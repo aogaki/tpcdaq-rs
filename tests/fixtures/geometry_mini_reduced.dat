@@ -1,0 +1,30 @@
+# Synthetic reduced "mini-eTPC-style" geometry fixture for tpcdaq-rs tests
+# (TODO/002_geometry.md). All values below are FICTIONAL — not copied from any
+# real detector .dat (CLAUDE.md: "実 .dat はリポに入れない。テストは合成
+# フィクスチャのみ").
+#
+ANGLES: 11.0 22.0 33.0
+DIAMOND SIZE: 2.5
+REFERENCE POINT: -5.0 6.0
+DRIFT VELOCITY: 0.6
+SAMPLING RATE: 12.5
+TRIGGER DELAY: 4.5
+DRIFT CAGE ACCEPTANCE: -40.0 40.0
+#
+# NEW format (10 columns): DIR SECTION STRIP COBO ASAD AGET AGET_CH OFF_PAD OFF_STRIP LEN_PADS
+# cobo=0, asad=0. U uses AGET 0 (signal ch 0-3), V/W share AGET 1 (signal ch 0-6).
+U	0	1	0	0	0	0	0.0	0.0	10
+U	0	2	0	0	0	1	1.0	0.1	10
+U	0	3	0	0	0	2	2.0	0.2	10
+U	0	4	0	0	0	3	3.0	0.3	10
+V	0	1	0	0	1	0	0.0	0.0	10
+V	0	2	0	0	1	1	1.0	0.1	10
+V	0	3	0	0	1	2	2.0	0.2	10
+W	0	1	0	0	1	3	0.0	0.0	10
+W	0	2	0	0	1	4	1.0	0.1	10
+W	0	3	0	0	1	5	2.0	0.2	10
+W	0	4	0	0	1	6	3.0	0.3	10
+#
+# AUX (5 columns): NAME COBO ASAD AGET AGET_CH
+TestAux0	0	0	0	4
+TestAux1	0	0	1	7

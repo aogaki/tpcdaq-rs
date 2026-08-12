@@ -1,0 +1,27 @@
+# Fictional 2-CoBo geometry fixture for tpcdaq-rs tests (TODO/002_geometry.md).
+# A real 2-CoBo ELITPC .dat does not exist yet (SPEC §14-5 / §13-7), so this
+# is a made-up shape used only to exercise the cumulative-AsAd-offset dense
+# array and the cobo-aware lookup key (SPEC §4.2 fixes rust_reference's
+# cobo-less 3-tuple key). Values are FICTIONAL.
+#
+ANGLES: 5.0 65.0 125.0
+DIAMOND SIZE: 3.0
+REFERENCE POINT: 1.0 -1.0
+DRIFT VELOCITY: 0.8
+SAMPLING RATE: 20.0
+TRIGGER DELAY: 8.0
+DRIFT CAGE ACCEPTANCE: -60.0 60.0
+#
+# DIR SECTION STRIP COBO ASAD AGET AGET_CH OFF_PAD OFF_STRIP LEN_PADS
+#
+# CoBo 0, AsAd 0 only — same (asad,aget,signal_ch) pairs as CoBo 1 below on
+# purpose, so a lookup test can prove the cobo id actually disambiguates them.
+U	0	1	0	0	0	0	0.0	0.0	5
+U	0	2	0	0	0	1	1.0	0.1	5
+#
+# CoBo 1, AsAd 0 — deliberately reuses (asad=0,aget=0,signal_ch=0/1).
+U	0	101	1	0	0	0	0.0	0.0	5
+U	0	102	1	0	0	1	1.0	0.1	5
+#
+# CoBo 1, AsAd 1 — makes asad_count differ per cobo (cobo0: 1 AsAd, cobo1: 2).
+V	0	201	1	1	0	0	0.0	0.0	5

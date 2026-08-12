@@ -1,0 +1,18 @@
+# Rust
+/target/
+Cargo.lock.orig
+
+# Data — real run data never enters this repository
+*.graw
+*.root
+tests/local/
+
+# Logs / OS
+logs/
+*.log
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+reference/

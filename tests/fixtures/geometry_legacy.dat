@@ -1,0 +1,19 @@
+# Synthetic LEGACY-format (7-column, single-AsAd) geometry fixture for
+# tpcdaq-rs tests (TODO/002_geometry.md). Modeled on the real LEGACY sample at
+# reference/TPCReco/TPCReco-higs_04_mk/resources/geometry_mini_eTPC.dat (shape
+# only — values here are FICTIONAL, not copied).
+#
+ANGLES: 90.0 -30.0 30.0
+DIAMOND SIZE: 1.5
+REFERENCE POINT: -2.0 3.0
+DRIFT VELOCITY: 0.7
+SAMPLING RATE: 25.0
+TRIGGER DELAY: 10.0
+DRIFT CAGE ACCEPTANCE: -80.0 80.0
+#
+# LEGACY format (7 columns): DIR STRIP AGET AGET_CH OFF_PAD OFF_STRIP LEN_PADS
+# (section/cobo/asad are implicitly 0 — no columns for them.)
+U	1	0	0	0.0	0.0	8
+U	2	0	1	1.0	0.1	8
+V	1	1	0	0.0	0.0	8
+W	1	1	1	1.0	0.1	8
