@@ -11,7 +11,9 @@
 - 実装済みモジュール: config(TOML)/ geometry(.dat、FPN、ChannelRole)/ msg(ZMQ ワイヤ + 漂流ガード)/
   command(状態機械 + REP タスク、tracing 化済み)/ zmq_helper(有限 HWM)/ framer / decode /
   receiver(never-stop)+ bin: receiver, graw_replay。
-- **git 未コミット**(リポ創設からまだ一度もコミットしていない — 区切りにあたり初回コミットを推奨)。
+- **公開済み**: https://github.com/aogaki/tpcdaq-rs (public、2026-08-12 初回 push)。
+  公開ルール: 実 .graw / FW / 実ジオメトリ .dat / マニュアル PDF は `reference/` に置き .gitignore 済み
+  (コミット前に混入チェックを実施した — 追跡対象はコード・文書・合成フィクスチャのみ)。
 - 実装の正本 = docs/SPEC_ja.md v1.0。モデル使い分け運用 = CLAUDE.md。
 - serena: reference/ 索引済み(次回 activate から有効)。
 
