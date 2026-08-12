@@ -1,6 +1,6 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-08-12(P1 完了 — ここで一旦区切り〔ユーザー指示〕)**
+**最終更新: 2026-08-12(P2 着手 — 保存系: graw-writer + root-sink 接続)**
 
 ## いま
 
@@ -17,16 +17,24 @@
 - 実装の正本 = docs/SPEC_ja.md v1.0。モデル使い分け運用 = CLAUDE.md。
 - serena: reference/ 索引済み(次回 activate から有効)。
 
-## アクティブ
+## アクティブ(P2 — 出口: graw バイト一致 + TTree 互換 + run 毎単一 ROOT + ×2 リプレイ 2 ソースビルド一致)
 
-- (なし — 区切り中)
+**波 1(起票済み・未実装 — 2026-08-12 に実装エージェントを途中停止し、書きかけコードは破棄済み。
+発注書は完成品なので次セッションは implementer に再発注するだけ)**:
+- [007_graw_writer.md](007_graw_writer.md) — graw-writer(CoBo 毎ファイル、バイト一致)→ implementer/Sonnet に発注
+- [008_root_sink_intake.md](008_root_sink_intake.md) — root-sink 取り込み骨格(C++、ロスレス PULL、ROOT 非依存)→ implementer/Opus に発注
+- 007 と 008 はファイル所有権が交差しないので並列可(007 = src/graw_writer.rs + config [graw_writer] + lib.rs 1 行、008 = tools/root_sink/ + examples/ + env-gated Rust テスト 1 本)
 
-## 次(再開時: P2 の詳細起票から)
+**波 2 以降(順次起票)**:
+- 009 decoder コンポーネント(Rust。EOS 集約 = SPEC §2.3「decoder のソース性」2026-08-12 追記)
+- 010 eventIdx ビルダ(C++ 純ヘッダ、SPEC §6.3)
+- 011 GDataFrame TTree + third_party/get 隔離(C++/ROOT 6.36.10 @ /opt/ROOT 確認済み)
+- 012 P2 E2E(graw_replay ×2 → 2 receiver → decoder → root-sink、TTree 互換比較 §12-3)
 
-- P2 = graw-writer(CoBo 毎ファイル、バイト一致)+ root-sink 接続(eventIdx ビルダ + GDataFrame TTree)。
-  SPEC §6/§7。root-sink の C++ 手術は SPEC §6.1 の表が発注書の種。
-- 006 レビュー指摘の再訪: 下流全死 + EOF 前 Reset での EOS 再試行が畳めない件(shutdown 経路の上限)。
-- Warsaw 確認事項(継続): 2-CoBo ジオメトリ .dat の有無(SPEC §13-7)、PROPOSAL v0.5 反映判断。
+## 継続事項
+
+- 006 レビュー指摘の再訪: 下流全死 + EOF 前 Reset での EOS 再試行が畳めない件(shutdown 経路の上限)→ 007/009 の停止設計で考慮。
+- Warsaw 確認事項: 2-CoBo ジオメトリ .dat の有無(SPEC §13-7)、PROPOSAL v0.5 反映判断。
 
 ## 最近完了
 

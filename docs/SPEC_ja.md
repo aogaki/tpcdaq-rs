@@ -155,6 +155,11 @@ Batch(positional array(5)):
 
 - バッチ詰め: receiver は「8 MiB 到達 or 10 ms 経過」の早い方でバッチを閉じる(設定可)。
   ホットパスで per-frame の ZMQ send / heap 確保をしない(CLAUDE.md)。
+- **decoder のソース性(2026-08-12 明確化)**: decoder は Fragments を `source_id = 100`・自前
+  sequence_number の**単一ストリーム**として送出し、上流全 CoBo の EOS 受領 + 対応 Fragment の
+  送出完了後に**自分の EOS を 1 本**送る。CoBo の識別は Fragment.cobo が担う。したがって
+  root-sink の期待ソース集合は {decoder} のみ(RunState が単純化)。graw-writer は receiver 直結
+  なので期待ソース = 設定の CoBo 集合のまま。
 
 ### 2.4 Fragment(デコード済みフレーム)
 
