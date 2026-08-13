@@ -1,6 +1,20 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.0(2026-08-12 ユーザーレビュー通過 — 実装の正本)**
+- **status**: **v1.4(2026-08-13 — 実装の正本)**
+- **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
+  ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
+  (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
+  run 番号管理はログブックと ROOT ファイル側が担う。mini は 1 AsAd で実質不変、
+  ELITPC は 2 CoBo × 2 AsAd = 4 ファイル)/ v1.2(2026-08-13)**非 AsAd 制御フレームの保全**を規定
+  (§6.5・§7・§12-2。007 実装の E2E で実 2025 run 先頭に frameType 7・12 B の制御フレームを確認。
+  実機 FrameStorage は警告して捨てるが、絶対ルール「保存系は意図的ドロップ禁止」を優先し
+  `ctrl/` サブディレクトリへ保全 — ユーザー決定)。§3.2 のコンポーネント REP 採番も固定。
+  / v1.3(2026-08-13)§6.3 に**イベント内フラグメント順 = (cobo, asad) 昇順**を追加
+  (010 実装レビューで確定 — 到着順は run 毎に揺れるため、§12-4 の 2 ソースビルド一致と
+  TTree 比較の再現性を成立させるには決定的順序が要る)。
+  / v1.4(2026-08-13)ロスレス PUSH に **ZMQ_IMMEDIATE を必須化**(§1.2 — 009 実装で発見:
+  libzmq 既定は connect() 時点でローカルキューを作り、**未接続の相手にも HWM 分 send が成功を
+  返す**ため、下流不在時の喪失が不可視になる)。
 - **正本性**: 本書が実装の正本。PROPOSAL v0.4 と食い違う場合は本書が勝つ(差分は §14 に列挙。
   PROPOSAL v0.5 への反映は Warsaw フィードバックと併せて判断 — 未実施)。
 - **入力**: PROPOSAL_ja.md v0.4 / delila-rs 実装調査 / C++ 版 tpcdaq 実装調査 /
@@ -33,7 +47,7 @@
 | コンポーネント | 言語 | 個数 | 責務 |
 |---|---|---|---|
 | receiver | Rust | CoBo 毎に 1 | TCP listen(CoBo 毎ポート)、MFM フレーミング、drain のみ(never-stop)。生フレームを graw-writer と decoder へ PUSH |
-| graw-writer | Rust | 1 | 生フレームを **CoBo 毎ファイル**へバイト一致 append(§7) |
+| graw-writer | Rust | 1 | 生フレームを **AsAd 毎ファイル**(ヘッダ asadIdx で振り分け)へバイト一致 append(§7) |
 | decoder | Rust | 1 | frameType 1/2 デコード → Fragment(§2.4)を root-sink へ PUSH。内部ワーカー並列(delila-rs reader 方式) |
 | root-sink | C++ | 1 | **イベントビルダ + graw2root 互換 TTree + ヒスト集計 + run\<N\>_monitor.root**。ヒスト/最新イベント/状態を PUB(§5, §6) |
 | monitor | Rust | 1 | root-sink の PUB を購読し WS へ変換する**ゲートウェイ**(集計しない)。ジオメトリで UVW グリッド化(§5.4) |
@@ -63,10 +77,16 @@ CoBo k ──TCP:46005+k──▶ [receiver k] ──PUSH──▶ (PULL bind) [
 ```
 
 - **ロスレス系 = PUSH/PULL**(有限 HWM の背圧)、**モニタ系 = PUB/SUB**(間引き可・ドロップはギャップ検出で可視化)。
+- **ロスレス PUSH は `ZMQ_IMMEDIATE` 必須**(v1.4): libzmq 既定は connect() 時点でローカル
+  キューを作り、未接続の相手にも HWM 分の send が成功を返す — 下流不在で「送れたことになる」のは
+  ロスレス契約違反(喪失の不可視化)。IMMEDIATE で**接続確立済みの相手にだけ積む**。
+  適用リンク: receiver→graw-writer / receiver→decoder / decoder→root-sink。実装は zmq_helper の
+  PUSH ヘルパに集約(焼き込み分散禁止)。モニタ系 PUB には適用しない(落として良いリンク)。
   delila-rs の「全リンク PUB/SUB + HWM=0 無制限バッファ」からの**意図的差分**(§14-4):
   ELITPC の ~111 MB/s では無制限バッファ = メモリ暴走リスクのため、有界 + 可視エラーを選ぶ。
 - **PULL 側が bind**(安定エンドポイント)、PUSH 側が connect。ZMQ の per-peer FIFO により
-  ソース毎の順序は保存される(graw-writer の CoBo 毎ファイル順序正しさの根拠)。
+  ソース毎の順序は保存される(graw-writer のファイル順序正しさの根拠 — AsAd 毎ファイルは
+  ソース列の部分列なので、この保証がそのまま AsAd 毎の順序保証になる)。
 - decoder → monitor の直結リンクは**設けない**(PROPOSAL 図からの変更、§14-2)。イベント表示・波形
   ビューの供給元は root-sink の built-event publish に一元化する。理由: (a) 2 CoBo 時に「表示イベント」
   の断片が食い違う問題が構造的に消える、(b) 集計と表示が同一のビルド結果を見る、(c) リンクが 1 本減る。
@@ -222,7 +242,7 @@ listen = "0.0.0.0:46005"              # CoBo からの TCP 着信
 data_sender_id = "CoBo[0]"            # ECC の NodeId 表記そのまま(大文字 TCP と並ぶ実機の罠)
 
 [decoder]
-workers = 4
+workers = 1                            # 予約(P5 実測まで単線 — 009。>1 は受理するが未使用)
 
 [root_sink]
 snapshot_hz = 1.0                      # ヒストスナップショット配信周期
@@ -252,7 +272,7 @@ receiver プロセスは `tpcdaq-receiver --config x.toml --cobo-id K` で CoBo 
 | root-sink PULL bind | `tcp://*:47003` |
 | root-sink PUB bind | `tcp://*:47004` |
 | controller ログ投稿 PULL bind | `tcp://*:47005` |
-| コンポーネント REP | `47100 + 連番`(receiver k = `47110+k`) |
+| コンポーネント REP | graw-writer = `47100`、decoder = `47101`、root-sink = `47102`、receiver k = `47110+k`(v1.2 で固定) |
 | ecc-bridge REP | `tcp://*:47200` |
 | controller REST / monitor WS | `8080` / `9000` |
 | source_id | receiver = `cobo_id`、decoder = 100、psu = 200(Batch の source_id 空間) |
@@ -403,6 +423,9 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
   (壁時計、既定 1000 ms)超過で **incomplete フラグ付きで emit**(捨てない)。
 - emit は event_idx 昇順。TTree へはイベント群の順にフレーム(GDataFrame)を書く —
   「到着順連結で順序が狂う」現行 GET 問題(PROPOSAL Q3)の構造的回避はここで実現される。
+- **イベント内のフラグメント順は (cobo, asad) 昇順で決定的にする**(v1.3。到着順は run 毎に
+  揺れるため、§12-4 の 2 ソースビルド一致・TTree 比較が順序で偽陰性にならないように)。
+  遅延到着分はこの限りではない(emit 後の追記 — 可逆性優先)。
 - emit 後に遅延到着したフラグメントも**必ず TTree に書く**(順序より可逆性優先)。`late_fragments`
   としてカウント・可視化。
 - 単一 CoBo 構成では実質素通し(期待集合が 1 要素)。多ソースの検証は graw_replay ×2 並走(§12-4)。
@@ -414,6 +437,12 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 - GDataFrame は GET 由来クラス(GFrameHeader / GDataChannel / GDataSample + LinkDef、ROOT 辞書を
   ビルド時生成)。ヘッダは Fragment(§2.4)の全フィールドから充填。`fHitPatterns` は C++ 版同様
   未充填(生 graw がバックストップ、と本書でも明文化)。
+- **`frame_type` と `run_number` は TTree に載せない**(011 レビューで明文化 — GFrameHeader に
+  置き場が無く、GET クラスは無改変が原則。run はディレクトリ・ファイル名・ログブック(§9)が持ち、
+  frame_type は生 graw がバックストップ。`fDataSource` は C++ 版 tpcdaq と同じく 0 固定)。
+- イベント内のチャンネル並びは **(aget, chan) 昇順**(C++ 版 tpcdaq の実データ初出順と一致。
+  本家 graw2root とは並びが異なるため、§12-3 の比較はチャンネルを (aget, chan) キーで
+  突き合わせる — 順序比較にしない)。
 - チャンネル内サンプルは連続で AddSample(標準リーダの前提)。圧縮は 505(ZSTD-5 — C++ 版の
   「ROOT 既定」から変更。§12-3 の TTree 比較は値比較なので影響しない)。
 
@@ -423,9 +452,18 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 |---|---|---|
 | イベント TTree | `run{run:04}.root`(rollover 時 `_0001` 付加) | 書き込み中は `run_inprogress_<unixtime>.root`、finalize で rename。異常終了は inprogress のまま残す(完全 run に化けない) |
 | モニタヒスト | `run{run:04}_monitor.root` | 全ソース EOS 後に書き出し。**EOS から 10 秒以内**(R10「速やかに」の数値化) |
-| 生 graw | `run{run:04}_cobo{K}_{seq:04}.graw` | §7 |
+| 生 graw | `CoBo{K}_AsAd{A}_{TS}_{idx:04}.graw` | **実機 DataRouter 命名に完全一致**(§7)。run 番号は含まれない — 対応はディレクトリとログブックが持つ |
+| 非 AsAd 制御フレーム | `ctrl/CoBo{K}_{TS}_{idx:04}.graw` | v1.2。run ディレクトリ配下のサブディレクトリ(オフラインの glob からは見えない)。§7 |
 
 出力先: `<output_root>/run{run:04}/` に run 毎ディレクトリを切り、全出力をまとめる。
+
+- run 番号 ↔ graw 実機命名の対応は **run ディレクトリと JSONL ログブック(§9 のファイル実績記録)が
+  持つ**(graw 名に run 番号が無いことの補償。ログ・UI・運用の管理単位は常に run 番号)。
+- **0 イベントの run は ROOT ファイルを作らない**(011 レビューで明文化 — 遅延オープン。
+  「run はあったがイベント 0」の実績はログブックとカウンタが持つ。空 TTree ファイルを置かない)。
+- イベント TTree は**全 CoBo/AsAd マージ済みの run 毎単一ファイルが理想形**(2026-08-13 ユーザー確認。
+  rollover はサイズ保護のみ)。オフライン側が ROOT にも graw 同様の命名を要求した場合は
+  **シンボリックリンクで対処**する(リネーム・複製はしない。実装物ではなく運用手順)。
 
 ### 6.6 third_party 隔離
 
@@ -434,8 +472,30 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
 
 ## 7. graw-writer 仕様
 
-- receiver からの RawFrames を **source_id(= cobo_id)毎のファイル**へバイトそのまま append。
-  リシリアライズ・変換なし(連結 = graw2root/CoBoFrameViewer で読めるファイル)。
+- receiver からの RawFrames を **(cobo, asad) 毎のファイル**へバイトそのまま append(v1.1 訂正)。
+  1 フレーム = 1 AsAd 分(§2.4)なので、振り分けはフレームヘッダの asadIdx を読むだけ。
+  リシリアライズ・変換なし(AsAd 毎連結 = 入力を asadIdx で分別した列と同一 =
+  graw2root/CoBoFrameViewer で読めるファイル)。
+- **振り分け対象は frameType 1/2 のフレームのみ**(v1.2)。asadIdx の読み出しは decode モジュールに
+  集約した `peek_asad`(**frameType 1/2 かつヘッダ 28 B 以上のときだけ Some**)を使う — frameType を
+  見ずにオフセット 27 を読むと、28 B を超える制御フレームが来たとき**誤った AsAd ファイルに混入**する。
+- **非 AsAd フレーム(peek_asad = None。例: 実 2025 run 先頭の frameType 7 トポロジー 12 B)は
+  `run{run:04}/ctrl/CoBo{K}_{TS}_{idx:04}.graw` へバイトそのまま保全**し、`ctrl_frames` カウンタ +
+  info ログで可視化(v1.2 ユーザー決定)。**Error 状態にはしない**(run 先頭に毎回来る正常な制御
+  フレームで Error に落ちない。Error は write 失敗・seq ギャップ・EOS 前 run 変更のみ)。
+  実機 FrameStorage は同フレームを警告して捨てる(`"Dumping frame"`)が、tpcdaq-rs は絶対ルール
+  (意図的ドロップ禁止)を優先する。ctrl/ はサブディレクトリなのでオフラインの `CoBo*` glob には
+  見えず、per-AsAd ファイルは実機と完全一致のまま。TS・idx・ローテーション規則は per-AsAd と同一。
+- AsAd 数は設定にもコードにも焼き込まない。観測した (cobo, asad) 毎にファイルを遅延作成
+  (mini = 1 ファイル、ELITPC = 2 CoBo × 2 AsAd = 4 ファイルが自然に出る)。
+- **命名 = 実機 DataRouter 完全一致**(v1.1): `CoBo{K}_AsAd{A}_{TS}_{idx:04}.graw`。
+  TS = 当該 (cobo, asad) ストリームの最初のファイル作成時刻、**localtime** の ISO 8601 拡張 +
+  ミリ秒 3 桁(例 `2022-04-12T08:03:44.531` — コロン入り、Linux 前提)。K/A はゼロ埋めなし 10 進。
+  出自 = GET `GetBench/src/get/daq/FrameStorage.cpp`(`"CoBo"<<K<<"_AsAd"<<A<<'_'<<TS<<'_'
+  <<setw(4)<<idx<<".graw"`)+ `utl::buildTimeStamp()`(localtime + %03d ms — 2026-08-13 実ソース確認)。
+- **ローテーションは TS 据え置き・idx++ のみ**(FrameStorage `createNewFile(newTimeStamp=false)` と
+  同一挙動)。新 run では新 TS + idx=0000。AsAd 間で TS が ms 単位でずれるのは実機も同じ
+  (実データ例: AsAd0–3 = .531/.533/.536/.540)で、TPCReco `RunIdParser` はこれを許容する。
 - ファイルハンドルは run 中開きっぱなし(per-frame open/close 禁止 — 旧 DataBloc の失敗)。
   flush は 1 秒毎、fsync はローテーションと close 時。
 - ローテーション: `cur + n > max_file_size(既定 1 GiB)` で次 seq へ。**フレームはファイル間で
@@ -589,7 +649,7 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
 | # | 項目 | 基準 |
 |---|---|---|
 | 1 | デコーダオラクル | 実 2025 run graw(ローカル、`TPCDAQ_REAL_GRAW` 環境変数)で **events=108 / items=15,040,512 / malformed=0**。CI は合成フィクスチャで frameType 1/2 両方 green |
-| 2 | graw バイト一致 | リプレイ入力と出力ファイル(CoBo 毎連結)の完全一致。ローテーション跨ぎも連結一致 |
+| 2 | graw バイト一致 | frameType 1/2 を asadIdx で分別した列 = per-AsAd 出力、残り全フレームの列 = ctrl/ 出力、**全出力の合計 = 入力の完全ロスレス分割**(v1.2)。mini 実 graw オラクル: AsAd ファイル 30,108,672 B + ctrl 12 B(frameType 7 ×1)= 30,108,684 B。ローテーション跨ぎも連結一致 |
 | 3 | TTree 互換 | 同一入力で C++ 版 tpcdaq の ROOT 出力と TTree レベル一致(エントリ数・全ヘッダフィールド・全チャンネルサンプル値。比較スクリプトを tools/ に置く) |
 | 4 | 2 ソースビルド | graw_replay ×2 並走(異なる CoBo id を模す)→ 全イベント complete、eventIdx 昇順、incomplete=0、CoBo 毎フレーム数一致 |
 | 5 | 連続負荷 | **100 Hz 相当ペース(mini ≈ 28 MB/s)のループリプレイで連続 24 時間、保存系 drop 0**(全カウンタ 0: overflow / gap / malformed / late)。各プロセス RSS が上限内かつ後半 12 時間で単調増加なし。ディスク節約のため「書いて検証して消す」ハーネス可 |

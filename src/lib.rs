@@ -24,3 +24,9 @@ pub mod decode;
 
 /// receiver コンポーネント(CoBo 毎の TCP 受信、never-stop)。SPEC §1.1/§1.3/§1.4。(006 で実装)
 pub mod receiver;
+
+/// graw-writer コンポーネント(AsAd 毎ファイル、バイト一致 append)。SPEC §1.1/§6.5/§7。(007 で実装)
+pub mod graw_writer;
+
+/// decoder コンポーネント(Fragments 単一ストリーム + EOS 集約)。SPEC §1.1/§2.3。(009 で実装)
+pub mod decoder;

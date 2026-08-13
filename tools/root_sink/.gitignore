@@ -1,0 +1,15 @@
+# C++ ビルド生成物(コミットしない)。リポ直下の .gitignore は Rust 側のものなので
+# ここに閉じ込める(tools/ 内で完結させる方針 — CLAUDE.md)。
+root_sink
+test_tpc_wire
+test_rs_core
+test_eb_core
+test_conformance
+test_recorder
+compare_gdataframe
+# ROOT 辞書(rootcling が LinkDefGET.h から毎ビルド生成する — TODO/011)
+getdict.cxx
+getdict_rdict.pcm
+libGET.rootmap
+*.o
+*.dSYM/

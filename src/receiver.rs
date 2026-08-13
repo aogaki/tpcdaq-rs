@@ -648,7 +648,13 @@ impl Handler {
         }
     }
 
-    /// 下流 2 本の PUSH を張る。HWM は必ず [`zmq_helper`] 経由(SPEC §1.4-2)。
+    /// 下流 2 本の PUSH を張る。HWM と `ZMQ_IMMEDIATE` は必ず [`zmq_helper`] 経由
+    /// (SPEC §1.4-2 / §1.2 v1.4)。
+    ///
+    /// IMMEDIATE により**下流(graw-writer / decoder)が居なければ送信タスクの send は
+    /// ブロックする**(未接続の相手に「送れたことにする」のを禁じる)。これは never-stop と
+    /// 矛盾しない: 詰まるのは送信タスクだけで、drain タスクは有界キューへ `try_send` するだけ
+    /// なので止まらず、溢れは `overflow_frames` + Error として可視化される(SPEC §1.4-1/3)。
     fn build_links(&self) -> Result<Vec<Link>, String> {
         let specs = [
             ("graw-writer", &self.params.graw_writer_endpoint),
@@ -660,8 +666,8 @@ impl Handler {
                 .context
                 .socket(zmq::PUSH)
                 .map_err(|e| format!("cannot create PUSH socket for {name}: {e}"))?;
-            // HWM は connect の前に設定しないと効かない
-            zmq_helper::apply_hwm(&socket, self.params.hwm)
+            // HWM も IMMEDIATE も connect の前に設定しないと効かない
+            zmq_helper::apply_push_hwm_with(&socket, self.params.hwm)
                 .map_err(|e| format!("cannot set HWM {} for {name}: {e}", self.params.hwm))?;
             socket
                 .connect(endpoint)

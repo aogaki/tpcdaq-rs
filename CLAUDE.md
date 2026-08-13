@@ -47,7 +47,7 @@ C++ サテライト(tools/): ROOT(root-sink)、ZeroC Ice 3.6.3(ecc-bridge、**en
 
 - **ch 数をコードに焼き込まない** — mini(256 信号 ch/272 FPN 込み)/ ELITPC(1024/1088)はジオメトリ設定(TPCReco `.dat` 形式)で切替。C++ 版の mini 前提を持ち込まない。
 - **FPN リオーダ必須** — GRAW 0–67 ↔ geometry 0–63、FPN={11,22,45,56}(reuse/rust_reference 参照)。波高・波形は**生 ADC(減算なし)**が既定。
-- **複数 CoBo 前提** — receiver は CoBo 毎。生 graw は CoBo 毎ファイル(バイト一致 append)。ビルド後のイベントデータは run 毎に単一 ROOT ファイル。イベントビルダは ELITPC(2 CoBo)で必須。
+- **複数 CoBo 前提** — receiver は CoBo 毎。生 graw は **AsAd 毎ファイル・実機 DataRouter 命名に完全一致**(`CoBo{K}_AsAd{A}_{TS}_{idx:04}.graw`、バイト一致 append。mini = 1、ELITPC = 2 CoBo × 2 AsAd = 4。run 番号管理はログブック・ROOT 側 — 2026-08-13 決定、SPEC v1.1)。ビルド後のイベントデータは run 毎に単一 ROOT ファイル(**全 CoBo/AsAd マージが理想形**)。イベントビルダは ELITPC(2 CoBo)で必須。
 - **frameType 1(2018)/ 2(2025 compact, blkSize256/big-endian)両対応**。
 - **listen-before-start** — `ecc start` 前に受信ポートを listen。
 - **実機プロトコル既知の罠**: DataSender id は `CoBo[0]` 形式・flowType は大文字 `TCP`。Ice は encoding 1.1。

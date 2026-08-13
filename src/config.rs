@@ -36,6 +36,40 @@ pub const DEFAULT_GRAW_WRITER_ENDPOINT: &str = "tcp://127.0.0.1:47001";
 /// receiver → decoder の既定 PUSH 接続先(SPEC §3.2 の `decoder PULL bind = 47002`)。
 pub const DEFAULT_DECODER_ENDPOINT: &str = "tcp://127.0.0.1:47002";
 
+/// graw-writer 自身の PULL bind の既定アドレス(SPEC §3.2「graw-writer PULL bind = tcp://*:47001」)。
+/// receiver 側の接続先定数 [`DEFAULT_GRAW_WRITER_ENDPOINT`] とはポートは同じだが bind/connect の
+/// アドレス表記が違う(bind は `*`、connect は `127.0.0.1`)ので別定数にしてある。
+pub const DEFAULT_GRAW_WRITER_PULL_BIND: &str = "tcp://*:47001";
+
+/// graw-writer のファイルローテーション閾値の既定(SPEC §7「既定 1 GiB」)。
+pub const DEFAULT_GRAW_WRITER_MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// graw-writer の flush 周期の既定(ミリ秒、SPEC §7「flush は 1 秒毎」)。
+pub const DEFAULT_GRAW_WRITER_FLUSH_INTERVAL_MS: u64 = 1000;
+
+/// graw-writer のコマンド REP bind アドレス(SPEC §3.2「コンポーネント REP = 47100 + 連番」)。
+/// receiver 群が `47110+k` を予約しているので、単一コンポーネントである graw-writer は
+/// その手前の連番の先頭 `47100` を使う。
+pub const GRAW_WRITER_COMMAND_LISTEN: &str = "tcp://*:47100";
+
+/// decoder 自身の PULL bind の既定アドレス(SPEC §3.2「decoder PULL bind = tcp://*:47002」)。
+/// receiver 側の接続先定数 [`DEFAULT_DECODER_ENDPOINT`] とはポートは同じだが bind/connect の
+/// アドレス表記が違う(bind は `*`、connect は `127.0.0.1`)ので別定数にしてある。
+pub const DEFAULT_DECODER_PULL_BIND: &str = "tcp://*:47002";
+
+/// decoder → root-sink の既定 PUSH 接続先(SPEC §3.2 の `root-sink PULL bind = 47003`)。
+pub const DEFAULT_ROOT_SINK_ENDPOINT: &str = "tcp://127.0.0.1:47003";
+
+/// decoder のコマンド REP bind アドレス(SPEC §3.2 v1.2「decoder = 47101」)。
+pub const DECODER_COMMAND_LISTEN: &str = "tcp://*:47101";
+
+/// decoder の PUSH 送信タイムアウトの既定(ミリ秒、TODO/009 の停止設計)。
+///
+/// 通常運転ではタイムアウトしても諦めずに再試行する(ロスレス = 下流の背圧で待つ)。
+/// **Reset コマンド処理中に限り**、このタイムアウトで送出待ちを打ち切れる
+/// (破棄は `eos_abandoned` / `batches_abandoned` として可視化する)。
+pub const DEFAULT_DECODER_SEND_TIMEOUT_MS: i32 = 1000;
+
 /// バッチを閉じるバイト数の既定値(SPEC §2.3「8 MiB 到達 or 10 ms 経過」)。
 pub const DEFAULT_BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
 
@@ -94,6 +128,7 @@ pub struct Config {
     pub system: SystemConfig,
     pub cobo: Vec<CoboConfig>,
     pub receiver: ReceiverConfig,
+    pub graw_writer: GrawWriterConfig,
     pub decoder: DecoderConfig,
     pub root_sink: RootSinkConfig,
     pub monitor: MonitorConfig,
@@ -138,10 +173,32 @@ pub struct ReceiverConfig {
     pub decoder_endpoint: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// graw-writer 固有の設定(`[graw_writer]`)。省略可、すべて既定値が入る(SPEC §7)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GrawWriterConfig {
+    /// PULL bind アドレス(SPEC §3.2)。
+    pub pull_bind: String,
+    /// ファイルローテーションの閾値(バイト、SPEC §7 既定 1 GiB)。
+    pub max_file_bytes: u64,
+    /// flush 周期(ミリ秒、SPEC §7 既定 1000)。
+    pub flush_interval_ms: u64,
+}
+
+/// decoder 固有の設定(`[decoder]`)。`workers` 以外は省略可で既定値が入る
+/// (SPEC §2.3 / §3.2、009 で追記)。
+#[derive(Debug, Clone, PartialEq)]
 pub struct DecoderConfig {
+    /// 内部ワーカー数。009 時点では**受理するだけで未使用**(> 1 なら info ログ)。
+    /// 並列化は実測してから決める(SPEC §13 の流儀)。
     pub workers: u32,
+    /// PULL bind アドレス(SPEC §3.2)。
+    pub pull_bind: String,
+    /// root-sink の PULL bind への接続先(SPEC §3.2)。
+    pub push_connect: String,
+    /// 出力バッチを閉じるバイト数(SPEC §2.3)。
+    pub batch_max_bytes: usize,
+    /// 出力バッチを閉じる経過時間(ミリ秒、SPEC §2.3)。
+    pub batch_max_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -178,7 +235,9 @@ struct RawConfig {
     cobo: Vec<RawCobo>,
     #[serde(default)]
     receiver: RawReceiver,
-    decoder: DecoderConfig,
+    #[serde(default)]
+    graw_writer: RawGrawWriter,
+    decoder: RawDecoder,
     root_sink: RootSinkConfig,
     monitor: RawMonitor,
     controller: RawController,
@@ -203,6 +262,30 @@ struct RawReceiver {
     hwm: Option<i32>,
     graw_writer_endpoint: Option<String>,
     decoder_endpoint: Option<String>,
+}
+
+/// `[decoder]` の TOML そのまま(009)。`workers` は 001 からの既存キーなので必須のまま、
+/// 009 で足したキーだけが省略可。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDecoder {
+    workers: u32,
+    #[serde(default)]
+    pull_bind: Option<String>,
+    #[serde(default)]
+    push_connect: Option<String>,
+    #[serde(default)]
+    batch_max_bytes: Option<usize>,
+    #[serde(default)]
+    batch_max_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawGrawWriter {
+    pull_bind: Option<String>,
+    max_file_bytes: Option<u64>,
+    flush_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +364,38 @@ fn resolve(raw: RawConfig) -> Config {
             .unwrap_or_else(|| DEFAULT_DECODER_ENDPOINT.to_string()),
     };
 
+    let graw_writer = GrawWriterConfig {
+        pull_bind: raw
+            .graw_writer
+            .pull_bind
+            .unwrap_or_else(|| DEFAULT_GRAW_WRITER_PULL_BIND.to_string()),
+        max_file_bytes: raw
+            .graw_writer
+            .max_file_bytes
+            .unwrap_or(DEFAULT_GRAW_WRITER_MAX_FILE_BYTES),
+        flush_interval_ms: raw
+            .graw_writer
+            .flush_interval_ms
+            .unwrap_or(DEFAULT_GRAW_WRITER_FLUSH_INTERVAL_MS),
+    };
+
+    let decoder = DecoderConfig {
+        workers: raw.decoder.workers,
+        pull_bind: raw
+            .decoder
+            .pull_bind
+            .unwrap_or_else(|| DEFAULT_DECODER_PULL_BIND.to_string()),
+        push_connect: raw
+            .decoder
+            .push_connect
+            .unwrap_or_else(|| DEFAULT_ROOT_SINK_ENDPOINT.to_string()),
+        batch_max_bytes: raw
+            .decoder
+            .batch_max_bytes
+            .unwrap_or(DEFAULT_BATCH_MAX_BYTES),
+        batch_max_ms: raw.decoder.batch_max_ms.unwrap_or(DEFAULT_BATCH_MAX_MS),
+    };
+
     let monitor = MonitorConfig {
         ws_listen: raw
             .monitor
@@ -302,7 +417,8 @@ fn resolve(raw: RawConfig) -> Config {
         system: raw.system,
         cobo,
         receiver,
-        decoder: raw.decoder,
+        graw_writer,
+        decoder,
         root_sink: raw.root_sink,
         monitor,
         controller,
@@ -420,6 +536,40 @@ data_sender_id = "CoBo[0]"
 [decoder]
 workers = 4
 
+[root_sink]
+snapshot_hz = 1.0
+event_publish_hz = 20.0
+build_timeout_ms = 1000
+
+[monitor]
+ws_listen = "0.0.0.0:9000"
+
+[controller]
+rest_listen = "0.0.0.0:8080"
+passphrase = "change-me"
+ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+config_id = "default"
+"#,
+            geometry = geometry.display()
+        )
+    }
+
+    /// 009 で足した `[decoder]` キーのテスト用に、`[decoder]` セクションだけを差し替えた
+    /// 最小構成の TOML を組む(`minimal_toml` は `[decoder]` を固定で埋め込むので、
+    /// そちらの `extra` では `[decoder]` を上書きできない)。
+    fn toml_with_decoder_section(geometry: &Path, decoder_section: &str) -> String {
+        format!(
+            r#"
+[system]
+experiment = "mini_eTPC"
+output_root = "/data/tpcdaq"
+geometry = "{geometry}"
+
+[[cobo]]
+id = 0
+listen = "0.0.0.0:46005"
+data_sender_id = "CoBo[0]"
+{decoder_section}
 [root_sink]
 snapshot_hz = 1.0
 event_publish_hz = 20.0
@@ -1101,6 +1251,133 @@ decoder_endpoint = "tcp://10.0.0.6:47902"
         assert_eq!(RECEIVER_COMMAND_PORT_BASE, 47110);
         // 手計算: CoBo 1 の REP ポート = 47110 + 1 = 47111
         assert_eq!(RECEIVER_COMMAND_PORT_BASE + 1, 47111);
+    }
+
+    // --- [graw_writer] セクション(007 で追加。SPEC §3.2 / §7) ---
+
+    /// `[graw_writer]` は丸ごと省略できて、SPEC §7 の既定値が入る。
+    #[test]
+    fn graw_writer_section_defaults_when_omitted() {
+        let geometry = make_temp_geometry_file();
+        let config = parse(&minimal_toml(&geometry, "")).unwrap();
+
+        assert_eq!(config.graw_writer.pull_bind, "tcp://*:47001");
+        assert_eq!(
+            config.graw_writer.max_file_bytes,
+            DEFAULT_GRAW_WRITER_MAX_FILE_BYTES
+        );
+        assert_eq!(config.graw_writer.max_file_bytes, 1024 * 1024 * 1024);
+        assert_eq!(config.graw_writer.flush_interval_ms, 1000);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// 明示値はすべて素通しされる(既定値と重ならない非対称な値)。
+    #[test]
+    fn graw_writer_section_values_override_the_defaults() {
+        let geometry = make_temp_geometry_file();
+        let section = r#"
+[graw_writer]
+pull_bind = "tcp://*:57001"
+max_file_bytes = 123456789
+flush_interval_ms = 250
+"#;
+        let config = parse(&minimal_toml(&geometry, section)).unwrap();
+
+        assert_eq!(config.graw_writer.pull_bind, "tcp://*:57001");
+        assert_eq!(config.graw_writer.max_file_bytes, 123_456_789);
+        assert_eq!(config.graw_writer.flush_interval_ms, 250);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    #[test]
+    fn graw_writer_unknown_field_is_err() {
+        let geometry = make_temp_geometry_file();
+        let err = parse(&minimal_toml(
+            &geometry,
+            "[graw_writer]\nmax_file_kib = 1024\n",
+        ))
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)));
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// SPEC §3.2「コンポーネント REP = 47100 + 連番」。graw-writer は receiver 群(47110+k)の
+    /// 手前 = 連番の先頭 47100。
+    #[test]
+    fn graw_writer_command_listen_matches_spec_3_2() {
+        assert_eq!(GRAW_WRITER_COMMAND_LISTEN, "tcp://*:47100");
+    }
+
+    // --- [decoder] セクション(009 で追記。SPEC §2.3 / §3.1 / §3.2) ---
+
+    /// `[decoder]` の既存キー(`workers`)だけを書いた最小形。009 で足したキーは
+    /// すべて省略でき、SPEC §2.3/§3.2 の既定値が入る。
+    #[test]
+    fn decoder_section_defaults_when_the_new_keys_are_omitted() {
+        let geometry = make_temp_geometry_file();
+        // minimal_toml は `[decoder] workers = 4` を含む(= 新キーはすべて省略された形)。
+        let config = parse(&minimal_toml(&geometry, "")).unwrap();
+
+        assert_eq!(config.decoder.workers, 4, "既存キーは無改変");
+        assert_eq!(config.decoder.pull_bind, "tcp://*:47002");
+        assert_eq!(config.decoder.push_connect, "tcp://127.0.0.1:47003");
+        assert_eq!(config.decoder.batch_max_bytes, DEFAULT_BATCH_MAX_BYTES);
+        // 手計算: SPEC §2.3「8 MiB 到達 or 10 ms 経過」→ 8 * 1024 * 1024 = 8,388,608
+        assert_eq!(config.decoder.batch_max_bytes, 8_388_608);
+        assert_eq!(config.decoder.batch_max_ms, 10);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// 明示値はすべて素通しされる(既定値と重ならない非対称な値)。
+    #[test]
+    fn decoder_section_values_override_the_defaults() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = toml_with_decoder_section(
+            &geometry,
+            r#"
+[decoder]
+workers = 3
+pull_bind = "tcp://*:57002"
+push_connect = "tcp://10.0.0.7:57003"
+batch_max_bytes = 1234567
+batch_max_ms = 25
+"#,
+        );
+        let config = parse(&toml_str).unwrap();
+
+        assert_eq!(config.decoder.workers, 3);
+        assert_eq!(config.decoder.pull_bind, "tcp://*:57002");
+        assert_eq!(config.decoder.push_connect, "tcp://10.0.0.7:57003");
+        assert_eq!(config.decoder.batch_max_bytes, 1_234_567);
+        assert_eq!(config.decoder.batch_max_ms, 25);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    #[test]
+    fn decoder_unknown_field_is_err() {
+        let geometry = make_temp_geometry_file();
+        let toml_str =
+            toml_with_decoder_section(&geometry, "[decoder]\nworkers = 1\nbatch_max_kib = 8192\n");
+        let err = parse(&toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)));
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// SPEC §3.2 v1.2「コンポーネント REP: decoder = 47101」/「decoder PULL bind = 47002」/
+    /// 「root-sink PULL bind = 47003」。
+    #[test]
+    fn decoder_endpoints_match_spec_3_2() {
+        assert_eq!(DECODER_COMMAND_LISTEN, "tcp://*:47101");
+        assert_eq!(DEFAULT_DECODER_PULL_BIND, "tcp://*:47002");
+        assert_eq!(DEFAULT_ROOT_SINK_ENDPOINT, "tcp://127.0.0.1:47003");
+        // decoder の PULL bind と、receiver 側が connect する先はポートが一致すること。
+        assert_eq!(DEFAULT_DECODER_ENDPOINT, "tcp://127.0.0.1:47002");
     }
 
     #[test]

@@ -84,6 +84,112 @@ async fn poll_status(
     panic!("timed out after {timeout:?} waiting for {what}; last status = {last:?}");
 }
 
+/// SPEC §1.2 v1.4(ロスレス PUSH は `ZMQ_IMMEDIATE`)が作る新しい状況の回帰テスト:
+/// **下流が「止まっている」のではなく「そもそも居ない」**とき。
+///
+/// v1.4 以前は libzmq が未接続の相手にも HWM 分を積んで send が成功を返していたため、
+/// 下流不在でもしばらく「送れたこと」になっていた(= 不可視の喪失)。IMMEDIATE 後は
+/// 1 通も送れない。その状態でも **never-stop が保たれる**こと —— drain はソケットを読み切り、
+/// 溢れは `overflow_frames` + Error として可視化される —— を固定する。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_absent_downstream_never_counts_as_sent_and_still_does_not_stop_the_drain() {
+    // 誰も bind していないアドレス 2 本(TcpListener で確保して即座に手放す)。
+    let dead_endpoint = || {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("tcp://{addr}")
+    };
+
+    let params = ReceiverParams {
+        cobo_id: 0,
+        listen: "127.0.0.1:0".to_string(),
+        command_listen: "tcp://127.0.0.1:0".to_string(),
+        graw_writer_endpoint: dead_endpoint(),
+        decoder_endpoint: dead_endpoint(),
+        batch_max_bytes: 4 * 1024,
+        batch_max_ms: 10,
+        queue_frames: 2,
+        heartbeat_ms: 1_000,
+        hwm: TEST_HWM,
+    };
+
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+    let (ep_tx, ep_rx) = oneshot::channel();
+    let task = tokio::spawn(run_receiver(params, shutdown_rx, Some(ep_tx)));
+    let cmd_ep = ep_rx.await.unwrap();
+
+    rpc(
+        &cmd_ep,
+        &Command::Configure(RunConfig {
+            run_number: 98,
+            comment: "absent downstream".to_string(),
+            config: serde_json::Value::Null,
+        }),
+    )
+    .await;
+    let armed = rpc(&cmd_ep, &Command::Arm).await;
+    let data_addr = armed.metrics.as_ref().unwrap()["bind_address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    rpc(&cmd_ep, &Command::Start { run_number: 98 }).await;
+
+    // fake CoBo: 4 MiB を全速で流し込む。drain が止まれば TCP バッファが詰まってここが返らない。
+    let total_bytes = FRAME_BYTES * FRAME_COUNT;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut stream = TcpStream::connect(&data_addr).await.unwrap();
+        for i in 0..FRAME_COUNT {
+            let frame = make_frame(FRAME_BYTES, (i % 251) as u8);
+            stream.write_all(&frame).await.expect("fake CoBo write");
+        }
+        stream.flush().await.unwrap();
+        stream
+    })
+    .await
+    .expect("fake CoBo の送信がブロックされた = drain が止まっている(never-stop 違反)");
+
+    let status = poll_status(
+        &cmd_ep,
+        Duration::from_secs(10),
+        "all bytes drained even with no downstream at all",
+        |r| metric_u64(r, "bytes") >= total_bytes as u64,
+    )
+    .await;
+    assert_eq!(metric_u64(&status, "bytes"), total_bytes as u64);
+    assert_eq!(metric_u64(&status, "frames"), FRAME_COUNT as u64);
+    assert!(
+        metric_u64(&status, "overflow_frames") > 0,
+        "下流不在なら内部キューは必ず溢れる — それが数えられていること(silent 禁止)"
+    );
+    assert_eq!(
+        metric_u64(&status, "batches"),
+        0,
+        "下流不在では 1 バッチも「送れたこと」にしない(SPEC §1.2 v1.4)"
+    );
+    assert_eq!(
+        status.state,
+        ComponentState::Error,
+        "内部キュー満杯はシステム過負荷 = Error(SPEC §1.4-3)"
+    );
+    println!(
+        "absent downstream: 受信 bytes={} frames={} overflow_frames={} batches={}",
+        metric_u64(&status, "bytes"),
+        metric_u64(&status, "frames"),
+        metric_u64(&status, "overflow_frames"),
+        metric_u64(&status, "batches"),
+    );
+
+    let reset = rpc(&cmd_ep, &Command::Reset).await;
+    assert!(reset.success, "{}", reset.message);
+
+    shutdown_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("receiver did not stop within 5 s")
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queue_overflow_counts_frames_enters_error_and_keeps_draining() {
     let ctx = zmq::Context::new();

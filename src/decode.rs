@@ -20,6 +20,30 @@ pub const HEADER_MIN_BYTES: usize = 88;
 /// frameType 2 の per-AGET カーソルが一周する周期。
 const RAW_CH_PER_AGET: u16 = 68;
 
+/// 共通 MFM ヘッダの asadIdx だけを覗き見る(offset 27)。**frameType 1/2 かつヘッダ 28 B
+/// 以上のときだけ `Some(asad)`**(v1.2)。それ以外(短小フレーム、frameType ∉ {1,2} の
+/// 制御フレーム — 実 2025 run 先頭の frameType 7・12 B が実例)は `None`。
+///
+/// graw-writer(TODO/007)が (cobo, asad) 毎にファイルを振り分けるための最小限の読み出し。
+/// [`Decoder::decode`] のようなフルデコードはしない — リシリアライズせずヘッダの生バイトを
+/// 覗くだけ(SPEC §7「graw_writer に `frame[27]` を焼き込まない」ためにここへ集約する)。
+///
+/// frameType を見ずにオフセット 27 だけを読むと、28 B を超える非 CoBo 制御フレームが
+/// オフセット 27 の任意バイトを asadIdx と誤認し、誤った AsAd ファイルへ混入する
+/// (SPEC §7 v1.2 — v1.1 実装の実 .graw E2E で判明)。`None` を返したフレームは
+/// graw-writer が `run{run:04}/ctrl/` へバイトそのまま保全する(意図的ドロップ禁止)。
+pub fn peek_asad(frame: &[u8]) -> Option<u8> {
+    if frame.len() < 28 {
+        return None;
+    }
+    let little = frame[0] & 0x80 != 0;
+    let frame_type = read_uint(&frame[5..7], little) as u16;
+    if frame_type != 1 && frame_type != 2 {
+        return None;
+    }
+    Some(frame[27])
+}
+
 /// CoBo フレームバイト列を [`Fragment`] へデコードする(純コア)。
 ///
 /// malformed / unsupported フレームは `decode` が `None` を返し、それぞれのカウンタに
@@ -329,6 +353,78 @@ mod tests {
             );
         }
         b
+    }
+
+    // -----------------------------------------------------------------
+    // peek_asad(TODO/007 graw-writer の振り分け用ヘッダ覗き見。v1.2: frameType-aware)
+    // -----------------------------------------------------------------
+
+    /// 手計算の出典: `make_blk256_frame` は offset 27 に asadIdx=3 を書き込む(既存フィクスチャ、
+    /// frameType=1)。フルデコードせずオフセット読みだけで同じ値が取れることを確認する。
+    #[test]
+    fn peek_asad_reads_offset_27_without_full_decode() {
+        let frame = make_blk256_frame(1, 4, &[]);
+        assert_eq!(peek_asad(&frame), Some(3));
+    }
+
+    /// frameType 2 のフレームでも同じオフセットで読める(frameType 1/2 はどちらも対象、v1.2)。
+    #[test]
+    fn peek_asad_supports_frame_type_2_as_well_as_1() {
+        let frame = make_blk256_frame(2, 2, &[]);
+        assert_eq!(peek_asad(&frame), Some(3));
+    }
+
+    /// `make_cobo_frame`(blkSize=1、frameType=1)は offset 27 に asad をそのまま書く —
+    /// 別ビルダでも一致すること。
+    #[test]
+    fn peek_asad_matches_the_header_field_across_builders() {
+        let h = HeaderFields {
+            asad: 2,
+            ..HeaderFields::default()
+        };
+        let frame = make_cobo_frame(1, false, &h, &[]);
+        assert_eq!(peek_asad(&frame), Some(2));
+        assert_eq!(frame[27], 2);
+    }
+
+    /// 短小フレーム(28 B 未満)は `None`(ctrl/ 保全の対象 — 呼び出し側の責務、SPEC §7 v1.2)。
+    #[test]
+    fn peek_asad_is_none_for_short_frames() {
+        assert_eq!(peek_asad(&[]), None);
+        assert_eq!(peek_asad(&[0u8; 27]), None); // 27 バイト = offset 27 が読めない(len must be >= 28)
+        assert_eq!(peek_asad(&[0u8; 4]), None);
+    }
+
+    /// ちょうど offset 27 まで届く(28 バイト)かつ frameType=1 なら読める境界値。
+    #[test]
+    fn peek_asad_reads_the_minimal_28_byte_boundary() {
+        let mut frame = vec![0u8; 28];
+        write_uint(&mut frame, 5, 1, 2, false); // frameType=1(big-endian)
+        frame[27] = 9;
+        assert_eq!(peek_asad(&frame), Some(9));
+    }
+
+    /// v1.2 の核心: frameType が 1/2 以外の制御フレームは、28 B を超えて offset 27 が
+    /// 物理的に読めても `None`(実 2025 run 先頭の frameType 7・12 B 制御フレームが実例。
+    /// ここでは長さを 88 B にして「短小だから None」ではなく「frameType で弾かれて None」
+    /// であることを検証する)。
+    #[test]
+    fn peek_asad_is_none_for_non_cobo_frame_types_even_when_long_enough() {
+        let h = HeaderFields {
+            asad: 5,
+            ..HeaderFields::default()
+        };
+        let frame = make_cobo_frame(7, false, &h, &[]); // 88 B、frameType=7(非 CoBo 制御フレーム)
+        assert!(frame.len() >= 28);
+        assert_eq!(
+            frame[27], 5,
+            "offset 27 自体は読める値を持つ(誤読ではないことの確認)"
+        );
+        assert_eq!(
+            peek_asad(&frame),
+            None,
+            "frameType が 1/2 以外なら 28 B 超でも None(SPEC §7 v1.2)"
+        );
     }
 
     // -----------------------------------------------------------------
