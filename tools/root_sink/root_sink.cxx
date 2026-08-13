@@ -232,6 +232,7 @@ struct Options {
   // TTree 書き出し(TODO/011)
   std::string output_root = ".";
   uint64_t max_root_bytes = rootsink::kDefaultMaxRootBytes;
+  int root_compression = rootsink::kDefaultCompression;  // TODO/014
   bool no_root = false;
 };
 
@@ -239,7 +240,7 @@ void usage(const char* argv0) {
   std::printf(
       "usage: %s [--bind ENDPOINT] [--rcvhwm N] [--queue N] [--throttle-ms N]\n"
       "       [--expect COBO:ASAD[,COBO:ASAD...]] [--build-timeout-ms N]\n"
-      "       [--output-root DIR] [--max-root-bytes N] [--no-root]\n"
+      "       [--output-root DIR] [--max-root-bytes N] [--root-compression N] [--no-root]\n"
       "\n"
       "  --bind ENDPOINT   PULL bind endpoint (default %s)\n"
       "  --rcvhwm N        receive high-water mark, must be > 0 (default %d)\n"
@@ -254,13 +255,18 @@ void usage(const char* argv0) {
       "  --output-root DIR run files go to DIR/run{run:04}/ (default \".\")\n"
       "  --max-root-bytes N\n"
       "                    roll the run file over past this size (default %" PRIu64 ")\n"
+      "  --root-compression N\n"
+      "                    ROOT TFile compression settings, non-negative\n"
+      "                    (default %d = ZLIB-1, readable by all ROOT eras;\n"
+      "                    e.g. 505 = ZSTD-5, requires ROOT 6.20+)\n"
       "  --no-root         do not write a TTree, only count (fast path for tests)\n"
       "\n"
       "SIGINT/SIGTERM: drain, print one JSON line of counters to stdout, exit 0.\n"
       "A run that never saw its EndOfStream keeps the run_inprogress_<unixtime>.root\n"
       "name (an unfinalized run must not masquerade as a complete one).\n",
       argv0, kDefaultBind, kDefaultRcvHwm, kDefaultQueue,
-      rootsink::kDefaultBuildTimeoutMs, rootsink::kDefaultMaxRootBytes);
+      rootsink::kDefaultBuildTimeoutMs, rootsink::kDefaultMaxRootBytes,
+      rootsink::kDefaultCompression);
 }
 
 // 半端な既定値で走らない(SPEC §3.2「設定パースエラーは起動失敗」)。
@@ -352,6 +358,9 @@ Options parse_args(int argc, char** argv) {
     } else if (a == "--max-root-bytes" && has_value) {
       opt.max_root_bytes =
           static_cast<uint64_t>(parse_positive("--max-root-bytes", argv[++i]));
+    } else if (a == "--root-compression" && has_value) {
+      opt.root_compression =
+          static_cast<int>(parse_nonnegative("--root-compression", argv[++i]));
     } else if (a == "--no-root") {
       opt.no_root = true;
     } else {
@@ -565,6 +574,7 @@ int main(int argc, char** argv) {
     rootsink::RecorderConfig rcfg;
     rcfg.output_root = opt.output_root;
     rcfg.max_root_bytes = opt.max_root_bytes;
+    rcfg.compression = opt.root_compression;
     recorder.reset(new rootsink::Recorder(rcfg));
     // スレッドを起こす前に公開する(fatal 時の JSON から必ず見える)。
     g_recorder.store(recorder.get(), std::memory_order_release);
@@ -610,8 +620,10 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "root_sink: --no-root: counting only, no TTree is written\n");
   } else {
     std::fprintf(stderr,
-                 "root_sink: writing TTree \"%s\" under %s (max-root-bytes=%" PRIu64 ")\n",
-                 rootsink::kTreeName, opt.output_root.c_str(), opt.max_root_bytes);
+                 "root_sink: writing TTree \"%s\" under %s (max-root-bytes=%" PRIu64
+                 " compression=%d)\n",
+                 rootsink::kTreeName, opt.output_root.c_str(), opt.max_root_bytes,
+                 opt.root_compression);
   }
   std::fflush(stderr);
 

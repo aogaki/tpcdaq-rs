@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.4(2026-08-13 — 実装の正本)**
+- **status**: **v1.6(2026-08-13 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -15,6 +15,11 @@
   / v1.4(2026-08-13)ロスレス PUSH に **ZMQ_IMMEDIATE を必須化**(§1.2 — 009 実装で発見:
   libzmq 既定は connect() 時点でローカルキューを作り、**未接続の相手にも HWM 分 send が成功を
   返す**ため、下流不在時の喪失が不可視になる)。
+  / v1.5(2026-08-13)run.root の圧縮既定を 505(ZSTD-5)→ **101(ZLIB-1、設定可能)** に変更
+  (§6.4 — Warsaw ヒアリング: オフライン解析も DAQ 計算機の旧 ROOT(ZSTD 非対応)で行うため。
+  docs/WARSAW_PLAN_ja.md)。
+  / v1.6(2026-08-13)§1.3 に**異常中止(abort)の正規経路**を追加(P2 レビュー R3 の解消 —
+  中止も必ず EOS で閉じる。run クローズ前に decoder を Reset しない)。
 - **正本性**: 本書が実装の正本。PROPOSAL v0.4 と食い違う場合は本書が勝つ(差分は §14 に列挙。
   PROPOSAL v0.5 への反映は Warsaw フィードバックと併せて判断 — 未実施)。
 - **入力**: PROPOSAL_ja.md v0.4 / delila-rs 実装調査 / C++ 版 tpcdaq 実装調査 /
@@ -112,6 +117,13 @@ CoBo k ──TCP:46005+k──▶ [receiver k] ──PUSH──▶ (PULL bind) [
      `Stop` コマンドで強制 EOS(タイムアウトは設定可)
   3. root-sink: 全ソース EOS 到達 = in-band バリア → TTree finalize + **run\<N\>_monitor.root 書き出し**(R10)
   4. コンポーネント `Stop`(上流から)、run_stop レコードを JSONL へ
+- **異常中止(abort)の正規経路(v1.6 — P2 レビュー R3 の解消)**: 中止も必ず「EOS を流して閉じる」:
+  ecc `stop`(不達でも続行)→ receiver へ `Stop`(強制 EOS)→ EOS がチェーンを流れて root-sink が
+  run をクローズ(incomplete は可視カウント)→ その後に各コンポーネントの `Stop`/`Reset`。
+  **run がクローズする前に decoder を Reset しない**(送出打ち切りの seq ギャップが root-sink を
+  §6.2-5 どおり fatal 死させる — 正しい検出を誤発火させない)。`Reset` は run クローズ後の
+  Error 復旧専用。例外: root-sink 自体が死んでいる場合のみ上流の Reset は無条件に可
+  (下流不在への abandon は可視カウントされ無害)。run_stop は `ok: false, reason: "abort:..."`。
 - 起動順(プロセス起動そのもの)は任意(ZMQ connect はリトライされる)。起動スクリプトの推奨順は
   bind 側から: graw-writer → decoder → root-sink → monitor → controller → receivers → ecc-bridge。
 
@@ -443,8 +455,10 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 - イベント内のチャンネル並びは **(aget, chan) 昇順**(C++ 版 tpcdaq の実データ初出順と一致。
   本家 graw2root とは並びが異なるため、§12-3 の比較はチャンネルを (aget, chan) キーで
   突き合わせる — 順序比較にしない)。
-- チャンネル内サンプルは連続で AddSample(標準リーダの前提)。圧縮は 505(ZSTD-5 — C++ 版の
-  「ROOT 既定」から変更。§12-3 の TTree 比較は値比較なので影響しない)。
+- チャンネル内サンプルは連続で AddSample(標準リーダの前提)。圧縮は **101(ZLIB-1)を既定とし
+  設定可能**(v1.5 — Warsaw はオフライン解析も DAQ 計算機の同一(旧)ROOT で行うため、
+  ZSTD(ROOT 6.20+)は読めない。ZLIB は全時代互換で C++ 版の「ROOT 既定」とも一致。
+  先方 ROOT 更新後に設定で ZSTD へ切替可。docs/WARSAW_PLAN_ja.md §2)。
 
 ### 6.5 ファイル命名・ライフサイクル
 

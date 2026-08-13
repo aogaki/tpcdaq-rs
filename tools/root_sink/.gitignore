@@ -6,6 +6,7 @@ test_rs_core
 test_eb_core
 test_conformance
 test_recorder
+test_geo
 compare_gdataframe
 # ROOT 辞書(rootcling が LinkDefGET.h から毎ビルド生成する — TODO/011)
 getdict.cxx

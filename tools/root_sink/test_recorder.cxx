@@ -572,6 +572,64 @@ void test_a_single_fragment_event_becomes_one_entry() {
 }
 
 // ---------------------------------------------------------------------------
+// 6. 圧縮設定(TODO/014): 既定 101(ZLIB-1)・明示指定(例 505=ZSTD-5)の反映
+// ---------------------------------------------------------------------------
+//
+// SPEC §6.4(v1.5): Warsaw のオフライン解析機は DAQ 計算機と同一の旧 ROOT で
+// ZSTD(505、ROOT 6.20+ 必須)を読めないため、既定は全時代互換の ZLIB-1(=101、
+// 算出は algorithm*100+level。1=ZLIB, 5=ZSTD)。`RecorderConfig::compression` で
+// 明示指定できることを固定する(root_sink.cxx の `--root-compression` はこれを配線するだけ)。
+int read_compression_settings(const std::string& path) {
+  TFile* in = TFile::Open(path.c_str(), "READ");
+  if (in == nullptr || in->IsZombie()) {
+    std::printf("read_compression_settings: cannot open %s\n", path.c_str());
+    delete in;
+    return -1;
+  }
+  const int settings = in->GetCompressionSettings();
+  in->Close();
+  delete in;
+  return settings;
+}
+
+void write_one_entry_run(const std::string& dir, uint32_t run, int* compression) {
+  rootsink::RecorderConfig cfg;
+  cfg.output_root = dir;
+  if (compression != nullptr) cfg.compression = *compression;
+  rootsink::Recorder rec(cfg);
+  rootsink::BuiltEvent ev;
+  ev.run_number = run;
+  ev.event_idx = 0;
+  rootsink::OwnedFragment f = make_fragment(run, 0, 0, 0);
+  push_item(f.items, pack_item(0, 1, 0, 5));
+  ev.fragments.push_back(std::move(f));
+  rec.write(ev, 1000);
+  rec.close_run(run, 1010);
+  CHECK(rec.fatal_reason() == nullptr);
+}
+
+void test_default_compression_is_101_zlib1() {
+  const std::string dir = scratch_dir("compdefault");
+  const uint32_t kRun = 21;
+  write_one_entry_run(dir, kRun, /*compression=*/nullptr);  // RecorderConfig 既定のまま
+  const std::string path = dir + "/run0021/run0021.root";
+  CHECK(exists(path));
+  CHECK_EQ(read_compression_settings(path), 101);  // ZLIB-1(SPEC §6.4 既定、v1.5)
+  remove_tree(dir);
+}
+
+void test_explicit_compression_setting_is_honored() {
+  const std::string dir = scratch_dir("compexplicit");
+  const uint32_t kRun = 22;
+  int zstd5 = 505;
+  write_one_entry_run(dir, kRun, &zstd5);
+  const std::string path = dir + "/run0022/run0022.root";
+  CHECK(exists(path));
+  CHECK_EQ(read_compression_settings(path), 505);  // 明示指定が反映される
+  remove_tree(dir);
+}
+
+// ---------------------------------------------------------------------------
 // inspect モード(E2E の entries 照合に使う)
 // ---------------------------------------------------------------------------
 int inspect(const std::string& path) {
@@ -608,5 +666,7 @@ int main(int argc, char** argv) {
   test_rollover_splits_the_run_into_numbered_parts();
   test_out_of_range_channel_is_counted_not_silently_dropped();
   test_a_single_fragment_event_becomes_one_entry();
+  test_default_compression_is_101_zlib1();
+  test_explicit_compression_setting_is_honored();
   return tpccheck::report("test_recorder");
 }

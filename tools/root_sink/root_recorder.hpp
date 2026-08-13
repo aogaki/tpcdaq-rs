@@ -72,7 +72,10 @@ constexpr const char* kTreeName = "tree";           // ツリー名
 constexpr const char* kBranchName = "GDataFrame";   // 単一ブランチ
 constexpr int kBranchBufferSize = 32000;            // Branch(..., 32000, 99)
 constexpr int kBranchSplitLevel = 99;               // graw2root 互換のリーフ名
-constexpr int kRootCompression = 505;               // ZSTD-5
+// ZLIB-1(既定、TODO/014・SPEC §6.4 v1.5)。Warsaw はオフライン解析も DAQ 計算機の
+// 同一(旧)ROOT で行うため ZSTD(505、ROOT 6.20+ 必須)は読めない。ZLIB は全時代互換
+// で C++ 版の「ROOT 既定」とも一致。`--root-compression` で上書き可(例 505=ZSTD-5)。
+constexpr int kDefaultCompression = 101;
 constexpr uint64_t kDefaultMaxRootBytes = 1ULL << 30;  // 1 GiB(--max-root-bytes 既定)
 // AutoSave 間隔(delila-rs Recorder 由来 / SPEC §6.1)。run 中でも inprogress を
 // ROOT で開けるようにしておく = 異常終了時にそこまでのデータが読める。
@@ -141,6 +144,7 @@ inline std::vector<std::string> list_directory(const std::string& dir) {
 struct RecorderConfig {
   std::string output_root = ".";                    // --output-root
   uint64_t max_root_bytes = kDefaultMaxRootBytes;   // --max-root-bytes
+  int compression = kDefaultCompression;            // --root-compression(TODO/014)
 };
 
 // JSON の root_files 要素(SPEC の「何をどこに何件書いたか」の可視化)。
@@ -307,7 +311,7 @@ class Recorder {
       return false;
     }
     provisional_ = pick_provisional(run_);
-    file_ = TFile::Open(provisional_.c_str(), "RECREATE", "", kRootCompression);
+    file_ = TFile::Open(provisional_.c_str(), "RECREATE", "", cfg_.compression);
     if (file_ == nullptr || file_->IsZombie()) {
       delete file_;
       file_ = nullptr;

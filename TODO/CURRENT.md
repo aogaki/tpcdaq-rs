@@ -20,12 +20,33 @@
 
 ## アクティブ(P2 — 出口: graw バイト一致 + TTree 互換 + run 毎単一 ROOT + ×2 リプレイ 2 ソースビルド一致)
 
-**P2 完全クローズ(007〜013)。オープンチケットなし。**
+**フェーズ訂正(2026-08-13、ユーザー指摘)**: PROPOSAL v0.4 のとおり **P3 = モニタ + WS + UI、
+P4 = run 制御**(「SPEC に P4 が無い」は Claude の読み違い — P4 は P5 に吸収されていない)。
+**ユーザー決定: 本来の P3(UI)を先に**(デモ最短到達。リプレイ駆動デモに run 制御は不要)。
 
-- 次: **P3(run 制御)の起票** — controller / ecc-bridge / JSONL ログブック(SPEC §8/§9)。
-  設計入力: レビュー R3(Reset カスケード — decoder の abandon が root-sink を exit 3 で殺す。
-  「run 中止の正規手順」を停止シーケンスとして設計する)。
-- P2 コミットはユーザー判断待ち(混入チェック済み)。
+**P4 前倒し分(発注済み — 完走させて受け入れる)**:
+- [015_logbook.md](015_logbook.md) — implementer/Sonnet **実行中**(src/logbook.rs + state.rs)
+- [017_ecc_bridge.md](017_ecc_bridge.md) — implementer/Opus **実行中**(tools/ecc_bridge/)
+- [016_controller.md](016_controller.md) — **起票済み・P4 まで保留**(発注しない)
+
+**P3(モニタ + WS + UI)— 波 1**:
+- 018 C++ ジオメトリ → **完了・archive 済み**(test_geo 426 CHECK、合成 3 + 実 .dat 2 本とも
+  ダンプがバイト一致。実 ELITPC .dat は単一 CoBo 形式 = **§13-7 の 2-CoBo .dat 問題は未解決の
+  まま** — ELITPC 構成の試験は引き続き合成 2-CoBo フィクスチャで。「最近完了」参照)
+- 以降順次: 019 root-sink ヒスト集計 + PUB(§5、018 依存)→ 020 monitor + WS(§5.4・§10)→
+  021 Web UI(§11)→ 022 P3 E2E(§12-8〜10 + R10)。SPEC v1.6。
+- **021 起票時の方針(ユーザー決定 2026-08-13)**: run 制御のボタン類は完成形レイアウトとして
+  **見た目だけ置き disabled**(P4 の REST が来たら配線するだけ)。**デモ用のモック関数・
+  仮バックエンドは作らない** — デモで動くのはモニタ経路(リプレイ → PUB → WS → UI)のみ。
+
+**設定方針の確認(2026-08-13 ユーザー質問 → WARSAW_PLAN §2 に明記)**: CoBo/FPGA に入る
+ハードウェア設定 xcfg は**先方の既存ファイルをそのまま**(config_id 参照のみ、生成・改変しない)。
+
+**保留(ユーザー決定)**: 物理屋向け PROPOSAL 資料とデモは UI + ファイルデータソースが
+できるまで待つ。
+**一時停止(2026-08-13 ユーザー指示)**: ユーザーが閉域 LAN に入って実データ
+(2022 / 2026)を取得するため、**実行中の 015 / 017 / 018 の完了・レビューをキリとして
+新規発注を停止し待機**。019(ヒスト + PUB)以降はデータ取得後に再開。
 
 **SPEC 改訂の要点(2026-08-13、v1.1→v1.4)**: AsAd 毎ファイル + 実機 DataRouter 命名(v1.1)/
 非 AsAd 制御フレームは `run{N}/ctrl/` へ保全 + REP 採番固定(v1.2)/ イベント内フラグメント順 =
@@ -58,6 +79,12 @@
 
 ## 最近完了
 
+- 2026-08-13: [018_cpp_geometry.md](archive/018_cpp_geometry.md) — root-sink 側 C++ ジオメトリ +
+  §4.5 二重実装一致(geo.hpp 純ヘッダ、test_geo 426 CHECK。dump_tsv が Rust とバイト一致 —
+  合成 3 本 + 実 mini/ELITPC .dat。意味論の正 = Rust、原本 C++ の欠陥 6 点を記録。レビュー済み)
+- 2026-08-13: [014_root_compression.md](archive/014_root_compression.md) — run.root 圧縮設定化
+  (既定 505 ZSTD-5 → **101 ZLIB-1**、`--root-compression` で上書き可。SPEC v1.5 / Warsaw 旧 ROOT
+  互換。test_recorder 169 CHECK、E2E entries=108 不変、サイズ +37% は許容。レビュー済み)
 - 2026-08-13: [013_decoder_starvation.md](archive/013_decoder_starvation.md) — decoder 飢餓修正
   (**真因確定 = libzmq `inbound_poll_rate=100` — recv 100 回に 1 度しか process_commands が
   走らず、fair-queue から外れたパイプが戻れない**。当初仮説は測定で棄却。修正 = recv 前に必ず

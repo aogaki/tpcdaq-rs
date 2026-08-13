@@ -40,7 +40,7 @@ GET_DICT = getdict.cxx
 GOLDEN ?=
 
 HEADERS   = tpc_wire.hpp rs_core.hpp eb_core.hpp check.hpp
-TESTS     = test_tpc_wire test_rs_core test_eb_core test_conformance
+TESTS     = test_tpc_wire test_rs_core test_eb_core test_conformance test_geo
 ROOTTESTS = test_recorder
 
 .PHONY: all test test-root compare clean
@@ -76,6 +76,9 @@ test_eb_core: test_eb_core.cpp eb_core.hpp rs_core.hpp tpc_wire.hpp check.hpp
 test_conformance: test_conformance.cpp tpc_wire.hpp check.hpp
 	$(CXX) $(CXXFLAGS) $< -o $@
 
+test_geo: test_geo.cpp geo.hpp check.hpp
+	$(CXX) $(CXXFLAGS) $< -o $@
+
 test_recorder: test_recorder.cxx root_recorder.hpp eb_core.hpp tpc_wire.hpp check.hpp \
                $(GET_DICT) $(GET_SRC)
 	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) -I$(GET_DIR) \
@@ -94,6 +97,7 @@ test: $(TESTS)
 	./test_rs_core
 	./test_eb_core
 	./test_conformance $(GOLDEN)
+	./test_geo
 
 test-root: $(ROOTTESTS)
 	./test_recorder
