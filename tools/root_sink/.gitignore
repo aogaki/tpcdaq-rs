@@ -6,11 +6,18 @@ test_rs_core
 test_eb_core
 test_conformance
 test_recorder
+test_pevent
 test_geo
 compare_gdataframe
+compare_pevent
 # ROOT 辞書(rootcling が LinkDefGET.h から毎ビルド生成する — TODO/011)
 getdict.cxx
 getdict_rdict.pcm
 libGET.rootmap
+# ROOT 辞書(rootcling が LinkDefTPCReco.h から毎ビルド生成する — TODO/020)。
+# **LinkDefTPCReco.h だけが我々のもの**。TPCReco 本体はビルド時参照でコピーしない。
+tpcrecodict.cxx
+tpcrecodict_rdict.pcm
+libTPCReco.rootmap
 *.o
 *.dSYM/

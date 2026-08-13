@@ -1,7 +1,8 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-08-13(**P2 完全クローズ** — 007〜013 全 COMPLETED、出口 4 項目実測達成 +
-飢餓バグ R1 解消。批判的レビュー済み → [docs/reviews/P2_review_2026-08-13.md](../docs/reviews/P2_review_2026-08-13.md)。SPEC v1.4。次: P3 起票)**
+**最終更新: 2026-08-13(**019 実データ回帰 + 020 PEventTPC 出力 完了** — SPEC v1.8。
+run.root は TPCReco 互換(変換ステップ消滅)。P2 レビュー →
+[docs/reviews/P2_review_2026-08-13.md](../docs/reviews/P2_review_2026-08-13.md)。次: P3 波の続き + 015/017 再発注判断 + コミット)**
 
 ## いま
 
@@ -24,18 +25,22 @@
 P4 = run 制御**(「SPEC に P4 が無い」は Claude の読み違い — P4 は P5 に吸収されていない)。
 **ユーザー決定: 本来の P3(UI)を先に**(デモ最短到達。リプレイ駆動デモに run 制御は不要)。
 
-**P4 前倒し分(発注済み — 完走させて受け入れる)**:
-- [015_logbook.md](015_logbook.md) — implementer/Sonnet **実行中**(src/logbook.rs + state.rs)
-- [017_ecc_bridge.md](017_ecc_bridge.md) — implementer/Opus **実行中**(tools/ecc_bridge/)
+**P4 前倒し分**:
+- [015_logbook.md](015_logbook.md) / [017_ecc_bridge.md](017_ecc_bridge.md) —
+  **エージェントが停止扱いで作業ゼロのまま終了**(2026-08-13 判明 — マシンスリープ起因の
+  可能性。src/logbook.rs も tools/ecc_bridge/ も未作成)。チケットは OPEN のまま。
+  **ユーザーの明示指示があれば再発注**(発注書はそのまま使える)。
 - [016_controller.md](016_controller.md) — **起票済み・P4 まで保留**(発注しない)
 
 **P3(モニタ + WS + UI)— 波 1**:
 - 018 C++ ジオメトリ → **完了・archive 済み**(test_geo 426 CHECK、合成 3 + 実 .dat 2 本とも
-  ダンプがバイト一致。実 ELITPC .dat は単一 CoBo 形式 = **§13-7 の 2-CoBo .dat 問題は未解決の
-  まま** — ELITPC 構成の試験は引き続き合成 2-CoBo フィクスチャで。「最近完了」参照)
-- 以降順次: 019 root-sink ヒスト集計 + PUB(§5、018 依存)→ 020 monitor + WS(§5.4・§10)→
-  021 Web UI(§11)→ 022 P3 E2E(§12-8〜10 + R10)。SPEC v1.6。
-- **021 起票時の方針(ユーザー決定 2026-08-13)**: run 制御のボタン類は完成形レイアウトとして
+  ダンプがバイト一致。018 時点で未解決だった §13-7 の 2-CoBo .dat 問題は **019 の実データで
+  解消** — ELITPC はワイヤ上 1 CoBo × 4 AsAd。「最近完了」参照)
+- 020 PEventTPC 出力 → **完了・archive 済み**(v1.8。「最近完了」参照。残: 同 run ペアでの
+  実データ値一致(次回 LAN)+ TPCReco 再配布許諾(Warsaw))。
+- 以降順次(番号は起票時に採番 — 繰り下げ多発のため事前採番をやめる): root-sink ヒスト集計 + PUB
+  (§5、018 依存)→ monitor + WS(§5.4・§10)→ Web UI(§11)→ P3 E2E(§12-8〜10 + R10)。
+- **UI ユニット起票時の方針(ユーザー決定 2026-08-13)**: run 制御のボタン類は完成形レイアウトとして
   **見た目だけ置き disabled**(P4 の REST が来たら配線するだけ)。**デモ用のモック関数・
   仮バックエンドは作らない** — デモで動くのはモニタ経路(リプレイ → PUB → WS → UI)のみ。
 
@@ -44,13 +49,14 @@ P4 = run 制御**(「SPEC に P4 が無い」は Claude の読み違い — P4 �
 
 **保留(ユーザー決定)**: 物理屋向け PROPOSAL 資料とデモは UI + ファイルデータソースが
 できるまで待つ。
-**一時停止(2026-08-13 ユーザー指示)**: ユーザーが閉域 LAN に入って実データ
-(2022 / 2026)を取得するため、**実行中の 015 / 017 / 018 の完了・レビューをキリとして
-新規発注を停止し待機**。019(ヒスト + PUB)以降はデータ取得後に再開。
+**待機解除(2026-08-13)**: ユーザーが閉域 LAN から実データ(2022 / 2026)を取得して
+`reference/exp_data/` に配置 → 019 で回帰組み込み完了。P3 波の続き(020〜)を再開できる。
 
-**SPEC 改訂の要点(2026-08-13、v1.1→v1.4)**: AsAd 毎ファイル + 実機 DataRouter 命名(v1.1)/
+**SPEC 改訂の要点(2026-08-13、v1.1→v1.7)**: AsAd 毎ファイル + 実機 DataRouter 命名(v1.1)/
 非 AsAd 制御フレームは `run{N}/ctrl/` へ保全 + REP 採番固定(v1.2)/ イベント内フラグメント順 =
-(cobo,asad) 昇順(v1.3)/ ロスレス PUSH に ZMQ_IMMEDIATE 必須(v1.4)
+(cobo,asad) 昇順(v1.3)/ ロスレス PUSH に ZMQ_IMMEDIATE 必須(v1.4)/ run.root 圧縮既定
+101 ZLIB-1(v1.5)/ 中止も EOS で閉じる正規経路(v1.6)/ **ELITPC = 1 CoBo × 4 AsAd・
+frameType 2 rev 5 固定・ローテーション書き込み後判定(v1.7、実データ実測)**
 
 **波 2 以降(順次起票)**:
 - 009 decoder コンポーネント(Rust。EOS 集約 = SPEC §2.3「decoder のソース性」2026-08-12 追記)
@@ -70,15 +76,27 @@ P4 = run 制御**(「SPEC に P4 が無い」は Claude の読み違い — P4 �
   **最後の 1 通を落とす**。tpcdaq-rs は PopResult 3 値で回避済み。delila-rs 側も要修正。
 - P2 批判的レビューの論点(009 逸脱 6): Fragment.cobo(ヘッダ値)と受信 source_id の不一致検出を
   入れるか(DataLinkSet 誤配線の早期検出になる)。
-- Warsaw 確認事項: 2-CoBo ジオメトリ .dat の有無(SPEC §13-7)、PROPOSAL v0.5 反映判断。
-- P2 レビュー R2(frameType 1 の実データ回帰なし)→ **ユーザーが 2022 と 2026 の実データを
-  入手予定**(2026-08-13 決定。「現在の実装に合わせるべき」— 入手後に環境変数パスの任意回帰へ
-  組み込む)。
+- Warsaw 確認事項: ~~2-CoBo ジオメトリ .dat の有無~~(**019 で解消** — 不要と確定)、
+  **データリンク本数(zCoBo 2 枚 → TCP 1 本か 2 本か、SPEC §13-7)**、PROPOSAL v0.5 反映判断。
+- ~~P2 レビュー R2(frameType 1 の実データ回帰なし)~~ → **019 でクローズ**(実機は 2022 時点で
+  既に frameType 2 — frameType 1 の実データは存在しない。回帰 = `TPCDAQ_REAL_GRAW_DIR`)。
 - P2 レビュー R3(Reset カスケードで root-sink が fatal 死)→ **P3 で実装**(2026-08-13
   ユーザー決定。controller の停止シーケンス設計に本項を必須入力とする)。
 
 ## 最近完了
 
+- 2026-08-13: [020_pevent_output.md](archive/020_pevent_output.md) — **run.root を PEventTPC
+  (TPCReco 互換)へ変更**(SPEC v1.8、ユーザー裁定「GDataFrame 出力は瑕疵」。TPCData/Event、
+  grawToEventTPC と同一充填(strip 射影・signal 窓・FPN ペデスタル減算既定 ON)、TPCReco
+  クラスは参照ビルド(ライセンス無指定のためコミットせず)。streamer checksum 実機三者一致、
+  test_pevent 119、既存回帰全 green(GDataFrame は --format gdataframe のテスト専用に降格)。
+  残: 同 run ペア値一致 + Warsaw 再配布許諾)
+- 2026-08-13: [019_elitpc_real_data.md](archive/019_elitpc_real_data.md) — **ELITPC 実データ回帰 +
+  ローテーション実機一致修正**(reference/exp_data/{2022,2026} 各 4 ファイルを実測:
+  **1 論理 CoBo × 4 AsAd・frameType 2 rev 5・各 _0000 = 3852 フレーム連続**。§13-7 解消・
+  R2 クローズ。graw-writer を実機 FrameStorage の書き込み後判定へ修正し、実 1 GiB ファイルとの
+  完全バイト一致を回帰で固定(修正前 red → 修正後 green)。SPEC v1.7。追記: 実機オフライン変換
+  出力 PEventTPC .root も実見 — **ZLIB-1 一致・ROOT 6.08/06 確定**、WARSAW_PLAN §4)
 - 2026-08-13: [018_cpp_geometry.md](archive/018_cpp_geometry.md) — root-sink 側 C++ ジオメトリ +
   §4.5 二重実装一致(geo.hpp 純ヘッダ、test_geo 426 CHECK。dump_tsv が Rust とバイト一致 —
   合成 3 本 + 実 mini/ELITPC .dat。意味論の正 = Rust、原本 C++ の欠陥 6 点を記録。レビュー済み)

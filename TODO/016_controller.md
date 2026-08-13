@@ -19,6 +19,9 @@
      passphrase は config `[controller]` から。
    - **コンポーネントクライアント**: §2.6 JSON REQ/REP(タイムアウト付き、config のエンドポイント
      表から。src/command.rs にクライアント側が無ければ追加 — サーバ側実装・既存テスト無改変)。
+   - **run TS の一元化(SPEC §6.4 v1.8 実装注記)**: Start コマンドに正式な run 開始 TS を
+     載せ、root-sink の runId(PEventTPC EventInfo)と graw-writer の TS 生成を将来これに
+     揃える(現状は各コンポーネントのローカル時刻で数秒ずれ得る — 対応の正はログブック)。
    - **run 開始シーケンス(§1.3 を忠実に)**: 015 `take_next_run` → Configure(下流から:
      graw-writer → decoder → receivers ※monitor は P3 後波)→ Arm(**receiver の実 bind ポートを
      応答から回収**)→ Start{run} → ecc-bridge 経由 describe→prepare→configure(DataLinkSet =

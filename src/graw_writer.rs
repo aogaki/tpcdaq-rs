@@ -470,17 +470,14 @@ impl RunWriter {
     }
 
     /// `key` の出力ファイルへ 1 フレームを書く(per-AsAd / ctrl 共通のホットパス)。
+    ///
+    /// ローテーションは実機 FrameStorage と同じく**書き込み後判定**(`write → サイズが
+    /// max を超えていたら次ファイルを即時オープン`、FrameStorage.cpp:190-197)。境界を
+    /// 跨いだフレームは現ファイルに残る(実 2022/2026 ELITPC データで確認: 各 _0000 が
+    /// 3852 フレーム = 1,073,875,968 B > 2^30 — TODO/019、SPEC §7 v1.7)。
     fn write_to(&mut self, key: FileKey, frame: &[u8]) -> Result<(), WriteError> {
         self.ensure_run_dir()?;
 
-        let must_rotate = self
-            .files
-            .get(&key)
-            .map(|f| f.cur_bytes > 0 && f.cur_bytes + frame.len() as u64 > self.max_file_bytes)
-            .unwrap_or(false);
-        if must_rotate {
-            self.rotate(key)?;
-        }
         if !self.files.contains_key(&key) {
             self.create_file(key)?;
         }
@@ -489,7 +486,7 @@ impl RunWriter {
             let entry = self
                 .files
                 .get_mut(&key)
-                .expect("create_file/rotate just ensured the entry exists");
+                .expect("create_file just ensured the entry exists");
             entry.file.write_all(frame)
         };
 
@@ -501,9 +498,13 @@ impl RunWriter {
             Ok(()) => {
                 entry.cur_bytes += frame.len() as u64;
                 entry.frames += 1;
+                let cur_bytes = entry.cur_bytes;
                 if let FileKey::Asad(cobo, asad) = key {
                     *self.asad_bytes.entry((cobo, asad)).or_insert(0) += frame.len() as u64;
                     *self.asad_frames.entry((cobo, asad)).or_insert(0) += 1;
+                }
+                if cur_bytes > self.max_file_bytes {
+                    self.rotate(key)?;
                 }
                 Ok(())
             }
@@ -521,8 +522,9 @@ impl RunWriter {
     }
 
     /// **ローテーション**: TS は据え置き、idx++ のみ(FrameStorage `createNewFile(newTimeStamp=false)`
-    /// と同一挙動、SPEC §7)。per-AsAd / ctrl 共通。呼び出し元(`write_to`)が `cur_bytes > 0`
-    /// の場合だけ呼ぶので、空ファイルへの巨大単発フレームはローテーションされない(同じガード)。
+    /// と同一挙動、SPEC §7)。per-AsAd / ctrl 共通。呼び出し元(`write_to`)が**書き込み後**に
+    /// `cur_bytes > max` で呼ぶ(v1.7 実機一致)。次ファイルは即時オープンする(createNewFile と
+    /// 同じ — 直後に run が終わると空ファイルが残るのも実機と同一)。フレームは決して分割しない。
     fn rotate(&mut self, key: FileKey) -> Result<(), WriteError> {
         let (ts, path_for_err, flush_result) = {
             let entry = self.files.get_mut(&key).expect("rotate: file must exist");
@@ -1105,7 +1107,7 @@ mod tests {
     fn rotation_keeps_the_same_ts_and_increments_idx_only() {
         let root = temp_output_root("rotation-ts");
         let one_frame = make_frame(0, 100); // 128 B
-        let max_file_bytes = one_frame.len() as u64; // ちょうど 1 フレーム分で毎回ローテーション
+        let max_file_bytes = one_frame.len() as u64 - 1; // 毎フレームが max を超える = 毎回ローテーション
         let mut w = RunWriter::new(root.clone(), 3, max_file_bytes);
 
         for seq in 0..3u64 {
@@ -1113,7 +1115,13 @@ mod tests {
         }
 
         let files = w.file_report();
-        assert_eq!(files.len(), 3, "1 フレームごとに新ファイル");
+        // 書き込み後判定(v1.7): 各フレームの直後にローテーションし次ファイルを即時オープン
+        // するので、閉じた 1 フレームファイル ×3 + 空の開きファイル(idx=3)= 4 本。
+        assert_eq!(
+            files.len(),
+            4,
+            "1 フレームごとに新ファイル + 空の次ファイル"
+        );
         let name0 = files[0].path.file_name().and_then(|n| n.to_str()).unwrap();
         let ts0 = name0.split('_').nth(2).unwrap().to_string();
         for (i, f) in files.iter().enumerate() {
@@ -1121,7 +1129,30 @@ mod tests {
             let ts = name.split('_').nth(2).unwrap();
             assert_eq!(ts, ts0, "TS はローテーションで据え置き: {name}");
             assert_eq!(f.idx, i as u32, "idx は連番: {name}");
+            let expected_frames = if i < 3 { 1 } else { 0 };
+            assert_eq!(f.frames, expected_frames, "{name}");
         }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// v1.7 の境界: 判定は strict `>`(FrameStorage `fileSize_B > maxFileSize`)なので、
+    /// ちょうど max_file_bytes ぴったりのファイルはローテーションされない。
+    #[test]
+    fn a_file_exactly_at_max_bytes_does_not_rotate() {
+        let root = temp_output_root("rotation-exact");
+        let one_frame = make_frame(0, 100); // 128 B
+        let max_file_bytes = one_frame.len() as u64; // 1 フレームでちょうど max
+        let mut w = RunWriter::new(root.clone(), 3, max_file_bytes);
+        w.handle_batch(0, 3, 0, &[frame(&one_frame)]).unwrap();
+
+        let files = w.file_report();
+        assert_eq!(
+            files.len(),
+            1,
+            "== max は strict `>` に届かずローテーションなし"
+        );
+        assert!(!files[0].closed);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1130,7 +1161,7 @@ mod tests {
     fn ctrl_files_rotate_with_ts_unchanged_and_idx_incrementing_like_asad_files() {
         let root = temp_output_root("ctrl-rotation");
         let ctrl = vec![0xCCu8; 20]; // 短小(< 28 B)= 無条件で ctrl 行き
-        let max_file_bytes = ctrl.len() as u64; // 毎回ローテーション
+        let max_file_bytes = ctrl.len() as u64 - 1; // 毎フレームが max を超える = 毎回ローテーション
         let mut w = RunWriter::new(root.clone(), 6, max_file_bytes);
         for seq in 0..3u64 {
             w.handle_batch(0, 6, seq, &[frame(&ctrl)]).unwrap();
@@ -1139,7 +1170,8 @@ mod tests {
         assert_eq!(w.ctrl_frames(), 3);
         assert!(!w.errored());
         let files = w.file_report();
-        assert_eq!(files.len(), 3);
+        // per-AsAd と同じ書き込み後判定(v1.7): 閉じた ×3 + 空の開きファイル(idx=3)。
+        assert_eq!(files.len(), 4);
         let name0 = files[0].path.file_name().and_then(|n| n.to_str()).unwrap();
         let ts0 = name0.split('_').nth(1).unwrap().to_string();
         for (i, f) in files.iter().enumerate() {
@@ -1258,7 +1290,7 @@ mod tests {
         let root = temp_output_root("rotation-boundary");
         let f1 = make_frame(0, 40); // 68 B
         let f2 = make_frame(0, 40); // 68 B
-        let max_file_bytes = f1.len() as u64 + 10; // f1 単独は収まるが f1+f2 は収まらない
+        let max_file_bytes = f1.len() as u64 + 10; // f2 の書き込みで max を超える
         let mut w = RunWriter::new(root.clone(), 5, max_file_bytes);
         w.handle_batch(0, 5, 0, &[frame(&f1), frame(&f2)]).unwrap();
         w.flush_all().unwrap();
@@ -1267,28 +1299,34 @@ mod tests {
         assert_eq!(files.len(), 2);
         let idx0 = files.iter().find(|f| f.idx == 0).unwrap();
         let idx1 = files.iter().find(|f| f.idx == 1).unwrap();
-        assert_eq!(
-            std::fs::read(&idx0.path).unwrap(),
-            f1,
-            "idx0 は f1 のみ(分割されない)"
-        );
-        assert_eq!(
-            std::fs::read(&idx1.path).unwrap(),
-            f2,
-            "idx1 は f2 のみ(分割されない)"
-        );
 
-        let mut concatenated = std::fs::read(&idx0.path).unwrap();
-        concatenated.extend_from_slice(&std::fs::read(&idx1.path).unwrap());
+        // v1.7(実機一致): 境界を跨いだ f2 も現ファイルに残る(書き込み後判定)。
+        // フレームは決して分割されず、次ファイルは空で開かれる。
         let mut expected = f1.clone();
         expected.extend_from_slice(&f2);
-        assert_eq!(concatenated, expected, "連結すれば入力と一致");
+        assert_eq!(
+            std::fs::read(&idx0.path).unwrap(),
+            expected,
+            "idx0 = f1 ++ f2(境界を跨いだフレームは現ファイルに残る — FrameStorage 一致)"
+        );
+        assert_eq!(idx0.frames, 2);
+        assert_eq!(
+            std::fs::read(&idx1.path).unwrap(),
+            Vec::<u8>::new(),
+            "idx1 はローテーション直後の空ファイル"
+        );
+
+        let concatenated = std::fs::read(&idx0.path).unwrap();
+        assert_eq!(
+            concatenated, expected,
+            "連結すれば入力と一致(空ファイルは無寄与)"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
     // -----------------------------------------------------------------
-    // 巨大フレーム(cur_bytes>0 ガード)
+    // 巨大フレーム(フレームは決して分割しない)
     // -----------------------------------------------------------------
 
     #[test]
@@ -1300,24 +1338,21 @@ mod tests {
         w.handle_batch(0, 9, 0, &[frame(&huge)]).unwrap();
         w.flush_all().unwrap();
 
+        // v1.7(実機一致): 巨大フレームも丸ごと書かれてから(分割されずに)ローテーション。
         let files = w.file_report();
-        assert_eq!(
-            files.len(),
-            1,
-            "cur_bytes==0 ガードで単発巨大フレームは分割されない"
-        );
-        assert_eq!(files[0].bytes, huge.len() as u64);
-        assert_eq!(std::fs::read(&files[0].path).unwrap(), huge);
+        assert_eq!(files.len(), 2, "巨大フレームの _0000 + 空の _0001");
+        let idx0 = files.iter().find(|f| f.idx == 0).unwrap();
+        assert_eq!(idx0.bytes, huge.len() as u64);
+        assert_eq!(std::fs::read(&idx0.path).unwrap(), huge, "分割されない");
 
-        // 続くフレームは(既に cur_bytes>0 なので)通常どおりローテーションされる
-        let next = make_frame(0, 5);
+        // 続くフレームは空の _0001 に入り、それも max 超過なら直後にローテーションされる。
+        let next = make_frame(0, 5); // 33 B > 32
         w.handle_batch(0, 9, 1, &[frame(&next)]).unwrap();
         w.flush_all().unwrap();
-        assert_eq!(
-            w.file_report().len(),
-            2,
-            "巨大フレームの後続フレームはローテーションされる"
-        );
+        let files = w.file_report();
+        assert_eq!(files.len(), 3, "_0000(huge)+ _0001(next)+ 空の _0002");
+        let idx1 = files.iter().find(|f| f.idx == 1).unwrap();
+        assert_eq!(std::fs::read(&idx1.path).unwrap(), next);
 
         let _ = std::fs::remove_dir_all(&root);
     }

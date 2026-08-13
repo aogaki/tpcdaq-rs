@@ -648,10 +648,17 @@ fn writes_a_run_root_file_and_finalizes_it() {
     };
     let out_root = scratch_dir("finalize");
     let endpoint = free_endpoint();
+    // v1.8: このテストは GDataFrame 出力(entries == fragments)の回帰なので
+    // テスト専用モードを明示する(既定は PEventTPC — SPEC §6.4 v1.8 / TODO/020)。
     let mut child = spawn_sink_raw(
         &bin,
         &endpoint,
-        &["--output-root", &out_root.to_string_lossy()],
+        &[
+            "--format",
+            "gdataframe",
+            "--output-root",
+            &out_root.to_string_lossy(),
+        ],
     );
     let pid = child.id();
 
@@ -831,7 +838,10 @@ async fn real_graw_replayed_end_to_end_writes_108_entries() {
     let mut sink = spawn_sink_raw(
         &bin,
         &sink_ep,
+        // v1.8: mini 実データオラクル(entries=108、GDataFrame)の回帰なのでテスト専用モード。
         &[
+            "--format",
+            "gdataframe",
             "--output-root",
             &out_root.to_string_lossy(),
             "--expect",

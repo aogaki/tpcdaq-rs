@@ -319,7 +319,7 @@ async fn rotation_across_a_boundary_still_concatenates_to_the_input() {
     let root = temp_root("rotation-e2e");
     let f1 = make_frame(0, 40, 0x11); // 68 B
     let f2 = make_frame(0, 40, 0x22); // 68 B
-    let max_file_bytes = f1.len() as u64 + 10; // f1 単独は収まるが f1+f2 は収まらない
+    let max_file_bytes = f1.len() as u64 + 10; // f2 の書き込みで max を超える
     let params = test_params(root.clone(), vec![5], max_file_bytes);
     let (cmd_ep, shutdown, task) = start_graw_writer(params).await;
 
@@ -344,6 +344,8 @@ async fn rotation_across_a_boundary_still_concatenates_to_the_input() {
     let path0 = PathBuf::from(files[0]["path"].as_str().unwrap());
     let path1 = PathBuf::from(files[1]["path"].as_str().unwrap());
 
+    // v1.7(実機一致): 境界を跨いだ f2 も現ファイルに残り(書き込み後判定)、
+    // ローテーション直後に開かれた次ファイルは空のまま閉じられる。
     let mut concatenated = std::fs::read(&path0).unwrap();
     concatenated.extend_from_slice(&std::fs::read(&path1).unwrap());
     let mut expected = f1.clone();
@@ -352,8 +354,16 @@ async fn rotation_across_a_boundary_still_concatenates_to_the_input() {
         concatenated, expected,
         "フレームはファイル間で分割されず、連結すれば一致"
     );
-    assert_eq!(std::fs::read(&path0).unwrap(), f1, "idx0 は f1 のみ");
-    assert_eq!(std::fs::read(&path1).unwrap(), f2, "idx1 は f2 のみ");
+    assert_eq!(
+        std::fs::read(&path0).unwrap(),
+        expected,
+        "idx0 = f1 ++ f2(境界を跨いだフレームは現ファイルに残る)"
+    );
+    assert_eq!(
+        std::fs::read(&path1).unwrap(),
+        Vec::<u8>::new(),
+        "idx1 はローテーション直後の空ファイル"
+    );
 
     shutdown_and_join(shutdown, task).await;
     let _ = std::fs::remove_dir_all(&root);

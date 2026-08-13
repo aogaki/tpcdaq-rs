@@ -256,6 +256,9 @@ void test_writes_one_entry_per_fragment_and_reads_back() {
   {
     rootsink::RecorderConfig cfg;
     cfg.output_root = dir;
+    // このファイルは **v1.7 までの GDataFrame 出力**の回帰(SPEC §12-3 の mini 実データ
+    // 全値一致オラクルがここに乗っている)。既定は PEventTPC なので明示で切り替える。
+    cfg.format = rootsink::OutputFormat::GDataFrame;
     rootsink::Recorder rec(cfg);
 
     rootsink::BuiltEvent ev41;
@@ -409,6 +412,9 @@ void test_shutdown_without_eos_keeps_the_inprogress_name() {
   {
     rootsink::RecorderConfig cfg;
     cfg.output_root = dir;
+    // このファイルは **v1.7 までの GDataFrame 出力**の回帰(SPEC §12-3 の mini 実データ
+    // 全値一致オラクルがここに乗っている)。既定は PEventTPC なので明示で切り替える。
+    cfg.format = rootsink::OutputFormat::GDataFrame;
     rootsink::Recorder rec(cfg);
     rootsink::BuiltEvent ev;
     ev.run_number = kRun;
@@ -453,6 +459,9 @@ void test_rollover_splits_the_run_into_numbered_parts() {
   {
     rootsink::RecorderConfig cfg;
     cfg.output_root = dir;
+    // このファイルは **v1.7 までの GDataFrame 出力**の回帰(SPEC §12-3 の mini 実データ
+    // 全値一致オラクルがここに乗っている)。既定は PEventTPC なので明示で切り替える。
+    cfg.format = rootsink::OutputFormat::GDataFrame;
     cfg.max_root_bytes = 1;  // 事実上「毎エントリでロールオーバ」
     rootsink::Recorder rec(cfg);
     for (uint32_t i = 0; i < 3; ++i) {
@@ -507,6 +516,9 @@ void test_out_of_range_channel_is_counted_not_silently_dropped() {
   {
     rootsink::RecorderConfig cfg;
     cfg.output_root = dir;
+    // このファイルは **v1.7 までの GDataFrame 出力**の回帰(SPEC §12-3 の mini 実データ
+    // 全値一致オラクルがここに乗っている)。既定は PEventTPC なので明示で切り替える。
+    cfg.format = rootsink::OutputFormat::GDataFrame;
     rootsink::Recorder rec(cfg);
     rootsink::BuiltEvent ev;
     ev.run_number = kRun;
@@ -548,6 +560,9 @@ void test_a_single_fragment_event_becomes_one_entry() {
   {
     rootsink::RecorderConfig cfg;
     cfg.output_root = dir;
+    // このファイルは **v1.7 までの GDataFrame 出力**の回帰(SPEC §12-3 の mini 実データ
+    // 全値一致オラクルがここに乗っている)。既定は PEventTPC なので明示で切り替える。
+    cfg.format = rootsink::OutputFormat::GDataFrame;
     rootsink::Recorder rec(cfg);
     for (uint32_t idx : {7u, 8u, 6u}) {  // 6 は「遅れて来た」= 昇順ではない
       rootsink::BuiltEvent ev;
@@ -595,6 +610,9 @@ int read_compression_settings(const std::string& path) {
 void write_one_entry_run(const std::string& dir, uint32_t run, int* compression) {
   rootsink::RecorderConfig cfg;
   cfg.output_root = dir;
+  // このファイルは **v1.7 までの GDataFrame 出力**の回帰(SPEC §12-3 の mini 実データ
+  // 全値一致オラクルがここに乗っている)。既定は PEventTPC なので明示で切り替える。
+  cfg.format = rootsink::OutputFormat::GDataFrame;
   if (compression != nullptr) cfg.compression = *compression;
   rootsink::Recorder rec(cfg);
   rootsink::BuiltEvent ev;

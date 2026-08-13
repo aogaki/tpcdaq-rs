@@ -1,5 +1,5 @@
-// root_recorder.hpp — GDataFrame の TTree 書き出し(SPEC §6.4)+ ファイルライフサイクル
-// (SPEC §6.5)。**ROOT に依存する唯一のヘッダ**。
+// root_recorder.hpp — イベント TTree の書き出し(SPEC §6.4)+ ファイルライフサイクル
+// (SPEC §6.5)。**ROOT に依存するヘッダ**(相方は pevent_fill.hpp)。
 //
 // 出自: delila-rs `tools/root_sink/root_sink.cxx` の `Recorder` クラスの流儀
 // (inprogress 名で開く → EOS で rename、AutoSave、開いている TFile を 1 スレッドに
@@ -8,8 +8,19 @@
 //   * `~/test/get/tpcdaq/src/output/root_writer.cpp`(C++ 版 tpcdaq = 実験で使用中)
 // の 2 つを正とした。移植にあたっての変更点は下の「delila-rs / 本家との差」を参照。
 //
-// **このヘッダを include してよいのは root_sink.cxx と test_recorder.cxx だけ**。
-// tpc_wire / rs_core / eb_core の 3 ヘッダは ROOT 非依存のまま(発注書 §3)。
+// **出力形式は 2 つ(SPEC §6.4 v1.8、TODO/020)**:
+//   * `OutputFormat::PEvent`(**既定**)= TPCReco `grawToEventTPC` と同一形式。
+//     ツリー `TPCData` / ブランチ `Event`(128000, splitlevel 2)/ **1 エントリ =
+//     1 ビルド済みイベント** / eventId は一回きり(遅延分は書かず数える)/
+//     `myChargeArray*` ブランチ無効 / 100 イベント毎 FlushBaskets /
+//     `Write("", kOverwrite)`。出自 = `EventSources/src/ConvertGrawFile.cpp:40-45,84-92`。
+//   * `OutputFormat::GDataFrame` = v1.7 までの出力(ツリー `tree` / 1 エントリ =
+//     1 フラグメント)。**テスト専用**(§12-3 の mini 実データ全値一致オラクルを
+//     持つ唯一の回帰)—— PEventTPC の同 run 実データオラクルが閉じたら削除してよい。
+//
+// **このヘッダを include してよいのは root_sink.cxx / test_recorder.cxx /
+// test_pevent.cxx だけ**。tpc_wire / rs_core / eb_core の 3 ヘッダは ROOT 非依存の
+// まま(発注書 §3)。
 //
 // --- delila-rs / 本家との差(意図的なもの)---------------------------------
 //  1. **rollover を ROOT 任せにしない**。delila は `TTree::GetMaxTreeSize` 超過時の
@@ -49,12 +60,14 @@
 #include <cstring>
 #include <ctime>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <TFile.h>
+#include <TObject.h>
 #include <TProcessID.h>
 #include <TROOT.h>
 #include <TTree.h>
@@ -64,14 +77,29 @@
 #include "GDataSample.h"
 #include "GFrameHeader.h"
 #include "eb_core.hpp"
+#include "pevent_fill.hpp"
 
 namespace rootsink {
 
+// 出力形式(SPEC §6.4 v1.8)。既定は PEventTPC —— GDataFrame はテスト専用。
+enum class OutputFormat { PEvent, GDataFrame };
+
 // SPEC §6.4 / §6.5 の定数(一字違わず合わせる)。
-constexpr const char* kTreeName = "tree";           // ツリー名
-constexpr const char* kBranchName = "GDataFrame";   // 単一ブランチ
+constexpr const char* kTreeName = "tree";           // ツリー名(GDataFrame モード)
+constexpr const char* kBranchName = "GDataFrame";   // 単一ブランチ(同上)
 constexpr int kBranchBufferSize = 32000;            // Branch(..., 32000, 99)
 constexpr int kBranchSplitLevel = 99;               // graw2root 互換のリーフ名
+
+// PEventTPC モード。**TPCReco `EventSourceROOT` がハード期待する形**
+// (ConvertGrawFile.cpp:40-45 / EventSourceROOT.cpp:25,74)。
+constexpr const char* kPEventTreeName = "TPCData";
+constexpr const char* kPEventBranchName = "Event";
+constexpr int kPEventBufferSize = 128000;
+constexpr int kPEventSplitLevel = 2;
+// 実運用 `disabledBranches` と同一(float[3][3][256][512] ≈ 4.7 MB/イベントの節約)。
+constexpr const char* kDisabledBranchPattern = "myChargeArray*";
+// ConvertGrawFile.cpp:85 と同じ間隔。
+constexpr uint64_t kFlushBasketsEvery = 100;
 // ZLIB-1(既定、TODO/014・SPEC §6.4 v1.5)。Warsaw はオフライン解析も DAQ 計算機の
 // 同一(旧)ROOT で行うため ZSTD(505、ROOT 6.20+ 必須)は読めない。ZLIB は全時代互換
 // で C++ 版の「ROOT 既定」とも一致。`--root-compression` で上書き可(例 505=ZSTD-5)。
@@ -145,6 +173,10 @@ struct RecorderConfig {
   std::string output_root = ".";                    // --output-root
   uint64_t max_root_bytes = kDefaultMaxRootBytes;   // --max-root-bytes
   int compression = kDefaultCompression;            // --root-compression(TODO/014)
+  OutputFormat format = OutputFormat::PEvent;       // --format(既定 = PEventTPC)
+  // PEvent モードでは **必須**(strip 射影に要る)。呼び手が寿命を持つこと。
+  const tpcgeo::Geometry* geometry = nullptr;       // --geometry
+  tpcpevent::FillConfig fill;                       // --pedestal-remove / --*-cell
 };
 
 // JSON の root_files 要素(SPEC の「何をどこに何件書いたか」の可視化)。
@@ -171,10 +203,22 @@ class Recorder {
     for (int a = 0; a < kMaxAget; ++a) {
       for (int c = 0; c < kMaxChanPerAget; ++c) grid_[a][c].reserve(64);
     }
+    if (cfg_.format == OutputFormat::PEvent) {
+      if (cfg_.geometry == nullptr) {
+        // ジオメトリ無しで PEventTPC は書けない(strip 射影ができない)。
+        // 呼び手が CLI で弾くのが本筋だが、黙って空を書かないための最後の砦。
+        set_fatal("pevent-no-geometry", "PEventTPC output needs a geometry (--geometry)");
+        return;
+      }
+      pevent_ = new PEventTPC();
+      filler_.reset(new tpcpevent::Filler(*cfg_.geometry, cfg_.fill));
+    }
   }
 
   ~Recorder() {
     shutdown();
+    delete pevent_;
+    pevent_ = nullptr;
     delete frame_;  // static TClonesArray も道連れ(ヘッダ冒頭の地雷)
     frame_ = nullptr;
   }
@@ -182,9 +226,11 @@ class Recorder {
   Recorder(const Recorder&) = delete;
   Recorder& operator=(const Recorder&) = delete;
 
-  // 組み上がったイベントを書く。**1 フラグメント = 1 エントリ**(SPEC §6.4)。
-  // 遅延到着フラグメントは呼び手が「1 フラグメントの BuiltEvent」として渡す
-  // (SPEC §6.3「emit 後に遅延到着したフラグメントも必ず TTree に書く」)。
+  // 組み上がったイベントを書く。
+  //   * PEvent モード: **1 エントリ = 1 ビルド済みイベント**(SPEC §6.4 v1.8)。
+  //     既に書いた eventId(= 遅延到着)は**書かずに数える**(SPEC §6.3 v1.8)。
+  //   * GDataFrame モード: **1 フラグメント = 1 エントリ**(v1.7 まで)。遅延到着
+  //     フラグメントは呼び手が「1 フラグメントの BuiltEvent」として渡す。
   void write(const BuiltEvent& ev, uint64_t now_ms) {
     if (fatal_ != nullptr) return;  // 既に死んでいる(呼び手が exit する)
     if (ev.fragments.empty()) return;
@@ -200,10 +246,37 @@ class Recorder {
       run_ = ev.run_number;
       run_active_ = true;
       next_part_ = 0;
+      have_last_event_id_ = false;
+      if (cfg_.format == OutputFormat::PEvent) {
+        // runId = **run 開始時刻**の %Y%m%d%H%M%S(TPCReco RunIdParser と同じ導出、
+        // SPEC §6.4)。run 中は一定 —— ここで 1 回だけ決める。
+        run_id_ = tpcpevent::run_id_now();
+        std::fprintf(stderr, "root_sink: run %u runId=%ld\n", run_, run_id_);
+      }
     }
+
+    if (cfg_.format == OutputFormat::PEvent) {
+      // eventId は一回きり(grawToEventTPC の eventIdMap と同じ意味論)。ビルダは
+      // event_idx 昇順で emit するので、「以前に書いた番号以下」= 遅延・重複。
+      if (have_last_event_id_ && ev.event_idx <= last_event_id_) {
+        duplicate_event_ids_.fetch_add(1, std::memory_order_relaxed);
+        if (duplicate_event_ids_.load(std::memory_order_relaxed) == 1) {
+          std::fprintf(stderr,
+                       "root_sink: event_idx=%u already written (last=%u) — not written to "
+                       "the TTree, counted (raw graw keeps the data)\n",
+                       ev.event_idx, last_event_id_);
+        }
+        return;
+      }
+    }
+
     if (file_ == nullptr && !open_part(now_ms)) return;
 
-    for (const OwnedFragment& f : ev.fragments) fill(f);
+    if (cfg_.format == OutputFormat::PEvent) {
+      fill_pevent(ev);
+    } else {
+      for (const OwnedFragment& f : ev.fragments) fill(f);
+    }
 
     // ロールオーバ判定は **イベント単位**(フレーム単位ではなく)—— 1 イベントの
     // フラグメントが 2 ファイルに割れないようにする。GetEND() = 現在のファイル末尾
@@ -253,6 +326,23 @@ class Recorder {
   uint64_t entries_written() const { return entries_written_.load(std::memory_order_relaxed); }
   uint64_t items_out_of_range() const {
     return items_out_of_range_.load(std::memory_order_relaxed);
+  }
+  // PEvent モードで「既に書いた eventId」を弾いた回数(遅延到着・重複)。
+  uint64_t duplicate_event_ids() const {
+    return duplicate_event_ids_.load(std::memory_order_relaxed);
+  }
+  // PEvent モードの充填カウンタ(strip でないチャンネル / PEventTPC の固定長配列を
+  // はみ出す key / ジオメトリ外フレーム)。GDataFrame モードでは常に 0。
+  // **Filler 側は素の整数**(per-sample の atomic はホットパスに置かない)。
+  // イベント毎に 1 回だけここへ積み替えて、他スレッドから読めるようにする。
+  uint64_t channels_without_strip() const {
+    return channels_without_strip_.load(std::memory_order_relaxed);
+  }
+  uint64_t charge_keys_out_of_range() const {
+    return charge_keys_out_of_range_.load(std::memory_order_relaxed);
+  }
+  uint64_t frames_outside_geometry() const {
+    return frames_outside_geometry_.load(std::memory_order_relaxed);
   }
   std::vector<RootFileRecord> files_snapshot() const {
     std::lock_guard<std::mutex> lk(files_mu_);
@@ -318,10 +408,25 @@ class Recorder {
       set_fatal("root-open", provisional_);
       return false;
     }
-    tree_ = new TTree(kTreeName, "tpcdaq GET data frames");
-    tree_->SetDirectory(file_);
-    // splitlevel 99 が graw2root 互換のリーフ名を作る(SPEC §6.4)。
-    tree_->Branch(kBranchName, &frame_, kBranchBufferSize, kBranchSplitLevel);
+    if (cfg_.format == OutputFormat::PEvent) {
+      // **タイトルは空文字**(ConvertGrawFile.cpp:41 `TTree aTree(treeName, "")`)。
+      tree_ = new TTree(kPEventTreeName, "");
+      tree_->SetDirectory(file_);
+      tree_->Branch(kPEventBranchName, &pevent_, kPEventBufferSize, kPEventSplitLevel);
+      // myChargeArray は書かない(実運用 disabledBranches と同一)。found==0 なら
+      // クラス定義が変わったということ —— 黙って 4.7 MB/イベントを書き始めない。
+      UInt_t found = 0;
+      tree_->SetBranchStatus(kDisabledBranchPattern, false, &found);
+      if (found == 0) {
+        set_fatal("pevent-branch", std::string("no branch matches ") + kDisabledBranchPattern);
+        return false;
+      }
+    } else {
+      tree_ = new TTree(kTreeName, "tpcdaq GET data frames");
+      tree_->SetDirectory(file_);
+      // splitlevel 99 が graw2root 互換のリーフ名を作る(SPEC §6.4)。
+      tree_->Branch(kBranchName, &frame_, kBranchBufferSize, kBranchSplitLevel);
+    }
     part_ = next_part_++;
     part_entries_ = 0;
     last_autosave_ms_ = now_ms;
@@ -330,14 +435,12 @@ class Recorder {
     return true;
   }
 
-  // 1 フラグメント = 1 エントリ。充填の正は graw2root.cpp と C++ 版 tpcdaq RootWriter。
-  void fill(const OwnedFragment& f) {
+  // OwnedFragment を `frame_`(GDataFrame)に展開する。**両モードの共通入口** ——
+  // PEventTPC 充填も「GDataFrame を読む」形に揃えることで、TPCReco
+  // `fillEventFromFrame` との意味論の等価性を構造的に担保する(SPEC §6.4 v1.8)。
+  // 充填の正は graw2root.cpp と C++ 版 tpcdaq RootWriter。
+  void build_frame(const OwnedFragment& f) {
     frame_->Clear();
-    // TRefArray(GDataChannel::fSamples)が使うオブジェクト番号を毎エントリ巻き戻す。
-    // graw2root.cpp と ROOT の JetEvent チュートリアル由来 —— これをやらないと
-    // TProcessID のオブジェクト表が単調増加して、長い run で溢れる。
-    const Int_t object_count = TProcessID::GetObjectCount();
-
     GET::GFrameHeader& h = frame_->fHeader;
     // Fragment(SPEC §2.4)は dataSource を運ばない(MFM ヘッダの 1 バイト)。
     // C++ 版 tpcdaq RootWriter も 0 を入れている。frame_type も GFrameHeader に
@@ -399,18 +502,73 @@ class Recorder {
         cell.clear();  // 容量は残る
       }
     }
+  }
 
+  // GDataFrame モード: **1 フラグメント = 1 エントリ**(v1.7 まで、テスト専用)。
+  void fill(const OwnedFragment& f) {
+    // TRefArray(GDataChannel::fSamples)が使うオブジェクト番号を毎エントリ巻き戻す。
+    // graw2root.cpp と ROOT の JetEvent チュートリアル由来 —— これをやらないと
+    // TProcessID のオブジェクト表が単調増加して、長い run で溢れる。
+    const Int_t object_count = TProcessID::GetObjectCount();
+    build_frame(f);
     TProcessID::SetObjectCount(object_count);
     tree_->Fill();
     entries_written_.fetch_add(1, std::memory_order_relaxed);
     ++part_entries_;
   }
 
+  // PEvent モード: **1 エントリ = 1 ビルド済みイベント**(SPEC §6.3/§6.4 v1.8)。
+  // フラグメントは (cobo,asad) 昇順に並んでいる(eb_core が保証)—— 順に
+  // GDataFrame へ展開して chargeMap に足し込む(`AddValByStrip` は `+=`)。
+  void fill_pevent(const BuiltEvent& ev) {
+    pevent_->Clear();
+    uint64_t event_time = 0;
+    for (const OwnedFragment& f : ev.fragments) {
+      const Int_t object_count = TProcessID::GetObjectCount();
+      build_frame(f);
+      filler_->add_frame(*frame_, *pevent_);
+      TProcessID::SetObjectCount(object_count);
+      // timestamp は最後のフラグメント(= (cobo,asad) 最大)のもの。
+      // TPCReco も「フラグメントを回して最後に立った値」を採る —— 我々は並びが
+      // 決定的(SPEC §6.3 v1.3)なので、同じイベントなら常に同じ値になる。
+      event_time = f.event_time;
+    }
+
+    eventraw::EventInfo info;
+    info.SetEventId(ev.event_idx);
+    info.SetEventTimestamp(static_cast<ULong_t>(event_time));
+    info.SetRunId(run_id_);
+    info.SetPedestalSubtracted(cfg_.fill.remove_pedestal);
+    // eventType / global_properties は 0 のまま(実運用の grawToEventTPC と同一 ——
+    // 埋めるのは解析側)。
+    pevent_->SetEventInfo(info);
+
+    tree_->Fill();
+    entries_written_.fetch_add(1, std::memory_order_relaxed);
+    ++part_entries_;
+    last_event_id_ = ev.event_idx;
+    have_last_event_id_ = true;
+    // 充填カウンタを他スレッドから読める場所へ積み替える(イベント毎に 1 回)。
+    channels_without_strip_.store(filler_->channels_without_strip(),
+                                  std::memory_order_relaxed);
+    charge_keys_out_of_range_.store(filler_->keys_out_of_range(), std::memory_order_relaxed);
+    frames_outside_geometry_.store(filler_->frames_outside_geometry(),
+                                   std::memory_order_relaxed);
+    // 100 イベント毎に basket を吐く(ConvertGrawFile.cpp:85 と同じ)。
+    if (part_entries_ % kFlushBasketsEvery == 0) tree_->FlushBaskets();
+  }
+
   // 現在の part を書いて閉じる。finalize=true なら最終名へ rename。
   void close_part(bool finalize) {
     if (file_ == nullptr) return;
     file_->cd();
-    tree_->Write();
+    if (cfg_.format == OutputFormat::PEvent) {
+      // 「最新版のツリーだけを残す」(ConvertGrawFile.cpp:92 と同じ)。AutoSave が
+      // 書いたキーの隣に ;2 を作らない。
+      tree_->Write("", TObject::kOverwrite);
+    } else {
+      tree_->Write();
+    }
     const std::string written = provisional_;
     file_->Close();
     delete file_;  // TFile が TTree を所有(delete で tree_ も消える)
@@ -469,16 +627,25 @@ class Recorder {
   RecorderConfig cfg_;
   TFile* file_ = nullptr;
   TTree* tree_ = nullptr;
-  GET::GDataFrame* frame_ = nullptr;  // ブランチのバッファ(プロセス内で 1 個だけ)
+  GET::GDataFrame* frame_ = nullptr;  // 取り込みの内部表現(プロセス内で 1 個だけ)
+  PEventTPC* pevent_ = nullptr;       // PEvent モードのブランチバッファ
+  std::unique_ptr<tpcpevent::Filler> filler_;  // PEvent モードの充填器
 
   std::string provisional_;
   uint32_t run_ = 0;
   bool run_active_ = false;
+  long run_id_ = 0;                // run 開始時刻の %Y%m%d%H%M%S(EventInfo::runId)
+  uint32_t last_event_id_ = 0;     // PEvent モードで最後に書いた eventId
+  bool have_last_event_id_ = false;
   uint32_t part_ = 0;       // 開いている part
   uint32_t next_part_ = 0;  // 次に開く part
   uint64_t part_entries_ = 0;
   std::atomic<uint64_t> entries_written_{0};
   std::atomic<uint64_t> items_out_of_range_{0};
+  std::atomic<uint64_t> duplicate_event_ids_{0};
+  std::atomic<uint64_t> channels_without_strip_{0};
+  std::atomic<uint64_t> charge_keys_out_of_range_{0};
+  std::atomic<uint64_t> frames_outside_geometry_{0};
   uint64_t last_autosave_ms_ = 0;
   mutable std::mutex files_mu_;
   std::vector<RootFileRecord> files_;

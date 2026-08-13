@@ -430,7 +430,11 @@ async fn e2e_a_single_source_matches_the_graw_bytes_and_the_real_root_oracle() {
     let mut sink = spawn_sink(
         &sink_bin,
         &sink_ep,
+        // v1.8: §12-3 の旧オラクル(GDataFrame、mini 実機 .root と全値比較)の回帰なので
+        // テスト専用モードを明示(既定は PEventTPC — SPEC §6.4 v1.8 / TODO/020)。
         &[
+            "--format",
+            "gdataframe",
             "--output-root",
             &root_out.to_string_lossy(),
             "--expect",
@@ -671,7 +675,11 @@ async fn run_two_source_build(
     let mut sink = spawn_sink(
         sink_bin,
         &sink_ep,
+        // v1.8: 2 ソースビルドの決定性比較も GDataFrame 出力前提(--strict-order)なので
+        // テスト専用モードを明示。
         &[
+            "--format",
+            "gdataframe",
             "--output-root",
             &out_root.to_string_lossy(),
             "--expect",

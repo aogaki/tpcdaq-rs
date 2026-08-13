@@ -28,7 +28,7 @@
   - `~/WorkSpace/delila-rs/` — コンポーネントシステムの手本。`tools/root_sink`(C++)= イベントビルダ + ROOT 書き出しの流用元
   - **`reference/`(リポ内、.gitignore 済み — コミット絶対禁止)** = 「これらと同等のことをやる」対象 + 変更不能な制約(2026-08-12 配置):
     - `20190315_patched/` — GET software(**実験使用中と同一版**)。ecc-bridge の検証相手、.ice 定義、GetController/MDaq の意味論、CoBoFrameViewer(デコード照合元)
-    - `TPCReco/` — ジオメトリ .dat の正(`GeometryTPC`)+ オフライン互換ターゲット(graw2root)。全スナップショット調査済み(2-CoBo .dat は現存せず — SPEC §13-7)
+    - `TPCReco/` — ジオメトリ .dat の正(`GeometryTPC`)+ オフライン互換ターゲット(**grawToEventTPC** — ELITPC 実運用の変換器。「graw2root」は GET 付属の別ツール(→ GDataFrame)で、混同注意 — 2026-08-13 確認)。全スナップショット調査済み(2-CoBo .dat は「不要」で決着 — SPEC §13-7 v1.7)
     - `ZC706_20181031_ELINP/` — zCoBo FW(**変更不能の足枷 = ワイヤ上の挙動の真実**)。SD_image / 1・2 AsAd 設定 / describe・configure xcfg / 運用スクリプト。要注目: `README_SCRIPTS.txt` の実 DataLinkSet 例(`DataSender id="CoBo[0]"` を FW 側資料でも確認済み 2026-08-12)、`CoboFormats-Rev-5-Compact.xcfg`(frameType 2 形式定義)、`MergedDataFormats-ByEventId/ByEventTime-*.xcfg`(Q3 順序問題の一次資料)
 
 ## Tech Stack
@@ -47,8 +47,8 @@ C++ サテライト(tools/): ROOT(root-sink)、ZeroC Ice 3.6.3(ecc-bridge、**en
 
 - **ch 数をコードに焼き込まない** — mini(256 信号 ch/272 FPN 込み)/ ELITPC(1024/1088)はジオメトリ設定(TPCReco `.dat` 形式)で切替。C++ 版の mini 前提を持ち込まない。
 - **FPN リオーダ必須** — GRAW 0–67 ↔ geometry 0–63、FPN={11,22,45,56}(reuse/rust_reference 参照)。波高・波形は**生 ADC(減算なし)**が既定。
-- **複数 CoBo 前提** — receiver は CoBo 毎。生 graw は **AsAd 毎ファイル・実機 DataRouter 命名に完全一致**(`CoBo{K}_AsAd{A}_{TS}_{idx:04}.graw`、バイト一致 append。mini = 1、ELITPC = 2 CoBo × 2 AsAd = 4。run 番号管理はログブック・ROOT 側 — 2026-08-13 決定、SPEC v1.1)。ビルド後のイベントデータは run 毎に単一 ROOT ファイル(**全 CoBo/AsAd マージが理想形**)。イベントビルダは ELITPC(2 CoBo)で必須。
-- **frameType 1(2018)/ 2(2025 compact, blkSize256/big-endian)両対応**。
+- **複数 CoBo 前提** — receiver は CoBo 毎。生 graw は **AsAd 毎ファイル・実機 DataRouter 命名に完全一致**(`CoBo{K}_AsAd{A}_{TS}_{idx:04}.graw`、バイト一致 append。mini = 1、**ELITPC = 1 論理 CoBo × 4 AsAd = 4**(2 枚の zCoBo を 1 CoBo として扱う — 実データ 2026-08-13 確認、SPEC v1.7)。run 番号管理はログブック・ROOT 側 — 2026-08-13 決定、SPEC v1.1)。ビルド後のイベントデータは run 毎に単一 ROOT ファイル(**全 CoBo/AsAd マージが理想形**)。イベントビルダは ELITPC(4 AsAd マージ)で必須。多 CoBo 能力は設計として維持(合成 2-CoBo フィクスチャでテスト)。
+- **frameType 1(2018 形式、実データ照合なし・合成のみ)/ 2(compact rev 5, blkSize256/big-endian — 実機は 2022 時点で既にこれ。SPEC v1.7)両対応**。
 - **listen-before-start** — `ecc start` 前に受信ポートを listen。
 - **実機プロトコル既知の罠**: DataSender id は `CoBo[0]` 形式・flowType は大文字 `TCP`。Ice は encoding 1.1。
 - **oxyroot でヒストを書かない** — TH1/TH2 型が存在しない(2026-08-12 ソース+実コンパイルで実証)。ヒストの ROOT 化は常に C++ 側(root-sink)。
@@ -94,5 +94,5 @@ C++ サテライト(tools/): ROOT(root-sink)、ZeroC Ice 3.6.3(ecc-bridge、**en
 ## やらないこと
 
 - 制御プレーン(ECC/getHwServer/FW)を改変しない。Ice **クライアント**として話すだけ。
-- オンライン 3D/トラック再構成(R5 非スコープ)。TPCReco・オフライン解析チェーンに触らない(graw2root 互換で無改造接続)。
+- オンライン 3D/トラック再構成(R5 非スコープ)。TPCReco・オフライン解析チェーンに触らない(grawToEventTPC が我々の .graw を無改造で読めることで接続)。
 - TLS・認証の自前実装(SSH トンネル + 必要ならリバースプロキシ)。

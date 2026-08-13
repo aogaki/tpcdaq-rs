@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.6(2026-08-13 — 実装の正本)**
+- **status**: **v1.8(2026-08-13 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -20,6 +20,27 @@
   docs/WARSAW_PLAN_ja.md)。
   / v1.6(2026-08-13)§1.3 に**異常中止(abort)の正規経路**を追加(P2 レビュー R3 の解消 —
   中止も必ず EOS で閉じる。run クローズ前に decoder を Reset しない)。
+  / v1.7(2026-08-13)**ELITPC 実データ(2022/2026)取得・実測による訂正 3 点**(TODO/019):
+  ①ELITPC のワイヤ実態は **1 論理 CoBo × 4 AsAd**(coboIdx=0・asadIdx=0..3、
+  `CoBo0_AsAd{0..3}_{TS}_0000.graw`)— v1.1 の「2 CoBo × 2 AsAd」を訂正(Aogaki の解釈:
+  2 枚の zCoBo を 1 CoBo として扱っている)。§13-7 の 2-CoBo ジオメトリ問題は**解消**
+  (実 ELITPC .dat の COBO 0・4 ASAD と完全整合)。
+  ②両年とも **frameType 2(compact)rev 5** — 2022 時点で既に compact。frameType 1 は
+  実機オラクル対象外(合成フィクスチャのみ)と確定。
+  ③**ローテーションを実機一致へ訂正**(§7): 書き込み**後**に size > max(strict)で次ファイル
+  即時オープン(FrameStorage.cpp 実装 + 実データの「各 _0000 = 3852 フレーム = 2^30 超過」で
+  確認)。v1.6 までの「書く前判定」は実機と 1 フレームずれる誤りだった。
+  §12-1/2 に ELITPC オラクル(`TPCDAQ_REAL_GRAW_DIR`)を追加。§6.4 に用語注意を追記:
+  ELITPC オフライン実運用の変換器は TPCReco **grawToEventTPC**(→ PEventTPC)であり、
+  「graw2root」(GET 付属 → GDataFrame)とは別物(ユーザー確認 2026-08-13)。
+  / **v1.8(2026-08-13)run.root のイベント形式を GDataFrame → PEventTPC(TPCReco 互換)へ
+  変更**(§6.4 全面改訂 — **ユーザー裁定: GDataFrame 出力は瑕疵**。オフライン解析は TPCReco で
+  行われており、Warsaw も grawToEventTPC 変換で PEventTPC を使っている。我々の出力を
+  変換不要でそのまま解析に使える形式に合わせる)。ツリー `TPCData` / ブランチ `Event`
+  (PEventTPC、bufsize 128000・splitlevel 2)、充填意味論は grawToEventTPC と同一
+  (normal ch のみ・strip 射影・signal 窓・FPN ベースのペデスタル減算既定 ON)。
+  GDataFrame は**内部充填表現 + テスト専用出力**へ降格(P2 の mini 実データ全値一致
+  オラクルを持つ唯一の回帰のため、PEventTPC の同 run 実データオラクルが閉じるまで維持)。
 - **正本性**: 本書が実装の正本。PROPOSAL v0.4 と食い違う場合は本書が勝つ(差分は §14 に列挙。
   PROPOSAL v0.5 への反映は Warsaw フィードバックと併せて判断 — 未実施)。
 - **入力**: PROPOSAL_ja.md v0.4 / delila-rs 実装調査 / C++ 版 tpcdaq 実装調査 /
@@ -54,7 +75,7 @@
 | receiver | Rust | CoBo 毎に 1 | TCP listen(CoBo 毎ポート)、MFM フレーミング、drain のみ(never-stop)。生フレームを graw-writer と decoder へ PUSH |
 | graw-writer | Rust | 1 | 生フレームを **AsAd 毎ファイル**(ヘッダ asadIdx で振り分け)へバイト一致 append(§7) |
 | decoder | Rust | 1 | frameType 1/2 デコード → Fragment(§2.4)を root-sink へ PUSH。内部ワーカー並列(delila-rs reader 方式) |
-| root-sink | C++ | 1 | **イベントビルダ + graw2root 互換 TTree + ヒスト集計 + run\<N\>_monitor.root**。ヒスト/最新イベント/状態を PUB(§5, §6) |
+| root-sink | C++ | 1 | **イベントビルダ + PEventTPC(TPCReco)互換 TTree(v1.8)+ ヒスト集計 + run\<N\>_monitor.root**。ヒスト/最新イベント/状態を PUB(§5, §6) |
 | monitor | Rust | 1 | root-sink の PUB を購読し WS へ変換する**ゲートウェイ**(集計しない)。ジオメトリで UVW グリッド化(§5.4) |
 | controller | Rust | 1 | run 制御オーケストレーション、REST API、操作権トークン、run 番号採番、**JSONL 単一ライタ**(§8, §9) |
 | ecc-bridge | C++ | 1 | Ice クライアント(encoding 1.1 固定)。JSON REQ/REP ↔ ECC(§8.2) |
@@ -430,35 +451,78 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 ### 6.3 イベントビルダ(新規、eventIdx ベース)
 
 - 期待フラグメント集合 = 設定 + ジオメトリから导出した `{(cobo, asad)}` の集合(mini: {(0,0)}、
-  ELITPC: {(0,0),(0,1),(1,0),(1,1)} 相当 — .dat の実配置に従う)。
+  ELITPC: **{(0,0),(0,1),(0,2),(0,3)}**(v1.7 実データ確認 — 1 論理 CoBo × 4 AsAd)。
+  .dat の実配置に従う)。
 - キー = `(run_number, event_idx)`。全期待フラグメント到達で complete、`build_timeout_ms`
   (壁時計、既定 1000 ms)超過で **incomplete フラグ付きで emit**(捨てない)。
-- emit は event_idx 昇順。TTree へはイベント群の順にフレーム(GDataFrame)を書く —
+- emit は event_idx 昇順。**TTree は 1 エントリ = 1 ビルド済みイベント(PEventTPC、v1.8)** —
   「到着順連結で順序が狂う」現行 GET 問題(PROPOSAL Q3)の構造的回避はここで実現される。
 - **イベント内のフラグメント順は (cobo, asad) 昇順で決定的にする**(v1.3。到着順は run 毎に
   揺れるため、§12-4 の 2 ソースビルド一致・TTree 比較が順序で偽陰性にならないように)。
-  遅延到着分はこの限りではない(emit 後の追記 — 可逆性優先)。
-- emit 後に遅延到着したフラグメントも**必ず TTree に書く**(順序より可逆性優先)。`late_fragments`
-  としてカウント・可視化。
+- **遅延到着(emit 後)の扱い(v1.8 改訂)**: PEventTPC は eventId 毎に 1 エントリで書き切る
+  (grawToEventTPC の eventId 重複排除と同じ意味論)ため、emit 済みイベントへの遅延
+  フラグメントは **TTree に書かず `late_fragments` としてカウント + warn 可視化**。
+  データ自体は生 graw(ロスレス保存系)に必ず在る — run.root は v1.8 から「解析用の変換出力」
+  であり(FPN 落とし・窓切り・ペデスタル減算を含む)、ロスレス保証の担い手ではない。
+  (旧 GDataFrame テストモードでは従来どおり追記 — 011/012 回帰の維持のため。)
 - 単一 CoBo 構成では実質素通し(期待集合が 1 要素)。多ソースの検証は graw_replay ×2 並走(§12-4)。
 
-### 6.4 TTree(graw2root 互換)
+### 6.4 TTree(PEventTPC / TPCReco 互換 — v1.8 全面改訂)
 
-- ツリー名 `"tree"`、単一ブランチ `Branch("GDataFrame", &frame, 32000, 99)`(splitlevel 99 が
-  graw2root 互換のリーフ名を作る)。**1 エントリ = 1 CoBo フレーム**。
-- GDataFrame は GET 由来クラス(GFrameHeader / GDataChannel / GDataSample + LinkDef、ROOT 辞書を
-  ビルド時生成)。ヘッダは Fragment(§2.4)の全フィールドから充填。`fHitPatterns` は C++ 版同様
-  未充填(生 graw がバックストップ、と本書でも明文化)。
-- **`frame_type` と `run_number` は TTree に載せない**(011 レビューで明文化 — GFrameHeader に
-  置き場が無く、GET クラスは無改変が原則。run はディレクトリ・ファイル名・ログブック(§9)が持ち、
-  frame_type は生 graw がバックストップ。`fDataSource` は C++ 版 tpcdaq と同じく 0 固定)。
-- イベント内のチャンネル並びは **(aget, chan) 昇順**(C++ 版 tpcdaq の実データ初出順と一致。
-  本家 graw2root とは並びが異なるため、§12-3 の比較はチャンネルを (aget, chan) キーで
-  突き合わせる — 順序比較にしない)。
-- チャンネル内サンプルは連続で AddSample(標準リーダの前提)。圧縮は **101(ZLIB-1)を既定とし
-  設定可能**(v1.5 — Warsaw はオフライン解析も DAQ 計算機の同一(旧)ROOT で行うため、
-  ZSTD(ROOT 6.20+)は読めない。ZLIB は全時代互換で C++ 版の「ROOT 既定」とも一致。
-  先方 ROOT 更新後に設定で ZSTD へ切替可。docs/WARSAW_PLAN_ja.md §2)。
+**決定(v1.8、ユーザー裁定)**: run.root のイベント形式 = **TPCReco `grawToEventTPC` の出力と
+同一**。オフライン解析は TPCReco であり(mini/ELITPC 共通)、変換ステップなしで我々の出力を
+そのまま解析に使えることが価値。v1.7 までの GDataFrame 出力は瑕疵と裁定。
+
+- **ツリー/ブランチ(TPCReco EventSourceROOT がハード期待する形)**: ツリー名 `TPCData`
+  (タイトル空文字)、単一ブランチ `Branch("Event", &pevent, 128000, 2)`(splitlevel 2)。
+  **1 エントリ = 1 イベント(全 AsAd ビルド済み)**。出自 = `ConvertGrawFile.cpp:40-45` +
+  `EventSourceROOT.cpp:25/74`(HIGS2026_online、2026-08-13 実ソース確認)。
+- **クラス**: `PEventTPC` + `eventraw::EventInfo`(TPCReco 由来)。**TPCReco はライセンス
+  無指定(= all rights reserved)のためコピーをリポにコミットしない** — 017 の .ice と同じ
+  **ビルド時参照**方式: `TPCDAQ_TPCRECO_DIR`(既定 `reference/TPCReco/TPCReco-HIGS2026_online`)
+  のヘッダを include し、我々の LinkDef(pragma: PEventTPC+ / eventraw::EventInfo+ /
+  同::global_properties+ / nestedclasses)で rootcling 辞書を生成。依存は 6 ファイルで閉じる
+  (PEventTPC.h/.cpp・EventInfo.h(.cpp は要否実装時判定)・StripTPC.h(GeometryTPC は前方宣言
+  のみ)・CoBoClock.h(boost ヘッダのみ))。Warsaw の再配布許諾が得られたら third_party/tpcreco
+  へ昇格。**streamer checksum 一致を受け入れテストで固定**(実測: PEventTPC v1 0xf71c32cf /
+  eventraw::EventInfo v1 0xfea093e4 / global_properties v1 0x49e6428c — コピー元は
+  HIGS2026_online 固定。myChargeArray の出入りした他スナップショットと混ぜると割れる)。
+- **chargeMap キー** = `{dir(U=0/V=1/W=2), section(0="-"/1=A/2=B), number(1 始まり), cell(0..511)}`、
+  値は `AddValByStrip` の **`+=` 加算**(tuple 版 setter を使う — shared_ptr<StripTPC> 版と同値)。
+- **myChargeArray ブランチは既定で無効**(`SetBranchStatus("TPCData.myChargeArray*", false)` —
+  実運用既定 `disabledBranches=["TPCData.myChargeArray*"]` と同一。float[3][3][256][512] ≈
+  4.7 MB/イベントの節約。streamer には残るのでクラス互換に影響なし)。
+- **充填意味論(`EventSourceGRAW::fillEventFromFrame` = HIGS2026_online の実装と同一)**:
+  - **normal ch(0..63)のみ**走査(`Aget_normal2raw` で FPN リオーダ)。FPN・非 strip ch は
+    捨てる(ロスレスは生 graw が担う — 絶対ルールと矛盾しない: ここは「変換出力」)。
+  - strip = ジオメトリ lookup(geo.hpp、018)。`AddValByStrip(strip, cell, 値)` で
+    chargeMap(key = tuple<int,int,int,int>)へ。
+  - **signal 窓**: cell ∈ [minSignalCell, maxSignalCell](既定 5..506)以外は捨てる。
+  - **ペデスタル減算(既定 ON)**: TPCReco `PedestalCalculator(GRAW)` と同一算法 —
+    ①FPN 4ch を cell 毎に平均(pedestal 窓 5..25 と signal 窓それぞれ)
+    ②normal ch の pedestal 窓で `raw − FPN平均` をチャンネル毎に平均(= オフセット、
+    TProfile 256 ビン整数中心と同値の純算術)
+    ③補正 = オフセット + FPN_ave_signal[cell]、格納値 = raw − 補正。
+    per (cobo,asad) フレーム毎にリセット・再計算(イベント内で完結、run 状態なし)。
+  - **EventInfo**: eventId = eventIdx、timestamp = eventTime、
+    runId = **run 開始 TS の `%Y%m%d%H%M%S`**(TPCReco `RunIdParser` と同じ導出 —
+    v1.7 §6.4「run_number を載せない」の代替がここに自然に存在する)、
+    pedestalSubtracted = 減算フラグ。
+    **実装注記(020)**: ワイヤに run 開始時刻が無いため、runId は root-sink が run を
+    開いた瞬間のローカル時刻から生成する。graw ファイル名の TS(graw-writer が独立に
+    採るローカル時刻)と数秒ずれ得る — 対応付けの正はログブック(§9)。P4 で controller が
+    Start コマンドに正式な run TS を載せて全コンポーネントで統一する(016 の設計入力)。
+- **設定**(config `[root_sink]` → CLI): `pedestal_remove`(既定 true)/
+  `min_pedestal_cell` 5 / `max_pedestal_cell` 25 / `min_signal_cell` 5 /
+  `max_signal_cell` 506(TPCReco `allowedOptions.json` の既定と同値)。
+- 圧縮は **101(ZLIB-1)を既定とし設定可能**(v1.5。実機 grawToEventTPC 出力が ZLIB level 1
+  であることを 2026 実ファイルで直接確認済み — WARSAW_PLAN §4)。
+- **GDataFrame の扱い(v1.8 降格)**: 取り込み側の内部表現として維持(Fragment → GDataFrame
+  充填は 011 で実データ全値一致を実証済み — PEventTPC 充填はこの GDataFrame を読む。
+  fillEventFromFrame と同じ入力形に揃えることで意味論の等価性を構造的に担保)。
+  **GDataFrame TTree 出力はテスト専用モード**(`--format gdataframe`)として残す — P2 の
+  mini 実データ全値一致オラクル(§12-3)を持つ唯一の回帰のため。PEventTPC の同 run
+  実データオラクル(§12-3 v1.8)が閉じたら削除してよい。既定は PEventTPC。
 
 ### 6.5 ファイル命名・ライフサイクル
 
@@ -484,12 +548,16 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 GDataFrame 系(CeCILL)は `third_party/get/` に置き、ライセンス文と出自(GET/CoBoFrameViewer 由来)を
 README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側に一切リンクしない(境界は ZMQ のみ)。
 
+**TPCReco 系(v1.8)**: ライセンス無指定のため**コミットしない**(§6.4 — ビルド時参照
+`TPCDAQ_TPCRECO_DIR`)。Warsaw の再配布許諾が得られたら `third_party/tpcreco/` へ
+昇格し、出典 URL + コミットハッシュ + 改変内容を NOTICE として付す。
+
 ## 7. graw-writer 仕様
 
 - receiver からの RawFrames を **(cobo, asad) 毎のファイル**へバイトそのまま append(v1.1 訂正)。
   1 フレーム = 1 AsAd 分(§2.4)なので、振り分けはフレームヘッダの asadIdx を読むだけ。
   リシリアライズ・変換なし(AsAd 毎連結 = 入力を asadIdx で分別した列と同一 =
-  graw2root/CoBoFrameViewer で読めるファイル)。
+  grawToEventTPC(TPCReco)/ graw2root(GET)/ CoBoFrameViewer で読めるファイル)。
 - **振り分け対象は frameType 1/2 のフレームのみ**(v1.2)。asadIdx の読み出しは decode モジュールに
   集約した `peek_asad`(**frameType 1/2 かつヘッダ 28 B 以上のときだけ Some**)を使う — frameType を
   見ずにオフセット 27 を読むと、28 B を超える制御フレームが来たとき**誤った AsAd ファイルに混入**する。
@@ -501,7 +569,8 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
   (意図的ドロップ禁止)を優先する。ctrl/ はサブディレクトリなのでオフラインの `CoBo*` glob には
   見えず、per-AsAd ファイルは実機と完全一致のまま。TS・idx・ローテーション規則は per-AsAd と同一。
 - AsAd 数は設定にもコードにも焼き込まない。観測した (cobo, asad) 毎にファイルを遅延作成
-  (mini = 1 ファイル、ELITPC = 2 CoBo × 2 AsAd = 4 ファイルが自然に出る)。
+  (mini = 1 ファイル、ELITPC = **1 CoBo × 4 AsAd = 4 ファイル**が自然に出る —
+  実 2022/2026 データで確認、v1.7)。
 - **命名 = 実機 DataRouter 完全一致**(v1.1): `CoBo{K}_AsAd{A}_{TS}_{idx:04}.graw`。
   TS = 当該 (cobo, asad) ストリームの最初のファイル作成時刻、**localtime** の ISO 8601 拡張 +
   ミリ秒 3 桁(例 `2022-04-12T08:03:44.531` — コロン入り、Linux 前提)。K/A はゼロ埋めなし 10 進。
@@ -512,8 +581,13 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
   (実データ例: AsAd0–3 = .531/.533/.536/.540)で、TPCReco `RunIdParser` はこれを許容する。
 - ファイルハンドルは run 中開きっぱなし(per-frame open/close 禁止 — 旧 DataBloc の失敗)。
   flush は 1 秒毎、fsync はローテーションと close 時。
-- ローテーション: `cur + n > max_file_size(既定 1 GiB)` で次 seq へ。**フレームはファイル間で
-  分割しない**。巨大単発フレームはそのまま書く(C++ 版と同じガード)。
+- ローテーション(**v1.7 実機一致に訂正**): フレームを書いた**後**、ファイルサイズが
+  `max_file_size(既定 1 GiB = 2^30 B)` を **strict に超えていたら**次 seq のファイルを
+  即時オープン(FrameStorage.cpp:190-197 `write → tellp() > 1024 MiB → createNewFile` と同一)。
+  **境界を跨いだフレームは現ファイルに残る**(実データ確認: 各 _0000 = 3852 フレーム =
+  1,073,875,968 B > 2^30。v1.6 までの「書く前判定」は実機と 1 フレームずれる誤り)。
+  **フレームはファイル間で分割しない**。巨大単発フレームもそのまま丸ごと書かれてから
+  ローテーション。直後に run が終わると空の次ファイルが残る(実機と同一挙動)。
 - 書き込み失敗は Error 状態 + カウント(silent 禁止)。run 中のディスクフルは §1.4-3 の異常停止経路。
 - run バウンダリ: Batch の run_number が変わったら新ファイル群、EOS で flush+close。
 
@@ -662,9 +736,9 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
 
 | # | 項目 | 基準 |
 |---|---|---|
-| 1 | デコーダオラクル | 実 2025 run graw(ローカル、`TPCDAQ_REAL_GRAW` 環境変数)で **events=108 / items=15,040,512 / malformed=0**。CI は合成フィクスチャで frameType 1/2 両方 green |
-| 2 | graw バイト一致 | frameType 1/2 を asadIdx で分別した列 = per-AsAd 出力、残り全フレームの列 = ctrl/ 出力、**全出力の合計 = 入力の完全ロスレス分割**(v1.2)。mini 実 graw オラクル: AsAd ファイル 30,108,672 B + ctrl 12 B(frameType 7 ×1)= 30,108,684 B。ローテーション跨ぎも連結一致 |
-| 3 | TTree 互換 | 同一入力で C++ 版 tpcdaq の ROOT 出力と TTree レベル一致(エントリ数・全ヘッダフィールド・全チャンネルサンプル値。比較スクリプトを tools/ に置く) |
+| 1 | デコーダオラクル | 実 2025 run graw(ローカル、`TPCDAQ_REAL_GRAW` 環境変数)で **events=108 / items=15,040,512 / malformed=0**。実 ELITPC graw(`TPCDAQ_REAL_GRAW_DIR`、2022/2026 各 4 ファイル、v1.7)で **各ファイル frames=3852 / items=536,444,928 / malformed=0 / unsupported=0 / eventIdx 0..=3851 連続 / eventTime 単調**。CI は合成フィクスチャで frameType 1/2 両方 green |
+| 2 | graw バイト一致 | frameType 1/2 を asadIdx で分別した列 = per-AsAd 出力、残り全フレームの列 = ctrl/ 出力、**全出力の合計 = 入力の完全ロスレス分割**(v1.2)。mini 実 graw オラクル: AsAd ファイル 30,108,672 B + ctrl 12 B(frameType 7 ×1)= 30,108,684 B。ローテーション跨ぎも連結一致。ELITPC 実ファイル(1,073,875,968 B > 2^30)を既定 max でリプレイすると **_0000 が入力と完全バイト一致 + 空 _0001**(ローテーション境界の実機一致、v1.7) |
+| 3 | TTree 互換 | **v1.8: PEventTPC 互換** — ①構造一致: 実機 grawToEventTPC 出力(2026 実ファイル)とツリー名/ブランチ/クラス streamer バージョン/圧縮が一致 ②値一致(単体): 既知入力 → chargeMap 期待値(strip 射影・signal 窓・ペデスタル算法の手計算オラクル)③値一致(実データ): **同一 run の graw 4 本組と grawToEventTPC 変換済み .root のペア**を入手後、全イベント全 key の値一致(env-gated、ペアが揃うまで skip)。旧 GDataFrame 比較(mini 実データ全値一致)は `--format gdataframe` テスト専用モードの回帰として維持 |
 | 4 | 2 ソースビルド | graw_replay ×2 並走(異なる CoBo id を模す)→ 全イベント complete、eventIdx 昇順、incomplete=0、CoBo 毎フレーム数一致 |
 | 5 | 連続負荷 | **100 Hz 相当ペース(mini ≈ 28 MB/s)のループリプレイで連続 24 時間、保存系 drop 0**(全カウンタ 0: overflow / gap / malformed / late)。各プロセス RSS が上限内かつ後半 12 時間で単調増加なし。ディスク節約のため「書いて検証して消す」ハーネス可 |
 | 6 | 瞬発負荷 | ペーシングなし全速リプレイ(≥ 3× 目標レート)10 分で drop 0(バッファ設計の証明) |
@@ -694,8 +768,12 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
    サポートする別 flowType — TCP 経路の実機疎通は P5 で必ず確認する。
 5. **実 ECC**: 20190315_patched 版コンテナで e2e → 実機。
 6. **ディスク持続書き込み**: 実運用ストレージで 28 MB/s(mini)/ 111 MB/s(ELITPC)持続の実測。
-7. **2-CoBo ジオメトリ .dat**: **現存しない**(TPCReco 全スナップショット調査済み — §14-5)。
-   Warsaw に既存有無を確認し、なければ ELITPC .dat から作成してもらう/自作する(Q3 の確認と併せて)。
+7. **2-CoBo ジオメトリ .dat**: **解消(v1.7)** — ELITPC 実データ(2022/2026)は
+   coboIdx=0・asadIdx=0..3 の **1 論理 CoBo** であり、既存 ELITPC .dat(COBO 0・4 ASAD)が
+   そのまま正。2-CoBo .dat は不要(合成 2-CoBo フィクスチャは多 CoBo 対応の能力テストとして維持)。
+   残る実機確認は**データリンク本数**: 2 枚の zCoBo(ZC706 は 1–2 AsAd 構成)が 1 本の TCP で
+   来るのか 2 本か(DataLinkSet の DataSender 数と receiver 台数に影響 — どちらでも受けられる
+   設計だが P5 で確認)。
 8. (P6)HiVolta: LOCAL モードでのモニタ無干渉・単一 TCP 接続の専有確認。HMP2020: LAN オプション
    有無と `SYST:MIX` 動作(Q2)。
 
@@ -710,7 +788,8 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
 4. **背圧方式**: delila-rs の「HWM=0 無制限バッファ」ではなく有限 HWM + 有界キュー + 可視 Error
    (§1.4)。PROPOSAL の「PUSH/PULL の背圧で守る」の具体化。
 5. **ELITPC 2-CoBo の .dat は現存しない**(TPCReco リポの全 13 変種が COBO 0 のみ・4 ASAD)。
-   GeometryTPC 自体は 2 CoBo 対応。§13-7 の確認事項へ。
+   GeometryTPC 自体は 2 CoBo 対応。§13-7 の確認事項へ
+   (v1.7: 実データにより「不要」と確定 — ワイヤ実態が COBO 0・4 ASAD そのもの)。
 6. root_sink は**ヒストをファイルに書かない**(THttpServer ライブのみ)— R10 実装は新規コード。
    PROPOSAL §5「root_sink の TH1D/TH2D 書き出し機構を流用」は「登録・生成機構を流用、書き出しは
    新規」が正確。
