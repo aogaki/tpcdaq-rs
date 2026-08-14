@@ -25,11 +25,27 @@
 //! `Configure`(run 番号確定)→ `Arm`(**bind + listen** = listen-before-start。実 bind
 //! アドレスを `CommandResponse.metrics` で返す — controller が DataLinkSet に使う、SPEC §8.2)
 //! → `Start{run}`(accept 開始・seq 0 リセット)→ `Stop` / `Reset`。
+//!
+//! # データリンクは同時に 1 本(先勝ち、SPEC §1.4-6 / TODO/032)
+//!
+//! 実機のデータリンクは **CoBo が `configure` 時に張る 1 本**だけで、ECC は probe を張らない。
+//! それでも 2 本目が来ることはある(CoBo の無 FIN 消滅 → 復旧後の再 configure / 迷い込み)。
+//! そのとき「先の接続を read し続け、後続は backlog に置き去り」にすると、相手からは
+//! 接続成功に見えたまま **run が丸ごと無言で空振り**する(GET 純正 DataRouter が
+//! ECONNREFUSED で即可視にする状況で、こちらだけ silent — 純正より悪い)。よって:
+//!
+//! - 現接続を drain しながら **accept も回し続け**、余分な接続は即 close(FIN)して
+//!   [`Metrics::extra_connections`] を進める(初回だけ warn)。相手にも即座に見える fail-fast。
+//! - **1 バイトも運ばなかった接続の終了は run 境界ではない**([`Metrics::empty_connections`])。
+//!   迷い込みの即断が偽 EOS で run を閉じるのを防ぐ。`Stop` の強制 EOS 経路は不変(SPEC §1.3)。
+//! - 現接続 peer と最終受信時刻を GetStatus に載せる(0 Hz と stale link の切り分け材料)。
+//!
+//! 余分な接続の close は同期処理(await なし)なので、**現接続の drain を 1 ミリ秒も止めない**。
 
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -136,12 +152,24 @@ struct Metrics {
     encode_errors: AtomicU64,
     /// ETERM 以外の ZMQ send 失敗数(以前は error ログのみ・無カウント)。
     send_errors: AtomicU64,
+    /// 現接続を保持したまま拒否した接続数(SPEC §1.4-6、TODO/032)。
+    extra_connections: AtomicU64,
+    /// 1 バイトも運ばずに終わった接続数(= run 境界を構成しなかった接続、SPEC §1.4-6)。
+    empty_connections: AtomicU64,
+    /// 最後にソケットから 1 バイト以上読めた時刻(unix ns)。**0 = この run では未受信**。
+    /// 0 Hz(トリガ無し)と stale link を運用で切り分けるための材料(SPEC §1.4-6)。
+    last_read_unix_ns: AtomicU64,
+    /// 現接続の相手アドレス(無接続なら `None`)。書き込みは接続の確立/終了時だけ =
+    /// ホットパス外なので `Mutex` でよい(GetStatus 読みも低頻度)。
+    peer: Mutex<Option<String>>,
     /// 内部キュー満杯を一度でも踏んだか(= Error 報告のラッチ、SPEC §1.4-3)。
     overflowed: AtomicBool,
     /// 打ち切りの warn を出したか(初回だけ出す — 以降はカウンタが担う)。
     logged_abandoned: AtomicBool,
     /// framer リセットの warn を出したか(同上、TODO/023-4 = R-P2-10)。
     logged_framer_reset: AtomicBool,
+    /// 余分な接続の warn を出したか(同上、TODO/032)。
+    logged_extra_connection: AtomicBool,
 }
 
 impl Metrics {
@@ -154,9 +182,39 @@ impl Metrics {
         self.messages_abandoned.store(0, Ordering::Relaxed);
         self.encode_errors.store(0, Ordering::Relaxed);
         self.send_errors.store(0, Ordering::Relaxed);
+        self.extra_connections.store(0, Ordering::Relaxed);
+        self.empty_connections.store(0, Ordering::Relaxed);
+        self.last_read_unix_ns.store(0, Ordering::Relaxed);
+        self.set_peer(None);
         self.overflowed.store(false, Ordering::Relaxed);
         self.logged_abandoned.store(false, Ordering::Relaxed);
         self.logged_framer_reset.store(false, Ordering::Relaxed);
+        self.logged_extra_connection.store(false, Ordering::Relaxed);
+    }
+
+    /// 現接続の相手アドレスを差し替える(接続確立で `Some`、終了で `None`)。
+    ///
+    /// ロックが毒されていても値を捨てない: `Metrics` は不変条件を持たない素の数値袋で、
+    /// panic 途中の中途半端な状態というものが存在しないため、`into_inner` で復帰してよい
+    /// (`.unwrap()` 禁止 — CLAUDE.md)。
+    fn set_peer(&self, peer: Option<SocketAddr>) {
+        let mut guard = self
+            .peer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = peer.map(|p| p.to_string());
+    }
+
+    /// 現接続 peer の JSON 表現(無接続なら `null`)。
+    fn peer_json(&self) -> serde_json::Value {
+        let guard = self
+            .peer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match guard.as_deref() {
+            Some(peer) => serde_json::json!(peer),
+            None => serde_json::Value::Null,
+        }
     }
 
     /// フレーム 1 個を落としたことを記録する。初回だけログに出す
@@ -190,6 +248,46 @@ impl Metrics {
         true
     }
 
+    /// 現接続を保持したまま拒否した接続を記録する(SPEC §1.4-6)。**初回だけ** warn
+    /// (以降はカウンタが担う)。戻り値 = このとき warn を出したか。
+    ///
+    /// 数えるだけでなく **close で相手にも見える**のがこの規約の要点: 黙って backlog に
+    /// 滞留させると、CoBo からは接続成功に見えたまま run が空振りする(TODO/032)。
+    fn record_extra_connection(
+        &self,
+        cobo_id: u32,
+        extra: SocketAddr,
+        current: SocketAddr,
+    ) -> bool {
+        self.extra_connections.fetch_add(1, Ordering::Relaxed);
+        if self.logged_extra_connection.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        warn!(
+            cobo_id,
+            %extra,
+            %current,
+            "a second data link arrived while one is already up — closing it at once (the data \
+             link is single by contract, SPEC §1.4-6). If the CoBo vanished without FIN and \
+             reconnected, this run is receiving nothing: rebuild the run. This is counted \
+             (metrics.extra_connections), never silent; further occurrences are counted only"
+        );
+        true
+    }
+
+    /// 1 バイトも運ばずに終わった接続を記録する(SPEC §1.4-6)。**EOS は出さない** ——
+    /// 迷い込み接続の即断で run を閉じてしまわないため。接続毎に 1 回なのでホットパス外。
+    fn record_empty_connection(&self, cobo_id: u32, peer: SocketAddr, reason: &str) {
+        self.empty_connections.fetch_add(1, Ordering::Relaxed);
+        info!(
+            cobo_id,
+            %peer,
+            reason,
+            "connection closed without carrying a single byte — not a run boundary, so no \
+             EndOfStream (SPEC §1.4-6); counted as metrics.empty_connections"
+        );
+    }
+
     /// 符号化失敗を記録する(送れなかった = 喪失なので必ず数える)。
     fn record_encode_error(&self, cobo_id: u32, link: &str, error: &crate::msg::MsgError) {
         self.encode_errors.fetch_add(1, Ordering::Relaxed);
@@ -221,6 +319,11 @@ impl Metrics {
 
     fn json(&self) -> serde_json::Value {
         let get = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        // 未受信は **null**(0 と混同しない — SPEC §9.2 v1.10 の nullable 方針と同じ)。
+        let last_read = match get(&self.last_read_unix_ns) {
+            0 => serde_json::Value::Null,
+            ns => serde_json::json!(ns),
+        };
         serde_json::json!({
             "bytes": get(&self.bytes),
             "frames": get(&self.frames),
@@ -230,6 +333,10 @@ impl Metrics {
             "messages_abandoned": get(&self.messages_abandoned),
             "encode_errors": get(&self.encode_errors),
             "send_errors": get(&self.send_errors),
+            "extra_connections": get(&self.extra_connections),
+            "empty_connections": get(&self.empty_connections),
+            "last_read_unix_ns": last_read,
+            "peer": self.peer_json(),
         })
     }
 }
@@ -259,6 +366,7 @@ async fn drain_task(
 ) {
     let mut buf = vec![0u8; READ_CHUNK_BYTES];
     // run 開始時点で「この run はまだ EOS を出していない」。EOF で出したら降ろす。
+    // **accept では立てない**(1 バイトも運ばない接続は EOS 勘定に一切影響しない、SPEC §1.4-6)。
     let mut owes_eos = true;
 
     'accept: loop {
@@ -268,11 +376,10 @@ async fn drain_task(
             result = listener.accept() => result,
         };
 
-        let mut stream = match accepted {
+        let (mut stream, peer) = match accepted {
             Ok((stream, peer)) => {
                 info!(cobo_id, %peer, "CoBo connected");
-                owes_eos = true;
-                stream
+                (stream, peer)
             }
             Err(e) => {
                 error!(cobo_id, error = %e, "accept failed — retrying");
@@ -280,27 +387,55 @@ async fn drain_task(
                 continue 'accept;
             }
         };
+        metrics.set_peer(Some(peer));
 
         let mut framer = Framer::new();
         // この接続で観測済みの framer リセット数(増分検知用 — TODO/023-4 = R-P2-10)。
         let mut seen_resets = 0u64;
+        // この接続が運んだバイト数。0 のままの終了は run 境界ではない(SPEC §1.4-6)。
+        let mut conn_bytes = 0u64;
+        // 余分な接続を拒否し続けるか。accept 自体が壊れた(fd 枯渇など)ときだけ降りる —
+        // 即 Ready で Err を返し続ける腕を回し続けると、drain を妨げる busy loop になる。
+        let mut reject_extra = true;
         loop {
+            // 腕は 3 つ。**biased 順は stop → read → accept**: 現接続の drain が最優先で、
+            // 拒否は全速受信中には遅れ得る(正しさには影響しない — TODO/032 発注済み挙動)。
+            // `TcpStream::read` も `TcpListener::accept` も cancel-safe(tokio 文書)。
             let read = tokio::select! {
                 biased;
                 _ = stop.recv() => break 'accept,
-                result = stream.read(&mut buf) => result,
+                result = stream.read(&mut buf) => Some(result),
+                extra = listener.accept(), if reject_extra => {
+                    reject_extra = reject_extra_connection(extra, &metrics, cobo_id, peer);
+                    None // 拒否は同期処理。drain は 1 ミリ秒も止まらない
+                }
             };
+            let Some(read) = read else { continue };
 
             match read {
-                // TCP EOF = run 境界(SPEC §1.3 の run 停止シーケンス)
+                // TCP EOF。データを運んだ接続だけが run 境界(SPEC §1.3 / §1.4-6)
                 Ok(0) => {
-                    info!(cobo_id, "TCP EOF — end of stream");
+                    if conn_bytes == 0 {
+                        metrics.record_empty_connection(cobo_id, peer, "EOF");
+                        break;
+                    }
+                    info!(cobo_id, %peer, conn_bytes, "TCP EOF — end of stream");
                     send_end_of_stream(&tx, cobo_id).await;
                     owes_eos = false;
                     break;
                 }
                 Ok(n) => {
+                    if conn_bytes == 0 {
+                        // この接続が最初のデータを運んだ = この run は EOS を負う(SPEC §1.4-6)
+                        owes_eos = true;
+                    }
+                    conn_bytes += n as u64;
                     metrics.bytes.fetch_add(n as u64, Ordering::Relaxed);
+                    // 最終受信時刻。clock_gettime は vDSO で ~20 ns(実測)、read は
+                    // 256 KiB 毎なので 1 GB/s でも ~4 k 回/s = 実質ゼロ。間引かない。
+                    metrics
+                        .last_read_unix_ns
+                        .store(unix_nanos(), Ordering::Relaxed);
                     framer.push(&buf[..n]);
                     while let Some(frame) = framer.next() {
                         let owned = frame.to_vec();
@@ -325,20 +460,57 @@ async fn drain_task(
                     }
                 }
                 Err(e) => {
-                    warn!(cobo_id, error = %e, "read failed — treating as end of stream");
+                    if conn_bytes == 0 {
+                        metrics.record_empty_connection(cobo_id, peer, &e.to_string());
+                        break;
+                    }
+                    warn!(cobo_id, %peer, error = %e, "read failed — treating as end of stream");
                     send_end_of_stream(&tx, cobo_id).await;
                     owes_eos = false;
                     break;
                 }
             }
         }
+        metrics.set_peer(None);
     }
 
+    metrics.set_peer(None);
     // Stop / shutdown で抜けたときの取りこぼし防止(SPEC §1.3: 強制 EOS)。
     if owes_eos {
         send_end_of_stream(&tx, cobo_id).await;
     }
     info!(cobo_id, "drain task stopped");
+}
+
+/// 余分な接続を **即 close** する(SPEC §1.4-6 の先勝ち規約)。
+///
+/// `await` を含まない = 現接続の drain を止めない。戻り値 = 以後もこの接続の間 accept 腕を
+/// 回してよいか(accept が壊れているなら降りる — 現接続が閉じれば `'accept` ループが
+/// [`ACCEPT_BACKOFF_MS`] 付きで拾い直す)。
+fn reject_extra_connection(
+    accepted: std::io::Result<(tokio::net::TcpStream, SocketAddr)>,
+    metrics: &Metrics,
+    cobo_id: u32,
+    current: SocketAddr,
+) -> bool {
+    match accepted {
+        Ok((extra, peer)) => {
+            // drop = FIN。相手には「受け口は塞がっている」と即座に見える
+            // (GET 純正 DataRouter の ECONNREFUSED と同型の fail-fast)。
+            drop(extra);
+            metrics.record_extra_connection(cobo_id, peer, current);
+            true
+        }
+        Err(e) => {
+            error!(
+                cobo_id,
+                error = %e,
+                "accept failed while a data link is up — extra connections are no longer rejected \
+                 until this link closes (retrying there would spin and steal the drain)"
+            );
+            false
+        }
+    }
 }
 
 /// EOS をキューへ入れる。**満杯でも捨てず**空くまで待つ(SPEC §2.2)。
@@ -1077,6 +1249,84 @@ mod tests {
             json["messages_abandoned"].as_u64(),
             Some(0),
             "失敗と打ち切りは別のカウンタ"
+        );
+    }
+
+    /// テスト用の非対称なアドレス(現接続 / 余分な接続を取り違えたら見えるように)。
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], port))
+    }
+
+    /// 余分な接続は **毎回数え、warn は初回だけ**(TODO/032 T2 の「warn 1 回」の機械照合)。
+    #[test]
+    fn every_extra_connection_is_counted_but_only_the_first_one_is_logged() {
+        let m = Metrics::default();
+        let current = addr(46005);
+        assert!(
+            m.record_extra_connection(3, addr(51001), current),
+            "初回は warn を出す"
+        );
+        assert!(
+            !m.record_extra_connection(3, addr(51002), current),
+            "2 回目以降は出さない"
+        );
+        assert!(!m.record_extra_connection(3, addr(51003), current));
+
+        assert_eq!(m.json()["extra_connections"].as_u64(), Some(3));
+        assert_eq!(
+            m.json()["empty_connections"].as_u64(),
+            Some(0),
+            "拒否した接続と 0 バイト接続は別のカウンタ"
+        );
+    }
+
+    /// 0 バイト接続は数えるだけ(EOS は drain 側で出さない — ここでは配線のみ固定)。
+    #[test]
+    fn empty_connections_are_counted_separately_from_extra_ones() {
+        let m = Metrics::default();
+        m.record_empty_connection(0, addr(51010), "EOF");
+        m.record_empty_connection(0, addr(51011), "Connection reset by peer");
+
+        assert_eq!(m.json()["empty_connections"].as_u64(), Some(2));
+        assert_eq!(m.json()["extra_connections"].as_u64(), Some(0));
+    }
+
+    /// リンク可視化 3 点(peer / last_read_unix_ns / 新カウンタ)の既定値と `reset()`。
+    /// **未受信は 0 ではなく null** —— 「0 と混同しない」(SPEC §9.2 v1.10 と同じ方針)。
+    #[test]
+    fn link_visibility_starts_empty_and_is_cleared_by_reset() {
+        let m = Metrics::default();
+        assert!(m.json()["peer"].is_null(), "無接続なら peer は null");
+        assert!(
+            m.json()["last_read_unix_ns"].is_null(),
+            "未受信なら last_read_unix_ns は null"
+        );
+
+        // 非対称に汚す: 余分 2 / 空 1 / peer あり / 最終受信時刻あり
+        m.record_extra_connection(7, addr(51020), addr(46007));
+        m.record_extra_connection(7, addr(51021), addr(46007));
+        m.record_empty_connection(7, addr(51022), "EOF");
+        m.set_peer(Some(addr(46007)));
+        m.last_read_unix_ns
+            .store(1_700_000_000_000_000_000, Ordering::Relaxed);
+        assert_eq!(m.json()["peer"].as_str(), Some("127.0.0.1:46007"));
+        assert_eq!(
+            m.json()["last_read_unix_ns"].as_u64(),
+            Some(1_700_000_000_000_000_000)
+        );
+
+        m.reset();
+
+        assert_eq!(m.json()["extra_connections"].as_u64(), Some(0));
+        assert_eq!(m.json()["empty_connections"].as_u64(), Some(0));
+        assert!(
+            m.json()["peer"].is_null(),
+            "次の run に前 run の peer を持ち越さない"
+        );
+        assert!(m.json()["last_read_unix_ns"].is_null());
+        assert!(
+            m.record_extra_connection(7, addr(51023), addr(46007)),
+            "次の run では warn も出し直す"
         );
     }
 

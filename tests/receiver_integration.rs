@@ -283,44 +283,15 @@ async fn both_links_reassemble_the_cobo_bytes_exactly() {
         .unwrap();
 }
 
-/// (c) データが 1 バイトも無い接続でも、EOF は run 境界として両リンクに EOS を出す。
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn eof_without_any_data_still_delivers_end_of_stream() {
-    let ctx = zmq::Context::new();
-    let (graw_pull, graw_ep) = bind_pull(&ctx);
-    let (decoder_pull, decoder_ep) = bind_pull(&ctx);
-
-    let (cmd_ep, shutdown_tx, task) =
-        start_receiver(test_params(0, "127.0.0.1:0", &graw_ep, &decoder_ep)).await;
-
-    rpc(
-        &cmd_ep,
-        &Command::Configure(RunConfig {
-            run_number: 5,
-            comment: String::new(),
-            config: serde_json::Value::Null,
-        }),
-    )
-    .await;
-    let data_addr = bind_address(&rpc(&cmd_ep, &Command::Arm).await);
-    rpc(&cmd_ep, &Command::Start { run_number: 5 }).await;
-
-    // 接続してすぐ閉じる
-    let stream = TcpStream::connect(&data_addr).await.unwrap();
-    drop(stream);
-
-    for (sock, link) in [(&graw_pull, "graw-writer"), (&decoder_pull, "decoder")] {
-        let got = collect_until_eos(sock, link);
-        assert!(got.frames.is_empty(), "{link}: データは無いはず");
-        assert_eq!(got.eos_run_number, Some(5), "{link}");
-    }
-
-    shutdown_tx.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), task)
-        .await
-        .expect("receiver did not stop within 5 s")
-        .unwrap();
-}
+// (c) **retire 済み(2026-08-14、TODO/032)**: `eof_without_any_data_still_delivers_end_of_stream`
+//     —— 「データが 1 バイトも無い接続でも EOF が run 境界になる」という**旧意味論**を固定していた。
+//     SPEC **v1.12 §1.4-6** で意味論が反転した(**1 バイトも運ばなかった接続の終了は run 境界
+//     (EOS)を構成しない** — 迷い込み接続の即断が偽 EOS で run を閉じるのを防ぐ)ため、
+//     主張ごと撤去する。新意味論版は
+//     `tests/receiver_stale_link.rs::a_connection_that_carried_no_byte_does_not_close_the_run`
+//     (`empty_connections` = 1 / EOS 非出力 / その後の実接続で EOS ちょうど 1 回、まで固定)。
+//     「接続が無いまま Stop されたら強制 EOS」は
+//     `stop_still_forces_exactly_one_end_of_stream_when_nobody_connected` が引き継ぐ。
 
 /// CoBo が繋がったまま(EOF が来ないまま)`Stop` された場合、receiver が**未送の EOS**を
 /// 自分で出すこと(SPEC §1.3 の run 停止シーケンス 2「EOF が来なければ Stop で強制 EOS」)。
