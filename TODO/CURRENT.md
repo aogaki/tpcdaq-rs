@@ -1,8 +1,7 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-08-14(**022・016 完了コミット済み + P2 レビュー処置確定(ユーザー承認)
-→ SPEC v1.10 + 改修 3 ユニット(023/024/025)起票・並列発注** — 統合ゲートは
-316 passed / 0 failed。次: 023/024/025 完了レビュー → 026 monitor + WS 起票)**
+**最終更新: 2026-08-14(**P2 改修波: 025・023 完了コミット済み(ゲート 335 green)、
+024(root-sink + テストインフラ)実装中** — 完了したら 026 monitor + WS 起票へ)**
 
 ## いま
 
@@ -54,14 +53,14 @@ P4 = run 制御**(「SPEC に P4 が無い」は Claude の読み違い — P4 �
 3. インフラ + フォローアップ = 起票承認(「なんだって記録に残したい」)。
 
 **改修 3 ユニット(2026-08-14 起票・worktree 並列発注)**:
-- [023_p2_hardening_rust.md](023_p2_hardening_rust.md) — Rust 異常系を decoder 水準へ
-  (R-P2-8 poisoned Mutex / R-P2-3 receiver 送信経路 / R-P2-9 graw-writer / R-P2-10/12)。
-  implementer/Opus。
+- ~~023 Rust 異常系~~ → **完了・archive 済み・コミット済み**(2026-08-14。取り込み後
+  ゲート 335 green。逸脱受理 4 — 特に「Stop では打ち切らない」は発注書の誤りを正す判断。
+  「最近完了」参照)。
 - [024_p2_hardening_root_sink.md](024_p2_hardening_root_sink.md) — root-sink C++
   (R-P2-1 mismatch fatal exit 6 / R-P2-2 AutoSave 飢餓 / R-P2-5 pending_events)+
   spawn テストインフラ(TOCTOU リトライ + Drop ガード)。implementer/Sonnet。
-- [025_controller_followups.md](025_controller_followups.md) — asad_inventory /
-  `POST /api/run/next` / Counters null 化 / logbook 復旧 warn。implementer/Sonnet。
+- ~~025 controller フォローアップ~~ → **完了・archive 済み・コミット済み**(2026-08-14。
+  取り込み後ゲート 323 green。「最近完了」参照)。
 - 残る P2 処置: R-P2-11 負荷ハーネス(P3 E2E 後に起票、Warsaw 前必須)/ R-P2-13 の
   geometry 可視化フックは 026 monitor 起票時のチェック項目。
 - **UI ユニット起票時の方針(ユーザー決定 2026-08-13)**: run 制御のボタン類は完成形レイアウトとして
@@ -97,7 +96,9 @@ frameType 2 rev 5 固定・ローテーション書き込み後判定(v1.7、実
 - ~~P2 批判的レビューの論点(009 逸脱 6): Fragment.cobo と source_id の不一致検出~~ →
   **013 で実装済みと確認**(decoder.rs:251、R-P2-7)。
 
-- 006 レビュー指摘の再訪: 下流全死 + EOF 前 Reset での EOS 再試行が畳めない件(shutdown 経路の上限)→ 007/009 の停止設計で考慮。
+- ~~006 レビュー指摘の再訪: 下流全死 + EOF 前 Reset での EOS 再試行が畳めない件~~ →
+  **023 で解消**(2026-08-14。受信側送信の中断可能ロスレス化 + abandon 可視カウント +
+  スレッド join。P2_REVIEW R-P2-3)。
 - ~~008 レビュー申し送り: SeqCheck 初回 0 強制~~ → **010 で解消**(厳格モード実装・実配線確認済み)。
 - **delila-rs への申し送り**(010 で発見): `tools/root_sink/eb_core.hpp` の `pop_for`(bool 戻り)は
   timeout と closed を区別できず、「空で戻る → 生産者が push+close → 呼び手が break」の競合で
@@ -108,11 +109,22 @@ frameType 2 rev 5 固定・ローテーション書き込み後判定(v1.7、実
   **データリンク本数(zCoBo 2 枚 → TCP 1 本か 2 本か、SPEC §13-7)**、PROPOSAL v0.5 反映判断。
 - ~~P2 レビュー R2(frameType 1 の実データ回帰なし)~~ → **019 でクローズ**(実機は 2022 時点で
   既に frameType 2 — frameType 1 の実データは存在しない。回帰 = `TPCDAQ_REAL_GRAW_DIR`)。
-- P2 レビュー R3(Reset カスケードで root-sink が fatal 死)→ **P3 で実装**(2026-08-13
-  ユーザー決定。controller の停止シーケンス設計に本項を必須入力とする)。
+- ~~P2 レビュー R3(Reset カスケードで root-sink が fatal 死)~~ → **016 で解消**
+  (2026-08-14。中止経路 = SPEC §1.3 v1.6 を controller が実装、「run クローズ前に
+  decoder を Reset しない」を機械照合テストで固定)。
 
 ## 最近完了
 
+- 2026-08-14: [023_p2_hardening_rust.md](archive/023_p2_hardening_rust.md) —
+  **Rust 異常系改修(P2 R-P2-3/8/9/10/12 クローズ)**(poisoned Mutex 即 Error /
+  receiver 送信の中断可能ロスレス化 + abandon 可視カウント + スレッド join(下流死で
+  Stop 609 µs・Reset 1.0 s 実測)/ graw-writer 異常系 4 経路の計数 / batches の意味
+  厳格化。新規 12 テスト・TDD 赤確認済み。取り込み後 335 green)
+- 2026-08-14: [025_controller_followups.md](archive/025_controller_followups.md) —
+  **controller フォローアップ**(asad_inventory(lookup 非経由)/ `POST /api/run/next`
+  (SPEC v1.10 §8.1)/ Counters `Option<u64>` 化 = null は取得不能(§9.2)/ logbook
+  復旧 warn(R-P2-13)。317→取り込み後 323 green。逸脱 4 件受理 — `Value` 受け手検証で
+  一律 400 等)
 - 2026-08-14: [022_root_sink_monitor_pub.md](archive/022_root_sink_monitor_pub.md) —
   **root-sink ヒスト集計 + モニタ PUB(P3 モニタ経路の起点)**(SPEC v1.9 §5 実装。
   monitor_hist 202 + monitor_pub 87 + recorder 216 CHECK、Rust 統合 6 本。hist_snapshot が
