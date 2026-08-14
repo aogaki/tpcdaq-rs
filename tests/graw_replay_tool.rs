@@ -169,6 +169,103 @@ fn loop_flag_repeats_file_at_least_twice() {
     let _ = std::fs::remove_file(&path);
 }
 
+// ---------------------------------------------------------------------------
+// 複数ファイルの eventIdx マージ送出(TODO/021)
+// ---------------------------------------------------------------------------
+
+/// 最小の合成 CoBo フレーム(blkSize=1・big-endian・frameType 1、96 B)。
+/// Framer が必要とするのは metaType + frameSize、マージが必要とするのは
+/// frameType(5..7)+ eventIdx(22..26)+ asadIdx(27)だけ。残りは `fill` の
+/// 埋め草にして内容一致の検証を効かせる。
+fn synth_frame(event_idx: u32, asad: u8, fill: u8) -> Vec<u8> {
+    let mut b = vec![fill; 96];
+    b[0] = 0x00; // blkSize=2^0=1、big-endian
+    b[1] = 0;
+    b[2] = 0;
+    b[3] = 96; // frameSize = 96 blocks × 1 B
+    b[5] = 0;
+    b[6] = 1; // frameType 1
+    b[22..26].copy_from_slice(&event_idx.to_be_bytes());
+    b[26] = 0;
+    b[27] = asad;
+    b
+}
+
+/// 12 B の非 AsAd 制御フレーム(実 2025 run 先頭の frameType 7 と同型)。
+fn synth_ctrl_frame(fill: u8) -> Vec<u8> {
+    let mut b = vec![fill; 12];
+    b[0] = 0x00;
+    b[1] = 0;
+    b[2] = 0;
+    b[3] = 12;
+    b[5] = 0;
+    b[6] = 7; // frameType 7(eventIdx を持たない)
+    b
+}
+
+/// 複数ファイル指定 = eventIdx 昇順・同 idx 内は引数順のインターリーブ送出であること。
+/// 制御フレームは遭遇時に即時送出。ファイル長の不揃い(末尾の余りイベント)も流れ切ること。
+/// 期待列は手組み: [C.ctrl, A0, B0, C0, A1, B1, C1, A2, B2, C2, A3](B/C は 3 イベントで枯渇)。
+#[test]
+fn multiple_files_are_interleaved_by_event_idx() {
+    // A(asad 0)= events 0..=3、B(asad 1)= 0..=2、C(asad 2)= 先頭 ctrl + 0..=2
+    let a: Vec<Vec<u8>> = (0..4).map(|e| synth_frame(e, 0, 0xA0)).collect();
+    let b: Vec<Vec<u8>> = (0..3).map(|e| synth_frame(e, 1, 0xB0)).collect();
+    let mut c: Vec<Vec<u8>> = vec![synth_ctrl_frame(0xCC)];
+    c.extend((0..3).map(|e| synth_frame(e, 2, 0xC0)));
+
+    let mut paths = Vec::new();
+    for (tag, frames) in [("ma", &a), ("mb", &b), ("mc", &c)] {
+        let path = temp_path(tag);
+        std::fs::write(&path, frames.concat()).expect("write fixture");
+        paths.push(path);
+    }
+
+    // 手組みの期待列(マージ規則そのもの): ctrl 最優先 → (eventIdx, 引数順) 昇順。
+    let expected: Vec<u8> = [
+        &c[0], // ctrl(C の先頭に居るので最初の 1 手で出る)
+        &a[0], &b[0], &c[1], // event 0
+        &a[1], &b[1], &c[2], // event 1
+        &a[2], &b[2], &c[3], // event 2
+        &a[3], // event 3(A のみ)
+    ]
+    .iter()
+    .flat_map(|f| f.iter().copied())
+    .collect();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let mut child = Command::new(bin())
+        .arg(addr.to_string())
+        .args(paths.iter().map(|p| p.as_os_str().to_owned()))
+        .spawn()
+        .expect("spawn graw_replay (merged)");
+
+    let (mut sock, _peer) = listener.accept().expect("accept connection");
+    let mut received = Vec::new();
+    sock.read_to_end(&mut received).expect("read until close");
+
+    let status = child.wait().expect("wait for graw_replay");
+    assert!(
+        status.success(),
+        "merged replay must exit 0, got {status:?}"
+    );
+    assert_eq!(
+        received.len(),
+        expected.len(),
+        "merged stream must carry every byte of every input file"
+    );
+    assert_eq!(
+        received, expected,
+        "merged stream must be the exact eventIdx-ascending interleave"
+    );
+
+    for p in &paths {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// 引数不備は明確なエラー + 非 0 exit であること(TODO/005: 「接続失敗・途中切断は明確な
 /// エラー + 非 0 exit」の一環として、まず引数レベルの誤りを確認しておく)。
 #[test]

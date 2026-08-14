@@ -662,6 +662,40 @@ void test_recorder_writes_tpcdata_tree() {
 // gdataframe モード(テスト専用の旧出力)が残っていること —— §12-3 の旧オラクル回帰は
 // これに乗っている。中身の全値照合は test_recorder.cxx の担当なので、ここでは
 // **ツリー名が切り替わる**ことだけ見る。
+// --run-id(TODO/021): 指定時は EventInfo.runId がその値になる(実データ照合と
+// P4 controller 経路の受け口)。未指定(0)は壁時計由来 — こちらは
+// test_recorder_writes_tpcdata_tree が「今日の日付の桁」であることまでは縛らず、
+// run_id_from_tm の単体テストが式を固定している。
+void test_recorder_run_id_override() {
+  const std::string dir = scratch_dir("runid");
+  const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
+  const long kOverride = 20260811074737L;  // 実機オラクルと同じ形の値
+
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.format = rootsink::OutputFormat::PEvent;
+    cfg.geometry = &geo;
+    cfg.fill = tiny_windows(/*remove_pedestal=*/false);
+    cfg.run_id_override = kOverride;
+    rootsink::Recorder rec(cfg);
+
+    rootsink::BuiltEvent ev;
+    ev.run_number = 9;
+    ev.event_idx = 0;
+    ev.fragments.push_back(make_fragment(0, 0, 0, 500, synthetic_items()));
+    rec.write(ev, 0);
+    CHECK(rec.fatal_reason() == nullptr);
+    rec.close_run(9, 0);
+  }
+
+  const std::vector<ReadEvent> events = read_pevent_file(dir + "/run0009/run0009.root");
+  CHECK_EQ(events.size(), 1);
+  if (events.size() == 1) {
+    CHECK_EQ(events[0].run_id, kOverride);
+  }
+}
+
 void test_recorder_gdataframe_mode_still_writes_old_tree() {
   const std::string dir = scratch_dir("gdf");
   {
@@ -778,6 +812,7 @@ int main() {
   test_run_id_from_tm();
   test_fill_config_validation();
   test_recorder_writes_tpcdata_tree();
+  test_recorder_run_id_override();
   test_recorder_gdataframe_mode_still_writes_old_tree();
   test_real_pevent_structure();
 

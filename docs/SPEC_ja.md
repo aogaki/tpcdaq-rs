@@ -738,7 +738,7 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
 |---|---|---|
 | 1 | デコーダオラクル | 実 2025 run graw(ローカル、`TPCDAQ_REAL_GRAW` 環境変数)で **events=108 / items=15,040,512 / malformed=0**。実 ELITPC graw(`TPCDAQ_REAL_GRAW_DIR`、2022/2026 各 4 ファイル、v1.7)で **各ファイル frames=3852 / items=536,444,928 / malformed=0 / unsupported=0 / eventIdx 0..=3851 連続 / eventTime 単調**。CI は合成フィクスチャで frameType 1/2 両方 green |
 | 2 | graw バイト一致 | frameType 1/2 を asadIdx で分別した列 = per-AsAd 出力、残り全フレームの列 = ctrl/ 出力、**全出力の合計 = 入力の完全ロスレス分割**(v1.2)。mini 実 graw オラクル: AsAd ファイル 30,108,672 B + ctrl 12 B(frameType 7 ×1)= 30,108,684 B。ローテーション跨ぎも連結一致。ELITPC 実ファイル(1,073,875,968 B > 2^30)を既定 max でリプレイすると **_0000 が入力と完全バイト一致 + 空 _0001**(ローテーション境界の実機一致、v1.7) |
-| 3 | TTree 互換 | **v1.8: PEventTPC 互換** — ①構造一致: 実機 grawToEventTPC 出力(2026 実ファイル)とツリー名/ブランチ/クラス streamer バージョン/圧縮が一致 ②値一致(単体): 既知入力 → chargeMap 期待値(strip 射影・signal 窓・ペデスタル算法の手計算オラクル)③値一致(実データ): **同一 run の graw 4 本組と grawToEventTPC 変換済み .root のペア**を入手後、全イベント全 key の値一致(env-gated、ペアが揃うまで skip)。旧 GDataFrame 比較(mini 実データ全値一致)は `--format gdataframe` テスト専用モードの回帰として維持 |
+| 3 | TTree 互換 | **v1.8: PEventTPC 互換** — ①構造一致: 実機 grawToEventTPC 出力(2026 実ファイル)とツリー名/ブランチ/クラス streamer バージョン/圧縮が一致 ②値一致(単体): 既知入力 → chargeMap 期待値(strip 射影・signal 窓・ペデスタル算法の手計算オラクル)③値一致(実データ): 同一 run の graw 4 本組と grawToEventTPC 変換済み .root のペアで全イベント全 key の値一致(env-gated)— **2026-08-14 達成: `compared 3852 events, 0 differences`**(TODO/021、tests/elitpc_pevent_e2e.rs)。旧 GDataFrame 比較(mini 実データ全値一致)は `--format gdataframe` テスト専用モードの回帰として維持 |
 | 4 | 2 ソースビルド | graw_replay ×2 並走(異なる CoBo id を模す)→ 全イベント complete、eventIdx 昇順、incomplete=0、CoBo 毎フレーム数一致 |
 | 5 | 連続負荷 | **100 Hz 相当ペース(mini ≈ 28 MB/s)のループリプレイで連続 24 時間、保存系 drop 0**(全カウンタ 0: overflow / gap / malformed / late)。各プロセス RSS が上限内かつ後半 12 時間で単調増加なし。ディスク節約のため「書いて検証して消す」ハーネス可 |
 | 6 | 瞬発負荷 | ペーシングなし全速リプレイ(≥ 3× 目標レート)10 分で drop 0(バッファ設計の証明) |
@@ -751,7 +751,9 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
 
 リプレイに使う graw_replay(Rust 版新規、005 で実装済み)は `--rate-mbps`(**Mbit/s 単位**の
 ペーシング。例: mini 100 Hz 相当 ≈ 28 MB/s = 224 Mbps)と `--loop` を持つ(C++ 版はペーシング
-なし全速のみ)。
+なし全速のみ)。**複数ファイル指定(021)**で per-AsAd 4 本組を **eventIdx 昇順に
+インターリーブ**して 1 本の TCP で送る(= 実機ワイヤの再現。同 idx 内は引数順、
+制御フレームは遭遇時に即時送出。単一ファイルは従来どおりバイトそのまま)。
 
 ## 13. 実機検証項目リスト(P5/P6 で実測 — 「実測で決める」を決定として固定)
 

@@ -44,6 +44,24 @@ pub fn peek_asad(frame: &[u8]) -> Option<u8> {
     Some(frame[27])
 }
 
+/// 共通 MFM ヘッダの eventIdx だけを覗き見る(offset 22..26、エンディアン対応)。
+/// ゲートは [`peek_asad`] と同一(frameType 1/2 かつ 28 B 以上のときだけ `Some`)—
+/// 「AsAd に振り分けられるフレーム = eventIdx を持つフレーム」を 1 つの述語に揃える。
+///
+/// graw_replay(TODO/021)が複数 AsAd ファイルを eventIdx 順にインターリーブ送出する
+/// ためのヘッダ読み。制御フレーム(`None`)はマージ順序に関与せず遭遇時にそのまま流す。
+pub fn peek_event_idx(frame: &[u8]) -> Option<u32> {
+    if frame.len() < 28 {
+        return None;
+    }
+    let little = frame[0] & 0x80 != 0;
+    let frame_type = read_uint(&frame[5..7], little) as u16;
+    if frame_type != 1 && frame_type != 2 {
+        return None;
+    }
+    Some(read_uint(&frame[22..26], little) as u32)
+}
+
 /// CoBo フレームバイト列を [`Fragment`] へデコードする(純コア)。
 ///
 /// malformed / unsupported フレームは `decode` が `None` を返し、それぞれのカウンタに
@@ -425,6 +443,45 @@ mod tests {
             None,
             "frameType が 1/2 以外なら 28 B 超でも None(SPEC §7 v1.2)"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // peek_event_idx(TODO/021 graw_replay マージ用。ゲートは peek_asad と同一)
+    // -----------------------------------------------------------------
+
+    /// 手計算の出典: make_cobo_frame は offset 22..26 に event_idx を書く。
+    /// 両エンディアンでフルデコードなしに同じ値が読めること。
+    #[test]
+    fn peek_event_idx_reads_offset_22_without_full_decode() {
+        for little in [true, false] {
+            let h = HeaderFields {
+                event_idx: 0x0102_0304,
+                ..HeaderFields::default()
+            };
+            let frame = make_cobo_frame(1, little, &h, &[]);
+            assert_eq!(peek_event_idx(&frame), Some(0x0102_0304));
+        }
+    }
+
+    /// frameType 2(compact)でも読める。blkSize=256・big-endian の実データ形も対象。
+    #[test]
+    fn peek_event_idx_supports_frame_type_2_and_blk256() {
+        let mut frame = make_blk256_frame(2, 2, &[]);
+        write_uint(&mut frame, 22, 3851, 4, false);
+        assert_eq!(peek_event_idx(&frame), Some(3851));
+    }
+
+    /// ゲートは peek_asad と同一: 短小(28 B 未満)と frameType ∉ {1,2} は None。
+    #[test]
+    fn peek_event_idx_gates_like_peek_asad() {
+        assert_eq!(peek_event_idx(&[0u8; 27]), None);
+        let h = HeaderFields {
+            event_idx: 7,
+            ..HeaderFields::default()
+        };
+        let ctrl = make_cobo_frame(7, false, &h, &[]); // frameType 7 = 非 CoBo 制御
+        assert!(ctrl.len() >= 28);
+        assert_eq!(peek_event_idx(&ctrl), None);
     }
 
     // -----------------------------------------------------------------

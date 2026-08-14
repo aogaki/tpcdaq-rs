@@ -1,6 +1,6 @@
 # 017 — ecc-bridge(C++/Ice)+ fake-ECC
 
-**Status: OPEN**
+**Status: COMPLETED**
 **仕様**: SPEC v1.6 §8.2(本体)、§8.3(検証)、§3.2(REP = `tcp://*:47200`)、§1.3(シーケンス
 中の位置)。CLAUDE.md「制御プレーンを改変しない — Ice **クライアント**として話すだけ」
 **流用元**(ユーザー自身のコード、読み取り + 移植可、出自コメント明記):
@@ -54,3 +54,42 @@
   **src/*.rs・Cargo.toml・tools/root_sink/ に触らない**(並列で 015 が src/ を作業中)。
 - Ice 環境(バージョン・リンク方法・encoding 1.1 の強制方法)を「## 結果」に記録
   (P5 の実 ECC コンテナ検証の材料)。
+
+
+## 結果
+
+実行環境: macOS(Darwin 25.5.0)、Ice 3.8.2(Homebrew /opt/homebrew/opt/ice)、
+libzmq 4.3.5、2026-08-14。
+実装: implementer/Opus(再発注 — 初回 08-13 発注はエージェント停止・作業ゼロ)。レビュー: Fable。
+
+### テスト結果(レビュー時に Fable が再実行)
+
+- `make test`(Ice 非依存単体): **136 passed / 0 failed**
+  (DataLinkSet XML 全文照合: `<DataSender id="CoBo[0]"/>`・大文字 TCP・2 CoBo = DataLink 2 本 /
+  JSON parse・レスポンス / 状態文字列 / fake 遷移表 / json_min)
+- `./run_ecc_e2e.sh`(fake-ECC + ecc_bridge + ZMQ REQ 実配線): **27 passed / 0 failed、exit 0**
+  - **listen-before-start 負性テストは実機と同一文言で green**:
+    `Could not establish data link. connect to ... failed: Connection refused`
+    (文言の出典 = GetBench DaqCtrlNodeI.cpp:399)
+- Rust env-gated `tests/ecc_bridge_intake.rs`: env 有 **2 passed** / env 無 skip 経路 green
+- リポ全体 cargo fmt / clippy -D warnings / cargo test(29 バイナリ)全 green
+
+### Ice 環境の記録(P5 実 ECC 検証の材料)
+
+- Ice **3.8.2** + slice2cpp 3.8.2。スタブは reference/20190315_patched の .ice から
+  ビルド時生成(9 unit、生成物はコミットしない)。同 .ice は ~/test/get の C++ 版と
+  **バイト一致**を確認 = 実験使用中と同一定義。
+- **encoding 1.1**: プロキシに `.ice_encodingVersion(Ice::Encoding_1_1)`(流用元踏襲)+
+  接続時に実測値を stderr へ出す(主張でなく実測: `connected to Ecc:tcp ... (encoding 1.1)`)。
+- Ice 3.8 は `Ice.Override.ConnectTimeout` 廃止(Client.ConnectTimeout 既定 10 s)。
+
+### 逸脱・設計判断(レビューで受理)
+
+1. EccController は ecc_bridge.cpp に取り込み(pimpl 廃止 — 隠す相手がいない。出自明記)。
+2. `ecc_e2e_client.cpp` 追加(nc 依存を避け、機械照合を C++ 側に寄せた)。
+3. **小文字 `tcp` は明示エラー**(黙って大文字化して罠を隠さない)。
+4. `status` の ok = 状態が取れたか(不達 = `{"ok":false,"state":"Unknown"}` — §8.2 どおり)。
+5. sender の形式検証はしない(`CoBo[Crate00_Slot00]` があり得るため。罠は e2e 照合で担保)。
+6. pause/resume は bridge の action に含めない(§8.2 の一覧どおり。fake-ECC 側は .ice の
+   実装義務があるため実装)。
+7. fake-ECC の data link connect は 2 s 非ブロッキング(制御プレーンを固めない)。

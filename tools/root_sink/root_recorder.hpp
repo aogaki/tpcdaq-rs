@@ -174,6 +174,8 @@ struct RecorderConfig {
   uint64_t max_root_bytes = kDefaultMaxRootBytes;   // --max-root-bytes
   int compression = kDefaultCompression;            // --root-compression(TODO/014)
   OutputFormat format = OutputFormat::PEvent;       // --format(既定 = PEventTPC)
+  // --run-id(TODO/021): EventInfo.runId の上書き。0 = run を開いた時刻から生成。
+  long run_id_override = 0;
   // PEvent モードでは **必須**(strip 射影に要る)。呼び手が寿命を持つこと。
   const tpcgeo::Geometry* geometry = nullptr;       // --geometry
   tpcpevent::FillConfig fill;                       // --pedestal-remove / --*-cell
@@ -249,8 +251,9 @@ class Recorder {
       have_last_event_id_ = false;
       if (cfg_.format == OutputFormat::PEvent) {
         // runId = **run 開始時刻**の %Y%m%d%H%M%S(TPCReco RunIdParser と同じ導出、
-        // SPEC §6.4)。run 中は一定 —— ここで 1 回だけ決める。
-        run_id_ = tpcpevent::run_id_now();
+        // SPEC §6.4)。run 中は一定 —— ここで 1 回だけ決める。--run-id 指定時は
+        // その値(実データ照合と P4 controller 経路の受け口、TODO/021)。
+        run_id_ = cfg_.run_id_override != 0 ? cfg_.run_id_override : tpcpevent::run_id_now();
         std::fprintf(stderr, "root_sink: run %u runId=%ld\n", run_, run_id_);
       }
     }

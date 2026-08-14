@@ -248,6 +248,10 @@ struct Options {
   rootsink::OutputFormat format = rootsink::OutputFormat::PEvent;
   std::string geometry;  // --geometry(PEvent モードでは必須)
   tpcpevent::FillConfig fill;
+  // --run-id(TODO/021): EventInfo.runId の上書き。0 = run を開いた時刻から生成(既定)。
+  // 実データ照合(同 run の grawToEventTPC 出力と比較)と、P4 で controller が正式な
+  // run TS を配る経路(SPEC §6.4 実装注記)の受け口。
+  long run_id = 0;
 };
 
 void usage(const char* argv0) {
@@ -288,6 +292,8 @@ void usage(const char* argv0) {
       "                    pedestal time window (default %d..%d)\n"
       "  --min-signal-cell N / --max-signal-cell N\n"
       "                    signal time window (default %d..%d)\n"
+      "  --run-id N        override EventInfo.runId (YYYYmmddHHMMSS as one number;\n"
+      "                    default 0 = derive from the wall clock when the run opens)\n"
       "\n"
       "SIGINT/SIGTERM: drain, print one JSON line of counters to stdout, exit 0.\n"
       "A run that never saw its EndOfStream keeps the run_inprogress_<unixtime>.root\n"
@@ -426,6 +432,8 @@ Options parse_args(int argc, char** argv) {
     } else if (a == "--max-signal-cell" && has_value) {
       opt.fill.max_signal_cell =
           static_cast<int>(parse_nonnegative("--max-signal-cell", argv[++i]));
+    } else if (a == "--run-id" && has_value) {
+      opt.run_id = parse_nonnegative("--run-id", argv[++i]);
     } else {
       std::fprintf(stderr, "root_sink: unknown or incomplete option '%s'\n", a.c_str());
       usage(argv[0]);
@@ -674,6 +682,7 @@ int main(int argc, char** argv) {
     rcfg.format = opt.format;
     rcfg.geometry = geometry.get();
     rcfg.fill = opt.fill;
+    rcfg.run_id_override = opt.run_id;
     recorder.reset(new rootsink::Recorder(rcfg));
     // スレッドを起こす前に公開する(fatal 時の JSON から必ず見える)。
     g_recorder.store(recorder.get(), std::memory_order_release);

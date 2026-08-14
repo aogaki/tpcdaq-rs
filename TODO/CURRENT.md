@@ -1,8 +1,8 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-08-13(**019 実データ回帰 + 020 PEventTPC 出力 完了** — SPEC v1.8。
-run.root は TPCReco 互換(変換ステップ消滅)。P2 レビュー →
-[docs/reviews/P2_review_2026-08-13.md](../docs/reviews/P2_review_2026-08-13.md)。次: P3 波の続き + 015/017 再発注判断 + コミット)**
+**最終更新: 2026-08-14(**021 同 run 値一致クローズ + 015 logbook + 017 ecc-bridge 完了** —
+run.root が実機 grawToEventTPC 出力と全 3852 イベント完全一致。P4 素材(015/016/017)が
+controller を残して完備。次: コミット → P3 波の続き(ヒスト + PUB 起票))**
 
 ## いま
 
@@ -26,11 +26,11 @@ P4 = run 制御**(「SPEC に P4 が無い」は Claude の読み違い — P4 �
 **ユーザー決定: 本来の P3(UI)を先に**(デモ最短到達。リプレイ駆動デモに run 制御は不要)。
 
 **P4 前倒し分**:
-- [015_logbook.md](015_logbook.md) / [017_ecc_bridge.md](017_ecc_bridge.md) —
-  **エージェントが停止扱いで作業ゼロのまま終了**(2026-08-13 判明 — マシンスリープ起因の
-  可能性。src/logbook.rs も tools/ecc_bridge/ も未作成)。チケットは OPEN のまま。
-  **ユーザーの明示指示があれば再発注**(発注書はそのまま使える)。
-- [016_controller.md](016_controller.md) — **起票済み・P4 まで保留**(発注しない)
+- 015 logbook / 017 ecc-bridge → **どちらも完了・archive 済み**(2026-08-14 再発注 →
+  全 green、逸脱受理。「最近完了」参照)
+- [016_controller.md](016_controller.md) — **起票済み・P4 開始時に発注**(依存 015/017 が
+  両方解消 — いつでも出せる)
+
 
 **P3(モニタ + WS + UI)— 波 1**:
 - 018 C++ ジオメトリ → **完了・archive 済み**(test_geo 426 CHECK、合成 3 + 実 .dat 2 本とも
@@ -85,6 +85,17 @@ frameType 2 rev 5 固定・ローテーション書き込み後判定(v1.7、実
 
 ## 最近完了
 
+- 2026-08-14: [021_same_run_oracle.md](archive/021_same_run_oracle.md) — **同 run 実データ値一致
+  = §12-3 v1.8 ③ クローズ**(実 graw 4 本 → フルチェーン → run.root が実機 grawToEventTPC
+  出力と `compared 3852 events, 0 differences` の完全一致。graw_replay 複数ファイル
+  eventIdx マージ(D1 必須機能)+ root_sink --run-id 同梱。020 の残は TPCReco 許諾のみ)
+- 2026-08-14: [017_ecc_bridge.md](archive/017_ecc_bridge.md) — ecc-bridge(C++/Ice)+ fake-ECC
+  (ZMQ REP 47200 の JSON サーバ、DataLinkSet XML 全文照合、listen-before-start 負性テストが
+  実機文言一致で green。Ice 3.8.2・encoding 1.1 実測ログ化・.ice は実験同一版とバイト一致。
+  単体 136 + 統合 27 + Rust 2)
+- 2026-08-14: [015_logbook.md](archive/015_logbook.md) — JSONL ログブック + next_run 永続化
+  (src/logbook.rs + src/state.rs。golden 照合・スキーマ漂流ガード・kill -9 耐久・atomic
+  rename 重複ゼロ。32 テスト。controller(016)の依存が解消)
 - 2026-08-13: [020_pevent_output.md](archive/020_pevent_output.md) — **run.root を PEventTPC
   (TPCReco 互換)へ変更**(SPEC v1.8、ユーザー裁定「GDataFrame 出力は瑕疵」。TPCData/Event、
   grawToEventTPC と同一充填(strip 射影・signal 窓・FPN ペデスタル減算既定 ON)、TPCReco

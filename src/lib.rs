@@ -30,3 +30,9 @@ pub mod graw_writer;
 
 /// decoder コンポーネント(Fragments 単一ストリーム + EOS 集約)。SPEC §1.1/§2.3。(009 で実装)
 pub mod decoder;
+
+/// JSONL ログブック(単一書き手の追記器 + リーダ)。SPEC §9。(015 で実装)
+pub mod logbook;
+
+/// `tpcdaq_state.json` の `next_run` 永続化。SPEC §8.1。(015 で実装)
+pub mod state;

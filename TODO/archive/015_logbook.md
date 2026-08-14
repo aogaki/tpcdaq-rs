@@ -1,6 +1,6 @@
 # 015 — JSONL ログブック + run 番号永続化(Rust 純モジュール)
 
-**Status: OPEN**
+**Status: COMPLETED**
 **仕様**: SPEC v1.6 §9(全部 = 本ユニットの核)、§8.1(`tpcdaq_state.json` の next_run)、
 §12-11(kill -9 耐性 = 受け入れ)
 **依存**: なし(純モジュール。controller = 016 が唯一の利用者になる)
@@ -42,3 +42,33 @@
   通過(既存 226 無影響)。
 - ファイル所有権: src/logbook.rs(新規)/ src/state.rs(新規)/ src/lib.rs(2 行)。
   **これ以外に触らない**(並列で 017 が tools/ecc_bridge/ を作業中)。
+
+
+## 結果
+
+実行環境: macOS(Darwin 25.5.0)、rustc stable、2026-08-14。
+実装: implementer/Sonnet(再発注 — 初回 08-13 発注はエージェント停止・作業ゼロ)。レビュー: Fable。
+
+### テスト結果
+
+- `cargo test --lib -- logbook:: state::` → **32 passed / 0 failed**(レビュー時に Fable が再実行)
+  - logbook 25: golden 文字列照合 5 型 / スキーマ漂流ガード 5 型 + ガード健全性 / ts 形式 /
+    seq 単調・回復 / read_since / 耐久系(途中切断の許容 + writer 再開、中間行破損 = Err、
+    1000 行連続追記)
+  - state 7: 不在時 1 から / 連番 / 再起動 / atomic rename(tmp 残らない・rename 直後
+    クラッシュ相当 50 回で重複ゼロ + 狭義単調)/ 破損 = Decode Err(無言リセットしない)
+- リポ全体 `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test` 全 green
+  (並行作業(020/021、017)と衝突なし — 所有権 3 ファイル厳守を確認)
+
+### 変更ファイル
+
+src/logbook.rs(新規 950 行)/ src/state.rs(新規 250 行)/ src/lib.rs(mod 宣言 6 行)
+
+### 逸脱・設計判断(レビューで受理)
+
+1. `Counters.frames` のキーを `BTreeMap<String, u64>`(u32 でなく)—
+   internally-tagged enum + flatten の serde 制約で数値キーが round-trip しないため。
+   JSON ワイヤ表現は不変(JSON のキーは元々文字列)。
+2. `audit.params` = `serde_json::Value`(既存 RunConfig::config / metrics の流儀)。
+3. seq 初期値 1(take_next_run の「不在時 1 から」と整合)。
+4. ts の RFC3339 検証は regex 依存を足さず固定長バイト検証(依存追加なしの指示に従う)。

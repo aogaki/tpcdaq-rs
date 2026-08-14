@@ -33,7 +33,7 @@
 |---|---|---|
 | 生 graw | 実機 DataRouter 命名・バイト互換(SPEC v1.1/v1.2 で対応済み) | 先方の bash 資産 + **grawToEventTPC(TPCReco)**を無改造で使えること |
 | run.root の圧縮 | **既定を 101(ZLIB-1)に変更、設定可能に**(SPEC v1.5 → TODO/014) | **先方はオフライン解析も DAQ 計算機の同一(旧)ROOT で行う**(低レートゆえの運用、2026-08-13 確認)。ROOT < 6.20 は ZSTD を読めない。ZLIB は全時代互換 + C++ 版の「ROOT 既定」と一致。**実機 ELITPC 変換出力(PEventTPC、ROOT 6.08/06 書き)が ZLIB level 1 であることを直接確認**(2026-08-13、§4) |
-| イベント ROOT 形式 | **PEventTPC(TPCReco)互換に変更**(SPEC v1.8 → TODO/020、2026-08-13 ユーザー裁定) | 先方は grawToEventTPC で PEventTPC に変換して解析している。我々の run.root を同形式にすれば**変換ステップ自体が消える**(オールインワン強化)。クラスは TPCReco-HIGS2026_online 無改変コピー(third_party/tpcreco)+ 実機変換ファイルと streamer 照合 |
+| イベント ROOT 形式 | **PEventTPC(TPCReco)互換に変更**(SPEC v1.8 → TODO/020、2026-08-13 ユーザー裁定) | 先方は grawToEventTPC で PEventTPC に変換して解析している。我々の run.root を同形式にすれば**変換ステップ自体が消える**(オールインワン強化)。クラスは TPCReco-HIGS2026_online のビルド時参照(ライセンス未指定のためコミットせず — 許諾は夏休み明けに確認)。**2026-08-14 実証済み: 同一 run の実データで実機変換出力と全 3852 イベント完全一致**(`compared 3852 events, 0 differences` — TODO/021) |
 | ハードウェア設定(xcfg) | **既存ファイルをそのまま使用**(2026-08-13 確認) | describe/prepare/configure の xcfg は生成・改変しない。ecc-bridge は `config_id` を渡すだけで、実体は ECC サーバ側の既存リポジトリ。CoBo/FPGA に入る内容は現行と完全同一。我々が作る XML は DataLinkSet(データ送り先)のみ |
 | 最終確認 | デモ時に**先方 DAQ 計算機の ROOT で run.root を開く**のを受け入れ試験とする | 手元に旧 ROOT が無いため実機確認が正 |
 

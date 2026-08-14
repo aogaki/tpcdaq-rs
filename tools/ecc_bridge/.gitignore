@@ -1,0 +1,10 @@
+# slice2cpp の生成物は**コミットしない**(.ice は reference/ を参照するだけ — TODO/017 §3)
+slice/
+
+# ビルド成果物
+ecc_bridge
+fake_ecc
+ecc_e2e_client
+test_ecc_bridge
+*.o
+*.dSYM/

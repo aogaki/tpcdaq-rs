@@ -3,10 +3,18 @@
 //! 再送して受信〜デコードを検証できる(C++ 版 `tools/graw_replay.cpp` の後継。
 //! `--rate-mbps` によるペーシングと `--loop` を追加。SPEC §12 末尾)。
 //!
-//! 使い方: `graw_replay <host:port> <file.graw> [--rate-mbps <f64>] [--loop] [--chunk-bytes <n=65536>]`
+//! 使い方: `graw_replay <host:port> <file.graw>... [--rate-mbps <f64>] [--loop] [--chunk-bytes <n=65536>]`
 //!
-//! - `--loop` なし: ファイル全体を送り切ったら接続を閉じて終了(受信側は EOF = run 境界)。
-//! - `--loop` あり: EOF に達したらファイル先頭へ戻って送り続ける(Ctrl-C か受信側切断で停止)。
+//! - ファイル 1 つ: **バイトそのまま**チャンク送出(従来経路 — §12-2 のバイト一致検証が
+//!   このツールの上に立っているので、再フレーミングを挟まない)。
+//! - ファイル複数(TODO/021): per-AsAd に分かれた実ファイル群(例: ELITPC の
+//!   `CoBo0_AsAd{0..3}_*.graw` 4 本組)を **eventIdx 昇順にインターリーブ**して 1 本の
+//!   TCP ストリームで送る — 実機ワイヤ(DataRouter が受けた形)の再現。同一 eventIdx 内は
+//!   引数で渡した順(= AsAd 昇順で渡せば AsAd 昇順)。ファイル逐次のリプレイでは
+//!   イベントビルダのタイムアウトを正しく通せない(全イベントが数秒割れる)。
+//!   eventIdx を持たない制御フレーム(frameType ∉ {1,2})は遭遇時にそのまま流す。
+//! - `--loop` なし: 送り切ったら接続を閉じて終了(受信側は EOF = run 境界)。
+//! - `--loop` あり: 送り切ったら先頭へ戻って送り続ける(Ctrl-C か受信側切断で停止)。
 //! - 接続失敗・送出中の切断は明確なエラーメッセージ + 非 0 exit(silent failure を作らない)。
 
 use std::fmt;
@@ -16,6 +24,9 @@ use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
+
+use tpcdaq::decode::peek_event_idx;
+use tpcdaq::framer::Framer;
 
 fn main() -> ExitCode {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
@@ -41,13 +52,9 @@ fn main() -> ExitCode {
 }
 
 /// 実際のリプレイ本体。テスト容易性のため main から分離してあるが、I/O を伴うので
-/// bin 内ユニットテストの対象は `args::parse` と `pace` の純粋関数側に絞る(KISS)。
+/// bin 内ユニットテストの対象は `args::parse` と `pace` の純粋関数側に絞る(KISS。
+/// マージ経路の順序・内容は tests/graw_replay_tool.rs の実 TCP 統合テストで機械照合)。
 fn run(cfg: &args::Args) -> Result<u64, ReplayError> {
-    let mut file = File::open(&cfg.file).map_err(|source| ReplayError::FileOpen {
-        path: cfg.file.clone(),
-        source,
-    })?;
-
     let mut stream = TcpStream::connect(&cfg.endpoint).map_err(|source| ReplayError::Connect {
         endpoint: cfg.endpoint.clone(),
         source,
@@ -57,10 +64,30 @@ fn run(cfg: &args::Args) -> Result<u64, ReplayError> {
         .rate_mbps
         .map(pace::mbps_to_bytes_per_sec)
         .unwrap_or(0.0);
-    let mut buf = vec![0u8; cfg.chunk_bytes];
     let start = Instant::now();
-    let mut total: u64 = 0;
 
+    if cfg.files.len() == 1 {
+        run_single(cfg, &mut stream, rate_bytes_per_sec, start)
+    } else {
+        run_merged(cfg, &mut stream, rate_bytes_per_sec, start)
+    }
+}
+
+/// 単一ファイル: **バイトそのまま**チャンク送出(従来経路、再フレーミングなし)。
+fn run_single(
+    cfg: &args::Args,
+    stream: &mut TcpStream,
+    rate_bytes_per_sec: f64,
+    start: Instant,
+) -> Result<u64, ReplayError> {
+    let path = &cfg.files[0];
+    let mut file = File::open(path).map_err(|source| ReplayError::FileOpen {
+        path: path.clone(),
+        source,
+    })?;
+
+    let mut buf = vec![0u8; cfg.chunk_bytes];
+    let mut total: u64 = 0;
     loop {
         let n = file.read(&mut buf).map_err(ReplayError::Read)?;
         if n == 0 {
@@ -81,8 +108,158 @@ fn run(cfg: &args::Args) -> Result<u64, ReplayError> {
             }
         }
     }
-
     Ok(total)
+}
+
+/// 複数ファイル: eventIdx 昇順の k-way マージ(TODO/021)。ストリーミング(各ファイル
+/// 先頭の 1 フレームだけをメモリに持つ)なので 1 GiB × 4 でも常駐は数 MB。
+fn run_merged(
+    cfg: &args::Args,
+    stream: &mut TcpStream,
+    rate_bytes_per_sec: f64,
+    start: Instant,
+) -> Result<u64, ReplayError> {
+    let mut total: u64 = 0;
+    loop {
+        total += merge::replay_once(
+            &cfg.files,
+            cfg.chunk_bytes,
+            &mut |frame: &[u8]| stream.write_all(frame).map_err(ReplayError::Send),
+            &mut |sent_total: u64| {
+                if rate_bytes_per_sec > 0.0 {
+                    let wait =
+                        pace::sleep_for(total + sent_total, rate_bytes_per_sec, start.elapsed());
+                    if wait > Duration::ZERO {
+                        std::thread::sleep(wait);
+                    }
+                }
+            },
+        )?;
+        if !cfg.loop_replay {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+/// eventIdx マージの本体(TODO/021)。
+mod merge {
+    use super::*;
+
+    /// 1 ソース = 1 ファイル + Framer。`next_frame` はフレーム 1 本を所有 Vec で返す。
+    struct FrameSource {
+        path: PathBuf,
+        file: File,
+        framer: Framer,
+        buf: Vec<u8>,
+        eof: bool,
+    }
+
+    impl FrameSource {
+        fn open(path: &PathBuf, chunk_bytes: usize) -> Result<Self, ReplayError> {
+            let file = File::open(path).map_err(|source| ReplayError::FileOpen {
+                path: path.clone(),
+                source,
+            })?;
+            Ok(Self {
+                path: path.clone(),
+                file,
+                framer: Framer::new(),
+                buf: vec![0u8; chunk_bytes],
+                eof: false,
+            })
+        }
+
+        fn next_frame(&mut self) -> Result<Option<Vec<u8>>, ReplayError> {
+            loop {
+                if let Some(frame) = self.framer.next() {
+                    return Ok(Some(frame.to_vec()));
+                }
+                if self.eof {
+                    // フレームにならない末尾の切れ端は黙って捨てない(CLAUDE.md)。
+                    let leftover = self.framer.buffered();
+                    if leftover > 0 {
+                        eprintln!(
+                            "graw_replay: {}: {leftover} trailing bytes do not form a \
+                             complete frame — not replayed",
+                            self.path.display()
+                        );
+                    }
+                    return Ok(None);
+                }
+                let n = self.file.read(&mut self.buf).map_err(ReplayError::Read)?;
+                if n == 0 {
+                    self.eof = true;
+                    continue;
+                }
+                self.framer.push(&self.buf[..n]);
+            }
+        }
+    }
+
+    /// 各ソース先頭の 1 フレーム。`event = None` は制御フレーム(即時送出)。
+    struct Head {
+        frame: Vec<u8>,
+        event: Option<u32>,
+    }
+
+    /// 全ファイルを 1 周インターリーブ送出して総バイト数を返す。
+    /// `emit` = フレーム送出、`paced` = 送出後のペーシング(累計バイトを渡す)。
+    pub fn replay_once(
+        files: &[PathBuf],
+        chunk_bytes: usize,
+        emit: &mut dyn FnMut(&[u8]) -> Result<(), ReplayError>,
+        paced: &mut dyn FnMut(u64),
+    ) -> Result<u64, ReplayError> {
+        let mut sources: Vec<FrameSource> = files
+            .iter()
+            .map(|p| FrameSource::open(p, chunk_bytes))
+            .collect::<Result<_, _>>()?;
+        let mut heads: Vec<Option<Head>> = Vec::with_capacity(sources.len());
+        for src in &mut sources {
+            heads.push(src.next_frame()?.map(|frame| Head {
+                event: peek_event_idx(&frame),
+                frame,
+            }));
+        }
+
+        let mut total: u64 = 0;
+        loop {
+            // 制御フレーム(eventIdx なし)が先頭に居るソースは最優先でそのまま流す
+            // (ファイル内の順序だけを保てばよい — 実機でも run 先頭に来るもの)。
+            let pick = heads
+                .iter()
+                .position(|h| matches!(h, Some(Head { event: None, .. })))
+                .or_else(|| {
+                    // データフレームは (eventIdx, 引数順) の最小を選ぶ。
+                    heads
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, h)| match h {
+                            Some(Head {
+                                event: Some(ev), ..
+                            }) => Some((*ev, i)),
+                            _ => None,
+                        })
+                        .min()
+                        .map(|(_, i)| i)
+                });
+            let Some(i) = pick else {
+                break; // 全ソース枯渇
+            };
+
+            let head = heads[i].take().expect("picked head exists");
+            emit(&head.frame)?;
+            total += head.frame.len() as u64;
+            paced(total);
+
+            heads[i] = sources[i].next_frame()?.map(|frame| Head {
+                event: peek_event_idx(&frame),
+                frame,
+            });
+        }
+        Ok(total)
+    }
 }
 
 /// 発生しうるエラーを利用者に分かるメッセージへ落とす(接続失敗・途中切断を隠さない)。
@@ -129,14 +306,16 @@ mod args {
     use std::path::PathBuf;
 
     pub const USAGE: &str =
-        "usage: graw_replay <host:port> <file.graw> [--rate-mbps <f64>] [--loop] [--chunk-bytes <n=65536>]";
+        "usage: graw_replay <host:port> <file.graw>... [--rate-mbps <f64>] [--loop] [--chunk-bytes <n=65536>]\n\
+         (複数ファイル = eventIdx 昇順インターリーブ送出。AsAd 昇順で渡すこと)";
 
     const DEFAULT_CHUNK_BYTES: usize = 65536;
 
     #[derive(Debug, Clone, PartialEq)]
     pub struct Args {
         pub endpoint: String,
-        pub file: PathBuf,
+        /// 1 つ = バイトそのまま送出(従来)。複数 = eventIdx マージ送出(TODO/021)。
+        pub files: Vec<PathBuf>,
         pub rate_mbps: Option<f64>,
         pub loop_replay: bool,
         pub chunk_bytes: usize,
@@ -186,16 +365,16 @@ mod args {
             }
         }
 
-        if positional.len() != 2 {
+        if positional.len() < 2 {
             return Err(format!(
-                "expected 2 positional arguments (host:port, file.graw), got {}",
+                "expected at least 2 positional arguments (host:port, file.graw...), got {}",
                 positional.len()
             ));
         }
 
         Ok(Args {
             endpoint: positional[0].clone(),
-            file: PathBuf::from(positional[1]),
+            files: positional[1..].iter().map(PathBuf::from).collect(),
             rate_mbps,
             loop_replay,
             chunk_bytes,
@@ -253,7 +432,7 @@ mod tests {
             got,
             Args {
                 endpoint: "127.0.0.1:9000".to_string(),
-                file: PathBuf::from("run.graw"),
+                files: vec![PathBuf::from("run.graw")],
                 rate_mbps: None,
                 loop_replay: false,
                 chunk_bytes: 65536,
@@ -277,7 +456,7 @@ mod tests {
             got,
             Args {
                 endpoint: "host:1234".to_string(),
-                file: PathBuf::from("run.graw"),
+                files: vec![PathBuf::from("run.graw")],
                 rate_mbps: Some(28.0),
                 loop_replay: true,
                 chunk_bytes: 4096,
@@ -285,10 +464,24 @@ mod tests {
         );
     }
 
+    /// TODO/021: 複数ファイル = マージ送出。引数順(= AsAd 昇順で渡す)が保持されること。
+    #[test]
+    fn parse_accepts_multiple_files_in_argument_order() {
+        let got = args::parse(&strs(&["h:1", "a0.graw", "a1.graw", "a2.graw", "a3.graw"])).unwrap();
+        assert_eq!(
+            got.files,
+            vec![
+                PathBuf::from("a0.graw"),
+                PathBuf::from("a1.graw"),
+                PathBuf::from("a2.graw"),
+                PathBuf::from("a3.graw"),
+            ]
+        );
+    }
+
     #[test]
     fn parse_rejects_wrong_positional_count() {
         assert!(args::parse(&strs(&["only-one-arg"])).is_err());
-        assert!(args::parse(&strs(&["a", "b", "c"])).is_err());
         assert!(args::parse(&strs(&[])).is_err());
     }
 
