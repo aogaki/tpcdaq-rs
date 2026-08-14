@@ -40,7 +40,7 @@ use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, error, info, warn};
 
 use crate::command::{run_command_task, Command, CommandResponse, ComponentState, RunConfig};
-use crate::config::{Config, RECEIVER_COMMAND_PORT_BASE};
+use crate::config::{Config, DEFAULT_RECEIVER_SEND_TIMEOUT_MS, RECEIVER_COMMAND_PORT_BASE};
 use crate::framer::Framer;
 use crate::msg::{Batch, Message, RawFrames};
 use crate::zmq_helper;
@@ -54,6 +54,10 @@ const CONTROL_RETRY_MS: u64 = 1;
 
 /// accept が失敗したときのバックオフ(エラーで busy loop にしない)。
 const ACCEPT_BACKOFF_MS: u64 = 100;
+
+/// 送信タスクが有界キューを待つ上限(= 打ち切り合図に気づくまでの粒度)。
+/// decoder スレッドの `POLL_TIMEOUT_MS` と同じ 100 ms 級。
+const SENDER_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 // ---------------------------------------------------------------------
 // 起動パラメタ
@@ -125,8 +129,19 @@ struct Metrics {
     batches: AtomicU64,
     overflow_frames: AtomicU64,
     framer_resets: AtomicU64,
+    /// 送出を打ち切ったメッセージ数(TODO/023-2 = R-P2-3。SPEC §1.3 v1.6「abandon は
+    /// 可視カウント」の receiver 側実装 — 打ち切りは `Reset` / 畳み込みでのみ起きる)。
+    messages_abandoned: AtomicU64,
+    /// MessagePack へ符号化できずに送れなかったメッセージ数(以前は error ログのみ・無カウント)。
+    encode_errors: AtomicU64,
+    /// ETERM 以外の ZMQ send 失敗数(以前は error ログのみ・無カウント)。
+    send_errors: AtomicU64,
     /// 内部キュー満杯を一度でも踏んだか(= Error 報告のラッチ、SPEC §1.4-3)。
     overflowed: AtomicBool,
+    /// 打ち切りの warn を出したか(初回だけ出す — 以降はカウンタが担う)。
+    logged_abandoned: AtomicBool,
+    /// framer リセットの warn を出したか(同上、TODO/023-4 = R-P2-10)。
+    logged_framer_reset: AtomicBool,
 }
 
 impl Metrics {
@@ -136,7 +151,12 @@ impl Metrics {
         self.batches.store(0, Ordering::Relaxed);
         self.overflow_frames.store(0, Ordering::Relaxed);
         self.framer_resets.store(0, Ordering::Relaxed);
+        self.messages_abandoned.store(0, Ordering::Relaxed);
+        self.encode_errors.store(0, Ordering::Relaxed);
+        self.send_errors.store(0, Ordering::Relaxed);
         self.overflowed.store(false, Ordering::Relaxed);
+        self.logged_abandoned.store(false, Ordering::Relaxed);
+        self.logged_framer_reset.store(false, Ordering::Relaxed);
     }
 
     /// フレーム 1 個を落としたことを記録する。初回だけログに出す
@@ -152,6 +172,53 @@ impl Metrics {
         }
     }
 
+    /// 送出打ち切りを記録する。**初回だけ** warn(以降はカウンタが担う)。
+    /// 戻り値 = このとき warn を出したか(「一度だけ」を機械照合するため)。
+    fn record_abandoned(&self, cobo_id: u32, link: &str, kind: &str) -> bool {
+        self.messages_abandoned.fetch_add(1, Ordering::Relaxed);
+        if self.logged_abandoned.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        warn!(
+            cobo_id,
+            link,
+            kind,
+            "send abandoned while stopping (Reset / component teardown) — this message is lost \
+             and counted, never silently dropped (SPEC §1.3 v1.6); further occurrences are \
+             counted only"
+        );
+        true
+    }
+
+    /// 符号化失敗を記録する(送れなかった = 喪失なので必ず数える)。
+    fn record_encode_error(&self, cobo_id: u32, link: &str, error: &crate::msg::MsgError) {
+        self.encode_errors.fetch_add(1, Ordering::Relaxed);
+        error!(cobo_id, link, %error, "cannot encode message — this message is lost and counted");
+    }
+
+    /// ETERM 以外の send 失敗を記録する(同上)。
+    fn record_send_error(&self, cobo_id: u32, link: &str, error: zmq::Error) {
+        self.send_errors.fetch_add(1, Ordering::Relaxed);
+        error!(cobo_id, link, %error, "ZMQ send failed — this message is lost and counted");
+    }
+
+    /// framer リセット(MFM ヘッダ崩れ)の**増分**を記録する(TODO/023-4 = R-P2-10)。
+    /// GetStatus をポーリングしていなくても気づけるよう**初回だけ** warn する。
+    /// 戻り値 = このとき warn を出したか。
+    fn note_framer_resets(&self, cobo_id: u32, resets: u64) -> bool {
+        self.framer_resets.store(resets, Ordering::Relaxed);
+        if self.logged_framer_reset.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        warn!(
+            cobo_id,
+            framer_resets = resets,
+            "MFM framing lost — the framer resynchronised on the next valid header; the CoBo link \
+             may be corrupting frames. Further occurrences are counted only (metrics.framer_resets)"
+        );
+        true
+    }
+
     fn json(&self) -> serde_json::Value {
         let get = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         serde_json::json!({
@@ -160,6 +227,9 @@ impl Metrics {
             "batches": get(&self.batches),
             "overflow_frames": get(&self.overflow_frames),
             "framer_resets": get(&self.framer_resets),
+            "messages_abandoned": get(&self.messages_abandoned),
+            "encode_errors": get(&self.encode_errors),
+            "send_errors": get(&self.send_errors),
         })
     }
 }
@@ -212,6 +282,8 @@ async fn drain_task(
         };
 
         let mut framer = Framer::new();
+        // この接続で観測済みの framer リセット数(増分検知用 — TODO/023-4 = R-P2-10)。
+        let mut seen_resets = 0u64;
         loop {
             let read = tokio::select! {
                 biased;
@@ -243,9 +315,14 @@ async fn drain_task(
                             }
                         }
                     }
-                    metrics
-                        .framer_resets
-                        .store(framer.reset_count(), Ordering::Relaxed);
+                    // MFM ヘッダ崩れは**増分を検知した瞬間に**一度だけ warn する
+                    // (TODO/023-4 = R-P2-10。以前はカウンタ転写だけで、GetStatus を
+                    // ポーリングしない限りフレーミング崩れの継続に気づけなかった)。
+                    let resets = framer.reset_count();
+                    if resets != seen_resets {
+                        seen_resets = resets;
+                        metrics.note_framer_resets(cobo_id, resets);
+                    }
                 }
                 Err(e) => {
                     warn!(cobo_id, error = %e, "read failed — treating as end of stream");
@@ -307,6 +384,8 @@ struct Link {
 
 /// 送信タスクの run 毎パラメタ。
 struct SenderConfig {
+    /// Batch の `source_id` = 担当 CoBo の番号そのもの(SPEC §3.2)。ログ・カウンタの
+    /// `cobo_id` にもこれをそのまま使う(同じ値を 2 つ持たない)。
     source_id: u32,
     run_number: u32,
     batch_max_bytes: usize,
@@ -314,15 +393,37 @@ struct SenderConfig {
     heartbeat: Duration,
 }
 
+/// 1 メッセージ送出の結末(decoder の [`crate::decoder`] と同じ切り方)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SendOutcome {
+    Sent,
+    /// 符号化失敗 / 一時的でない send 失敗。**この 1 通は失われた**(カウント + error 済み)が、
+    /// リンクとしては生きているので送出は続ける。
+    Failed,
+    /// 打ち切り(`Reset` / 畳み込み)または ZMQ コンテキスト終了。以後このリンクへは送らない。
+    Stopped,
+}
+
 /// 有界キューからフレームを取り、「`batch_max_bytes` 到達 or `batch_max` 経過」の早い方で
 /// バッチを閉じて両リンクへ送る(SPEC §2.3)。アイドル時は Heartbeat を出す(SPEC §2.2)。
 ///
 /// 専用 OS スレッドで走る前提。ZMQ 送信のブロック(= 背圧)はここで受け止める。
+///
+/// # 停止設計(TODO/023-2 = R-P2-3。decoder の `send_lossless` と同じ形)
+///
+/// 送出はロスレス(下流の背圧で待つ)。`abandon` が立つのは **`Reset` とコンポーネント
+/// 畳み込み**のときだけで、そこで初めて送出待ちを打ち切り `messages_abandoned` として
+/// 可視化する。`Stop` では立てない —— receiver の `Stop` は「強制 EOS を流す」経路
+/// (SPEC §1.3 v1.6)であり、ここで打ち切ると下流が run を閉じられなくなる。
+///
+/// 待ち時間は [`SENDER_POLL_INTERVAL`] で必ず頭打ちにする: `heartbeat_ms` をいくら長く
+/// しても打ち切り合図に気づくまでが鈍らない = スレッドが残らない。
 fn sender_loop(
     rx: Receiver<FrameMsg>,
     mut links: Vec<Link>,
     cfg: SenderConfig,
     metrics: Arc<Metrics>,
+    abandon: Arc<AtomicBool>,
 ) {
     // バッチ用のバッファは使い回す(per-batch の再確保をしない)。
     let mut batch: Vec<ByteBuf> = Vec::new();
@@ -332,9 +433,17 @@ fn sender_loop(
     let mut last_send = Instant::now();
 
     loop {
+        if abandon.load(Ordering::Relaxed) {
+            // Reset / 畳み込み: 送出待ちで居座らない(打ち切りは既にカウント済み)。
+            break;
+        }
+
         let now = Instant::now();
         let wake = batch_deadline.unwrap_or(last_send + cfg.heartbeat);
-        let alive = match rx.recv_timeout(wake.saturating_duration_since(now)) {
+        let wait = wake
+            .saturating_duration_since(now)
+            .min(SENDER_POLL_INTERVAL);
+        let alive = match rx.recv_timeout(wait) {
             Ok(FrameMsg::Frame(frame)) => {
                 batch_bytes += frame.len();
                 batch.push(ByteBuf::from(frame));
@@ -342,7 +451,14 @@ fn sender_loop(
                     batch_deadline = Some(now + cfg.batch_max);
                 }
                 if batch_bytes >= cfg.batch_max_bytes {
-                    let alive = flush(&mut links, &mut batch, &mut batch_bytes, &cfg, &metrics);
+                    let alive = flush(
+                        &mut links,
+                        &mut batch,
+                        &mut batch_bytes,
+                        &cfg,
+                        &metrics,
+                        &abandon,
+                    );
                     batch_deadline = None;
                     last_send = Instant::now();
                     alive
@@ -351,14 +467,22 @@ fn sender_loop(
                 }
             }
             Ok(FrameMsg::EndOfStream) => {
-                let mut alive = flush(&mut links, &mut batch, &mut batch_bytes, &cfg, &metrics);
+                let mut alive = flush(
+                    &mut links,
+                    &mut batch,
+                    &mut batch_bytes,
+                    &cfg,
+                    &metrics,
+                    &abandon,
+                );
                 batch_deadline = None;
                 let eos = Message::<RawFrames>::EndOfStream {
                     source_id: cfg.source_id,
                     run_number: cfg.run_number,
                 };
                 for link in &mut links {
-                    alive &= send_on(link, &eos);
+                    alive &= send_on(link, &eos, "EndOfStream", &cfg, &metrics, &abandon)
+                        != SendOutcome::Stopped;
                 }
                 info!(
                     source_id = cfg.source_id,
@@ -368,8 +492,22 @@ fn sender_loop(
                 last_send = Instant::now();
                 alive
             }
+            // 待ちを頭打ちにしたので、タイムアウト = 期限到達とは限らない。期限は自分で見る。
             Err(RecvTimeoutError::Timeout) => {
-                if batch.is_empty() {
+                let now = Instant::now();
+                if batch_deadline.is_some_and(|deadline| now >= deadline) {
+                    let alive = flush(
+                        &mut links,
+                        &mut batch,
+                        &mut batch_bytes,
+                        &cfg,
+                        &metrics,
+                        &abandon,
+                    );
+                    batch_deadline = None;
+                    last_send = Instant::now();
+                    alive
+                } else if batch.is_empty() && now >= last_send + cfg.heartbeat {
                     let heartbeat = Message::<RawFrames>::Heartbeat {
                         source_id: cfg.source_id,
                         run_number: cfg.run_number,
@@ -377,21 +515,26 @@ fn sender_loop(
                     };
                     let mut alive = true;
                     for link in &mut links {
-                        alive &= send_on(link, &heartbeat);
+                        alive &= send_on(link, &heartbeat, "Heartbeat", &cfg, &metrics, &abandon)
+                            != SendOutcome::Stopped;
                     }
                     heartbeat_counter += 1;
                     last_send = Instant::now();
                     alive
                 } else {
-                    let alive = flush(&mut links, &mut batch, &mut batch_bytes, &cfg, &metrics);
-                    batch_deadline = None;
-                    last_send = Instant::now();
-                    alive
+                    true
                 }
             }
             // drain タスクが終わった = run 終了。残りを吐いて畳む。
             Err(RecvTimeoutError::Disconnected) => {
-                flush(&mut links, &mut batch, &mut batch_bytes, &cfg, &metrics);
+                flush(
+                    &mut links,
+                    &mut batch,
+                    &mut batch_bytes,
+                    &cfg,
+                    &metrics,
+                    &abandon,
+                );
                 false
             }
         };
@@ -404,6 +547,7 @@ fn sender_loop(
     info!(
         source_id = cfg.source_id,
         run_number = cfg.run_number,
+        messages_abandoned = metrics.messages_abandoned.load(Ordering::Relaxed),
         "sender task stopped"
     );
 }
@@ -418,12 +562,14 @@ fn flush(
     batch_bytes: &mut usize,
     cfg: &SenderConfig,
     metrics: &Metrics,
+    abandon: &AtomicBool,
 ) -> bool {
     if batch.is_empty() {
         return true;
     }
     let created_ns = unix_nanos();
     let mut alive = true;
+    let mut delivered = false;
     for link in links.iter_mut() {
         let message = Message::Data(Batch {
             source_id: cfg.source_id,
@@ -435,33 +581,90 @@ fn flush(
         // 送信の成否によらず番号は進める: 失敗はギャップとして下流に見えるべき
         // (詰めると「落ちていない」と誤認される — silent failure を作らない)。
         link.sequence_number += 1;
-        alive &= send_on(link, &message);
+        let outcome = send_on(link, &message, "Data", cfg, metrics, abandon);
+        delivered |= outcome == SendOutcome::Sent;
+        alive &= outcome != SendOutcome::Stopped;
     }
-    metrics.batches.fetch_add(1, Ordering::Relaxed);
+    // `batches` は「プロセスから出て行ったバッチ」だけを数える。打ち切り/失敗したものを
+    // ここに混ぜると「送れたこと」に化ける(下流不在で batches が伸びない、が契約 —
+    // SPEC §1.2 v1.4。喪失は messages_abandoned / send_errors 側に出る)。
+    if delivered {
+        metrics.batches.fetch_add(1, Ordering::Relaxed);
+    }
     debug!(frames = batch.len(), bytes = *batch_bytes, "batch flushed");
     batch.clear();
     *batch_bytes = 0;
     alive
 }
 
-/// 1 リンクへ 1 メッセージ送る。返り値 `false` = ZMQ コンテキスト終了(以後送れない)。
-fn send_on<P: Serialize>(link: &mut Link, message: &Message<P>) -> bool {
+/// 1 リンクへ 1 メッセージ送る(ロスレス。EAGAIN では諦めずに待つ)。
+///
+/// **捨てない・ただし中断可能**(TODO/023-2 = R-P2-3): SNDTIMEO
+/// ([`crate::config::DEFAULT_RECEIVER_SEND_TIMEOUT_MS`])で目を覚ましては `abandon` を見る。
+/// 立っていなければ再試行し続ける(下流の背圧で待つ = ロスレス)。立っていれば
+/// `messages_abandoned` として数えて打ち切る —— 破棄が可視化されていることが、
+/// 打ち切りを許す唯一の条件(SPEC §1.3 v1.6 / §1.4)。
+///
+/// 失敗はすべて数える: 符号化失敗 = `encode_errors`、ETERM 以外の send 失敗 = `send_errors`。
+/// ETERM だけはコンテキスト終了(正常な畳み込み)なのでカウントせず `Stopped` を返す。
+fn send_on<P: Serialize>(
+    link: &mut Link,
+    message: &Message<P>,
+    kind: &'static str,
+    cfg: &SenderConfig,
+    metrics: &Metrics,
+    abandon: &AtomicBool,
+) -> SendOutcome {
     let bytes = match message.to_msgpack() {
         Ok(bytes) => bytes,
         Err(e) => {
-            error!(link = link.name, error = %e, "cannot encode message — dropped");
-            return true;
+            metrics.record_encode_error(cfg.source_id, link.name, &e);
+            return SendOutcome::Failed;
         }
     };
-    match link.socket.send(&bytes[..], 0) {
-        Ok(()) => true,
-        Err(zmq::Error::ETERM) => {
-            info!(link = link.name, "ZMQ context terminated — sender stopping");
-            false
+    let mut waited = false;
+    loop {
+        // 打ち切り合図は **送る前に**見る: 1 通あたり最大でも SNDTIMEO 1 回分しか
+        // 待たない(2 リンク分が直列に積み上がらない)。
+        if abandon.load(Ordering::Relaxed) {
+            metrics.record_abandoned(cfg.source_id, link.name, kind);
+            return SendOutcome::Stopped;
         }
-        Err(e) => {
-            error!(link = link.name, error = %e, "ZMQ send failed — this message is lost");
-            true
+        match link.socket.send(&bytes[..], 0) {
+            Ok(()) => {
+                if waited {
+                    info!(
+                        cobo_id = cfg.source_id,
+                        link = link.name,
+                        "downstream backpressure released — message sent"
+                    );
+                }
+                return SendOutcome::Sent;
+            }
+            Err(zmq::Error::EAGAIN) => {
+                if !waited {
+                    waited = true;
+                    info!(
+                        cobo_id = cfg.source_id,
+                        link = link.name,
+                        kind,
+                        "downstream is full or absent — blocking on backpressure (lossless; only \
+                         Reset / teardown may abandon it)"
+                    );
+                }
+            }
+            Err(zmq::Error::ETERM) => {
+                info!(
+                    cobo_id = cfg.source_id,
+                    link = link.name,
+                    "ZMQ context terminated — sender stopping"
+                );
+                return SendOutcome::Stopped;
+            }
+            Err(e) => {
+                metrics.record_send_error(cfg.source_id, link.name, e);
+                return SendOutcome::Failed;
+            }
         }
     }
 }
@@ -487,8 +690,12 @@ struct Handler {
     /// Arm で確保した listener(Start で drain タスクへ渡す)。
     listener: Option<StdTcpListener>,
     bind_address: Option<SocketAddr>,
-    /// 走行中の run を畳む合図。
+    /// 走行中の run を畳む合図(drain タスク宛)。
     run_stop: Option<broadcast::Sender<()>>,
+    /// 送出待ちの打ち切り合図(送信スレッド宛)。`Reset` と畳み込みでのみ立てる。
+    abandon: Option<Arc<AtomicBool>>,
+    /// 送信スレッド。**join できることが「スレッドを残さない」の担保**(TODO/023-2)。
+    sender_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Handler {
@@ -502,6 +709,8 @@ impl Handler {
             listener: None,
             bind_address: None,
             run_stop: None,
+            abandon: None,
+            sender_handle: None,
         }
     }
 
@@ -608,10 +817,14 @@ impl Handler {
             heartbeat: Duration::from_millis(self.params.heartbeat_ms),
         };
         let sender_metrics = Arc::clone(&self.metrics);
-        std::thread::Builder::new()
+        let abandon = Arc::new(AtomicBool::new(false));
+        self.abandon = Some(Arc::clone(&abandon));
+        let handle = std::thread::Builder::new()
             .name(format!("receiver{}-sender", self.params.cobo_id))
-            .spawn(move || sender_loop(rx, links, cfg, sender_metrics))
+            .spawn(move || sender_loop(rx, links, cfg, sender_metrics, abandon))
             .map_err(|e| format!("cannot spawn sender thread: {e}"))?;
+        // 前 run のスレッドは既に畳まれている(drain タスク終了でキューが切れる)。
+        self.sender_handle = Some(handle);
 
         let (stop_tx, stop_rx) = broadcast::channel(1);
         tokio::spawn(drain_task(
@@ -625,6 +838,9 @@ impl Handler {
         Ok(())
     }
 
+    /// `Stop` は送出を打ち切らない(未送バッチと強制 EOS を送り切る = ロスレス)。
+    /// SPEC §1.3 v1.6 の中止経路は「EOS を流して閉じる」なので、ここで打ち切ると
+    /// 下流が run を閉じられなくなる。畳むのは drain タスクだけ。
     fn do_stop(&mut self) -> Result<(), String> {
         // drain タスクが listener を落とし、未送 EOS を出してから畳む。
         self.stop_run();
@@ -632,8 +848,14 @@ impl Handler {
         Ok(())
     }
 
+    /// `Reset` はオペレータの明示オーバーライド(decoder の `do_reset` と同じ位置づけ)。
+    /// 送出待ちを打ち切れる唯一の経路で、破棄は `messages_abandoned` として可視化される。
+    /// **カウンタは消さない** —— 破棄が後から読めなければ打ち切りを許す条件を満たさない。
     fn do_reset(&mut self) -> Result<(), String> {
+        self.abandon_sends();
         self.stop_run();
+        // 打ち切り合図を出した後なので join は有限時間で返る(SNDTIMEO / poll 間隔で目覚める)。
+        self.join_sender();
         self.listener = None;
         self.bind_address = None;
         self.run_number = None;
@@ -645,6 +867,29 @@ impl Handler {
     fn stop_run(&mut self) {
         if let Some(stop) = self.run_stop.take() {
             let _ = stop.send(()); // 受け手が既に居なくても構わない
+        }
+    }
+
+    /// 送信スレッドへ「送出待ちを打ち切ってよい」と伝える(`Reset` / 畳み込み専用)。
+    fn abandon_sends(&mut self) {
+        if let Some(abandon) = self.abandon.take() {
+            abandon.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// 送信スレッドの終了を待つ。**ここが「スレッドがリークしない」の担保**で、
+    /// 呼ぶ前に必ず [`Handler::abandon_sends`] を済ませておくこと(そうでないと
+    /// 下流不在のときに永久にブロックする)。
+    fn join_sender(&mut self) {
+        let Some(handle) = self.sender_handle.take() else {
+            return;
+        };
+        if handle.join().is_err() {
+            // スレッドが panic して死んでいた。カウンタが途中で止まっている可能性がある。
+            error!(
+                cobo_id = self.params.cobo_id,
+                "sender thread panicked — its counters may be incomplete"
+            );
         }
     }
 
@@ -669,6 +914,11 @@ impl Handler {
             // HWM も IMMEDIATE も connect の前に設定しないと効かない
             zmq_helper::apply_push_hwm_with(&socket, self.params.hwm)
                 .map_err(|e| format!("cannot set HWM {} for {name}: {e}", self.params.hwm))?;
+            // SNDTIMEO は「打ち切れる粒度」を作るためだけのもの(decoder と同じ出所・
+            // 同じ既定 — TODO/023-2)。タイムアウトしても通常は諦めず再試行する。
+            socket
+                .set_sndtimeo(DEFAULT_RECEIVER_SEND_TIMEOUT_MS)
+                .map_err(|e| format!("cannot set send timeout for {name}: {e}"))?;
             socket
                 .connect(endpoint)
                 .map_err(|e| format!("cannot connect {name} to {endpoint}: {e}"))?;
@@ -712,8 +962,13 @@ impl Handler {
 }
 
 impl Drop for Handler {
+    /// コンポーネントごと畳む(プロセス終了・shutdown)。`Reset` と同じ扱いで送出待ちを
+    /// 打ち切り、**送信スレッドを join してから**去る(ブロックしたまま残る OS スレッドを
+    /// 作らない — TODO/023-2 の「スレッドがリークしない」)。
     fn drop(&mut self) {
+        self.abandon_sends();
         self.stop_run();
+        self.join_sender();
     }
 }
 
@@ -748,4 +1003,120 @@ pub async fn run_receiver(
         move |cmd| handler.handle(cmd),
     )
     .await;
+}
+
+// ---------------------------------------------------------------------
+// テスト(仕様書 — 先に書く)。カウンタと「一度だけログ」の純ロジック(ZMQ/IO なし)。
+// 実配線での打ち切り検証は tests/receiver_overload.rs。
+// ---------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    /// 打ち切りは **毎回数え、ログは初回だけ**(ホットパスでログ整形を繰り返さない
+    /// — CLAUDE.md。カウンタが常に進むので silent にはならない)。
+    #[test]
+    fn every_abandoned_message_is_counted_but_only_the_first_one_is_logged() {
+        let m = Metrics::default();
+        assert!(
+            m.record_abandoned(0, "decoder", "Data"),
+            "初回は warn を出す"
+        );
+        assert!(
+            !m.record_abandoned(0, "graw-writer", "Data"),
+            "2 回目以降は出さない"
+        );
+        assert!(!m.record_abandoned(0, "decoder", "EndOfStream"));
+
+        assert_eq!(m.messages_abandoned.load(Ordering::Relaxed), 3);
+        assert_eq!(m.json()["messages_abandoned"].as_u64(), Some(3));
+    }
+
+    /// framer リセット(MFM ヘッダ崩れ)は増分検知時に一度だけ warn、値は常に metrics へ。
+    #[test]
+    fn framer_resets_are_stored_every_time_but_warned_only_once() {
+        let m = Metrics::default();
+        assert!(m.note_framer_resets(1, 1), "最初の増分で warn");
+        assert_eq!(m.json()["framer_resets"].as_u64(), Some(1));
+        assert!(!m.note_framer_resets(1, 4), "2 回目以降は warn しない");
+        assert_eq!(
+            m.json()["framer_resets"].as_u64(),
+            Some(4),
+            "カウンタは黙って進み続ける"
+        );
+    }
+
+    /// 送出失敗の 2 経路(符号化 / ETERM 以外の send)は数えて metrics に出す。
+    ///
+    /// **実配線での符号化失敗は事実上到達不能**: ペイロードは `Vec<ByteBuf>` で、
+    /// `rmp_serde::to_vec` は `Vec<u8>` へ書くだけ(IO も未対応型も無い)。到達経路を
+    /// 作れないので、ここではカウンタの配線だけを固定する(発注書 023 テスト節の
+    /// 「不能なら理由を記録してカウンタ配線のみ検査」)。
+    #[test]
+    fn encode_and_send_failures_are_counted_and_exposed() {
+        let m = Metrics::default();
+        m.record_encode_error(
+            0,
+            "decoder",
+            &crate::msg::MsgError::ItemFieldRange {
+                field: "adc",
+                value: 5000,
+                max: 4095,
+            },
+        );
+        // 非対称: 符号化 1 件・send 2 件
+        m.record_send_error(0, "decoder", zmq::Error::EINVAL);
+        m.record_send_error(0, "graw-writer", zmq::Error::EHOSTUNREACH);
+
+        let json = m.json();
+        assert_eq!(json["encode_errors"].as_u64(), Some(1));
+        assert_eq!(json["send_errors"].as_u64(), Some(2));
+        assert_eq!(
+            json["messages_abandoned"].as_u64(),
+            Some(0),
+            "失敗と打ち切りは別のカウンタ"
+        );
+    }
+
+    /// カウンタは run 毎(`Start` でリセット)。023 で足した 3 本も同じ規約に従う。
+    #[test]
+    fn start_resets_every_counter_including_the_new_ones() {
+        let m = Metrics::default();
+        m.record_abandoned(0, "decoder", "Data");
+        m.record_encode_error(
+            0,
+            "decoder",
+            &crate::msg::MsgError::ItemFieldRange {
+                field: "adc",
+                value: 5000,
+                max: 4095,
+            },
+        );
+        m.record_send_error(0, "decoder", zmq::Error::EINVAL);
+        m.note_framer_resets(0, 3);
+        m.record_dropped_frame(0, "queue full");
+
+        m.reset();
+
+        let json = m.json();
+        for key in [
+            "bytes",
+            "frames",
+            "batches",
+            "overflow_frames",
+            "framer_resets",
+            "messages_abandoned",
+            "encode_errors",
+            "send_errors",
+        ] {
+            assert_eq!(json[key].as_u64(), Some(0), "metrics.{key} が残っている");
+        }
+        assert!(!m.overflowed.load(Ordering::Relaxed));
+        assert!(
+            m.record_abandoned(0, "decoder", "Data"),
+            "次の run では warn も出し直す"
+        );
+    }
 }

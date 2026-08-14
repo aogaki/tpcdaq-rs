@@ -156,6 +156,8 @@ pub struct RunDecoder {
     run_mismatches: u64,
     eos_in: u64,
     heartbeats_in: u64,
+    heartbeats_out: u64,
+    heartbeats_abandoned: u64,
     eos_abandoned: u64,
     batches_abandoned: u64,
     /// `Batch.source_id` と `Fragment.cobo`(GRAW ヘッダ実値)の不一致数(TODO/013-4)。
@@ -168,6 +170,7 @@ pub struct RunDecoder {
     logged_unsupported: bool,
     logged_malformed: bool,
     logged_cobo_mismatch: bool,
+    logged_heartbeat_abandoned: bool,
 }
 
 impl RunDecoder {
@@ -199,6 +202,8 @@ impl RunDecoder {
             run_mismatches: 0,
             eos_in: 0,
             heartbeats_in: 0,
+            heartbeats_out: 0,
+            heartbeats_abandoned: 0,
             eos_abandoned: 0,
             batches_abandoned: 0,
             cobo_mismatch: 0,
@@ -206,6 +211,7 @@ impl RunDecoder {
             logged_unsupported: false,
             logged_malformed: false,
             logged_cobo_mismatch: false,
+            logged_heartbeat_abandoned: false,
         }
     }
 
@@ -387,7 +393,12 @@ impl RunDecoder {
         self.clear_pending();
     }
 
-    /// **Reset 中に限り**バッチ送出を打ち切った。破棄は必ず数えて可視化する。
+    /// バッチ送出を打ち切った。破棄は必ず数えて可視化する。
+    ///
+    /// 打ち切りが起きるのは 2 経路: **Reset 中の明示オーバーライド**(送出待ちの中断)と
+    /// **そもそも送れないソケット**(符号化失敗 / ETERM / 一般 ZMQ エラー)。前者だけと
+    /// 書いてあったのは実装との乖離だった(TODO/023-6 = P2 レビュー R-P2-13 の L3)。
+    ///
     /// 自前 seq は進める — 下流にはギャップとして見えるべきで、詰めると
     /// 「落ちていない」と誤認される(receiver の flush と同じ理屈)。
     pub fn batch_abandoned(&mut self) {
@@ -412,7 +423,7 @@ impl RunDecoder {
         self.rearm();
     }
 
-    /// **Reset 中に限り**自分の EOS 送出を打ち切った。
+    /// 自分の EOS 送出を打ち切った(経路は [`RunDecoder::batch_abandoned`] と同じ 2 つ)。
     pub fn eos_abandoned(&mut self) {
         self.eos_abandoned += 1;
         warn!(
@@ -421,6 +432,26 @@ impl RunDecoder {
              downstream will not see this run's barrier; counted, never silently dropped"
         );
         self.rearm();
+    }
+
+    /// アイドル Heartbeat を送出できた(SPEC §2.2)。Batch/EOS と同じく out/abandoned を
+    /// 対にして数える(TODO/023-5 = R-P2-12。以前は `let _ =` で結果を捨てていた)。
+    pub fn heartbeat_sent(&mut self) {
+        self.heartbeats_out += 1;
+    }
+
+    /// Heartbeat の送出を打ち切った(符号化失敗・Reset 中の中断・送れないソケット)。
+    /// Heartbeat は 1 Hz で繰り返し来るのでログは**初回だけ**(以降はカウンタが担う)。
+    pub fn heartbeat_abandoned(&mut self) {
+        self.heartbeats_abandoned += 1;
+        if !self.logged_heartbeat_abandoned {
+            self.logged_heartbeat_abandoned = true;
+            info!(
+                run_number = self.run_number,
+                "decoder: Heartbeat abandoned (unsendable socket or Reset override) — counted; \
+                 further occurrences are counted only"
+            );
+        }
     }
 
     /// プロトコル違反(seq ギャップ・EOS 前 run 変更・malformed)を一度でも踏んだか。
@@ -472,6 +503,14 @@ impl RunDecoder {
         self.batches_abandoned
     }
 
+    pub fn heartbeats_out(&self) -> u64 {
+        self.heartbeats_out
+    }
+
+    pub fn heartbeats_abandoned(&self) -> u64 {
+        self.heartbeats_abandoned
+    }
+
     /// `Batch.source_id` と `Fragment.cobo` が食い違ったフレーム数(TODO/013-4)。
     pub fn cobo_mismatch(&self) -> u64 {
         self.cobo_mismatch
@@ -496,6 +535,8 @@ impl RunDecoder {
             "run_mismatches": self.run_mismatches,
             "eos_in": self.eos_in,
             "heartbeats_in": self.heartbeats_in,
+            "heartbeats_out": self.heartbeats_out,
+            "heartbeats_abandoned": self.heartbeats_abandoned,
             "eos_abandoned": self.eos_abandoned,
             "batches_abandoned": self.batches_abandoned,
             "cobo_mismatch": self.cobo_mismatch,
@@ -683,6 +724,9 @@ fn send_own_eos(push: &zmq::Socket, core: &Mutex<RunDecoder>, abandon: &AtomicBo
 
 /// アイドル時 Heartbeat(SPEC §2.2、1 Hz)。落としてよいものではないが、下流が詰まって
 /// いるときは通常の送出と同じくブロックする(Reset のみ打ち切り可)。
+///
+/// 送出の成否は **必ずカウンタへ戻す**(TODO/023-5 = R-P2-12。Batch/EOS が out/abandoned の
+/// 対を持つのに Heartbeat だけ結果を捨てていた = 死活判定の材料が無音で消えていた)。
 fn send_heartbeat(
     push: &zmq::Socket,
     core: &Mutex<RunDecoder>,
@@ -703,11 +747,22 @@ fn send_heartbeat(
             Ok(bytes) => bytes,
             Err(e) => {
                 error!(error = %e, "decoder: cannot encode Heartbeat");
+                drop(c);
+                if let Ok(mut c) = core.lock() {
+                    c.heartbeat_abandoned();
+                }
                 return;
             }
         }
     };
-    let _ = send_lossless(push, &bytes, abandon);
+    let outcome = send_lossless(push, &bytes, abandon);
+    match core.lock() {
+        Ok(mut c) => match outcome {
+            SendOutcome::Sent => c.heartbeat_sent(),
+            SendOutcome::Abandoned => c.heartbeat_abandoned(),
+        },
+        Err(_) => error!("decoder: RunDecoder mutex poisoned after Heartbeat send"),
+    }
 }
 
 /// PULL poll → recv → decode → PUSH send を 1 本の専用 OS スレッドで回す(006/007 と同じ流儀)。
@@ -942,17 +997,30 @@ impl Handler {
     }
 
     /// [`RunDecoder`] がプロトコル違反を報告していたら状態へ反映する(007 と同じ流儀)。
+    ///
+    /// **poisoned Mutex は「エラーなし」に丸めない**(TODO/023-1 = R-P2-8): ロックが毒され
+    /// ているのは「デコードスレッドがロック保持中に panic して死んだ」ときだけで、それを
+    /// `unwrap_or(false)` で握り潰すと **スレッド全停止でも state=Running のまま GetStatus が
+    /// success を返し続ける**(delila-rs 2026-05-04 事案と同型の不可視化)。即 Error にする。
     fn latch_error(&mut self) {
         if self.state == ComponentState::Error
             || !self.state.can_transition_to(ComponentState::Error)
         {
             return;
         }
-        let is_errored = self
-            .core
-            .as_ref()
-            .and_then(|c| c.lock().ok().map(|g| g.errored()))
-            .unwrap_or(false);
+        let is_errored = match self.core.as_ref() {
+            None => false,
+            Some(core) => match core.lock() {
+                Ok(guard) => guard.errored(),
+                Err(_) => {
+                    warn!(
+                        "decoder: worker thread panicked while holding the core lock (poisoned \
+                         mutex) — entering Error"
+                    );
+                    true
+                }
+            },
+        };
         if !is_errored {
             return;
         }
@@ -1532,6 +1600,28 @@ mod tests {
         assert_eq!(c.unsupported(), 1);
     }
 
+    // -----------------------------------------------------------------
+    // Heartbeat 送出カウンタ(TODO/023-5 = R-P2-12)
+    // -----------------------------------------------------------------
+
+    /// Batch/EOS が out/abandoned の対を持つのに Heartbeat だけ結果を捨てていた(`let _ =`)。
+    /// 送出成功と打ち切りを別々に数え、どちらも metrics に出す。
+    #[test]
+    fn heartbeat_send_outcomes_are_counted_separately() {
+        let mut c = core(1, &[0]);
+        // 非対称: 成功 2 通・打ち切り 1 通(数え違いが目に見えるように)
+        c.heartbeat_sent();
+        c.heartbeat_sent();
+        c.heartbeat_abandoned();
+
+        assert_eq!(c.heartbeats_out(), 2);
+        assert_eq!(c.heartbeats_abandoned(), 1);
+        let m = c.metrics_json();
+        assert_eq!(m["heartbeats_out"].as_u64(), Some(2));
+        assert_eq!(m["heartbeats_abandoned"].as_u64(), Some(1));
+        assert_eq!(m["heartbeats_in"].as_u64(), Some(0), "受信カウンタとは独立");
+    }
+
     #[test]
     fn metrics_json_carries_every_counter_of_the_ticket() {
         let mut c = core(1, &[0]);
@@ -1552,6 +1642,8 @@ mod tests {
             "run_mismatches",
             "eos_in",
             "heartbeats_in",
+            "heartbeats_out",
+            "heartbeats_abandoned",
             "eos_abandoned",
             "batches_abandoned",
             "cobo_mismatch",
@@ -1565,5 +1657,66 @@ mod tests {
         );
         assert_eq!(m["heartbeats_in"].as_u64(), Some(1));
         assert_eq!(m["items_out"].as_u64(), Some(8));
+    }
+
+    // -----------------------------------------------------------------
+    // poisoned Mutex = スレッド死(TODO/023-1 = R-P2-8)
+    // -----------------------------------------------------------------
+
+    fn test_params() -> DecoderParams {
+        DecoderParams {
+            pull_bind: "tcp://127.0.0.1:0".to_string(),
+            push_connect: "tcp://127.0.0.1:0".to_string(),
+            command_listen: "tcp://127.0.0.1:0".to_string(),
+            batch_max_bytes: 8 * 1024 * 1024,
+            batch_max_ms: 10,
+            heartbeat_ms: 1_000,
+            send_timeout_ms: 100,
+            workers: 1,
+            expected_sources: vec![0],
+        }
+    }
+
+    /// 「ワーカースレッドがロック保持中に panic して死んだ」状況をそのまま作る。
+    /// (テスト出力に panic のメッセージが 1 行出るのは想定どおり — 握り潰さない。)
+    fn poison<T: Send + 'static>(m: &Arc<Mutex<T>>) {
+        let m = Arc::clone(m);
+        let joined = std::thread::spawn(move || {
+            let _guard = m.lock().expect("fresh mutex is not poisoned");
+            panic!("simulated worker panic while holding the lock");
+        })
+        .join();
+        assert!(joined.is_err(), "スレッドは panic しているはず");
+    }
+
+    #[test]
+    fn a_poisoned_core_lock_enters_error_instead_of_looking_healthy() {
+        let mut handler = Handler::new(test_params());
+        let core = Arc::new(Mutex::new(core(1, &[0])));
+        handler.core = Some(Arc::clone(&core));
+        handler.state = ComponentState::Running;
+
+        poison(&core);
+        assert!(core.lock().is_err(), "前提: Mutex は poisoned");
+
+        handler.latch_error();
+        assert_eq!(
+            handler.state,
+            ComponentState::Error,
+            "スレッド死を「エラーなし」に丸めない(R-P2-8)"
+        );
+    }
+
+    /// 対照: 健全なコアで違反が無ければ Running のまま(上のテストが常に Error を
+    /// 返すだけの偽陽性でないこと)。
+    #[test]
+    fn a_healthy_core_without_violations_stays_running() {
+        let mut handler = Handler::new(test_params());
+        let core = Arc::new(Mutex::new(core(1, &[0])));
+        handler.core = Some(Arc::clone(&core));
+        handler.state = ComponentState::Running;
+
+        handler.latch_error();
+        assert_eq!(handler.state, ComponentState::Running);
     }
 }

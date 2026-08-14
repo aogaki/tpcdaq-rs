@@ -422,6 +422,91 @@ async fn run_number_change_before_eos_latches_error_and_counts_it() {
 }
 
 // ---------------------------------------------------------------------
+// (f) TODO/023-3(= P2 レビュー R-P2-9): 異常系 4 経路を decoder 水準で数える
+// ---------------------------------------------------------------------
+
+/// 実配線で 4 経路を一度に踏ませ、**すべてが metrics に出る**ことと
+/// **異常な EOS では run が閉じない**ことを確かめる。
+///
+/// - EOS の run_number 不一致 → `run_mismatches`(以前は warn のみ = GetStatus から見えない)
+/// - 期待外 source_id の EOS → `unexpected_sources`(以前は無言で eos_received に insert)
+/// - 復号できない msgpack → `decode_errors`(以前は warn のみ)
+/// - Heartbeat 受信 → `heartbeats_in`(以前は無言で捨てていた)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abnormal_messages_are_counted_and_never_close_the_run() {
+    const RUN: u32 = 23;
+    let root = temp_root("abnormal-counters");
+    // 期待ソースは 0 だけ。7 は「配線を間違えた誰か」。
+    let params = test_params(root.clone(), vec![0], 10 * 1024 * 1024);
+    let (cmd_ep, shutdown, task) = start_graw_writer(params).await;
+
+    let pull_bind = configure_arm(&cmd_ep, RUN).await;
+    let ctx = zmq::Context::new();
+    let push = connect_push(&ctx, &pull_bind);
+    rpc(&cmd_ep, &Command::Start { run_number: RUN }).await;
+
+    // 正常な 1 バッチ(このファイルが開いたままであることが「run が閉じていない」証拠)
+    send_batch(&push, 0, RUN, 0, &[make_frame(0, 8, 0x5A)]);
+
+    // 4 経路(非対称: 不一致 1・期待外 2・復号不能 3・Heartbeat 1)
+    send_eos(&push, 0, RUN + 1); // run 不一致
+    send_eos(&push, 7, RUN); // 期待外ソース
+    send_eos(&push, 8, RUN); // 期待外ソース(2 件目)
+    for i in 0..3u8 {
+        push.send(vec![0xC1u8, i, 0xFF], 0).unwrap(); // msgpack の never-used バイト = 復号不能
+    }
+    let heartbeat: Message<RawFrames> = Message::Heartbeat {
+        source_id: 0,
+        run_number: RUN,
+        counter: 0,
+    };
+    push.send(heartbeat.to_msgpack().unwrap(), 0).unwrap();
+
+    let status = poll_until(&cmd_ep, &Command::GetStatus, Duration::from_secs(5), |r| {
+        metric_u64(r, "heartbeats_in") >= 1
+    })
+    .await;
+
+    assert_eq!(
+        metric_u64(&status, "run_mismatches"),
+        1,
+        "EOS の run 不一致も Batch 側と同じカウンタへ計上する"
+    );
+    assert_eq!(metric_u64(&status, "unexpected_sources"), 2);
+    assert_eq!(metric_u64(&status, "decode_errors"), 3);
+    assert_eq!(metric_u64(&status, "heartbeats_in"), 1);
+    assert_eq!(
+        metric_u64(&status, "seq_gaps"),
+        0,
+        "異常メッセージは seq 検証に影響しない"
+    );
+
+    // run は閉じていない: ファイルは開いたまま(files_open = 1 / files_closed = 0)。
+    assert_eq!(
+        metric_u64(&status, "files_open"),
+        1,
+        "期待外 EOS / run 不一致 EOS で run を閉じてはならない"
+    );
+    assert_eq!(metric_u64(&status, "files_closed"), 0);
+    assert_eq!(
+        status.state,
+        ComponentState::Running,
+        "023-3 の 4 経路は Error ラッチの対象ではない(計上のみ)"
+    );
+
+    // 正規の EOS(期待ソース・正しい run)が来て初めて閉じる。
+    send_eos(&push, 0, RUN);
+    let closed = poll_until(&cmd_ep, &Command::GetStatus, Duration::from_secs(5), |r| {
+        metric_u64(r, "files_closed") == 1
+    })
+    .await;
+    assert_eq!(metric_u64(&closed, "files_open"), 0);
+
+    shutdown_and_join(shutdown, task).await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------
 // (e) Configure→Arm→Start→Stop の全シーケンス
 // ---------------------------------------------------------------------
 

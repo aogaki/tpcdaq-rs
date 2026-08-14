@@ -506,6 +506,17 @@ async fn configure_arm_start_stop_sequence_succeeds_and_idle_sends_heartbeats() 
         other => panic!("Heartbeat のはずが {other:?}"),
     }
 
+    // 送出成功も数える(TODO/023-5 = R-P2-12。以前は `let _ =` で結果を捨てていた)。
+    let status = poll_until(&cmd_ep, &Command::GetStatus, Duration::from_secs(5), |r| {
+        metric_u64(r, "heartbeats_out") >= 1
+    })
+    .await;
+    assert_eq!(
+        metric_u64(&status, "heartbeats_abandoned"),
+        0,
+        "受け手が居るのに打ち切られてはいない"
+    );
+
     let stopped = rpc(&cmd_ep, &Command::Stop).await;
     assert!(stopped.success, "{}", stopped.message);
     assert_eq!(stopped.state, ComponentState::Configured);

@@ -91,6 +91,14 @@ pub fn default_receiver_command_endpoint(cobo_id: u32) -> String {
 /// (破棄は `eos_abandoned` / `batches_abandoned` として可視化する)。
 pub const DEFAULT_DECODER_SEND_TIMEOUT_MS: i32 = 1000;
 
+/// receiver の PUSH 送信タイムアウトの既定(ミリ秒、TODO/023-2 = P2 レビュー R-P2-3)。
+///
+/// **decoder と同じ出所・同じ既定**([`DEFAULT_DECODER_SEND_TIMEOUT_MS`])。receiver も
+/// decoder と同じく「タイムアウトしても通常は諦めず再試行、`Reset` / 畳み込み中に限り
+/// 打ち切って `messages_abandoned` として可視化」という停止設計を採るので、打ち切りの
+/// 粒度を 2 コンポーネントで揃える(`[receiver]` に TOML キーは足さない — decoder と同じ流儀)。
+pub const DEFAULT_RECEIVER_SEND_TIMEOUT_MS: i32 = DEFAULT_DECODER_SEND_TIMEOUT_MS;
+
 /// バッチを閉じるバイト数の既定値(SPEC §2.3「8 MiB 到達 or 10 ms 経過」)。
 pub const DEFAULT_BATCH_MAX_BYTES: usize = 8 * 1024 * 1024;
 

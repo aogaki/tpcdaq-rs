@@ -204,6 +204,13 @@ pub struct RunWriter {
     /// **Error 状態には遷移しない**(malformed とは違い、run 先頭に来る正常な制御フレーム)。
     ctrl_frames: u64,
     write_errors: u64,
+    /// 期待ソース集合の外から EndOfStream が来た回数(TODO/023-3 = R-P2-9)。
+    /// DataLinkSet 誤配線の検知材料。EOS 集合には**入れない**(閉じ判定を汚さない)。
+    unexpected_sources: u64,
+    /// 受信メッセージを MessagePack として復号できなかった回数(TODO/023-3)。
+    decode_errors: u64,
+    /// 上流 Heartbeat の受信数(SPEC §2.2。decoder の `heartbeats_in` と同じ材料)。
+    heartbeats_in: u64,
     errored: bool,
 }
 
@@ -225,6 +232,9 @@ impl RunWriter {
             run_mismatches: 0,
             ctrl_frames: 0,
             write_errors: 0,
+            unexpected_sources: 0,
+            decode_errors: 0,
+            heartbeats_in: 0,
             errored: false,
         }
     }
@@ -250,6 +260,63 @@ impl RunWriter {
 
     pub fn write_errors(&self) -> u64 {
         self.write_errors
+    }
+
+    /// 期待外 source_id からの EndOfStream の数(TODO/023-3 = R-P2-9)。
+    pub fn unexpected_sources(&self) -> u64 {
+        self.unexpected_sources
+    }
+
+    /// 復号できなかった受信メッセージの数(TODO/023-3)。
+    pub fn decode_errors(&self) -> u64 {
+        self.decode_errors
+    }
+
+    /// 受信した上流 Heartbeat の数(SPEC §2.2)。
+    pub fn heartbeats_in(&self) -> u64 {
+        self.heartbeats_in
+    }
+
+    /// EndOfStream の run_number 不一致を計上する(TODO/023-3 = R-P2-9)。
+    ///
+    /// Batch 側([`RunWriter::handle_batch`])は同じ違反を `run_mismatches` に計上するのに、
+    /// EOS 側は warn するだけで数えていなかった(= GetStatus からは見えない)。同じカウンタへ
+    /// 揃える。**Error ラッチはしない**(発注書 023-3 は「計上」のみ。この EOS は run を
+    /// 閉じる材料にも使わない)。
+    pub fn record_eos_run_mismatch(&mut self, source_id: u32, got_run: u32) {
+        self.run_mismatches += 1;
+        warn!(
+            source_id,
+            expected_run = self.run_number,
+            got_run,
+            run_mismatches = self.run_mismatches,
+            "graw-writer: EndOfStream run_number mismatch — counted, not used to close the run"
+        );
+    }
+
+    /// 期待ソース集合の外から来た EndOfStream を計上する(TODO/023-3 = R-P2-9)。
+    ///
+    /// 以前は無言で `eos_received` に insert していた。閉じ判定は subset 判定なので早閉じは
+    /// 起きないが、**DataLinkSet / receiver `--cobo-id` 誤配線の検知材料が何も残らなかった**。
+    pub fn record_unexpected_source(&mut self, source_id: u32, expected: &HashSet<u32>) {
+        self.unexpected_sources += 1;
+        info!(
+            source_id,
+            expected = ?expected,
+            unexpected_sources = self.unexpected_sources,
+            "graw-writer: EndOfStream from a source outside the expected set — counted and \
+             ignored for the close decision (likely a misconfigured DataLinkSet)"
+        );
+    }
+
+    /// 復号できなかった受信メッセージを計上する(TODO/023-3。ログは呼び出し側)。
+    pub fn record_decode_error(&mut self) {
+        self.decode_errors += 1;
+    }
+
+    /// 上流 Heartbeat を受けた(SPEC §2.2)。**数えるだけ**(転送も保存もしない)。
+    pub fn record_heartbeat(&mut self) {
+        self.heartbeats_in += 1;
     }
 
     /// 1 Batch(RawFrames)分を処理する: ソース毎 sequence_number 連続性 → run_number 一致 →
@@ -402,6 +469,9 @@ impl RunWriter {
             "run_mismatches": self.run_mismatches,
             "ctrl_frames": self.ctrl_frames,
             "write_errors": self.write_errors,
+            "unexpected_sources": self.unexpected_sources,
+            "decode_errors": self.decode_errors,
+            "heartbeats_in": self.heartbeats_in,
             "batches": serde_json::Value::Object(batches),
             "asad": asad,
             "files": files,
@@ -620,6 +690,24 @@ fn local_timestamp() -> String {
 // ZMQ 配線(受信スレッド + コマンド REP)
 // ---------------------------------------------------------------------
 
+/// カウンタ更新だけのためにロックを取る定型(TODO/023-3 の 4 経路で使う)。
+///
+/// **戻り値 `false` = poisoned**(この Mutex を触るのは書き込みスレッドと GetStatus だけ
+/// なので、毒されている = このスレッド自身が過去に panic した)。その場合は消費を止める。
+/// 状態を Error にするのは Handler の [`Handler::latch_error`]。
+fn record(writer: &Mutex<RunWriter>, f: impl FnOnce(&mut RunWriter)) -> bool {
+    match writer.lock() {
+        Ok(mut w) => {
+            f(&mut w);
+            true
+        }
+        Err(_) => {
+            error!("graw-writer: RunWriter mutex poisoned — stopping");
+            false
+        }
+    }
+}
+
 /// PULL recv → [`RunWriter`] への書き込みを 1 本の専用 OS スレッドで行う(SPEC §7「受信スレッド
 /// (専用 OS スレッド、同期 zmq)→ 書き込み処理」)。
 ///
@@ -629,6 +717,9 @@ fn local_timestamp() -> String {
 ///
 /// 書き込み失敗が起きたら **即座に PULL の消費を止める**(SPEC §7: HWM が詰まり上流receiver へ
 /// 背圧が伝わり、overflow として可視化される — SPEC §1.4 のカスケード)。
+///
+/// 異常メッセージ(EOS の run 不一致 / 期待外ソースの EOS / 復号不能 / Heartbeat)は
+/// **すべてカウンタへ**(TODO/023-3 = R-P2-9)。どれも run を閉じる材料には使わない。
 fn run_writer_thread(
     pull: zmq::Socket,
     writer: Arc<Mutex<RunWriter>>,
@@ -674,27 +765,39 @@ fn run_writer_thread(
                     source_id,
                     run_number: eos_run,
                 }) => {
-                    if eos_run == run_number {
-                        eos_received.insert(source_id);
+                    // 異常な EOS は 2 種類とも**数えてから捨てる**(TODO/023-3 = R-P2-9):
+                    // run 不一致も期待外ソースも、run を閉じる材料には使わない。
+                    if eos_run != run_number {
+                        if !record(&writer, |w| w.record_eos_run_mismatch(source_id, eos_run)) {
+                            break 'consume;
+                        }
+                    } else if !expected_sources.contains(&source_id) {
+                        if !record(&writer, |w| {
+                            w.record_unexpected_source(source_id, &expected_sources)
+                        }) {
+                            break 'consume;
+                        }
                     } else {
-                        warn!(
-                            source_id,
-                            expected_run = run_number,
-                            got_run = eos_run,
-                            "graw-writer: EndOfStream run_number mismatch"
-                        );
+                        eos_received.insert(source_id);
+                        if expected_sources.is_subset(&eos_received) {
+                            info!(
+                                run_number,
+                                "graw-writer: all expected sources reached EndOfStream"
+                            );
+                            break 'consume;
+                        }
                     }
-                    if expected_sources.is_subset(&eos_received) {
-                        info!(
-                            run_number,
-                            "graw-writer: all expected sources reached EndOfStream"
-                        );
+                }
+                Ok(Message::Heartbeat { .. }) => {
+                    if !record(&writer, RunWriter::record_heartbeat) {
                         break 'consume;
                     }
                 }
-                Ok(Message::Heartbeat { .. }) => {}
                 Err(e) => {
-                    warn!(error = %e, "graw-writer: cannot decode message — skipped");
+                    warn!(error = %e, "graw-writer: cannot decode message — counted and skipped");
+                    if !record(&writer, RunWriter::record_decode_error) {
+                        break 'consume;
+                    }
                 }
             },
             Err(zmq::Error::EAGAIN) => {}
@@ -791,17 +894,29 @@ impl Handler {
 
     /// [`RunWriter`] が Error を報告していたら状態へ反映する(SPEC §7、receiver の
     /// overflow latch と同じ流儀)。
+    ///
+    /// **poisoned Mutex は「エラーなし」に丸めない**(TODO/023-1 = R-P2-8): 毒されている
+    /// = 書き込みスレッドがロック保持中に panic して死んだ、である。`unwrap_or(false)` で
+    /// 握り潰すと**全ファイルが書かれなくなっても state=Running のまま**になる。
     fn latch_error(&mut self) {
         if self.state == ComponentState::Error
             || !self.state.can_transition_to(ComponentState::Error)
         {
             return;
         }
-        let is_errored = self
-            .writer
-            .as_ref()
-            .and_then(|w| w.lock().ok().map(|g| g.errored()))
-            .unwrap_or(false);
+        let is_errored = match self.writer.as_ref() {
+            None => false,
+            Some(writer) => match writer.lock() {
+                Ok(guard) => guard.errored(),
+                Err(_) => {
+                    warn!(
+                        "graw-writer: worker thread panicked while holding the writer lock \
+                         (poisoned mutex) — entering Error"
+                    );
+                    true
+                }
+            },
+        };
         if !is_errored {
             return;
         }
@@ -1384,6 +1499,125 @@ mod tests {
     // -----------------------------------------------------------------
     // finalize: flush + fsync + close、以後は書けない
     // -----------------------------------------------------------------
+
+    // -----------------------------------------------------------------
+    // 異常系カウンタ(TODO/023-3 = R-P2-9 — decoder 水準へ揃える)
+    // -----------------------------------------------------------------
+
+    /// 4 経路(EOS run 不一致 / 期待外 source EOS / 復号不能 / Heartbeat)がすべて
+    /// **数えられて metrics に出る**こと。値は非対称にして取り違えを検出する。
+    #[test]
+    fn the_abnormal_paths_are_counted_and_exposed_in_metrics() {
+        let root = temp_output_root("abnormal-counters");
+        let mut w = RunWriter::new(root.clone(), 4, 10 * 1024 * 1024);
+        let expected: HashSet<u32> = [0u32].into_iter().collect();
+
+        // 非対称: run 不一致 1・期待外ソース 2・復号不能 3・Heartbeat 4
+        w.record_eos_run_mismatch(0, 9);
+        w.record_unexpected_source(7, &expected);
+        w.record_unexpected_source(8, &expected);
+        for _ in 0..3 {
+            w.record_decode_error();
+        }
+        for _ in 0..4 {
+            w.record_heartbeat();
+        }
+
+        assert_eq!(
+            w.run_mismatches(),
+            1,
+            "EOS の run 不一致も Batch 側と同じカウンタへ"
+        );
+        assert_eq!(w.unexpected_sources(), 2);
+        assert_eq!(w.decode_errors(), 3);
+        assert_eq!(w.heartbeats_in(), 4);
+        assert!(
+            !w.errored(),
+            "023-3 の 4 経路はいずれも Error ラッチの対象ではない(計上のみ)"
+        );
+
+        let m = w.metrics_json();
+        for key in [
+            "seq_gaps",
+            "run_mismatches",
+            "ctrl_frames",
+            "write_errors",
+            "unexpected_sources",
+            "decode_errors",
+            "heartbeats_in",
+        ] {
+            assert!(m.get(key).is_some(), "metrics.{key} が無い: {m}");
+        }
+        assert_eq!(m["run_mismatches"].as_u64(), Some(1));
+        assert_eq!(m["unexpected_sources"].as_u64(), Some(2));
+        assert_eq!(m["decode_errors"].as_u64(), Some(3));
+        assert_eq!(m["heartbeats_in"].as_u64(), Some(4));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // -----------------------------------------------------------------
+    // poisoned Mutex = スレッド死(TODO/023-1 = R-P2-8)
+    // -----------------------------------------------------------------
+
+    fn test_params() -> GrawWriterParams {
+        GrawWriterParams {
+            pull_bind: "tcp://127.0.0.1:0".to_string(),
+            command_listen: "tcp://127.0.0.1:0".to_string(),
+            output_root: std::env::temp_dir().join("tpcdaq-graw-writer-poison-test"),
+            max_file_bytes: 1024,
+            flush_interval_ms: 1000,
+            expected_sources: vec![0],
+        }
+    }
+
+    /// 「書き込みスレッドがロック保持中に panic して死んだ」状況をそのまま作る。
+    /// (テスト出力に panic のメッセージが 1 行出るのは想定どおり — 握り潰さない。)
+    fn poison<T: Send + 'static>(m: &Arc<Mutex<T>>) {
+        let m = Arc::clone(m);
+        let joined = std::thread::spawn(move || {
+            let _guard = m.lock().expect("fresh mutex is not poisoned");
+            panic!("simulated worker panic while holding the lock");
+        })
+        .join();
+        assert!(joined.is_err(), "スレッドは panic しているはず");
+    }
+
+    #[test]
+    fn a_poisoned_writer_lock_enters_error_instead_of_looking_healthy() {
+        let root = temp_output_root("poisoned");
+        let mut handler = Handler::new(test_params());
+        let writer = Arc::new(Mutex::new(RunWriter::new(root.clone(), 1, 1024)));
+        handler.writer = Some(Arc::clone(&writer));
+        handler.state = ComponentState::Running;
+
+        poison(&writer);
+        assert!(writer.lock().is_err(), "前提: Mutex は poisoned");
+
+        handler.latch_error();
+        assert_eq!(
+            handler.state,
+            ComponentState::Error,
+            "スレッド死を「エラーなし」に丸めない(R-P2-8)"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 対照: 健全な writer で違反が無ければ Running のまま。
+    #[test]
+    fn a_healthy_writer_without_violations_stays_running() {
+        let root = temp_output_root("healthy");
+        let mut handler = Handler::new(test_params());
+        let writer = Arc::new(Mutex::new(RunWriter::new(root.clone(), 1, 1024)));
+        handler.writer = Some(Arc::clone(&writer));
+        handler.state = ComponentState::Running;
+
+        handler.latch_error();
+        assert_eq!(handler.state, ComponentState::Running);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn finalize_closes_every_open_file_and_keeps_the_file_report() {

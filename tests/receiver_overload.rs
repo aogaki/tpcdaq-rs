@@ -190,6 +190,141 @@ async fn an_absent_downstream_never_counts_as_sent_and_still_does_not_stop_the_d
         .unwrap();
 }
 
+/// TODO/023-2(= P2 レビュー R-P2-3): **下流不在で送出がブロックしている最中でも
+/// コンポーネントを畳める**こと。
+///
+/// 以前の `send_on` は SNDTIMEO 無しのブロッキング送信だったので、下流が全部死ぬと
+/// 送信スレッドが `zmq_send` の中で永久に固まり(broadcast stop では起こせない)、
+/// しかも失敗が 1 つも数えられていなかった。修正後は decoder と同じ形:
+/// **捨てない・ただし中断可能**(`Reset` / 畳み込みのみ)+ 打ち切りは可視カウント。
+///
+/// `Reset` の応答が返ってきた時点で送信スレッドは **join 済み**(`do_reset` が join する)
+/// なので、応答に載る `messages_abandoned` は確定値であり、スレッドが残っていないことの
+/// 直接の証拠でもある。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blocked_send_is_abandoned_on_reset_counted_and_the_sender_thread_is_joined() {
+    let dead_endpoint = || {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        format!("tcp://{addr}")
+    };
+
+    let params = ReceiverParams {
+        cobo_id: 0,
+        listen: "127.0.0.1:0".to_string(),
+        command_listen: "tcp://127.0.0.1:0".to_string(),
+        graw_writer_endpoint: dead_endpoint(),
+        decoder_endpoint: dead_endpoint(),
+        batch_max_bytes: 4 * 1024, // 1 フレームで 1 バッチ = すぐ送信側がブロックする
+        batch_max_ms: 10,
+        queue_frames: 256, // 溢れさせない(見たいのは送信ブロックであって overflow ではない)
+        heartbeat_ms: 60_000, // Heartbeat では起こさない(打ち切りの粒度は SNDTIMEO)
+        hwm: TEST_HWM,
+    };
+
+    let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+    let (ep_tx, ep_rx) = oneshot::channel();
+    let task = tokio::spawn(run_receiver(params, shutdown_rx, Some(ep_tx)));
+    let cmd_ep = ep_rx.await.unwrap();
+
+    rpc(
+        &cmd_ep,
+        &Command::Configure(RunConfig {
+            run_number: 97,
+            comment: "blocked send".to_string(),
+            config: serde_json::Value::Null,
+        }),
+    )
+    .await;
+    let armed = rpc(&cmd_ep, &Command::Arm).await;
+    let data_addr = armed.metrics.as_ref().unwrap()["bind_address"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    rpc(&cmd_ep, &Command::Start { run_number: 97 }).await;
+
+    // 数フレームだけ流す(内部キューは 256 段なので溢れない)。送信スレッドは
+    // 最初のバッチで下流不在にぶつかってブロックする。
+    let mut stream = TcpStream::connect(&data_addr).await.unwrap();
+    for i in 0..4 {
+        stream
+            .write_all(&make_frame(FRAME_BYTES, 0xB0 + i))
+            .await
+            .expect("fake CoBo write");
+    }
+    stream.flush().await.unwrap();
+
+    // 全フレームがソケットから読み切られている(never-stop は保たれたまま)。
+    let status = poll_status(
+        &cmd_ep,
+        Duration::from_secs(10),
+        "all frames drained",
+        |r| metric_u64(r, "frames") >= 4,
+    )
+    .await;
+    assert_eq!(
+        metric_u64(&status, "messages_abandoned"),
+        0,
+        "まだ諦めていない(下流の背圧で待っている = ロスレス)"
+    );
+    assert_eq!(metric_u64(&status, "overflow_frames"), 0, "溢れてはいない");
+
+    // Stop は打ち切らない(強制 EOS を流す経路 — SPEC §1.3 v1.6)。即座に返ること。
+    let stop_started = Instant::now();
+    let stopped = rpc(&cmd_ep, &Command::Stop).await;
+    let stop_elapsed = stop_started.elapsed();
+    assert!(stopped.success, "{}", stopped.message);
+    assert!(
+        stop_elapsed < Duration::from_secs(2),
+        "Stop に {stop_elapsed:?} 掛かった(送出待ちで固まっている)"
+    );
+
+    // Reset は打ち切ってよい唯一の経路。応答が返る = 送信スレッドを join できた。
+    let reset_started = Instant::now();
+    let reset = rpc(&cmd_ep, &Command::Reset).await;
+    let reset_elapsed = reset_started.elapsed();
+    assert!(reset.success, "{}", reset.message);
+    assert_eq!(reset.state, ComponentState::Idle);
+    assert!(
+        reset_elapsed < Duration::from_secs(2),
+        "Reset に {reset_elapsed:?} 掛かった(送信スレッドが畳めていない)"
+    );
+
+    // 破棄は必ず数えられ、metrics に出る(数えられていることが打ち切りを許す条件)。
+    assert!(
+        metric_u64(&reset, "messages_abandoned") >= 1,
+        "打ち切ったのに数えていない: {:?}",
+        reset.metrics
+    );
+    for key in ["messages_abandoned", "encode_errors", "send_errors"] {
+        assert!(
+            reset.metrics.as_ref().unwrap().get(key).is_some(),
+            "metrics.{key} が GetStatus に出ていない: {:?}",
+            reset.metrics
+        );
+    }
+    assert_eq!(
+        metric_u64(&reset, "batches"),
+        0,
+        "下流不在では 1 バッチも「送れたこと」にしない(SPEC §1.2 v1.4)"
+    );
+    println!(
+        "blocked send: Stop {stop_elapsed:?} / Reset {reset_elapsed:?}、\
+         messages_abandoned={} encode_errors={} send_errors={}",
+        metric_u64(&reset, "messages_abandoned"),
+        metric_u64(&reset, "encode_errors"),
+        metric_u64(&reset, "send_errors"),
+    );
+    drop(stream);
+
+    shutdown_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("receiver did not stop within 5 s")
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queue_overflow_counts_frames_enters_error_and_keeps_draining() {
     let ctx = zmq::Context::new();

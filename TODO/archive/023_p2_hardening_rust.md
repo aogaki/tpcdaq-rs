@@ -1,6 +1,36 @@
 # 023 — P2 レビュー改修: Rust 異常系を decoder 水準に揃える
 
-**Status: OPEN(発注可)**
+**Status: COMPLETED**(2026-08-14 implementer/Opus(worktree)→ Fable レビュー PASS →
+main 取り込み)
+
+## 結果
+
+- **実装**(7 ファイル +1057/-60): receiver 送信経路の decoder パターン移植
+  (SendOutcome 3 値 / SNDTIMEO + EAGAIN リトライ / 送る前に abandon 確認 /
+  `messages_abandoned`・`encode_errors`・`send_errors` を metrics 露出 / Reset・畳み込みで
+  sender スレッドを **join**)+ framer リセット初回 warn + decoder/graw-writer の
+  poisoned Mutex 即 Error + graw-writer 異常系 4 経路(EOS run 不一致・期待外ソース EOS は
+  **数えて捨てる = run を閉じる材料にしない**、decode_errors、heartbeats_in)+
+  decoder `heartbeats_out`/`heartbeats_abandoned` + doc 修正。
+- **テスト(worktree でエージェント実行 + Fable がゲート・コード読みで裏取り、2026-08-14、
+  macOS Darwin 25.5.0)**: fmt / clippy クリーン、`cargo test` 281 passed / 0 failed
+  (新規 12。TDD 赤確認済み — poisoned テストは旧実装で Running≠Error の失敗を実測)。
+  実データ gate: p2_e2e 2 件(13.6 s)+ intake 9 件 green、ELITPC 2022 構造オラクル
+  2 件 green(172 s)。**検収実測: 下流不在で Stop 609 µs / Reset 1.000 s、
+  messages_abandoned=2、スレッド join 確認**。main 取り込み後の統合ゲートは CURRENT.md
+  記載値。スキップ: elitpc_pevent_e2e(env パス未特定 — 本ユニット無関係)。
+- **レビュー(Fable)**: 逸脱 4 件すべて受理 —
+  ①**`Stop` では打ち切らない**(発注書の誤り。Stop = §1.3 v1.6 の強制 EOS 経路であり、
+  ここで abandon すると一時的な詰まりで EOS を捨てる。打ち切りは Reset と畳み込みのみ —
+  decoder と同型)②join は do_reset/Drop、Reset 応答 ~1 s(SNDTIMEO 分、検収 2 s 内)+
+  送信待ち 100 ms 頭打ち ③`batches` を「送れたバッチ」に厳格化(v1.4 契約の整合)
+  ④EOS run 不一致は計上のみで Error ラッチしない(SPEC §7 の Error 事由列挙に整合。
+  不一致 EOS は run を閉じない)。
+- **申し送り**: (a) Stop 直後・下流不在のまま Start し直すと前 run の送信スレッドが
+  blocked のまま残る経路が理論上ある(修正前から同じ。Start 時 abandon は正常系 EOS を
+  落とし得るため未着手)— controller は Stop 後 Reset まで送る(016)ので実運用では
+  踏まない。(b) poisoned 時の respond() metrics は `{}`(状態は Error で可視。
+  `PoisonError::into_inner` で読ませる改善余地)。
 **仕様**: SPEC **v1.10** §1.4-5(役割非対称 — source は Error + drain 継続)/ §1.3 v1.6
 (abandon の可視カウント)。所見の詳細 = [P2_REVIEW.md](P2_REVIEW.md) の
 R-P2-8 / R-P2-3 / R-P2-9 / R-P2-10 / R-P2-12 / R-P2-13(logbook)。
