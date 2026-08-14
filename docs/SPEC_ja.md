@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.11(2026-08-14 — 実装の正本)**
+- **status**: **v1.12(2026-08-14 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -70,6 +70,26 @@
   / **v1.11(2026-08-14)§13-7 のデータリンク本数を解消**(Aogaki 情報): 2 枚の zCoBo は
   同一筐体内で内部ネットワークを 1 つに束ねてから PC 接続 = **データリンクは 1 本**
   (DataSender 1 エントリ・receiver 1 台。v1.7 のワイヤ実態と整合)。P5 初日の目視確認のみ残す。
+  / **v1.12(2026-08-14)実 GET ソース調査(TODO/032・033)+ 連続 run のユーザー裁定(TODO/034)**:
+  ①**§1.3 run 開始に「ECC を Idle へ戻す」段を追加**(ユーザー決定 — 実運用が「毎 run 完全
+  リセットして一からやり直す」作法。かつ `ecc stop` 後は `Ready` で `describe` が通らないため
+  2 本目以降の必須条件。TODO/030 の跨 run 実測で判明、TODO/034)。
+  **同日中に訂正**: 実 ECC の `reset` は `EV_UNDO` = **1 段戻す**意味論で `Active` からは**無音で
+  無視**され、`configure` も `ST_PREPARED` ガードで黙ってスキップされる(TODO/034 が実 ECC
+  ソースで発見)。よって `Ready → Idle` は **`breakup → reset → reset` の歩き戻し**が必要。
+  実装は TODO/036。
+  ②**§1.3 停止シーケンスの事実修正**(TODO/032 — 実 GET の `daqStop` は**データリンクを
+  close しない**。close は breakup か次 configure。**データリンクを張るのは CoBo 自身**で ECC は
+  probe を張らない)+ 第一段を**受信静止検出に置換**(TODO/033、`eos_quiesce_ms` 新設 =
+  既定 500 ms。`eos_timeout` はハード上限として存置)。強制 EOS を「例外」から**正規経路**へ。
+  ③**§1.3 異常中止の機序を実装実態に訂正**(TODO/033 — decoder Reset は同一 run 内 seq ギャップを
+  作らない(打ち切りは末尾バッチでスレッドは直後に終了)。実害は **EOS バリア喪失 → 次 run 冒頭の
+  run_number 食い違い fatal(exit 6)として遅発**。誤りの起源は P2 レビュー R3 の仕様合成)+
+  **終端条項**(強制 EOS も流れ切らなければ畳んでよい / 次 run 前に root-sink を再起動)を追加。
+  ④**§9.2 run_stop に `forced_eos` / `eos_closed` を追加**(TODO/033 — 実機 TCP flow では
+  `forced_eos=true` が常態で、**異常の印は `eos_closed=false` のみ**)+ reason の `"abort:..."` を明文化。
+  ⑤**§1.4-6 receiver 単一リンク規約**(先勝ち + 余分接続は即 close + `extra_connections` /
+  0 バイト接続は EOS を構成しない)+ **§12-13** + **§13-7 に P5 の機械確認手段**を追記(TODO/032)。
 - **正本性**: 本書が実装の正本。PROPOSAL v0.4 と食い違う場合は本書が勝つ(差分は §14 に列挙。
   PROPOSAL v0.5 への反映は Warsaw フィードバックと併せて判断 — 未実施)。
 - **入力**: PROPOSAL_ja.md v0.4 / delila-rs 実装調査 / C++ 版 tpcdaq 実装調査 /
@@ -159,21 +179,73 @@ CoBo k ──TCP:46005+k──▶ [receiver k] ──PUSH──▶ (PULL bind) [
   1. run 番号採番(§8.1)→ 各 Rust コンポーネントへ `Configure`(下流から: graw-writer, monitor → decoder → receivers)
   2. `Arm` — **receiver はここで bind + listen**(listen-before-start の実装点)
   3. `Start{run}` — 書き手はファイル準備、receiver は accept 開始
-  4. ecc-bridge 経由で `describe → prepare → configure(DataLinkSet XML)→ start`
+  4. ecc-bridge 経由で **`reset`(= ECC を `Idle` へ戻す)→** `describe → prepare →
+     configure(DataLinkSet XML)→ start`
+     - **毎 run 先頭で必ず ECC を `Idle` へ戻す(v1.12、ユーザー決定 2026-08-14)**: 実運用
+       (ワルシャワ大学)が「**毎 run 完全にリセットして一からやり直す**」作法であり、それに合わせる。
+       **1 本目でも同じ経路を通す**(状態による分岐を作らない)。
+     - **⚠ 実 ECC の `reset` は「1 段戻す(`EV_UNDO`)」意味論であり、`Idle` への直行ではない
+       (v1.12 訂正 — TODO/034 が実 ECC ソースで発見、発注側で裏取り済み)**:
+       `EV_UNDO` の遷移は `Described→Idle` と `Prepared→Described` の 2 本のみで、
+       **`Active`(= Ready/Running/Paused)からの `EV_UNDO` は存在しない**
+       (`GetBench/src/get/rc/BackEnd.cpp:924` / `:250-270`)。未定義遷移は例外も出さず
+       **`Ignored` で無音**(`StateMachine/src/dhsm/Engine.cpp:344`)。さらに
+       `BackEnd::configure` は **`if (state == ST_PREPARED)` ガードで黙ってスキップ**する
+       (`BackEnd.cpp:955-962`)。
+       → `ecc stop` 後の `Ready` から `reset` を 1 回打つだけでは **何も起きず、続く
+       describe / prepare も無音、configure もスキップされ、`start` だけが成功する**。
+       **`Ready → Idle` には `breakup`(Active→Prepared)→ `reset`(→Described)→
+       `reset`(→Idle)の歩き戻しが要る**。controller は**現在の ECC 状態を見て必要な段数だけ
+       歩き戻す**(§8.2 の状態を使う)。
+       **`ecc stop` 後の ECC は `Ready`** で、`describe` は `Off / Idle / Described` からしか
+       許されないため、この歩き戻しが無いと **2 本目以降の run が成立しない**
+       (TODO/030 の跨 run 実測 + TODO/034 の実 ECC 解析)。
+       **オペレータに手で `POST /api/ecc/reset` を挟ませない**。
+     - `configure` で **CoBo がデータリンクを張り直す**(下記 v1.12 注記)ので、receiver の
+       「run 毎に接続 1 本」という意味論とも整合する。**歩き戻しが不完全なまま `start` すると
+       `configure` がスキップされ、CoBo がリンクを張り直さないまま run が始まる**
+       (実機では前 run のソケットが receiver 側で閉じられているため
+       「Could not establish data link.」= 可視な失敗になるが、いずれにせよ run は成立しない)。
+     - controller は **`reset` 直後の ECC 申告状態を audit(`ecc_state_after_reset`)に必ず残す**
+       (silent にしない。実機で `"Ready"` が出たら歩き戻しが効いていないシグナル)。
+     - `Arm` は前 run のソケット解放待ちで一時的に bind 失敗しうる(libzmq の close は非同期)。
+       controller は**指数バックオフでリトライ**し、**粘った回数と所要を audit
+       (`arm_retries`)に必ず記録**する(実測: 最悪 4 試行 / 157 ms。上限 6 試行 / 620 ms)。
+     - **run 開始シーケンスが失敗したら `next_run` を巻き戻す**(controller は単一書き手)。
+       ただし `run_start` をログブックへ書いた後は巻き戻さない。「番号は飛んでよい」(§12-11)は
+       維持するが、**運用でふつうに使って飛ぶ状態は無くす**。
   5. run_start レコードを JSONL へ(§9)
 - run 停止シーケンス:
-  1. ecc `stop`(CoBo が送信停止 → TCP close)
-  2. receiver: EOF 検出 → `EndOfStream` を下流全リンクへ。EOF が **5 秒**来なければ controller の
-     `Stop` コマンドで強制 EOS(タイムアウトは設定可)
+  1. ecc `stop`(CoBo が送信停止。**実 GET は stop ではデータリンクを close しない** — close は
+     breakup(`daqDisconnect`)または次の `configure` の再接続時。20190315_patched
+     `DaqCtrlNodeI::daqStop` / `disconnect` で確認、v1.12。**データリンクを張るのは CoBo 自身**で、
+     ECC は Ice で指示するだけ。接続確立は `configure` の時点)
+  2. receiver: EOF が届いた場合(breakup 先行・リプレイ等)は `EndOfStream` を下流全リンクへ。
+     **実機の通常経路では ecc stop 後に EOF は届かない**(TODO/032 調査)ため、controller は
+     「自然 EOS の完了」または「全 receiver の受信静止(受信バイト数が `eos_quiesce_ms`
+     (既定 **500 ms**、設定可)のあいだ不変。不達の receiver は静止とみなす)」の早い方まで待ち、
+     receiver への `Stop` コマンドで **EOS を注入する(これが正規経路)**。`eos_timeout`
+     (既定 **5 秒**、設定可)は両段のハード上限。静止検出は ecc stop の flush 済み在飛データを
+     飲み切ってから畳むための待ちであり、ロスレス規約の一部である(v1.12)
   3. root-sink: 全ソース EOS 到達 = in-band バリア → TTree finalize + **run\<N\>_monitor.root 書き出し**(R10)
   4. コンポーネント `Stop`(上流から)、run_stop レコードを JSONL へ
-- **異常中止(abort)の正規経路(v1.6 — P2 レビュー R3 の解消)**: 中止も必ず「EOS を流して閉じる」:
-  ecc `stop`(不達でも続行)→ receiver へ `Stop`(強制 EOS)→ EOS がチェーンを流れて root-sink が
-  run をクローズ(incomplete は可視カウント)→ その後に各コンポーネントの `Stop`/`Reset`。
-  **run がクローズする前に decoder を Reset しない**(送出打ち切りの seq ギャップが root-sink を
-  §6.2-5 どおり fatal 死させる — 正しい検出を誤発火させない)。`Reset` は run クローズ後の
-  Error 復旧専用。例外: root-sink 自体が死んでいる場合のみ上流の Reset は無条件に可
-  (下流不在への abandon は可視カウントされ無害)。run_stop は `ok: false, reason: "abort:..."`。
+- **異常中止(abort)の正規経路(v1.6、v1.12 で機序を実装実態に訂正)**: 中止も必ず
+  「EOS を流して閉じる」: ecc `stop`(不達でも続行)→ receiver へ `Stop`(強制 EOS)→
+  EOS がチェーンを流れて root-sink が run をクローズ(incomplete は可視カウント)→
+  その後に各コンポーネントの `Stop`/`Reset`。
+  **run がクローズする前に decoder を Reset しない**。理由(v1.12 訂正): Reset の送出打ち切りが
+  作るのは「同一 run 内の seq ギャップ」ではない(打ち切られるのは末尾バッチで、以後の送出
+  なしにスレッドが終了するため §6.2-5 の Gap 検出は発火しない)。実害は **EOS バリアの喪失**で
+  あり、root-sink は run を開いたまま残り、**次の run の最初の Data で run_number 食い違いの
+  fatal(exit 6、§6.2-5)として遅発する**。`Reset` は run クローズ後の Error 復旧専用。
+  例外: root-sink 自体が死んでいる場合のみ上流の Reset は無条件に可(下流不在への abandon は
+  可視カウントされ無害)。
+- **EOS が強制でも流れ切らなかったとき(v1.12 追加 — 終端条項)**: 強制 EOS 後も `eos_timeout`
+  内に伝播を観測できなければ、controller はそれ以上待たずにコンポーネントを畳んでよい
+  (`run_stop` に `ok: false` と `eos_closed: false` を記録 — §9.2)。このとき root-sink の run は
+  開いたままである。**次の run を開始する前に root-sink を再起動(または fatal 死を回収)する
+  こと** — さもなくば次 run の最初の Data が上記の遅発 fatal を踏む(これは正しい検出であり、
+  抑止しない)。run_stop は `ok: false, reason: "abort:..."` または `"error:eos-timeout"`。
 - 起動順(プロセス起動そのもの)は任意(ZMQ connect はリトライされる)。起動スクリプトの推奨順は
   bind 側から: graw-writer → decoder → root-sink → monitor → controller → receivers → ecc-bridge。
 
@@ -194,6 +266,15 @@ CoBo k ──TCP:46005+k──▶ [receiver k] ──PUSH──▶ (PULL bind) [
    (receiver / decoder / graw-writer)は **Error 状態を報告して drain は継続**し、止める判断は
    controller が行う(§1.3)。REP を持たない root-sink は **即 fatal 終了**が唯一の可視な
    失敗表明であり、黙って走り続けるより正しい(§6.2-5/6)。
+6. **receiver のデータリンクは同時に 1 本(先勝ち、v1.12)**: 接続保持中に到着した余分な接続は
+   accept して即 close し、`extra_connections` としてカウント + 初回 warn(黙って backlog に
+   滞留させない — silent stall 禁止)。**1 バイトも運ばなかった接続の終了(EOF / エラー)は
+   run 境界(EOS)を構成しない** — `empty_connections` としてカウントする(迷い込み接続の
+   即断が偽 EOS で run を閉じるのを防ぐ。§1.3 の強制 EOS 経路は不変)。現接続 peer と
+   最終受信時刻(`last_read_unix_ns`)は GetStatus で可視。
+   根拠: 実機のデータリンクは CoBo が configure 時に張る 1 本のみで、ECC は probe を張らない
+   (TODO/032 調査)。GET 純正 DataRouter も単一接続(確立後は listen 自体を閉じる)であり、
+   本規約はそれを可視化強化した同型。
 
 ## 2. ZMQ メッセージ仕様
 
@@ -710,7 +791,7 @@ fake-ECC servant(C++ 版のテストハーネス)相手の e2e を CI に置く(
 | type | 追加フィールド |
 |---|---|
 | `run_start` | `run`, `config_id`, `geometry: {path, sha256}`, `cobos: [{id, listen}]`, `operator`, `comment`, `expected_fragments`(期待 (cobo,asad) 集合) |
-| `run_stop` | `run`, `duration_s`, `ok: bool`, `reason`("normal" / "error:..."), `counters: {events_built, events_incomplete, late_fragments, frames: {cobo: n}, overflow_frames, malformed}`(**v1.10: 各項目は nullable — null = 「その時点で取得不能」であり 0 と混同しない**。root-sink が REP を持たない間、events_built/events_incomplete/late_fragments は null。取れる分は GetStatus 実測)、`files: [{path, bytes}]`(graw 群 + root + monitor.root 実績) |
+| `run_stop` | `run`, `duration_s`, `ok: bool`, `reason`(**"normal" / "error:eos-timeout" / "abort:<原因>"** — abort は停止開始時点の起因。EOS の顛末は次の 2 フィールドが持ち、reason には合成しない)、**`forced_eos: bool`**(EOS を receiver `Stop` で注入したか。**実機 TCP flow では通常 true**(§1.3 v1.12 — stop はデータリンクを close しない)。EOF 由来の自然 EOS のみ false)、**`eos_closed: bool`**(EOS がチェーンを流れ切ったことを観測できたか。**false が唯一の異常の印**であり、reason が abort でも eos-timeout の事実はここで読める)(v1.12 追加)、`counters: {events_built, events_incomplete, late_fragments, frames: {cobo: n}, overflow_frames, malformed}`(**v1.10: 各項目は nullable — null = 「その時点で取得不能」であり 0 と混同しない**。root-sink が REP を持たない間、events_built/events_incomplete/late_fragments は null。取れる分は GetStatus 実測)、`files: [{path, bytes}]`(graw 群 + root + monitor.root 実績) |
 | `audit` | `action`(REST エンドポイント名), `params`(要約), `operator`, `ok`, `error` |
 | `comment` | `author`, `text`(自由記述、R11) |
 | `psu` | `device`, `channel`, `event`("TRIP"/"ON"/"OFF"/"VSET"/...), `values: {vmon, imon, vset}`(P6 で詳細化) |
@@ -816,6 +897,7 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
 | 10 | WS 適合性 | §10.4 の全メッセージ型 green |
 | 11 | JSONL 耐性 | run 中 kill -9 後、最終行以外の全行が parse 可能。再起動後 next_run が重複しない |
 | 12 | ジオメトリ | mini/ELITPC/合成 2-CoBo .dat のロード + Rust/C++ ダンプ一致(§4.5)。FPN 表の両参照実装一致 |
+| 13 | receiver 余分接続(v1.12) | 現接続でデータ流通中に余分な接続を張っても、現接続のフレーム列はバイト一致で無影響 + 余分接続は即 close + `extra_connections` 加算 + warn 1 回。0 バイト接続の終了で EOS が出ない(偽 run 境界なし) |
 
 リプレイに使う graw_replay(Rust 版新規、005 で実装済み)は `--rate-mbps`(**Mbit/s 単位**の
 ペーシング。例: mini 100 Hz 相当 ≈ 28 MB/s = 224 Mbps)と `--loop` を持つ(C++ 版はペーシング
@@ -848,6 +930,8 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
    DataLinkSet 単一エントリ例と完全整合)。P5 初日に実機で接続数を目視確認するだけでよい
    (万一 2 TCP 接続が同一ポートに来る構成だった場合は receiver の accept ループが
    同時 2 接続対応を要する — 現設計は 1 接続ずつ drain。その際は要改修として扱う)。
+   **P5 初日の接続数目視は receiver の `extra_connections` カウンタで機械確認できる(v1.12)**
+   (run 中 0 のままなら 1 リンク構成の実機確認完了。> 0 なら 2 接続構成 = 上記「要改修」シグナル)。
 8. (P6)HiVolta: LOCAL モードでのモニタ無干渉・単一 TCP 接続の専有確認。HMP2020: LAN オプション
    有無と `SYST:MIX` 動作(Q2)。
 
