@@ -9,6 +9,14 @@
 //       負性テストの実体。実 ECC の同じ症状は
 //       reference/20190315_patched/GetBench/src/get/daq/DaqCtrlNodeI.cpp:399 が出典。
 //   (c) 繋がったら **1 バイトも送らず**保持し、stop() で閉じる(データ送出は graw_replay の仕事)。
+//   (d) `--no-data-link`(既定 OFF、TODO/030 の裁定①): start() で **TCP を一切張らない**。
+//       実機では「CoBo が張る 1 本の TCP がそのままデータリンク」なので、リプレイ側
+//       (graw_replay)が CoBo 役を務める全通し試験では、この servant が別途 connect すると
+//       **CoBo が 2 台**いる状態になる。receiver の accept ループは 1 接続ずつしか処理しない
+//       ため、保持されたこの「幻の CoBo」が受け口を占有してデータが 1 バイトも読まれない。
+//       接続してすぐ close する案は使えない —— receiver は `Ok(0)` を run 境界と解釈して
+//       EOS を送るので run が空で閉じてしまう。よって「張らない」を選ぶ。
+//       **既定は従来どおり張る**ので、016/017 の listen-before-start 負性テストは不変。
 //
 // このプロセスは制御プレーンの模擬だけを行う。GET のビルドは要らない(Ice のみ)。
 
@@ -97,6 +105,7 @@ int connect_with_timeout(const std::string& ip, int port, std::string& why) {
 
 class FakeEcc : public get::rc::StateMachine {
  public:
+  explicit FakeEcc(bool no_data_link) : no_data_link_(no_data_link) {}
   ~FakeEcc() override { close_links(); }
 
   void describe(std::string configId, const Ice::Current&) override {
@@ -111,7 +120,11 @@ class FakeEcc : public get::rc::StateMachine {
   }
   void configure(std::string configId, std::string dataRouter, const Ice::Current&) override {
     std::lock_guard<std::mutex> lk(mu_);
-    step("configure");
+    // **036**: 実 ECC の BackEnd::configure は `if (state == ST_PREPARED)` ガード付きで、
+    // Prepared 以外では**何も起きない**(BackEnd.cpp:955-962)。DataLinkSet も更新されない ——
+    // つまり CoBo は**古い宛先のまま**になる。ここで早期 return するのがその再現である
+    // (更新してしまうと「歩き戻しを省いても新しいポートに繋がる」嘘の green を作る)。
+    if (step("configure") != ecc::Step::Applied) return;
     config_id_ = std::move(configId);
     data_link_set_ = std::move(dataRouter);  // DataLinkSet XML をそのまま保持
   }
@@ -125,6 +138,14 @@ class FakeEcc : public get::rc::StateMachine {
     if (links.empty()) {
       state_ = ecc::State::Ready;  // 遷移を巻き戻す
       throw mdaq::utl::CmdException("Could not establish data link. no DataLink in DataLinkSet");
+    }
+    // --no-data-link: DataLinkSet の中身は検査するが TCP は張らない(冒頭 (d) の理由)。
+    if (no_data_link_) {
+      for (const ecc::Link& l : links) {
+        std::fprintf(stderr, "fake_ecc: data link SKIPPED (--no-data-link): %s -> %s:%d\n",
+                     l.sender.c_str(), l.router_ip.c_str(), l.router_port);
+      }
+      return;
     }
     std::vector<int> opened;
     for (const ecc::Link& l : links) {
@@ -166,7 +187,10 @@ class FakeEcc : public get::rc::StateMachine {
   }
   void reset(const Ice::Current&) override {
     std::lock_guard<std::mutex> lk(mu_);
-    step("reset");
+    // **036**: 実 ECC の reset は EV_UNDO = **1 段戻すだけ**(BackEnd.cpp:924)。遷移が
+    // 無ければ(= Active に居れば)**副作用も含めて完全に無音**。ここで早期 return しないと
+    // 「reset は効かないのに DataLinkSet だけ消える」という実機に無い状態を作ってしまう。
+    if (step("reset") != ecc::Step::Applied) return;
     close_links();
     data_link_set_.clear();
   }
@@ -181,15 +205,33 @@ class FakeEcc : public get::rc::StateMachine {
   }
 
  private:
-  // ecc_core の遷移表で状態を進める。違反は CmdException(= 実 ECC と同じ現れ方)。
-  void step(const char* action) {
+  // ecc_core の遷移表で状態を進める(036)。
+  //
+  //   Applied … 遷移した(呼び手は副作用を実行してよい)
+  //   Ignored … 実 ECC と同じく**無音**。状態も副作用も動かさない。**呼び手には ok を返す**
+  //             ので、controller から見て「何も起きなかったのに成功」= 一番危ない現れ方に
+  //             なる。ここを黙って通すのが実機準拠であり、我々の歩き戻しはこれを
+  //             「状態が動かなかった」ことで検出する(src/controller.rs)。
+  //   Denied  … 順序違反。CmdException(実機より辛い側 —— ecc_core.hpp の注記参照)
+  //
+  // Ignored は**この fake のログには出す**(ダブルの中まで無音にすると、テストが落ちた
+  // ときに原因が判らない)。ログは Ice の外なので controller からは見えない。
+  ecc::Step step(const char* action) {
     ecc::State next = ecc::State::Unknown;
     std::string err;
-    if (!ecc::next_state(state_, action, next, err)) {
+    const ecc::Step result = ecc::next_state(state_, action, next, err);
+    if (result == ecc::Step::Denied) {
       std::fprintf(stderr, "fake_ecc: %s\n", err.c_str());
       throw mdaq::utl::CmdException(err);
     }
+    if (result == ecc::Step::Ignored) {
+      std::fprintf(stderr,
+                   "fake_ecc: %s IGNORED in state %s (real ECC: no such transition = silence)\n",
+                   action, ecc::to_string(state_));
+      return result;
+    }
     state_ = next;
+    return result;
   }
   mdaq::utl::CmdException invalid(const char* action) const {
     return mdaq::utl::CmdException("invalid transition: " + std::string(action) + " in state " +
@@ -219,15 +261,22 @@ class FakeEcc : public get::rc::StateMachine {
   std::string config_id_;
   std::string data_link_set_;
   std::vector<int> links_;  // start() で張った(そして黙って保持する)接続
+  bool no_data_link_ = false;
 };
 
 void usage() {
   std::printf(
-      "usage: fake_ecc [--host IP] [--port N] [--identity NAME]\n"
+      "usage: fake_ecc [--host IP] [--port N] [--identity NAME] [--no-data-link]\n"
       "\n"
       "  --host IP        endpoint address (default 127.0.0.1)\n"
       "  --port N         endpoint port, 0 = pick a free one (default 0)\n"
       "  --identity NAME  Ice object identity (default Ecc)\n"
+      "  --no-data-link   start() does not open (nor hold) any TCP connection to the\n"
+      "                   DataLinkSet targets. Use it when something else already plays\n"
+      "                   the CoBo and streams the data (graw_replay in the P3 e2e):\n"
+      "                   a receiver serves one connection at a time, so a held probe\n"
+      "                   connection would starve the real data stream. Default: off,\n"
+      "                   i.e. links are opened (listen-before-start negative test).\n"
       "\n"
       "Prints one line \"PROXY <stringified proxy>\" on stdout once the adapter is\n"
       "active; feed it to ecc_bridge --ecc-proxy. Runs until SIGINT/SIGTERM.\n");
@@ -239,6 +288,7 @@ int main(int argc, char** argv) {
   std::string host = "127.0.0.1";
   std::string port = "0";
   std::string identity = "Ecc";
+  bool no_data_link = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const bool has_value = (i + 1 < argc);
@@ -252,6 +302,8 @@ int main(int argc, char** argv) {
       port = argv[++i];
     } else if (a == "--identity" && has_value) {
       identity = argv[++i];
+    } else if (a == "--no-data-link") {
+      no_data_link = true;
     } else {
       std::fprintf(stderr, "fake_ecc: bad argument '%s'\n", a.c_str());
       usage();
@@ -267,7 +319,7 @@ int main(int argc, char** argv) {
     comm = Ice::initialize();
     auto adapter = comm->createObjectAdapterWithEndpoints(
         "FakeEcc", "tcp -h " + host + " -p " + port);
-    auto servant = std::make_shared<FakeEcc>();
+    auto servant = std::make_shared<FakeEcc>(no_data_link);
     auto prx = adapter->add(servant, Ice::stringToIdentity(identity));
     adapter->activate();
     std::printf("PROXY %s\n", prx->ice_toString().c_str());

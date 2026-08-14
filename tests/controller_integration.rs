@@ -203,7 +203,7 @@ impl FakeEcc {
         let thread_requests = Arc::clone(&requests);
         let thread_stop = Arc::clone(&stop);
         let handle = std::thread::spawn(move || {
-            // ECC の状態遷移(fake_ecc と同じ意味論、SPEC §8.2)。
+            // ECC の状態遷移(`tools/ecc_bridge/ecc_core.hpp` = 実 ECC の SM と同じ意味論)。
             let mut state = "Off".to_string();
             while !thread_stop.load(Ordering::Relaxed) {
                 let message = match socket.recv_bytes(0) {
@@ -217,16 +217,29 @@ impl FakeEcc {
                     .unwrap_or("")
                     .to_string();
                 thread_requests.lock().unwrap().push(request);
-                state = match action.as_str() {
-                    "describe" => "Described".to_string(),
-                    "prepare" => "Prepared".to_string(),
-                    "configure" => "Ready".to_string(),
-                    "start" => "Running".to_string(),
-                    "stop" => "Ready".to_string(),
-                    "breakup" => "Prepared".to_string(),
-                    "reset" => "Idle".to_string(),
-                    _ => state,
+                // **036: 実 ECC の状態機械そのもの**(reference/20190315_patched の
+                // `GetBench/src/get/rc/BackEnd.cpp:250-270` / `:924` / `:955-962`)。
+                // 以前ここは「reset はどこからでも Idle」だった —— その甘さが 034 の
+                // 誤実装を green で通した。**ダブルを実機より甘くしない**。
+                // 遷移が無い組み合わせは実 ECC と同じく**無音**(状態は動かず ok は true。
+                // `StateMachine/src/dhsm/Engine.cpp:334-352` の `Ignored`)。
+                let next = match (action.as_str(), state.as_str()) {
+                    ("describe", "Off" | "Idle" | "Described") => Some("Described"),
+                    ("prepare", "Described" | "Prepared") => Some("Prepared"),
+                    // BackEnd::configure の ST_PREPARED ガード = それ以外は黙ってスキップ。
+                    ("configure", "Prepared") => Some("Ready"),
+                    ("start", "Ready") => Some("Running"),
+                    ("stop", "Running" | "Paused") => Some("Ready"),
+                    // EV_BREAK: Active(Ready/Running/Paused)→ Prepared。
+                    ("breakup", "Ready" | "Running" | "Paused") => Some("Prepared"),
+                    // EV_UNDO は **1 段戻すだけ**(Active からは遷移が無い)。
+                    ("reset", "Described") => Some("Idle"),
+                    ("reset", "Prepared") => Some("Described"),
+                    _ => None,
                 };
+                if let Some(next) = next {
+                    state = next.to_string();
+                }
                 let reply = json!({"ok": true, "state": state, "error": ""});
                 let _ = socket.send(reply.to_string().as_bytes(), 0);
             }
@@ -531,6 +544,10 @@ async fn a_full_run_drives_every_component_in_spec_order_and_writes_the_logbook(
     }
 
     // --- ecc は describe → prepare → configure → start ---
+    // 034/036: run 開始は必ず「ECC を Idle へ歩き戻す」段から始まるが、このフェイク ECC は
+    // 起動直後 = `Off`(これ以上戻れない底)なので、歩き戻しは `status` の 1 発だけで済み
+    // **1 コマンドも発行されない**。歩く姿は 2 本目以降が見せる
+    // (`three_consecutive_runs_…` を参照)。`actions()` は `status` を除いている。
     assert_eq!(
         harness.ecc.actions(),
         vec!["describe", "prepare", "configure", "start"]
@@ -765,12 +782,26 @@ async fn a_failed_start_rolls_back_and_leaves_no_half_started_run() {
         harness.decoder.commands(),
         vec!["Configure", "Stop", "Reset"]
     );
-    // ecc は 1 度も呼ばれない(半端に ECC を走らせない)。
-    assert!(harness.ecc.actions().is_empty());
+    // ECC を**走らせる**段(describe 以降)へは進まない。歩き戻しの段は、この ECC が
+    // 起動直後 = `Off` なので `status` だけ(= `actions()` は空)。失敗しても ECC は
+    // 一番安全な状態に置かれたままなので巻き戻す必要がない(034 論点 A / 036)。
+    assert!(
+        harness.ecc.actions().is_empty(),
+        "ECC を走らせる段へ進まない: {:?}",
+        harness.ecc.actions()
+    );
 
-    // 相は Idle に戻り、もう一度 start できる状態(run 番号は 1 個飛ぶ = §12-11 で許容)。
+    // 相は Idle に戻り、もう一度 start できる状態。
     let (_, body) = get(harness.rest, "/api/status");
     assert_eq!(body["phase"], json!("Idle"));
+
+    // **run 番号は空費しない**(034 論点 C)。`run_start` をログブックへ書く前に落ちたので
+    // 採番を巻き戻す —— 状態ファイルを直接読んで、次の run がまた 1 番であることを見る。
+    let state: Value = serde_json::from_str(
+        &std::fs::read_to_string(harness.output_root.join("tpcdaq_state.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(state["next_run"], json!(1), "採番が巻き戻っていない");
 
     let records = harness.logbook();
     let audit = records.last().unwrap();
@@ -778,7 +809,78 @@ async fn a_failed_start_rolls_back_and_leaves_no_half_started_run() {
     assert_eq!(audit["action"], json!("run/start"));
     assert_eq!(audit["ok"], json!(false));
     assert_eq!(audit["params"]["stage"], json!("Configure"));
+    // 巻き戻したこと自体も監査に残す(silent にしない)。
+    assert_eq!(audit["params"]["next_run_rewound"], json!(true));
     assert!(!records.iter().any(|r| r["type"] == json!("run_start")));
+
+    harness.shutdown();
+}
+
+/// **034 の出口(モック版)**: `POST /api/ecc/reset` を**手で挟まずに**連続 3 run が通り、
+/// run 番号が 1, 2, 3 と飛ばずに進む。
+///
+/// 030 の実測では 2 本目の `run/start` が `ecc describe failed in state Ready` で必ず失敗し、
+/// 失敗のたびに番号が 1 つ消えていた(run 1 → run 4)。ここは controller が毎回 `reset` を
+/// 撃つことと、失敗しない限り番号が連番であることを固定する。**実 ECC 遷移表相手の
+/// 出口は `tests/p3_e2e.rs` の E2E-H**(このフェイク ECC は順序違反を断らないため)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_consecutive_runs_need_no_manual_ecc_reset_and_keep_the_run_numbers_consecutive() {
+    let harness = harness("consecutive", &[0], true, None).await;
+    let token = harness.acquire("aogaki");
+
+    let mut runs = Vec::new();
+    for pass in 0..3 {
+        let (status, body) = post(
+            harness.rest,
+            "/api/run/start",
+            json!({"token": token, "comment": format!("consecutive {pass}")}),
+        );
+        assert_eq!(status, 200, "{pass} 本目の run/start が落ちた: {body}");
+        runs.push(body["run"].as_u64().unwrap());
+
+        let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+        assert_eq!(status, 200, "{pass} 本目の run/stop が落ちた: {body}");
+        assert_eq!(body["ok"], json!(true), "{body}");
+    }
+
+    // 番号は飛ばない(030 実測の run 1 → run 4 が起きない)。
+    assert_eq!(runs, vec![1, 2, 3]);
+
+    // ECC の呼び出し列(036 の出口。`status` は `actions()` が除いている):
+    //
+    //   1 本目: ECC は起動直後の `Off` = これ以上戻れない底なので**歩かない**。
+    //   2 本目以降: 前の run の `ecc stop` が `Ready` に置いているので
+    //     **breakup → reset → reset** で `Idle` まで歩き戻してから describe に入る
+    //     (実 ECC の `EV_UNDO` は 1 段ずつ、`Active` からは無音で無視 —— 036)。
+    let mut expected: Vec<&str> = vec!["describe", "prepare", "configure", "start", "stop"];
+    for _ in 0..2 {
+        expected.extend([
+            "breakup",
+            "reset",
+            "reset",
+            "describe",
+            "prepare",
+            "configure",
+            "start",
+            "stop",
+        ]);
+    }
+    assert_eq!(harness.ecc.actions(), expected);
+
+    // ログブックにも 3 本分が揃う(run_start / run_stop が run 毎に 1 組ずつ)。
+    let records = harness.logbook();
+    let starts: Vec<u64> = records
+        .iter()
+        .filter(|r| r["type"] == json!("run_start"))
+        .map(|r| r["run"].as_u64().unwrap())
+        .collect();
+    let stops: Vec<u64> = records
+        .iter()
+        .filter(|r| r["type"] == json!("run_stop"))
+        .map(|r| r["run"].as_u64().unwrap())
+        .collect();
+    assert_eq!(starts, vec![1, 2, 3]);
+    assert_eq!(stops, vec![1, 2, 3]);
 
     harness.shutdown();
 }

@@ -205,6 +205,10 @@ int main(int argc, char** argv) {
   CHECK(server >= 0);
   if (server < 0) return tpccheck::report("ecc_e2e");
 
+  // 直前の configure 失敗で ECC は Active(Ready)に居る。**実 ECC の configure は
+  // `ST_PREPARED` からしか効かない**(BackEnd.cpp:955-962 のガード。それ以外は黙ってスキップ)
+  // ので、張り替えの前に breakup で Prepared へ戻す(SPEC v1.12 §1.3 / TODO/036)。
+  expect("breakup(before re-configure)", req.call("{\"action\":\"breakup\"}"), true, "Prepared");
   expect("configure(with listener)", req.call(configure_request(listen_port)), true, "Ready");
   expect("start", req.call("{\"action\":\"start\"}"), true, "Running");
 
@@ -227,7 +231,9 @@ int main(int argc, char** argv) {
 
   // 6. 残りの遷移
   expect("breakup", req.call("{\"action\":\"breakup\"}"), true, "Prepared");
-  expect("reset", req.call("{\"action\":\"reset\"}"), true, "Idle");
+  // 実 ECC の reset は `EV_UNDO` = **1 段戻す**(BackEnd.cpp:250-270)。Prepared → Idle は 2 段。
+  expect("reset(1)", req.call("{\"action\":\"reset\"}"), true, "Described");
+  expect("reset(2)", req.call("{\"action\":\"reset\"}"), true, "Idle");
 
   // 7. 壊れた入力でブリッジは死なない(状態は返る、次のリクエストも通る)
   expect("malformed json", req.call("{\"action\":"), false, "Idle", "parse error");

@@ -3,7 +3,9 @@
 //   * DataLinkSet XML 生成の**文字列全文照合**(CoBo[0] 形式 / 大文字 TCP / 2 CoBo = DataLink 2 本)
 //   * JSON リクエスト parse とレスポンス生成(never throw — 壊れた入力も Result 化)
 //   * 状態文字列マップ(Off..Paused/Unknown)
-//   * fake-ECC の状態遷移表(Off→Described→Prepared→Ready→Running、順序違反はエラー)
+//   * fake-ECC の状態遷移表 = **実 ECC の SM**(036): `reset` は 1 段戻すだけ・`Active` からは
+//     無音、`configure` は Prepared 以外で無音スキップ、`breakup` は Active→Prepared、
+//     順序違反(describe/prepare/start/stop)はエラー
 //
 // ここには Ice も ZMQ も要らない(`make test` は g++ 一発)。Ice を跨ぐ検証は run_ecc_e2e.sh。
 
@@ -210,32 +212,101 @@ void test_state_strings() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. fake-ECC の状態遷移表(Off→Described→Prepared→Ready→Running、順序違反はエラー)
+// 5. fake-ECC の状態遷移表 = **実 ECC の SM**(036)
+//
+// 出典は reference/20190315_patched:
+//   GetBench/src/get/rc/BackEnd.cpp:250-270 / :924 / :955-962、
+//   StateMachine/src/dhsm/Engine.cpp:334-352。
 // ---------------------------------------------------------------------------
 
 void test_state_machine_happy_path() {
   State s = State::Off;
   std::string err;
+  // 一周: Off →(describe/prepare/configure/start)→ Running →(stop)→ Ready →
+  //       **歩き戻し breakup → reset → reset** → Idle。
+  // `reset` が 2 回要るのが 036 の眼目 —— `EV_UNDO` は 1 段しか戻さない。
   const struct {
     const char* action;
     State want;
   } steps[] = {
-      {"describe", State::Described}, {"prepare", State::Prepared}, {"configure", State::Ready},
-      {"start", State::Running},      {"stop", State::Ready},       {"breakup", State::Prepared},
-      {"reset", State::Idle},
+      {"describe", State::Described}, {"prepare", State::Prepared},  {"configure", State::Ready},
+      {"start", State::Running},      {"stop", State::Ready},        {"breakup", State::Prepared},
+      {"reset", State::Described},    {"reset", State::Idle},
   };
   for (const auto& st : steps) {
     State next = State::Unknown;
-    const bool ok = ecc::next_state(s, st.action, next, err);
-    if (!ok) std::printf("  (action=%s from=%s err=%s)\n", st.action, ecc::to_string(s), err.c_str());
-    CHECK(ok);
+    const ecc::Step step = ecc::next_state(s, st.action, next, err);
+    if (step != ecc::Step::Applied) {
+      std::printf("  (action=%s from=%s err=%s)\n", st.action, ecc::to_string(s), err.c_str());
+    }
+    CHECK(step == ecc::Step::Applied);
     CHECK(next == st.want);
     s = next;
   }
   // status は状態を変えない(いつでも可)。
   State next = State::Unknown;
-  CHECK(ecc::next_state(State::Running, "status", next, err));
+  CHECK(ecc::next_state(State::Running, "status", next, err) == ecc::Step::Applied);
   CHECK(next == State::Running);
+}
+
+// **036 の核心**: `reset`(= EV_UNDO)は 1 段戻すだけで、`Active`(Ready/Running/Paused)
+// からは遷移が無く**無音で無視**される。`Ready → Idle` には breakup → reset → reset が要る。
+void test_reset_walks_back_one_step_at_a_time() {
+  std::string err;
+  State next = State::Unknown;
+
+  // EV_UNDO の 2 本(BackEnd.cpp:250-270)。
+  CHECK(ecc::next_state(State::Prepared, "reset", next, err) == ecc::Step::Applied);
+  CHECK(next == State::Described);
+  CHECK(ecc::next_state(State::Described, "reset", next, err) == ecc::Step::Applied);
+  CHECK(next == State::Idle);
+
+  // Active からは**遷移が無い** = Ignored(例外も出ない・状態も動かない)。
+  for (const State active : {State::Ready, State::Running, State::Paused}) {
+    CHECK(ecc::next_state(active, "reset", next, err) == ecc::Step::Ignored);
+    CHECK(next == active);
+    CHECK_STR(err, "");  // **無音**: エラー文言すら出ない
+  }
+  // 底(Off / Idle)でも同じく無音(これ以上戻れない)。
+  CHECK(ecc::next_state(State::Idle, "reset", next, err) == ecc::Step::Ignored);
+  CHECK(next == State::Idle);
+  CHECK(ecc::next_state(State::Off, "reset", next, err) == ecc::Step::Ignored);
+  CHECK(next == State::Off);
+
+  // EV_BREAK は Active のどこからでも Prepared へ(ST_ACTIVE は複合状態)。
+  for (const State active : {State::Ready, State::Running, State::Paused}) {
+    CHECK(ecc::next_state(active, "breakup", next, err) == ecc::Step::Applied);
+    CHECK(next == State::Prepared);
+  }
+  CHECK(ecc::next_state(State::Described, "breakup", next, err) == ecc::Step::Ignored);
+  CHECK(next == State::Described);
+
+  // `Ready → Idle` の歩き戻し 3 手を通しで(controller が実装する列そのもの)。
+  State s = State::Ready;
+  const char* walk[] = {"breakup", "reset", "reset"};
+  const State want[] = {State::Prepared, State::Described, State::Idle};
+  for (int i = 0; i < 3; ++i) {
+    CHECK(ecc::next_state(s, walk[i], next, err) == ecc::Step::Applied);
+    CHECK(next == want[i]);
+    s = next;
+  }
+}
+
+// **036**: `configure` は `ST_PREPARED` ガード付き(BackEnd.cpp:955-962)。
+// Prepared 以外では**黙ってスキップ**される —— エラーにならないのが一番危ないところ。
+void test_configure_is_silently_skipped_outside_prepared() {
+  std::string err;
+  State next = State::Unknown;
+
+  CHECK(ecc::next_state(State::Prepared, "configure", next, err) == ecc::Step::Applied);
+  CHECK(next == State::Ready);
+
+  for (const State from : {State::Off, State::Idle, State::Described, State::Ready,
+                           State::Running, State::Paused}) {
+    CHECK(ecc::next_state(from, "configure", next, err) == ecc::Step::Ignored);
+    CHECK(next == from);  // DataLinkSet は張り替わらない = CoBo は古い宛先のまま
+    CHECK_STR(err, "");
+  }
 }
 
 void test_state_machine_rejects_out_of_order() {
@@ -243,23 +314,22 @@ void test_state_machine_rejects_out_of_order() {
   State next = State::Unknown;
 
   // listen 以前の問題: describe していないのに start
-  CHECK(!ecc::next_state(State::Off, "start", next, err));
+  CHECK(ecc::next_state(State::Off, "start", next, err) == ecc::Step::Denied);
   CHECK(err.find("start") != std::string::npos);
   CHECK(err.find("Off") != std::string::npos);
 
-  CHECK(!ecc::next_state(State::Off, "configure", next, err));
-  CHECK(!ecc::next_state(State::Described, "start", next, err));
-  CHECK(!ecc::next_state(State::Ready, "prepare", next, err));
-  CHECK(!ecc::next_state(State::Running, "start", next, err));  // 二重 start
-  CHECK(!ecc::next_state(State::Ready, "stop", next, err));     // 走っていないのに stop
-  CHECK(!ecc::next_state(State::Off, "chirp", next, err));      // 未知 action
+  CHECK(ecc::next_state(State::Described, "start", next, err) == ecc::Step::Denied);
+  CHECK(ecc::next_state(State::Ready, "prepare", next, err) == ecc::Step::Denied);
+  CHECK(ecc::next_state(State::Running, "start", next, err) == ecc::Step::Denied);  // 二重 start
+  CHECK(ecc::next_state(State::Ready, "stop", next, err) == ecc::Step::Denied);  // 走っていない
+  CHECK(ecc::next_state(State::Off, "chirp", next, err) == ecc::Step::Denied);   // 未知 action
 
-  // reset はどこからでも Idle へ(復旧手段は塞がない)。
-  CHECK(ecc::next_state(State::Running, "reset", next, err));
-  CHECK(next == State::Idle);
-  // configure は Ready からもう一度掛け直せる(DataLinkSet の張り替え)。
-  CHECK(ecc::next_state(State::Ready, "configure", next, err));
+  // **034 の事故の再現**: 前の run の `ecc stop` 後(= Ready)に reset 1 発では Idle に
+  // 届かず(Ignored)、続く describe は順序違反になる。この 2 行が「歩き戻しを省いた
+  // 実装は必ず落ちる」ことの保証である。
+  CHECK(ecc::next_state(State::Ready, "reset", next, err) == ecc::Step::Ignored);
   CHECK(next == State::Ready);
+  CHECK(ecc::next_state(State::Ready, "describe", next, err) == ecc::Step::Denied);
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +388,8 @@ int main() {
   test_make_response();
   test_state_strings();
   test_state_machine_happy_path();
+  test_reset_walks_back_one_step_at_a_time();
+  test_configure_is_silently_skipped_outside_prepared();
   test_state_machine_rejects_out_of_order();
   test_json_min();
   return tpccheck::report("test_ecc_bridge");

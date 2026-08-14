@@ -283,48 +283,92 @@ inline std::string make_response(bool ok, State s, const std::string& error) {
 }
 
 // ---------------------------------------------------------------------------
-// fake-ECC の状態遷移表(TODO/017 §2「順序違反はエラー」)
+// fake-ECC の状態遷移表(TODO/017 §2 →**036 で実 ECC の SM に合わせて厳格化**)
 //
-// 実 ECC(reference/20190315_patched/GetBench/src/get/rc/SM.cpp)の骨格を模した最小版:
-//   Off/Idle --describe--> Described --prepare--> Prepared --configure--> Ready --start--> Running
-// reset はどこからでも Idle(復旧手段は塞がない)。status は状態を変えない。
+// **この表の前身は「reset はどこからでも Idle(復旧手段は塞がない)」だった。それが
+// TODO/034 の誤実装(`Ready` から reset 1 発で Idle に戻るつもりの run 開始)を green で
+// 通してしまった。** テストダブルのコメントを一次資料として扱ってはならない —— 一次資料は
+// 実 ECC のソース(reference/20190315_patched)だけである(036 の教訓)。
+//
+// 実 ECC の SM(出典を行番号まで書く):
+//   GetBench/src/get/rc/BackEnd.cpp:250-270  … SM の全遷移
+//       EV_DESCRIBE  : Idle      -> Described
+//       EV_UNDO      : Described -> Idle / Prepared -> Described   ← **この 2 本だけ**
+//       EV_PREPARE   : Described -> Prepared
+//       EV_CONFIGURE : Prepared  -> Active(初期部分状態 = Ready)
+//       EV_BREAK     : Active    -> Prepared      (Active = Ready/Running/Paused の複合状態)
+//       EV_START/EV_STOP : Ready <-> Running(Active 部分機械。EV_STOP は Paused からも)
+//   GetBench/src/get/rc/BackEnd.cpp:924      … reset() は engine.step(EV_UNDO) **のみ**
+//   GetBench/src/get/rc/BackEnd.cpp:955-962  … configure() は `if (state == ST_PREPARED)`
+//                                              ガード付き = それ以外は**黙ってスキップ**
+//   StateMachine/src/dhsm/Engine.cpp:334-352 … 未定義遷移は例外を投げず **Ignored**(完全な無音)
+//
+// 帰結: 前の run の `ecc stop` が置いた `Ready` から `Idle` へ戻るには
+// **breakup → reset → reset** の歩き戻しが要る(SPEC §1.3 v1.12。歩くのは controller)。
+//
+// **実機より辛くしてある 1 点**: describe / prepare / start / stop の順序違反を、実機は
+// 無音の Ignored にするがここでは Denied(= CmdException)にする。テストダブルは実機より
+// **甘くしてはならない**が、辛い分には「run が可視に失敗する」だけで事故にならない。
+// この辛さがあるおかげで、歩き戻しを省いた実装は E2E で必ず落ちる。
 // **bridge 本体はこの表を使わない**(状態の正は常に実 ECC の getStatus)。
 // ---------------------------------------------------------------------------
-inline bool next_state(State from, const std::string& action, State& to, std::string& error) {
-  auto allow = [&](State next) {
+
+// 1 遷移の結末。実 ECC の dhsm::Engine::ProcessingResult に対応する
+// (Applied = crossTransition した / Ignored = 遷移が無く**無音で**何も起きない)。
+// Denied は本テストダブル固有の厳しさ(上記「実機より辛くしてある 1 点」)。
+enum class Step { Applied, Ignored, Denied };
+
+inline Step next_state(State from, const std::string& action, State& to, std::string& error) {
+  to = from;  // 既定は「動かない」。Applied のときだけ書き換える。
+  error.clear();
+  // ST_ACTIVE(複合状態)に居るか。EV_UNDO はここからは定義されていない。
+  const bool active =
+      (from == State::Ready || from == State::Running || from == State::Paused);
+
+  auto applied = [&to](State next) {
     to = next;
-    error.clear();
-    return true;
+    return Step::Applied;
   };
-  auto deny = [&]() {
-    to = from;
+  auto denied = [&]() {
     error = "invalid transition: " + action + " in state " + to_string(from);
-    return false;
+    return Step::Denied;
   };
 
-  if (action == "status") return allow(from);
-  if (action == "reset") return allow(State::Idle);
+  // status は観測であって遷移ではない(状態を変えない)。
+  if (action == "status") return Step::Applied;
+
+  // EV_UNDO = **1 段戻すだけ**。Active からは遷移が無いので無音で無視される。
+  if (action == "reset") {
+    if (from == State::Described) return applied(State::Idle);
+    if (from == State::Prepared) return applied(State::Described);
+    return Step::Ignored;
+  }
+  // EV_BREAK = Active(Ready/Running/Paused)→ Prepared。それ以外からは無音。
+  if (action == "breakup") return active ? applied(State::Prepared) : Step::Ignored;
+  // EV_CONFIGURE = Prepared からのみ。BackEnd::configure の ST_PREPARED ガードにより
+  // **それ以外の状態では黙ってスキップされる**(エラーにならない = 一番危ない挙動)。
+  if (action == "configure") {
+    return (from == State::Prepared) ? applied(State::Ready) : Step::Ignored;
+  }
+
   if (action == "describe") {
+    // 実 SM は Idle からのみ。`Off`(= 我々が付けた「ECC 未初期化」状態。fake の初期値)と
+    // `Described` からの撃ち直しは 017 から受けている —— 実機より甘くはならない側なので残す。
     return (from == State::Off || from == State::Idle || from == State::Described)
-               ? allow(State::Described)
-               : deny();
+               ? applied(State::Described)
+               : denied();
   }
   if (action == "prepare") {
-    return (from == State::Described || from == State::Prepared) ? allow(State::Prepared) : deny();
+    return (from == State::Described || from == State::Prepared) ? applied(State::Prepared)
+                                                                 : denied();
   }
-  if (action == "configure") {
-    // Ready からの再 configure = DataLinkSet の張り替え(listen ポートが変わったとき)。
-    return (from == State::Prepared || from == State::Ready) ? allow(State::Ready) : deny();
-  }
-  if (action == "start") return (from == State::Ready) ? allow(State::Running) : deny();
+  if (action == "start") return (from == State::Ready) ? applied(State::Running) : denied();
   if (action == "stop") {
-    return (from == State::Running || from == State::Paused) ? allow(State::Ready) : deny();
+    return (from == State::Running || from == State::Paused) ? applied(State::Ready) : denied();
   }
-  if (action == "breakup") return (from == State::Ready) ? allow(State::Prepared) : deny();
 
-  to = from;
   error = "unknown action: " + action;
-  return false;
+  return Step::Denied;
 }
 
 }  // namespace ecc

@@ -182,6 +182,10 @@ fn bridge_speaks_the_json_contract_controller_expects() {
     // listen してから configure → start は通り、CoBo 役が実際に繋いで来る。
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
     let port = listener.local_addr().unwrap().port();
+    // 直前の configure 失敗で ECC は Active(Ready)。**実 ECC の configure は `ST_PREPARED`
+    // からしか効かない**(黙ってスキップ)ので、張り替えの前に breakup で Prepared へ戻す
+    // (SPEC v1.12 §1.3 / TODO/036)。
+    assert_reply(&call(&sock, r#"{"action":"breakup"}"#), true, "Prepared");
     assert_reply(&call(&sock, &configure(port)), true, "Ready");
     assert_reply(&call(&sock, r#"{"action":"start"}"#), true, "Running");
     let (conn, _) = listener.accept().expect("fake CoBo connects after start");
@@ -189,6 +193,8 @@ fn bridge_speaks_the_json_contract_controller_expects() {
 
     assert_reply(&call(&sock, r#"{"action":"stop"}"#), true, "Ready");
     assert_reply(&call(&sock, r#"{"action":"breakup"}"#), true, "Prepared");
+    // 実 ECC の reset は `EV_UNDO` = **1 段戻す**。Prepared → Idle は 2 段(TODO/036)。
+    assert_reply(&call(&sock, r#"{"action":"reset"}"#), true, "Described");
     assert_reply(&call(&sock, r#"{"action":"reset"}"#), true, "Idle");
 
     // 壊れたリクエストでもブリッジは死なない(状態は返るし、次も通る)。

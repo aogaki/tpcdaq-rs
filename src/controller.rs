@@ -15,6 +15,23 @@
 //!    [`Transport`] 越しだけ、時刻も `Transport::sleep` 経由なので、モックで全分岐を機械照合できる。
 //! 3. [`Controller`] + axum — REST・操作権・監査・ログブック書き込みの配線。
 //!
+//! # 連続 run(034 — ユーザー裁定「毎 run 完全にリセットして一からやり直す」/ 036)
+//!
+//! run 開始は **必ず ECC を `Idle` へ戻すところから**始まる。前の run の `ecc stop` は ECC を
+//! `Ready` に置くが、`describe` は `Off/Idle/Described` からしか許されないので、戻さないと
+//! 2 本目が必ず順序違反で落ちる。
+//!
+//! ただし実 ECC の `reset` は `EV_UNDO` = **1 段戻すだけ**で、`Active`(Ready/Running/Paused)
+//! からは遷移が無く**無音で無視**される(`GetBench/src/get/rc/BackEnd.cpp:924` / `:250-270`、
+//! `StateMachine/src/dhsm/Engine.cpp:334-352`)。よって `reset` を 1 発撃つのではなく、
+//! **現在の状態を見て必要な段数だけ歩き戻す**(036、SPEC §1.3 v1.12):
+//! `Running/Paused --stop--> Ready --breakup--> Prepared --reset--> Described --reset--> Idle`。
+//! `Idle` に着けなければ **run を始めない**([`Sequencer::walk_ecc_back_to_idle`])。
+//!
+//! あわせて、`Arm` は前の run が閉じたソケットの解放待ちで一時的に bind に失敗しうるので
+//! 指数バックオフで粘り(粘った実績は audit へ)、run 開始が失敗したときは
+//! **`run_start` をログブックへ書く前に限り** 採番を巻き戻す。
+//!
 //! # 巻き戻し(SPEC §1.3「半端な Running を残さない」)
 //!
 //! 開始シーケンスのどの段で失敗しても、**実行済みのコンポーネントだけ**を上流から畳む。
@@ -73,6 +90,28 @@ pub const DEFAULT_STATUS_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// EOS 伝播の観測間隔(SPEC §1.3 の EOS 待ち)。
 pub const DEFAULT_EOS_POLL: Duration = Duration::from_millis(200);
+
+/// `Arm` リトライの初回バックオフ(034 = 論点 B)。以降は試行ごとに倍。
+///
+/// decoder / graw-writer の PULL は固定ポート bind なのに、前の run の `Reset` で閉じた
+/// ソケットは **libzmq の close が非同期**なので即座には空かない。直後の `Arm` は
+/// `Address already in use` で弾かれる(030 実測: 3 回に 2 回、3 試行 = **0.118–0.121 s** で成功)。
+pub const ARM_RETRY_BACKOFF: Duration = Duration::from_millis(20);
+
+/// `Arm` の最大試行回数(初回 + リトライ 5 回)。
+///
+/// 眠る合計 = 20+40+80+160+320 = **620 ms**(最後の試行の後は眠らない)。030 の実測所要
+/// 0.12 s 級に対して約 5 倍の余裕で、「1 秒級で足りる」という見立ての範囲に収まる。
+/// **上限を無くさない**のは、bind 失敗が本当に恒久的(他プロセスがポートを握っている)な
+/// ときに run 開始が永久に返らないのを避けるため。
+pub const ARM_MAX_ATTEMPTS: u32 = 6;
+
+/// ECC を `Idle` へ歩き戻すのに要する**最大段数**(036)。
+///
+/// 実 ECC の SM で `Idle` から一番遠いのは `Running` / `Paused` で、そこからは
+/// `stop`(→ Ready)→ `breakup`(→ Prepared)→ `reset`(→ Described)→ `reset`(→ Idle)の
+/// **4 段**。上限を置くのは、状態が期待どおり動かないときに run 開始が永久に回らないため。
+const ECC_WALK_BACK_MAX_STEPS: usize = 4;
 
 /// ログ投稿 PULL の recv タイムアウト(ms)。停止合図を見るための目覚まし。
 const LOG_PULL_POLL_MS: i32 = 200;
@@ -340,6 +379,38 @@ pub struct StartReport {
     pub run: u32,
     /// Arm 応答から回収した (cobo_id, router_ip, router_port)。DataLinkSet の材料。
     pub links: Vec<RouterLink>,
+    /// `Arm` を撃ち直したコンポーネントの実績(034)。**1 回で通ったものは載らない**ので、
+    /// 空でない = bind の解放待ちが実際に起きた、という運用の可視化になる。
+    pub arm_retries: Vec<ArmRetry>,
+    /// 歩き戻しの**着地点**(034 で入り 036 で意味を精密化)。ここが `"Idle"`(ECC が
+    /// 未初期化なら `"Off"`)でなければ run は始まらないので、成功報告では常にそのどちらか。
+    /// 034 からのキー名を保つ(実機の audit を見る手順を変えないため)。
+    pub ecc_state_after_reset: String,
+    /// 歩き戻しの**各段**(036)。`"<action>-><その直後に ECC が申告した状態>"` の列で、
+    /// 先頭は必ず `status->…`(= 歩く前に見えた状態)。
+    /// 例: `["status->Ready", "breakup->Prepared", "reset->Described", "reset->Idle"]`。
+    /// 1 要素だけなら歩く必要が無かった。**ログブックの audit に残す**(silent にしない)。
+    pub ecc_walk_back: Vec<String>,
+}
+
+/// `Arm` のリトライ実績(034 = 論点 B「リトライしたら回数と所要を必ず出す」)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArmRetry {
+    pub component: String,
+    /// 総試行回数(最後の 1 回を含む)。1 は載らない(= リトライしていない)。
+    pub attempts: u32,
+    /// 最初の試行から決着までの実所要。
+    pub waited_ms: u64,
+}
+
+impl ArmRetry {
+    fn to_json(&self) -> Value {
+        json!({
+            "component": self.component,
+            "attempts": self.attempts,
+            "waited_ms": self.waited_ms,
+        })
+    }
 }
 
 /// receiver が実際に bind した口(SPEC §8.2「router_port は receiver が実際に bind した
@@ -413,8 +484,9 @@ impl<'a> Sequencer<'a> {
 
     /// run 開始シーケンス。
     ///
-    /// `Configure`(下流から)→ `Arm`(receiver の実 bind ポートを回収)→ `Start{run}` →
-    /// ecc `describe` → `prepare` → `configure`(DataLinkSet)→ `start`。
+    /// **ecc を `Idle` へ歩き戻す(034 → 036)** → `Configure`(下流から)→ `Arm`(receiver の
+    /// 実 bind ポートを回収)→ `Start{run}` → ecc `describe` → `prepare` →
+    /// `configure`(DataLinkSet)→ `start`。
     /// **どの段の失敗も巻き戻す**(以降を実行せず、実行済みコンポーネントを畳む)。
     pub fn start_run(
         &mut self,
@@ -424,6 +496,17 @@ impl<'a> Sequencer<'a> {
     ) -> Result<StartReport, StartFailure> {
         let params = self.params;
         let mut touched = vec![false; params.components.len()];
+
+        // 0. ECC を Idle へ**歩き戻す**(034 = 論点 A のユーザー裁定「毎 run 完全にリセット
+        //    して一からやり直す」= ワルシャワ大学の作法。036 で実 ECC の意味論に合わせた)。
+        //
+        //    コンポーネントに 1 コマンドも触る前にここを済ませる —— 前の run が Running の
+        //    まま残っていたとき、新しい listen が古い CoBo ストリームを拾わないため。
+        let mut ecc_walk_back = Vec::new();
+        let ecc_state_after_reset = match self.walk_ecc_back_to_idle(&mut ecc_walk_back) {
+            Ok(state) => state,
+            Err(detail) => return Err(self.rollback("ecc", detail, &touched)),
+        };
 
         // 1. Configure(下流から: graw-writer → decoder → receivers)
         //    SPEC §6.4 v1.8: 正式な run 開始 TS は controller が 1 つだけ決めてここで配る。
@@ -440,9 +523,11 @@ impl<'a> Sequencer<'a> {
         }
 
         // 2. Arm — receiver はここで bind + listen(listen-before-start)。実ポートを回収する。
+        //    bind は前の run のソケット解放待ちで一時的に失敗しうるので粘る(034)。
         let mut links = Vec::new();
+        let mut arm_retries = Vec::new();
         for (i, component) in params.components.iter().enumerate() {
-            let response = match self.apply(component, &Command::Arm) {
+            let response = match self.arm_with_retry(component, &mut arm_retries) {
                 Ok(response) => response,
                 Err(detail) => return Err(self.rollback("Arm", detail, &touched)),
             };
@@ -482,7 +567,143 @@ impl<'a> Sequencer<'a> {
             }
         }
 
-        Ok(StartReport { run, links })
+        Ok(StartReport {
+            run,
+            links,
+            arm_retries,
+            ecc_state_after_reset,
+            ecc_walk_back,
+        })
+    }
+
+    /// ECC を **`Idle` まで歩き戻す**(036、SPEC §1.3 v1.12 の ⚠ 注記)。
+    ///
+    /// 実 ECC の `reset` は `EV_UNDO` = **1 段戻すだけ**で、`Active`(= Ready/Running/Paused)
+    /// からは遷移が定義されておらず**無音で無視**される。よって「どこからでも reset 1 発で
+    /// Idle」は成立しない —— **現在の状態を見て必要な段数だけ**歩く:
+    ///
+    /// ```text
+    /// Running/Paused --stop--> Ready --breakup--> Prepared --reset--> Described --reset--> Idle
+    /// ```
+    ///
+    /// 出典(`reference/20190315_patched`): `GetBench/src/get/rc/BackEnd.cpp:924`
+    /// (`reset()` = `engine.step(EV_UNDO)` のみ)/ 同 `:250-270`(`EV_UNDO` は
+    /// `Described→Idle` と `Prepared→Described` の 2 本だけ、`Active→Prepared` は `EV_BREAK`)/
+    /// `StateMachine/src/dhsm/Engine.cpp:334-352`(未定義遷移は例外を投げず `Ignored` = 無音)/
+    /// 同 `BackEnd.cpp:955-962`(`configure` は `ST_PREPARED` ガードで黙ってスキップ)。
+    ///
+    /// **`Idle` に着けなければ run を始めない**。歩けない状態(`Unknown` 等)も、
+    /// 撃ったのに状態が動かなかった段(= 実 ECC の無音無視)も `Err` にする ——
+    /// 黙って先へ進むと `configure` がスキップされ、**CoBo がデータリンクを張り直さないまま**
+    /// run が始まる(2 本目以降が成立しない)。
+    ///
+    /// `Off`(ECC 未初期化 = 我々の起動直後)はこれ以上戻れない底なので、`Idle` と同じく
+    /// 「何も出さない」で通す(`describe` は `Off / Idle / Described` から許される)。
+    ///
+    /// 歩いた跡は `trail` に `"<action>-><直後に ECC が申告した状態>"` で積む(audit 行き)。
+    fn walk_ecc_back_to_idle(&mut self, trail: &mut Vec<String>) -> Result<String, String> {
+        let mut state = self.apply_ecc(&json!({"action": "status"}))?;
+        trail.push(format!("status->{state}"));
+
+        let mut steps = 0usize;
+        while state != "Idle" && state != "Off" {
+            let action = match state.as_str() {
+                "Running" | "Paused" => "stop",
+                "Ready" => "breakup",
+                "Prepared" | "Described" => "reset",
+                _ => {
+                    return Err(format!(
+                        "ecc is in state {state} — refusing to start a run \
+                         (cannot walk this state back to Idle)"
+                    ))
+                }
+            };
+            if steps == ECC_WALK_BACK_MAX_STEPS {
+                return Err(format!(
+                    "ecc did not reach Idle within {ECC_WALK_BACK_MAX_STEPS} steps \
+                     (stuck in {state}; walked {trail:?}) — refusing to start a run"
+                ));
+            }
+            let landed = self.apply_ecc(&json!({ "action": action }))?;
+            trail.push(format!("{action}->{landed}"));
+            steps += 1;
+            if landed == state {
+                // 実 ECC は未定義遷移をエラーにしない(`Ignored`)。「ok なのに状態が
+                // 動いていない」が唯一の手がかりなので、ここで止める(silent 禁止)。
+                return Err(format!(
+                    "ecc {action} left the ECC in {state} — the real ECC ignores undefined \
+                     transitions in silence; refusing to start a run"
+                ));
+            }
+            state = landed;
+        }
+        info!(state, ?trail, "ecc walked back before the run");
+        Ok(state)
+    }
+
+    /// `Arm` を「bind が空くまで」指数バックオフで粘って送る(034 = 論点 B)。
+    ///
+    /// 直前の run の `Reset` で閉じた PULL / listen ソケットは libzmq の `close` が非同期な
+    /// ぶんだけ残るので、直後の `Arm` は `Address already in use` で弾かれる(030 実測:
+    /// 3 回に 2 回、3 試行 0.118–0.121 s で成功)。ここで [`ARM_MAX_ATTEMPTS`] 回まで
+    /// [`ARM_RETRY_BACKOFF`] から倍々に待って撃ち直す。
+    ///
+    /// **粘った事実は必ず残す**(silent 禁止): 成功しても [`ArmRetry`] を積んで audit へ、
+    /// 失敗したら「何回・何 ms 粘ったか」を失敗理由の文字列に載せる。
+    ///
+    /// 断り方(不達 / 不許可遷移 / bind 失敗)で場合分けはしない —— 相手の文字列で分岐すると
+    /// 文言が変わった日に黙って壊れる。恒久的な失敗でも高々 620 ms 遅れて同じ理由で落ちる。
+    fn arm_with_retry(
+        &mut self,
+        component: &ComponentEndpoint,
+        retries: &mut Vec<ArmRetry>,
+    ) -> Result<CommandResponse, String> {
+        let began = Instant::now();
+        let mut backoff = ARM_RETRY_BACKOFF;
+        let mut last = String::new();
+        for attempt in 1..=ARM_MAX_ATTEMPTS {
+            match self.apply(component, &Command::Arm) {
+                Ok(response) => {
+                    if attempt > 1 {
+                        let retry = ArmRetry {
+                            component: component.name.clone(),
+                            attempts: attempt,
+                            waited_ms: began.elapsed().as_millis() as u64,
+                        };
+                        warn!(
+                            component = component.name,
+                            attempts = retry.attempts,
+                            waited_ms = retry.waited_ms,
+                            "Arm succeeded only after retrying (socket close is asynchronous)"
+                        );
+                        retries.push(retry);
+                    }
+                    return Ok(response);
+                }
+                Err(detail) => {
+                    last = detail;
+                    if attempt < ARM_MAX_ATTEMPTS {
+                        warn!(
+                            component = component.name,
+                            attempt,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "Arm failed — retrying: {last}"
+                        );
+                        self.transport.sleep(backoff);
+                        backoff *= 2;
+                    }
+                }
+            }
+        }
+        let waited_ms = began.elapsed().as_millis() as u64;
+        retries.push(ArmRetry {
+            component: component.name.clone(),
+            attempts: ARM_MAX_ATTEMPTS,
+            waited_ms,
+        });
+        Err(format!(
+            "{last} (gave up after {ARM_MAX_ATTEMPTS} attempts over {waited_ms} ms)"
+        ))
     }
 
     /// 実行済みコンポーネントだけを**上流から**畳む(SPEC §1.3「半端な Running を残さない」)。
@@ -583,9 +804,14 @@ impl<'a> Sequencer<'a> {
         let params = self.params;
         let mut notes = Vec::new();
 
-        // 1. ecc stop(CoBo が送信を止め TCP が閉じる)。中止では不達でも続行する。
+        // 1. ecc stop(CoBo が送信を止める)。中止では不達でも続行する。
+        //    **データリンクはここでは閉じない**(SPEC §1.3 v1.12 の事実修正、TODO/032):
+        //    実 GET の `daqStop` は TCP を close せず、close は `breakup`(`daqDisconnect`)か
+        //    次の `configure` の張り直しのときである。よって実機の通常経路では
+        //    **ecc stop 後に EOF は届かない** —— EOS は下の receiver `Stop` で注入する。
+        //    (コメントのみ 036 で訂正。停止側の挙動そのものは TODO/033 の担当。)
         let ecc_stop_failed = match self.apply_ecc(&json!({"action": "stop"})) {
-            Ok(()) => false,
+            Ok(_) => false,
             Err(detail) => {
                 warn!(%detail, "ecc stop failed — continuing to close the run with EOS");
                 notes.push(detail);
@@ -775,7 +1001,9 @@ impl<'a> Sequencer<'a> {
         }
     }
 
-    fn apply_ecc(&mut self, request: &Value) -> Result<(), String> {
+    /// ecc-bridge へ 1 リクエスト。成功したら **ECC が申告した状態**を返す(034: reset が
+    /// 本当に Idle まで戻ったかを呼び手が見られるようにするため)。
+    fn apply_ecc(&mut self, request: &Value) -> Result<String, String> {
         let action = request
             .get("action")
             .and_then(Value::as_str)
@@ -789,7 +1017,7 @@ impl<'a> Sequencer<'a> {
             )),
             Ok(reply) => {
                 info!(action, state = reply.state, "ecc command applied");
-                Ok(())
+                Ok(reply.state)
             }
         }
     }
@@ -1475,6 +1703,8 @@ fn start_run_blocking(
     match result {
         Ok(report) => {
             let (geometry, expected_fragments) = geometry;
+            // ここから先(run_start をログブックへ書いた後)は **絶対に採番を巻き戻さない** ——
+            // 記録に残った run 番号を次の run が撃ち直すことになる(034 = 論点 C)。
             controller.append(LogbookRecord::RunStart {
                 actor: ACTOR.to_string(),
                 run,
@@ -1489,7 +1719,15 @@ fn start_run_blocking(
                 "run/start",
                 json!({"run": run, "comment": comment, "links": report.links.iter()
                     .map(|l| json!({"cobo": l.cobo_id, "router_ip": l.router_ip, "router_port": l.router_port}))
-                    .collect::<Vec<_>>()}),
+                    .collect::<Vec<_>>(),
+                    // 034: Arm を撃ち直したなら回数と所要を必ず残す(silent 禁止)。
+                    "arm_retries": report.arm_retries.iter().map(ArmRetry::to_json).collect::<Vec<_>>(),
+                    // 034: 歩き戻しの着地点(`Idle` / `Off` 以外では run は始まらない)。
+                    "ecc_state_after_reset": report.ecc_state_after_reset,
+                    // 036: **歩き戻しの各段**。実機で歩き戻しが効いているかはここで機械確認する
+                    // (2 本目以降が `["status->Ready","breakup->Prepared","reset->Described",
+                    //  "reset->Idle"]` になっていること)。
+                    "ecc_walk_back": report.ecc_walk_back}),
                 operator,
                 true,
                 None,
@@ -1499,9 +1737,27 @@ fn start_run_blocking(
         }
         Err(failure) => {
             let detail = failure.to_string();
+            // 034 = 論点 C: **run_start をログブックへ書く前**に落ちたので、採番を返す。
+            // controller は `next_run` の単一書き手で、この時点の相は `Starting`
+            // (`run/next` も次の `run/start` も弾かれる)ため、割り込みが無い。
+            let rewound = match crate::state::set_next_run(&controller.state_path, run) {
+                Ok(()) => {
+                    info!(run, "run start failed — next_run rewound to this number");
+                    true
+                }
+                Err(e) => {
+                    error!(run, error = %e, "cannot rewind next_run — the number is spent");
+                    false
+                }
+            };
             controller.audit(
                 "run/start",
-                json!({"run": run, "comment": comment, "stage": failure.stage}),
+                json!({
+                    "run": run,
+                    "comment": comment,
+                    "stage": failure.stage,
+                    "next_run_rewound": rewound,
+                }),
                 operator,
                 false,
                 Some(detail.clone()),
@@ -2041,8 +2297,16 @@ mod tests {
         calls: Vec<Call>,
         names: BTreeMap<String, String>, // endpoint → name
         fail: Vec<(String, String)>,
+        /// コンポーネント名 → 残り「Arm を断る回数」(034: bind 解放待ちの模擬)。
+        refuse_arm: BTreeMap<String, u32>,
         metrics: BTreeMap<String, Value>,
         ecc_fail: Vec<String>,
+        /// この ECC が今いる状態(036)。[`ecc_transition`] で**実 ECC と同じように**動く。
+        ecc_state: String,
+        /// 「受けたのに無音で何もしない」action(036)。実 ECC の未定義遷移は例外も出さず
+        /// `Ignored`(`StateMachine/src/dhsm/Engine.cpp:334-352`)なので、歩き戻しが
+        /// 空振りする経路を**わざと**作れるようにしておく。
+        ecc_ignores: Vec<String>,
         /// EOS 完了を「N 回目の GetStatus 以降」にする(時間経過の模擬)。
         eos_after_polls: Option<usize>,
         eos_polls: usize,
@@ -2075,8 +2339,11 @@ mod tests {
                 calls: Vec::new(),
                 names,
                 fail: Vec::new(),
+                refuse_arm: BTreeMap::new(),
                 metrics,
                 ecc_fail: Vec::new(),
+                ecc_state: "Idle".to_string(),
+                ecc_ignores: Vec::new(),
                 eos_after_polls: None,
                 eos_polls: 0,
                 slept: Duration::ZERO,
@@ -2094,8 +2361,27 @@ mod tests {
             self
         }
 
+        /// 034: 最初の `times` 回だけ `Arm` を断る(libzmq の close 非同期による
+        /// `Address already in use` が数十 ms で解ける様子の模擬)。
+        fn refuse_arm_times(mut self, component: &str, times: u32) -> Self {
+            self.refuse_arm.insert(component.to_string(), times);
+            self
+        }
+
         fn fail_ecc(mut self, action: &str) -> Self {
             self.ecc_fail.push(action.to_string());
+            self
+        }
+
+        /// 036: ECC がこの状態に居るところから始める(前の run の `ecc stop` 後は `Ready`)。
+        fn ecc_in(mut self, state: &str) -> Self {
+            self.ecc_state = state.to_string();
+            self
+        }
+
+        /// 036: この action を**受けるが無音で何もしない** ECC にする(実 ECC の `Ignored`)。
+        fn ecc_ignores(mut self, action: &str) -> Self {
+            self.ecc_ignores.push(action.to_string());
             self
         }
 
@@ -2129,6 +2415,33 @@ mod tests {
             self.calls
                 .iter()
                 .position(|c| c.component == component && c.action == action)
+        }
+    }
+
+    /// **実 ECC の状態機械そのもの**(036)。`None` = その状態に遷移が無い =
+    /// 実 ECC は例外も出さず**無音で無視**する(`StateMachine/src/dhsm/Engine.cpp:334-352`)。
+    ///
+    /// 出典は `reference/20190315_patched/GetBench/src/get/rc/BackEnd.cpp:250-270`
+    /// (SM の全遷移)/ `:924`(`reset()` = `EV_UNDO` だけ)/ `:955-962`(`configure` の
+    /// `ST_PREPARED` ガード)。`tools/ecc_bridge/ecc_core.hpp` の表と**同じ意味論**にしてある。
+    ///
+    /// **このダブルを甘くしてはならない**: 「reset はどこからでも Idle」という誤った
+    /// テストダブルが 034 の誤実装を green で通した(036 の起票理由そのもの)。
+    fn ecc_transition(state: &str, action: &str) -> Option<&'static str> {
+        match (action, state) {
+            ("describe", "Off" | "Idle" | "Described") => Some("Described"),
+            ("prepare", "Described" | "Prepared") => Some("Prepared"),
+            // ST_PREPARED ガード: Prepared 以外からの configure は**黙ってスキップ**される。
+            ("configure", "Prepared") => Some("Ready"),
+            ("start", "Ready") => Some("Running"),
+            ("stop", "Running" | "Paused") => Some("Ready"),
+            // EV_BREAK: Active(= Ready/Running/Paused)→ Prepared。
+            ("breakup", "Ready" | "Running" | "Paused") => Some("Prepared"),
+            // EV_UNDO は **1 段戻すだけ**。Active からは遷移が無い。
+            ("reset", "Described") => Some("Idle"),
+            ("reset", "Prepared") => Some("Described"),
+            // status は観測。それ以外はすべて無音(状態は動かない)。
+            _ => None,
         }
     }
 
@@ -2173,7 +2486,15 @@ mod tests {
                 }
             }
 
-            let refused = self.fail.iter().any(|(c, a)| c == &name && a == &action);
+            let mut refused = self.fail.iter().any(|(c, a)| c == &name && a == &action);
+            if action == "Arm" {
+                if let Some(left) = self.refuse_arm.get_mut(&name) {
+                    if *left > 0 {
+                        *left -= 1;
+                        refused = true;
+                    }
+                }
+            }
             let state = ComponentState::Running;
             let response = if refused {
                 CommandResponse::error(state, format!("mock refuses {action}"))
@@ -2193,13 +2514,19 @@ mod tests {
             if self.ecc_fail.contains(&action) {
                 return Ok(EccReply {
                     ok: false,
-                    state: "Ready".to_string(),
+                    state: self.ecc_state.clone(),
                     error: format!("mock refuses {action}"),
                 });
             }
+            if !self.ecc_ignores.contains(&action) {
+                if let Some(next) = ecc_transition(&self.ecc_state, &action) {
+                    self.ecc_state = next.to_string();
+                }
+            }
+            // 実 ECC は未定義遷移でもエラーを返さない(無音)ので **ok は常に true**。
             Ok(EccReply {
                 ok: true,
-                state: "Running".to_string(),
+                state: self.ecc_state.clone(),
                 error: String::new(),
             })
         }
@@ -2263,16 +2590,22 @@ mod tests {
     // 開始シーケンス(SPEC §1.3)
     // -----------------------------------------------------------------
 
-    /// 順序の正本: Configure(下流から)→ Arm → Start → ecc 4 段。
+    /// 順序の正本: **ecc を Idle へ歩き戻す(034 → 036)**→ Configure(下流から)→ Arm →
+    /// Start → ecc 4 段。
+    ///
+    /// 先頭の段は 034(論点 A = ユーザー裁定「毎 run 完全にリセットして一からやり直す」)で
+    /// 入り、036 で**現在状態を見て必要な段数だけ歩く**形になった。ここは既に `Idle` に
+    /// 居るので `status` 1 発だけで済む(= 1 本目の実機の姿)。
     #[test]
     fn start_follows_the_spec_order_and_collects_router_ports() {
         let params = params_with(&[0, 1]);
-        let mut mock = MockTransport::new(&params);
+        let mut mock = MockTransport::new(&params).ecc_in("Idle");
         let report = Sequencer::new(&params, &mut mock)
             .start_run(57, "gas test", "2026-08-14T10:00:00.000")
             .unwrap();
 
         let expected = vec![
+            Call::new("ecc", "status"),
             Call::new("graw-writer", "Configure"),
             Call::new("decoder", "Configure"),
             Call::new("receiver0", "Configure"),
@@ -2307,6 +2640,284 @@ mod tests {
                     router_port: 46101,
                 },
             ]
+        );
+        assert!(
+            report.arm_retries.is_empty(),
+            "1 発で通ったならリトライ記録は空: {:?}",
+            report.arm_retries
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 034 — 連続 run の運用性
+    // -----------------------------------------------------------------
+
+    /// **論点 A**(ユーザー裁定、036 で歩き戻しに更新): run 開始は必ず ECC を `Idle` へ
+    /// 戻すところから始まる —— **コンポーネントに 1 コマンドも触る前**に片付ける
+    /// (= 前の run が残した `Ready` から `describe` を撃って順序違反で死ぬ経路を塞ぐ。
+    /// 新しい listen が前の run の CoBo ストリームを拾う経路も同時に塞がる)。
+    #[test]
+    fn the_start_sequence_walks_the_ecc_back_to_idle_before_touching_any_component() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).ecc_in("Ready");
+        Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap();
+
+        let calls = mock.commands();
+        let first_component = calls
+            .iter()
+            .position(|c| c.component != "ecc")
+            .expect("コンポーネントに 1 つもコマンドが出ていない");
+        assert_eq!(
+            &calls[..first_component],
+            &[
+                Call::new("ecc", "status"),
+                Call::new("ecc", "breakup"),
+                Call::new("ecc", "reset"),
+                Call::new("ecc", "reset"),
+            ],
+            "コンポーネントに触る前に ECC が Idle まで片付いていない: {calls:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 036 — ECC の歩き戻し(実 ECC の `EV_UNDO` 意味論)
+    // -----------------------------------------------------------------
+
+    /// **036 の本体**: 前の run の `ecc stop` が置いた `Ready` からは
+    /// **`breakup` → `reset` → `reset`** の 3 手で `Idle` まで歩き戻す。
+    ///
+    /// 手計算の出典 = 実 ECC の SM(`GetBench/src/get/rc/BackEnd.cpp:250-270`):
+    /// `EV_BREAK` が `Active(Ready) → Prepared`、`EV_UNDO` が `Prepared → Described` と
+    /// `Described → Idle` の**各 1 段**。`reset` を 3 発撃つのではなく `breakup` から
+    /// 始まるのは、`Active` からの `EV_UNDO` が**存在しない**(= 無音で無視される)ため。
+    #[test]
+    fn a_ready_ecc_is_walked_back_to_idle_before_the_run_starts() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).ecc_in("Ready");
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap();
+
+        // 発行されたコマンド列(コンポーネントに触る前の 4 手)。
+        assert_eq!(
+            &mock.commands()[..4],
+            &[
+                Call::new("ecc", "status"),
+                Call::new("ecc", "breakup"),
+                Call::new("ecc", "reset"),
+                Call::new("ecc", "reset"),
+            ]
+        );
+        // 歩いた跡は audit に残る(silent 禁止 — 実機で効いているかはこれで見る)。
+        assert_eq!(
+            report.ecc_walk_back,
+            vec![
+                "status->Ready",
+                "breakup->Prepared",
+                "reset->Described",
+                "reset->Idle",
+            ]
+        );
+        assert_eq!(report.ecc_state_after_reset, "Idle");
+    }
+
+    /// `Idle` なら **1 コマンドも出さない**(状態を見てから歩くので、要らない段は歩かない)。
+    /// `status` は観測であって操作ではない。
+    #[test]
+    fn an_idle_ecc_is_left_alone() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).ecc_in("Idle");
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap();
+
+        assert_eq!(
+            mock.commands().first(),
+            Some(&Call::new("ecc", "status")),
+            "run 開始の第 1 手は ECC の状態を**見る**こと: {:?}",
+            mock.commands()
+        );
+        for action in ["breakup", "reset", "stop"] {
+            assert!(
+                !mock.commands().contains(&Call::new("ecc", action)),
+                "Idle なのに {action} を撃った: {:?}",
+                mock.commands()
+            );
+        }
+        assert_eq!(report.ecc_walk_back, vec!["status->Idle"]);
+        assert_eq!(report.ecc_state_after_reset, "Idle");
+    }
+
+    /// 前の run が `Running` のまま残っていたら **`stop` から**歩き戻す(4 手)。
+    /// controller が死んだ後の復旧(E2E-G の状況)がこれ。
+    #[test]
+    fn a_running_ecc_is_stopped_first_and_then_walked_back_to_idle() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).ecc_in("Running");
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap();
+
+        assert_eq!(
+            &mock.commands()[..5],
+            &[
+                Call::new("ecc", "status"),
+                Call::new("ecc", "stop"),
+                Call::new("ecc", "breakup"),
+                Call::new("ecc", "reset"),
+                Call::new("ecc", "reset"),
+            ]
+        );
+        assert_eq!(
+            report.ecc_walk_back,
+            vec![
+                "status->Running",
+                "stop->Ready",
+                "breakup->Prepared",
+                "reset->Described",
+                "reset->Idle",
+            ]
+        );
+    }
+
+    /// **判断できない状態では run を始めない**(`Unknown` = ECC 不達 or 未知の綴り)。
+    /// コンポーネントには 1 コマンドも出さない。
+    #[test]
+    fn an_ecc_in_an_unknown_state_refuses_to_start_the_run() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).ecc_in("Unknown");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "ecc");
+        assert!(failure.detail.contains("Unknown"), "{}", failure.detail);
+        assert_eq!(mock.commands(), vec![Call::new("ecc", "status")]);
+    }
+
+    /// **無音で無視された段を見逃さない**(036 の肝): 実 ECC は未定義遷移をエラーにせず
+    /// `Ignored` で返す(`StateMachine/src/dhsm/Engine.cpp:334-352`)。つまり
+    /// 「ok なのに状態が動いていない」が唯一の手がかりであり、そこで **run を止める**。
+    /// 黙って先へ進むと `configure` がスキップされた ECC の上に run を建ててしまう。
+    #[test]
+    fn an_ecc_that_ignores_a_walk_back_step_in_silence_refuses_to_start_the_run() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .ecc_in("Ready")
+            .ecc_ignores("breakup");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "ecc");
+        assert!(failure.detail.contains("breakup"), "{}", failure.detail);
+        assert!(failure.detail.contains("Ready"), "{}", failure.detail);
+        // 空振りした 1 手で止まる(残りを撃ち続けない)。
+        assert_eq!(
+            mock.commands(),
+            vec![Call::new("ecc", "status"), Call::new("ecc", "breakup")]
+        );
+    }
+
+    /// ECC の状態が**取れなければ** run を始めない(見えない ECC の上に run を建てない)。
+    /// コンポーネントには 1 コマンドも出ない。
+    #[test]
+    fn a_failing_ecc_status_stops_the_run_before_any_component_is_configured() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).fail_ecc("status");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "ecc");
+        assert!(failure.detail.contains("status"), "{}", failure.detail);
+        assert_eq!(mock.commands(), vec![Call::new("ecc", "status")]);
+    }
+
+    /// 歩き戻しの途中の失敗も **run を始めない**(半端な ECC の上に run を建てない)。
+    #[test]
+    fn a_failing_ecc_reset_stops_the_run_before_any_component_is_configured() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .ecc_in("Ready")
+            .fail_ecc("reset");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "ecc");
+        assert!(failure.detail.contains("reset"), "{}", failure.detail);
+        assert_eq!(
+            mock.commands(),
+            vec![
+                Call::new("ecc", "status"),
+                Call::new("ecc", "breakup"),
+                Call::new("ecc", "reset"),
+            ]
+        );
+    }
+
+    /// **論点 B**: Arm の bind 失敗は指数バックオフでリトライし、**回数と所要を必ず残す**
+    /// (silent 禁止)。
+    ///
+    /// 手計算の出典: バックオフは [`ARM_RETRY_BACKOFF`] = 20 ms から倍々。
+    /// 3 回目で通るなら眠るのは 1 回目の後(20 ms)と 2 回目の後(40 ms)= **60 ms**。
+    /// (030 実測の「2 本目は 3 回・0.118–0.121 s」がまさにこの形)。
+    #[test]
+    fn arm_retries_with_exponential_backoff_and_records_the_attempts() {
+        let params = params_with(&[0]);
+        // decoder の Arm を 2 回だけ断る(3 回目で通る)。非対称に 1 台だけ詰まらせる。
+        let mut mock = MockTransport::new(&params).refuse_arm_times("decoder", 2);
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap();
+
+        assert_eq!(report.arm_retries.len(), 1, "{:?}", report.arm_retries);
+        assert_eq!(report.arm_retries[0].component, "decoder");
+        assert_eq!(report.arm_retries[0].attempts, 3);
+        assert_eq!(
+            mock.slept,
+            Duration::from_millis(60),
+            "20 ms + 40 ms の指数バックオフ"
+        );
+        // 詰まった相手だけ Arm を撃ち直す(通った相手は 1 回のまま)。
+        assert_eq!(
+            mock.actions("decoder"),
+            vec!["Configure", "Arm", "Arm", "Arm", "Start"]
+        );
+        assert_eq!(
+            mock.actions("graw-writer"),
+            vec!["Configure", "Arm", "Start"]
+        );
+    }
+
+    /// リトライ上限を使い切ったら **どれだけ粘ったかを言って** 失敗する(黙って諦めない)。
+    ///
+    /// 手計算の出典: [`ARM_MAX_ATTEMPTS`] = 6 回 = リトライ 5 回。眠る合計は
+    /// 20+40+80+160+320 = **620 ms**(最後の試行の後は眠らない)。
+    #[test]
+    fn arm_gives_up_after_the_retry_budget_and_says_how_hard_it_tried() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).fail_on("decoder", "Arm");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "Arm");
+        assert!(
+            failure.detail.contains("6 attempts"),
+            "何回粘ったか言っていない: {}",
+            failure.detail
+        );
+        assert_eq!(mock.slept, Duration::from_millis(620));
+        assert_eq!(
+            mock.actions("decoder")
+                .iter()
+                .filter(|a| *a == "Arm")
+                .count(),
+            ARM_MAX_ATTEMPTS as usize
         );
     }
 
@@ -2355,6 +2966,10 @@ mod tests {
         assert_eq!(
             mock.commands(),
             vec![
+                // 034/036: run 開始は必ず ECC を Idle へ戻すところから(論点 A)。
+                // このモックの ECC は既に `Idle` なので `status` で確かめるだけ。失敗しても
+                // ECC は Idle = **一番安全な状態**のままなので、ここを巻き戻す必要はない。
+                Call::new("ecc", "status"),
                 Call::new("graw-writer", "Configure"),
                 Call::new("decoder", "Configure"),
                 Call::new("receiver0", "Configure"), // ここで失敗
@@ -2387,9 +3002,13 @@ mod tests {
             !calls.iter().any(|c| c.action == "Start"),
             "巻き戻し中に Start を出さない: {calls:?}"
         );
+        // 034/036: 先頭の歩き戻し(ここは既に `Idle` なので `status` だけ)は通る。
+        // **ECC を走らせる段**(describe 以降)へ進まないことが、この主張の中身である。
         assert!(
-            !calls.iter().any(|c| c.component == "ecc"),
-            "ecc へ進まない: {calls:?}"
+            !calls
+                .iter()
+                .any(|c| c.component == "ecc" && c.action != "status"),
+            "ECC を走らせる段へ進まない: {calls:?}"
         );
         // 実行済み 4 台すべてが Stop → Reset を受ける(Stop は Armed からは断られるので
         // Reset が Idle まで戻す = 半端な状態を残さない)。
