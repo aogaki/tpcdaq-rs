@@ -70,6 +70,9 @@ struct StatusPayload {
     events_built: u64,
     events_incomplete: u64,
     late_fragments: u64,
+    /// ビルダ組み上げ中の瞬間値(SPEC §5.3 v1.10、R-P2-5、TODO/024)。`late_fragments`
+    /// の次のキー。
+    pending_events: u64,
     frames_per_cobo: BTreeMap<String, u64>,
     bytes_written: u64,
     saturation: BTreeMap<String, SaturationPayload>,
@@ -172,12 +175,21 @@ fn free_endpoint() -> String {
     format!("tcp://127.0.0.1:{port}")
 }
 
+/// C++ 側の zmq bind 失敗の終了コード(`free_endpoint()` の TOCTOU — 022 結果節の
+/// 申し送り、024 やること 4)。
+const EXIT_ZMQ: i32 = 4;
+/// spawn 後に早期死を見る猶予とリトライ回数。
+const EARLY_DEATH_GRACE: Duration = Duration::from_millis(200);
+const SPAWN_RETRY_MAX: u32 = 3;
+
 /// 起動した root_sink。**Drop で必ず殺す** —— assert で落ちたテストが子プロセスを
 /// 置き去りにすると、継承した stderr パイプが閉じず `cargo test` ごと固まる
 /// (root_sink_intake.rs にはこの守りが無い。ここでは新規なので入れてある)。
 struct Sink {
     child: Child,
     pid: u32,
+    data_ep: String,
+    pub_ep: String,
 }
 
 impl Drop for Sink {
@@ -191,19 +203,47 @@ impl Drop for Sink {
 
 impl Sink {
     /// `--pub` は**必ず空きポート**を渡す(既定の 47004 を掴むと並列テストが互いを弾く)。
-    fn spawn(bin: &Path, data_ep: &str, pub_ep: &str, extra: &[&str]) -> Sink {
-        let child = Command::new(bin)
-            .arg("--bind")
-            .arg(data_ep)
-            .arg("--pub")
-            .arg(pub_ep)
-            .args(extra)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn root_sink");
-        let pid = child.id();
-        Sink { child, pid }
+    /// **spawn 後 ~200 ms 内に exit 4(zmq bind 失敗 = `free_endpoint()` の TOCTOU)で
+    /// 死んでいたら、新しいポートで再スポーンする**(最大 3 回、リトライは eprintln で
+    /// 可視 —— 022 結果節の申し送り、024 やること 4)。
+    fn spawn(bin: &Path, extra: &[&str]) -> Sink {
+        for attempt in 1..=SPAWN_RETRY_MAX {
+            let data_ep = free_endpoint();
+            let pub_ep = free_endpoint();
+            let mut child = Command::new(bin)
+                .arg("--bind")
+                .arg(&data_ep)
+                .arg("--pub")
+                .arg(&pub_ep)
+                .args(extra)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .expect("spawn root_sink");
+            std::thread::sleep(EARLY_DEATH_GRACE);
+            if let Some(status) = child.try_wait().expect("try_wait") {
+                if status.code() == Some(EXIT_ZMQ) {
+                    eprintln!(
+                        "Sink::spawn: attempt {attempt}/{SPAWN_RETRY_MAX} root_sink \
+                         exited {status:?} within {EARLY_DEATH_GRACE:?} on \
+                         {data_ep}/{pub_ep} (free_endpoint() TOCTOU) — retrying with \
+                         new ports"
+                    );
+                    continue;
+                }
+            }
+            let pid = child.id();
+            return Sink {
+                child,
+                pid,
+                data_ep,
+                pub_ep,
+            };
+        }
+        panic!(
+            "root_sink failed to bind after {SPAWN_RETRY_MAX} attempts (exit {EXIT_ZMQ} every \
+             time)"
+        );
     }
 
     /// SIGTERM → 終了待ち → 終了時の JSON 1 行。
@@ -493,19 +533,17 @@ fn status_is_published_at_one_hertz_even_while_idle() {
         eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set (C++ build is not a cargo test dependency)");
         return;
     };
-    let data_ep = free_endpoint();
-    let pub_ep = free_endpoint();
-    let mut sink = Sink::spawn(
-        &bin,
-        &data_ep,
-        &pub_ep,
-        &["--no-root", "--geometry", GEOMETRY],
-    );
+    let mut sink = Sink::spawn(&bin, &["--no-root", "--geometry", GEOMETRY]);
+    let pub_ep = sink.pub_ep.clone();
 
     let ctx = zmq::Context::new();
     let sub = connect_sub(&ctx, &pub_ep);
-    // データを 1 通も送らずに 2.5 秒покой —— それでも status は来る。
-    let msgs = collect_until(&sub, Instant::now() + Duration::from_millis(2500));
+    // データを 1 通も送らずに 4 秒放置 —— それでも status は来る。
+    // (024: spawn の早期死リトライがフルスイート中の同時実行プロセス数を増やすため、
+    // 元の 2.5 s だと重負荷時に "status(1 Hz)を 2 通観測" のマージンが薄く、
+    // ごく稀に 1 通しか集まらず flake した。しきい値そのもの(2 通以上)は変えず、
+    // 観測窓だけ広げて余裕を持たせる。)
+    let msgs = collect_until(&sub, Instant::now() + Duration::from_millis(4000));
 
     let statuses = of_kind(&msgs, "status");
     assert!(
@@ -528,6 +566,7 @@ fn status_is_published_at_one_hertz_even_while_idle() {
     assert_eq!(s.events_built, 0);
     assert_eq!(s.events_incomplete, 0);
     assert_eq!(s.late_fragments, 0);
+    assert_eq!(s.pending_events, 0, "組み上げ中のイベントが無い");
     assert_eq!(s.bytes_written, 0, "--no-root なので 0");
     assert_eq!(s.publish_drops, 0);
     assert!(s.frames_per_cobo.is_empty(), "1 フレームも来ていない");
@@ -595,14 +634,9 @@ fn hist_snapshot_bins_match_an_independent_recomputation() {
         eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set");
         return;
     };
-    let data_ep = free_endpoint();
-    let pub_ep = free_endpoint();
-    let mut sink = Sink::spawn(
-        &bin,
-        &data_ep,
-        &pub_ep,
-        &["--no-root", "--geometry", GEOMETRY],
-    );
+    let mut sink = Sink::spawn(&bin, &["--no-root", "--geometry", GEOMETRY]);
+    let data_ep = sink.data_ep.clone();
+    let pub_ep = sink.pub_ep.clone();
 
     let ctx = zmq::Context::new();
     let sub = connect_sub(&ctx, &pub_ep);
@@ -690,13 +724,9 @@ fn built_events_are_published_and_throttling_is_counted() {
         eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set");
         return;
     };
-    let data_ep = free_endpoint();
-    let pub_ep = free_endpoint();
     // 送出は速く・配信は 2 Hz —— 間引きが必ず起きる設定(publish_drops > 0 を主張する)。
     let mut sink = Sink::spawn(
         &bin,
-        &data_ep,
-        &pub_ep,
         &[
             "--no-root",
             "--geometry",
@@ -707,6 +737,8 @@ fn built_events_are_published_and_throttling_is_counted() {
             "2",
         ],
     );
+    let data_ep = sink.data_ep.clone();
+    let pub_ep = sink.pub_ep.clone();
 
     let ctx = zmq::Context::new();
     let sub = connect_sub(&ctx, &pub_ep);
@@ -806,12 +838,8 @@ fn event_publish_hz_zero_is_off_and_not_counted_as_drops() {
         eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set");
         return;
     };
-    let data_ep = free_endpoint();
-    let pub_ep = free_endpoint();
     let mut sink = Sink::spawn(
         &bin,
-        &data_ep,
-        &pub_ep,
         &[
             "--no-root",
             "--geometry",
@@ -820,6 +848,8 @@ fn event_publish_hz_zero_is_off_and_not_counted_as_drops() {
             "0",
         ],
     );
+    let data_ep = sink.data_ep.clone();
+    let pub_ep = sink.pub_ep.clone();
 
     let ctx = zmq::Context::new();
     let sub = connect_sub(&ctx, &pub_ep);
@@ -881,14 +911,10 @@ fn monitor_root_is_written_within_ten_seconds_of_the_eos() {
         return;
     };
     let out_root = scratch_dir("r10");
-    let data_ep = free_endpoint();
-    let pub_ep = free_endpoint();
     // TTree 側は GDataFrame(1 エントリ = 1 フラグメント)—— 既存回帰と同じ形のまま、
     // モニタ経路が保存側に干渉していないことを見る。
     let mut sink = Sink::spawn(
         &bin,
-        &data_ep,
-        &pub_ep,
         &[
             "--format",
             "gdataframe",
@@ -898,6 +924,7 @@ fn monitor_root_is_written_within_ten_seconds_of_the_eos() {
             &out_root.to_string_lossy(),
         ],
     );
+    let data_ep = sink.data_ep.clone();
 
     let ctx = zmq::Context::new();
     let push = connect_push(&ctx, &data_ep);
@@ -1002,14 +1029,9 @@ fn real_graw_hist_totals_match_an_independent_sum() {
     assert_eq!(events.len(), 108, "P1 オラクル(events)");
     assert_eq!(decoder.items(), 15_040_512, "P1 オラクル(items)");
 
-    let data_ep = free_endpoint();
-    let pub_ep = free_endpoint();
-    let mut sink = Sink::spawn(
-        &bin,
-        &data_ep,
-        &pub_ep,
-        &["--no-root", "--geometry", GEOMETRY],
-    );
+    let mut sink = Sink::spawn(&bin, &["--no-root", "--geometry", GEOMETRY]);
+    let data_ep = sink.data_ep.clone();
+    let pub_ep = sink.pub_ep.clone();
 
     let ctx = zmq::Context::new();
     let sub = connect_sub(&ctx, &pub_ep);
@@ -1110,12 +1132,8 @@ fn bench_storage_throughput_vs_snapshot_rate() {
     let total_bytes: usize = batches.iter().map(|b| b.len()).sum();
 
     let out_root = scratch_dir(&format!("bench{hz}"));
-    let data_ep = free_endpoint();
-    let pub_ep = free_endpoint();
     let mut sink = Sink::spawn(
         &bin,
-        &data_ep,
-        &pub_ep,
         &[
             "--format",
             "gdataframe",
@@ -1127,6 +1145,7 @@ fn bench_storage_throughput_vs_snapshot_rate() {
             &hz,
         ],
     );
+    let data_ep = sink.data_ep.clone();
     let ctx = zmq::Context::new();
     let push = connect_push(&ctx, &data_ep);
     std::thread::sleep(Duration::from_millis(400)); // bind が済むまで

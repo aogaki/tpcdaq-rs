@@ -1,4 +1,5 @@
-// monitor_pub.hpp — モニタ PUB のワイヤ直列化(SPEC §5.3 v1.9 + §2.2 + §2.4)。TODO/022。
+// monitor_pub.hpp — モニタ PUB のワイヤ直列化(SPEC §5.3 v1.10 + §2.2 + §2.4)。TODO/022。
+// status に `pending_events`(11 キー目、`late_fragments` の次)を追加(TODO/024、R-P2-5)。
 //
 // **純ヘッダ。ZMQ 非依存・ROOT 非依存** —— ここは「バイト列を組む」だけで、送るのは
 // root_sink.cxx の Publisher スレッド。直列化と zmq send は必ず `hist_mutex` の**外**で
@@ -53,11 +54,25 @@ struct Status {
   uint64_t events_built = 0;       // emit 済みイベント総数(complete + incomplete)
   uint64_t events_incomplete = 0;
   uint64_t late_fragments = 0;
+  // ビルダ組み上げ中の瞬間値(SPEC §5.3 v1.10、R-P2-5)。pending ≈ レート ×
+  // build_timeout に比例するため常時可視化する(hard limit は設けない — 下の
+  // kPendingWarnThreshold は warn するだけ)。
+  uint64_t pending_events = 0;
   uint64_t frames_per_cobo[kMaxCobo] = {};
   uint64_t bytes_written = 0;      // Recorder の atomic(--no-root なら 0)
   Saturation saturation[kPlaneCount] = {};
   uint64_t publish_drops = 0;      // built event の間引き数(送り手側の意図的間引き)
 };
+
+// pending_events の警告閾値(SPEC §5.3 v1.10、R-P2-5)。hard limit はロスレス契約と
+// 衝突するので設けない —— 超過を可視化して warn するだけ。呼び手(root_sink.cxx の
+// 集計スレッド)が「一度だけ」のラッチを持ち、この純関数は閾値判定だけを切り出す
+// (単体テスト対象)。
+constexpr uint64_t kPendingWarnThreshold = 1000;
+
+inline bool pending_events_exceeds_warn_threshold(uint64_t pending_events) {
+  return pending_events > kPendingWarnThreshold;
+}
 
 // ---------------------------------------------------------------------------
 // MessagePack 書き側(必要な 6 種だけ)
@@ -184,7 +199,7 @@ class Encoder {
 
   void status(const Status& s, uint64_t created_ns, std::vector<uint8_t>& out) {
     open_envelope(out, s.run, created_ns);
-    mpw::map_len(out, 10);
+    mpw::map_len(out, 11);
     mpw::str(out, "kind");
     mpw::str(out, "status");
     mpw::str(out, "run");
@@ -197,6 +212,8 @@ class Encoder {
     mpw::uint_(out, s.events_incomplete);
     mpw::str(out, "late_fragments");
     mpw::uint_(out, s.late_fragments);
+    mpw::str(out, "pending_events");
+    mpw::uint_(out, s.pending_events);
     mpw::str(out, "frames_per_cobo");
     write_frames_per_cobo(out, s);
     mpw::str(out, "bytes_written");

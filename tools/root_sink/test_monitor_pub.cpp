@@ -85,9 +85,10 @@ void check_bytes(const std::vector<uint8_t>& got, const std::vector<uint8_t>& wa
 // 手計算の出典(値はすべて取り違えが見えるようにずらしてある):
 //   envelope  = fixmap(1){"Data": array(5)[101, 7, 0, 42, payload]}
 //               source_id 101 = SPEC §3.2 v1.9(root-sink のモニタ PUB)
-//   payload   = fixmap(10){ kind, run, state, events_built, events_incomplete,
-//                           late_fragments, frames_per_cobo, bytes_written,
-//                           saturation, publish_drops }
+//   payload   = fixmap(11){ kind, run, state, events_built, events_incomplete,
+//                           late_fragments, pending_events, frames_per_cobo,
+//                           bytes_written, saturation, publish_drops }
+//   pending_events(v1.10、R-P2-5)は late_fragments の次(SPEC §5.3)。
 //   frames_per_cobo は **値が 0 でない CoBo だけ**を 10 進文字列キーで(cobo 昇順)。
 //   bytes_written = 200 は fixint(≤127)に入らないので uint8(0xcc)。
 void test_status_bytes() {
@@ -97,6 +98,7 @@ void test_status_bytes() {
   s.events_built = 5;
   s.events_incomplete = 1;
   s.late_fragments = 2;
+  s.pending_events = 8;
   s.frames_per_cobo[0] = 3;
   s.frames_per_cobo[2] = 4;
   s.bytes_written = 200;
@@ -117,13 +119,14 @@ void test_status_bytes() {
   e.fixint(7);    // run_number
   e.fixint(0);    // sequence_number(最初の 1 通)
   e.fixint(42);   // created_ns
-  e.fixmap(10);
+  e.fixmap(11);
   e.str("kind");              e.str("status");
   e.str("run");               e.fixint(7);
   e.str("state");             e.str("running");
   e.str("events_built");      e.fixint(5);
   e.str("events_incomplete"); e.fixint(1);
   e.str("late_fragments");    e.fixint(2);
+  e.str("pending_events");    e.fixint(8);
   e.str("frames_per_cobo");
   e.fixmap(2);
   e.str("0");                 e.fixint(3);
@@ -158,7 +161,7 @@ void test_status_idle_state_string() {
 
   tpcwire::Reader r(h.payload, h.payload_size);
   const uint32_t n = r.read_map_len();
-  CHECK_EQ(n, 10);
+  CHECK_EQ(n, 11);
   bool saw_idle = false;
   for (uint32_t i = 0; i < n; ++i) {
     const std::string key = r.read_str();
@@ -597,6 +600,20 @@ void test_large_scalars_use_wider_msgpack_integers() {
   CHECK_EQ(cobo255, 65535);
 }
 
+// ---------------------------------------------------------------------------
+// 7. pending_events の警告閾値(SPEC §5.3 v1.10、R-P2-5)— 純関数の単体
+// ---------------------------------------------------------------------------
+//
+// 「一度だけ warn」のラッチは呼び手(root_sink.cxx の集計スレッド)が持つ —— ここは
+// 閾値超過の判定だけを機械照合する(kPendingWarnThreshold = 1000)。
+void test_pending_events_warn_threshold() {
+  CHECK(!rsmon::pending_events_exceeds_warn_threshold(0));
+  CHECK(!rsmon::pending_events_exceeds_warn_threshold(999));
+  CHECK(!rsmon::pending_events_exceeds_warn_threshold(rsmon::kPendingWarnThreshold));
+  CHECK(rsmon::pending_events_exceeds_warn_threshold(rsmon::kPendingWarnThreshold + 1));
+  CHECK(rsmon::pending_events_exceeds_warn_threshold(1'000'000));
+}
+
 }  // namespace
 
 int main() {
@@ -610,5 +627,6 @@ int main() {
   test_sequence_is_one_series_across_kinds_and_never_resets();
   test_output_buffer_is_reused_without_leftovers();
   test_large_scalars_use_wider_msgpack_integers();
+  test_pending_events_warn_threshold();
   return tpccheck::report("test_monitor_pub");
 }

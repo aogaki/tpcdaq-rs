@@ -1,6 +1,39 @@
 # 024 — P2 レビュー改修: root-sink C++ + spawn テストインフラ
 
-**Status: OPEN(発注可)**
+**Status: COMPLETED**(2026-08-14 implementer/Sonnet(worktree)→ Fable レビュー PASS →
+main 取り込み)
+
+## 結果
+
+- **実装**(7 ファイル +526/-96): `kExitRunMismatch = 6` — consume() の Data/EOS 両経路で
+  `run_number_mismatch()` の増分検知 → fatal(**転写を fatal 直前に移す副次バグ修正つき —
+  `_Exit` で戻らないため旧位置では終了 JSON に乗らなかった**)/ Recorder 混在 run 防御を
+  finalize=false + PROTOCOL VIOLATION 明示(到達不能になった最後の砦)/
+  `maybe_autosave()` を write()/tick() 共通化(R-P2-2)/ Status `pending_events`
+  (11 キー目)+ `kPendingWarnThreshold=1000` 純関数 + 一度だけ warn(R-P2-5)/
+  テストインフラ: SinkGuard(Drop kill)+ spawn 早期死リトライ(exit 4 検知・最大 3 回・
+  eprintln 可視)+ intake 全 spawn に `--pub` 空きポート明示。
+- **テスト(worktree でエージェント実行 + Fable が main 取り込み後ゲートで裏取り、
+  2026-08-14、macOS Darwin 25.5.0 / ROOT 6.36.10)**:
+  `make test` 全 green(monitor_pub 87→**92**)、`make test-root` 全 green
+  (recorder 216→**233**。pevent 構造一致は TPCDAQ_REAL_PEVENT 未設定 SKIP — 既存どおり)、
+  fmt / clippy クリーン、cargo test 全 green。新規: C++ 混在 run 防御(inprogress 残置)/
+  write() 単独 AutoSave(peek_tree_entries ヘルパ — 読み専 TFile で GetEntries のみ)/
+  閾値純関数。Rust: run 混在 Data / EOS 各 → **exit 6** + JSON run_number_mismatch 照合。
+  **intake + monitor_pub の 3 回連続 0 fail**(+ 実装過程で 15 回以上 green =
+  TOCTOU flake の構造的解消)。
+- **main 取り込み後(Fable 実測)**: make test / test-root 全 green、intake+monitor
+  3 回連続 **17/17**、フルゲート(実データ + ecc env)**337 passed / 0 failed**。
+  取り込み時の教訓 2 件: ①`make test`/`test-root` は root_sink **本体**を再ビルドせず、
+  stale バイナリで新テスト 2 本が偽 red になった(Fable が test-root に root_sink 依存を
+  追加して恒久化 — Makefile 1 行)。②全スイート並列の 1 ラウンドで名前不明の 1 fail が
+  単発発生(直後 2 周は 0 fail・名前捕捉できず — 再発したらフルログで採取)。
+- **レビュー(Fable)**: 判断 3 件受理 — AutoSave 検証の読み専 TFile 方式 / mismatch 判定を
+  on_data/on_eos 直後に置く(stale EOS・期待外 source は RunState 実装上 mismatch を
+  増分させないことを確認済み)/ idle status テストの観測窓 2.5→4 s(spawn 200 ms 猶予の
+  直接的副作用への最小是正、閾値は不変)。worktree は main へ ff 同期して作業
+  (自コミットなし)、TPCDAQ_TPCRECO_DIR は Makefile 既定のオーバーライド機構を使用
+  (無改変)。
 **仕様**: SPEC **v1.10** §6.2-5(run_number 食い違い = fatal exit 6)/ §5.3
 (status `pending_events` + 警告閾値 1000)。所見の詳細 = [P2_REVIEW.md](P2_REVIEW.md) の
 R-P2-1 / R-P2-2 / R-P2-5、および archive/022 結果節「既知の申し送り」(free_endpoint

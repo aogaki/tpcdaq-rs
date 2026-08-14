@@ -42,6 +42,8 @@ const RUN_NUMBER: u32 = 7;
 /// C++ 側の終了コード表(root_sink.cxx と対)。
 const EXIT_MALFORMED: i32 = 2;
 const EXIT_SEQ: i32 = 3;
+const EXIT_ZMQ: i32 = 4;
+const EXIT_RUN_MISMATCH: i32 = 6;
 
 // ---------------------------------------------------------------------
 // skip ゲートとプロセス操作
@@ -81,6 +83,85 @@ fn spawn_sink(bin: &Path, endpoint: &str, extra: &[&str]) -> Child {
     let mut args: Vec<&str> = vec!["--no-root"];
     args.extend_from_slice(extra);
     spawn_sink_raw(bin, endpoint, &args)
+}
+
+/// 起動した root_sink を **Drop で必ず殺す**(root_sink_monitor_pub.rs の `Sink` と
+/// 同じ守りを intake 側へ横展開 —— 024 やること 4。assert で落ちたテストが子
+/// プロセスを置き去りにすると、継承した stderr パイプが閉じず `cargo test` ごと
+/// 固まる)。既存のヘルパー(`wait_for_exit` / `read_counts` / `send_term(pid)`)は
+/// `&mut Child` / `child.id()` を触るだけなので、`Deref`/`DerefMut` だけで
+/// 呼び出し側を書き換えずに済む(KISS)。
+struct SinkGuard(Child);
+
+impl Drop for SinkGuard {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+impl std::ops::Deref for SinkGuard {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SinkGuard {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.0
+    }
+}
+
+/// spawn 後 ~200 ms 内に見る猶予とリトライ回数(022 結果節の申し送り、024 やること 4)。
+const EARLY_DEATH_GRACE: Duration = Duration::from_millis(200);
+const SPAWN_RETRY_MAX: u32 = 3;
+
+/// `spawn_sink`/`spawn_sink_raw` を早期死リトライに包む共通ロジック。
+///
+/// 1. **`--pub` は必ず空きポートを明示**(既定 47004 の並列 bind 競合ノイズを消す ——
+///    root_sink_monitor_pub.rs の `Sink::spawn` と同じ理由。intake はモニタ PUB を
+///    使わないので、返す endpoint は `--bind`(データ取り込み側)だけでよい)。
+/// 2. spawn 後 `EARLY_DEATH_GRACE` 以内に exit 4(zmq bind 失敗 = `free_endpoint()` の
+///    TOCTOU)で死んでいたら、新しいポートで再スポーンする(最大 `SPAWN_RETRY_MAX` 回。
+///    リトライは eprintln で可視)。
+fn spawn_with_retry(
+    bin: &Path,
+    extra: &[&str],
+    spawn: fn(&Path, &str, &[&str]) -> Child,
+) -> (SinkGuard, String) {
+    for attempt in 1..=SPAWN_RETRY_MAX {
+        let data_ep = free_endpoint();
+        let pub_ep = free_endpoint();
+        let mut args: Vec<&str> = vec!["--pub", &pub_ep];
+        args.extend_from_slice(extra);
+        let mut child = spawn(bin, &data_ep, &args);
+        std::thread::sleep(EARLY_DEATH_GRACE);
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            if status.code() == Some(EXIT_ZMQ) {
+                eprintln!(
+                    "spawn_with_retry: attempt {attempt}/{SPAWN_RETRY_MAX} root_sink \
+                     exited {status:?} within {EARLY_DEATH_GRACE:?} on {data_ep}/{pub_ep} \
+                     (free_endpoint() TOCTOU) — retrying with new ports"
+                );
+                continue;
+            }
+        }
+        return (SinkGuard(child), data_ep);
+    }
+    panic!(
+        "root_sink failed to bind after {SPAWN_RETRY_MAX} attempts (exit {EXIT_ZMQ} every time)"
+    );
+}
+
+fn spawn_sink_with_retry(bin: &Path, extra: &[&str]) -> (SinkGuard, String) {
+    spawn_with_retry(bin, extra, spawn_sink)
+}
+
+fn spawn_sink_raw_with_retry(bin: &Path, extra: &[&str]) -> (SinkGuard, String) {
+    spawn_with_retry(bin, extra, spawn_sink_raw)
 }
 
 /// SIGTERM を送る。**libc を依存に足さない**ため kill(1) を呼ぶ
@@ -198,6 +279,27 @@ fn end_of_stream() -> Vec<u8> {
     message.to_msgpack().expect("encode EndOfStream")
 }
 
+/// `batch_of` の run_number を上書きできる版(run 混在テスト専用、TODO/024 R-P2-1)。
+fn batch_with_run(sequence_number: u64, run_number: u32, payload: Fragments) -> Vec<u8> {
+    let message: Message<Fragments> = Message::Data(Batch {
+        source_id: DECODER_SOURCE_ID,
+        run_number,
+        sequence_number,
+        created_ns: 1_755_000_000_000_000_000 + sequence_number,
+        payload,
+    });
+    message.to_msgpack().expect("encode Data batch")
+}
+
+/// `end_of_stream` の run_number を上書きできる版(同上)。
+fn end_of_stream_with_run(run_number: u32) -> Vec<u8> {
+    let message: Message<Fragments> = Message::EndOfStream {
+        source_id: DECODER_SOURCE_ID,
+        run_number,
+    };
+    message.to_msgpack().expect("encode EndOfStream")
+}
+
 /// PUSH を張る。sndtimeo を入れておく(受け側が上がらなかったときに永久に固まらない)。
 fn connect_push(ctx: &zmq::Context, endpoint: &str, sndhwm: i32) -> zmq::Socket {
     let push = ctx.socket(zmq::PUSH).expect("PUSH socket");
@@ -223,8 +325,7 @@ fn counts_data_batches_and_closes_the_run_on_eos() {
         eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set (C++ build is not a cargo test dependency)");
         return;
     };
-    let endpoint = free_endpoint();
-    let mut child = spawn_sink(&bin, &endpoint, &[]);
+    let (mut child, endpoint) = spawn_sink_with_retry(&bin, &[]);
     let pid = child.id();
 
     let ctx = zmq::Context::new();
@@ -270,8 +371,7 @@ fn a_malformed_message_kills_the_process_instead_of_being_dropped() {
         eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set");
         return;
     };
-    let endpoint = free_endpoint();
-    let mut child = spawn_sink(&bin, &endpoint, &[]);
+    let (mut child, endpoint) = spawn_sink_with_retry(&bin, &[]);
 
     let ctx = zmq::Context::new();
     let push = connect_push(&ctx, &endpoint, 100);
@@ -300,8 +400,7 @@ fn a_sequence_number_gap_is_fatal() {
         eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set");
         return;
     };
-    let endpoint = free_endpoint();
-    let mut child = spawn_sink(&bin, &endpoint, &[]);
+    let (mut child, endpoint) = spawn_sink_with_retry(&bin, &[]);
 
     let ctx = zmq::Context::new();
     let push = connect_push(&ctx, &endpoint, 100);
@@ -328,8 +427,7 @@ fn a_run_whose_first_batch_is_missing_is_fatal() {
         eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set");
         return;
     };
-    let endpoint = free_endpoint();
-    let mut child = spawn_sink(&bin, &endpoint, &[]);
+    let (mut child, endpoint) = spawn_sink_with_retry(&bin, &[]);
 
     let ctx = zmq::Context::new();
     let push = connect_push(&ctx, &endpoint, 100);
@@ -344,6 +442,75 @@ fn a_run_whose_first_batch_is_missing_is_fatal() {
     let counts = read_counts(&mut child);
     assert_eq!(count(&counts, "batches"), 0, "counts={counts}");
     assert_eq!(counts["fatal"], "sequence-break", "counts={counts}");
+}
+
+// ---------------------------------------------------------------------
+// 3b. run 中の run_number 食い違い = fatal(SPEC §6.2-5 v1.10、R-P2-1、TODO/024)
+// ---------------------------------------------------------------------
+
+/// Data で run が開いたあと、別の run_number の Data が届く = プロトコル違反。
+/// decoder は単一ストリームで run を混ぜない契約なので、旧「カウンタのみ」を
+/// exit 6 に昇格した。
+#[test]
+fn a_run_number_mismatch_in_data_is_fatal() {
+    let Some(bin) = sink_bin() else {
+        eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set");
+        return;
+    };
+    let (mut child, endpoint) = spawn_sink_with_retry(&bin, &[]);
+
+    let ctx = zmq::Context::new();
+    let push = connect_push(&ctx, &endpoint, 100);
+    push.send(data_batch(0, &[3]), 0)
+        .expect("send seq 0 (run RUN_NUMBER, opens the run)");
+    push.send(batch_with_run(1, RUN_NUMBER + 1, vec![fragment(0, 3)]), 0)
+        .expect("send seq 1 with a different run_number");
+
+    let status = wait_for_exit(&mut child, Duration::from_secs(10));
+    assert_eq!(
+        status.code(),
+        Some(EXIT_RUN_MISMATCH),
+        "run_number 食い違いは exit {EXIT_RUN_MISMATCH} であるべき: {status:?}"
+    );
+    let counts = read_counts(&mut child);
+    // 食い違う方は数えない(fatal は on_data() の直後、batches++ より前)
+    assert_eq!(count(&counts, "batches"), 1, "counts={counts}");
+    assert!(
+        count(&counts, "run_number_mismatch") >= 1,
+        "counts={counts}"
+    );
+    assert_eq!(counts["fatal"], "run-number-mismatch", "counts={counts}");
+}
+
+/// EOS の run_number が開いている run と食い違う経路(同上、EOS 側)。
+#[test]
+fn a_run_number_mismatch_in_eos_is_fatal() {
+    let Some(bin) = sink_bin() else {
+        eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set");
+        return;
+    };
+    let (mut child, endpoint) = spawn_sink_with_retry(&bin, &[]);
+
+    let ctx = zmq::Context::new();
+    let push = connect_push(&ctx, &endpoint, 100);
+    push.send(data_batch(0, &[3]), 0)
+        .expect("send seq 0 (run RUN_NUMBER, opens the run)");
+    push.send(end_of_stream_with_run(RUN_NUMBER + 1), 0)
+        .expect("send EndOfStream with a different run_number");
+
+    let status = wait_for_exit(&mut child, Duration::from_secs(10));
+    assert_eq!(
+        status.code(),
+        Some(EXIT_RUN_MISMATCH),
+        "EOS の run_number 食い違いは exit {EXIT_RUN_MISMATCH} であるべき: {status:?}"
+    );
+    let counts = read_counts(&mut child);
+    assert_eq!(count(&counts, "batches"), 1, "counts={counts}");
+    assert!(
+        count(&counts, "run_number_mismatch") >= 1,
+        "counts={counts}"
+    );
+    assert_eq!(counts["fatal"], "run-number-mismatch", "counts={counts}");
 }
 
 // ---------------------------------------------------------------------
@@ -366,10 +533,8 @@ fn a_throttled_sink_makes_the_sender_block_without_losing_anything() {
     const TOTAL: usize = 16;
     const THROTTLE_MS: u64 = 50;
 
-    let endpoint = free_endpoint();
-    let mut child = spawn_sink(
+    let (mut child, endpoint) = spawn_sink_with_retry(
         &bin,
-        &endpoint,
         &["--rcvhwm", "1", "--queue", "1", "--throttle-ms", "50"],
     );
     let pid = child.id();
@@ -492,10 +657,8 @@ fn two_cobo_two_asad_shuffled_fragments_build_complete_events() {
     };
     const EVENTS: u32 = 6;
 
-    let endpoint = free_endpoint();
-    let mut child = spawn_sink(
+    let (mut child, endpoint) = spawn_sink_with_retry(
         &bin,
-        &endpoint,
         &[
             "--expect",
             ELITPC_EXPECT,
@@ -557,10 +720,8 @@ fn a_missing_fragment_is_emitted_as_an_incomplete_event_on_eos() {
     const EVENTS: u32 = 4;
     const MISSING: (u32, u8, u8) = (2, 1, 0);
 
-    let endpoint = free_endpoint();
-    let mut child = spawn_sink(
+    let (mut child, endpoint) = spawn_sink_with_retry(
         &bin,
-        &endpoint,
         &[
             "--expect",
             ELITPC_EXPECT,
@@ -647,12 +808,10 @@ fn writes_a_run_root_file_and_finalizes_it() {
         return;
     };
     let out_root = scratch_dir("finalize");
-    let endpoint = free_endpoint();
     // v1.8: このテストは GDataFrame 出力(entries == fragments)の回帰なので
     // テスト専用モードを明示する(既定は PEventTPC — SPEC §6.4 v1.8 / TODO/020)。
-    let mut child = spawn_sink_raw(
+    let (mut child, endpoint) = spawn_sink_raw_with_retry(
         &bin,
-        &endpoint,
         &[
             "--format",
             "gdataframe",
@@ -834,11 +993,9 @@ async fn real_graw_replayed_end_to_end_writes_108_entries() {
     let ctx = zmq::Context::new();
 
     // --- root_sink(本物のプロセス)を先に上げる。listen-before-start と同じ理屈 ---
-    let sink_ep = free_endpoint();
-    let mut sink = spawn_sink_raw(
+    // v1.8: mini 実データオラクル(entries=108、GDataFrame)の回帰なのでテスト専用モード。
+    let (mut sink, sink_ep) = spawn_sink_raw_with_retry(
         &bin,
-        &sink_ep,
-        // v1.8: mini 実データオラクル(entries=108、GDataFrame)の回帰なのでテスト専用モード。
         &[
             "--format",
             "gdataframe",
@@ -849,6 +1006,8 @@ async fn real_graw_replayed_end_to_end_writes_108_entries() {
         ],
     );
     let sink_pid = sink.id();
+    // spawn_sink_raw_with_retry 自体の早期死チェック(200 ms)に加えて、E2E は起動完了に
+    // もう少し余裕を見る(元のコメントどおり)。
     std::thread::sleep(Duration::from_millis(300)); // bind が済むまで
 
     // --- decoder(009): PUSH 先は root_sink ---

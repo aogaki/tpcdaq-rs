@@ -143,6 +143,24 @@ std::vector<ReadFrame> read_root_file(const std::string& path) {
   return out;
 }
 
+// AutoSave の観測専用の軽量読み手: **GDataFrame を materialize しない**(ツリーの
+// 有無とエントリ数だけを見る)。`read_root_file()` はエントリを GetEntry() で読み戻す
+// ため、GET クラスの地雷(ヘッダ冒頭「同時に 2 個生かしてはいけない」)を踏む —— まだ
+// Recorder が生きている(= 書き手の GDataFrame が生きている)間に呼びたいので専用にする。
+// キーが無い(AutoSave/Close がまだ一度も走っていない)ときは -1。
+Long64_t peek_tree_entries(const std::string& path, const char* tree_name) {
+  TFile* in = TFile::Open(path.c_str(), "READ");
+  if (in == nullptr || in->IsZombie()) {
+    delete in;
+    return -1;
+  }
+  TTree* tree = dynamic_cast<TTree*>(in->Get(tree_name));
+  const Long64_t entries = (tree == nullptr) ? -1 : tree->GetEntries();
+  in->Close();
+  delete in;
+  return entries;
+}
+
 // ---------------------------------------------------------------------------
 // テスト用の小道具
 // ---------------------------------------------------------------------------
@@ -441,6 +459,134 @@ void test_shutdown_without_eos_keeps_the_inprogress_name() {
   if (left.size() == 1) {
     const std::vector<ReadFrame> frames = read_root_file(run_dir + "/" + left[0]);
     CHECK_EQ(frames.size(), 1);
+  }
+  remove_tree(dir);
+}
+
+// ---------------------------------------------------------------------------
+// 2b. 混在 run の防御は finalize しない(SPEC §6.5、TODO/024 R-P2-1)
+// ---------------------------------------------------------------------------
+//
+// root_sink.cxx の consume() が run_number_mismatch の増分を検知して fatal(exit 6)
+// にする経路が正になった(SPEC §6.2-5 v1.10)ので、ここに来るのは本来到達不能な
+// 最後の砦。それでも Recorder::write() に直接違う run_number のイベントを渡すと、
+// **旧 run は finalize されず inprogress のまま残る**こと(完成 run 名に化けない)を
+// 単体で機械照合する。
+void test_mixed_run_defense_keeps_the_old_run_inprogress() {
+  const std::string dir = scratch_dir("mixedrun");
+  const uint32_t kRunA = 5;
+  const uint32_t kRunB = 6;
+  std::vector<rootsink::RootFileRecord> files;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    // このファイルは **v1.7 までの GDataFrame 出力**の回帰(SPEC §12-3 の mini 実データ
+    // 全値一致オラクルがここに乗っている)。既定は PEventTPC なので明示で切り替える。
+    cfg.format = rootsink::OutputFormat::GDataFrame;
+    rootsink::Recorder rec(cfg);
+
+    rootsink::BuiltEvent evA;
+    evA.run_number = kRunA;
+    evA.event_idx = 1;
+    rootsink::OwnedFragment fA = make_fragment(kRunA, 1, 0, 0);
+    push_item(fA.items, pack_item(0, 1, 2, 3));
+    evA.fragments.push_back(std::move(fA));
+    rec.write(evA, /*now_ms=*/1000);
+    CHECK(rec.is_open());
+
+    // run B のイベントが run A の EOS より先に届く(プロトコル違反 — 本来は上流の
+    // consume() が fatal にする経路。Recorder 単体はその最後の砦)。
+    rootsink::BuiltEvent evB;
+    evB.run_number = kRunB;
+    evB.event_idx = 1;
+    rootsink::OwnedFragment fB = make_fragment(kRunB, 1, 0, 0);
+    push_item(fB.items, pack_item(0, 1, 2, 4));
+    evB.fragments.push_back(std::move(fB));
+    rec.write(evB, /*now_ms=*/1010);
+
+    rec.close_run(kRunB, /*now_ms=*/1020);
+    CHECK(rec.fatal_reason() == nullptr);
+    files = rec.files_snapshot();
+  }
+  const std::string run_dir_a = dir + "/run0005";
+  const std::string run_dir_b = dir + "/run0006";
+
+  // run A: **finalize されない**(完成 run 名に化けない、finalize=false に変更した点)。
+  CHECK(!exists(run_dir_a + "/run0005.root"));
+  const std::vector<std::string> left_a = list_prefixed(run_dir_a, "run_inprogress_");
+  CHECK_EQ(left_a.size(), 1);
+
+  // run B: 通常どおり close_run で finalize される。
+  CHECK(exists(run_dir_b + "/run0006.root"));
+  CHECK_EQ(list_prefixed(run_dir_b, "run_inprogress_").size(), 0);
+
+  CHECK_EQ(files.size(), 2);
+  if (files.size() == 2 && left_a.size() == 1) {
+    CHECK(files[0].path == run_dir_a + "/" + left_a[0]);
+    CHECK_EQ(files[0].entries, 1);
+    CHECK(files[1].path == run_dir_b + "/run0006.root");
+    CHECK_EQ(files[1].entries, 1);
+  }
+  // run A の中身も捨てていない(inprogress でも読める)。
+  if (left_a.size() == 1) {
+    const std::vector<ReadFrame> frames = read_root_file(run_dir_a + "/" + left_a[0]);
+    CHECK_EQ(frames.size(), 1);
+  }
+  remove_tree(dir);
+}
+
+// ---------------------------------------------------------------------------
+// 2c. write() 連打だけで AutoSave が走る(tick() を呼ばない、TODO/024 R-P2-2)
+// ---------------------------------------------------------------------------
+//
+// 手計算の出典: kAutoSaveIntervalMs = 30000。open_part() が last_autosave_ms_ を
+// 最初の write() の now_ms(1000)で初期化するので、次の write() の now_ms が
+// 1000 + 30000 = 31000 に達した瞬間(`now_ms < last_autosave_ms_ + interval` が
+// false になる境界)で AutoSave が走るはず。**tick() は一度も呼ばない** —— 以前は
+// これが原因でデータが途切れない run では AutoSave が一度も走らなかった。
+//
+// 観測方法: プロセス内で同じ inprogress パスをもう一度 `TFile::Open(..., "READ")`
+// で開く(Recorder はまだ閉じていない)。AutoSave が書いたキーが無ければツリーは
+// 見えず(peek_tree_entries が -1)、AutoSave が走った後は同じパスからエントリ数が
+// 読める(peek_tree_entries はブランチを読まないので GDataFrame を materialize せず、
+// ヘッダ冒頭の「同時に 2 個生かしてはいけない」に触れない)。
+void test_write_triggers_autosave_without_tick() {
+  const std::string dir = scratch_dir("autosave");
+  const uint32_t kRun = 9;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.format = rootsink::OutputFormat::GDataFrame;
+    rootsink::Recorder rec(cfg);
+
+    rootsink::BuiltEvent ev0;
+    ev0.run_number = kRun;
+    ev0.event_idx = 0;
+    rootsink::OwnedFragment f0 = make_fragment(kRun, 0, 0, 0);
+    push_item(f0.items, pack_item(0, 1, 2, 3));
+    ev0.fragments.push_back(std::move(f0));
+    rec.write(ev0, /*now_ms=*/1000);
+    const std::string provisional_path = rec.provisional();
+    CHECK(!provisional_path.empty());
+
+    // AutoSave 前: まだキーが書かれていないので、別の読み手からはツリーが見えない。
+    CHECK_EQ(peek_tree_entries(provisional_path, rootsink::kTreeName), -1);
+
+    rootsink::BuiltEvent ev1;
+    ev1.run_number = kRun;
+    ev1.event_idx = 1;
+    rootsink::OwnedFragment f1 = make_fragment(kRun, 1, 0, 0);
+    push_item(f1.items, pack_item(0, 1, 2, 4));
+    ev1.fragments.push_back(std::move(f1));
+    // 30 s の期限をまたぐ now_ms。tick() は一度も呼んでいない。
+    rec.write(ev1, /*now_ms=*/1000 + 30000);
+
+    // AutoSave 後: 同じパスを別の TFile で開くとツリーが読める(2 エントリ)。
+    CHECK_EQ(peek_tree_entries(provisional_path, rootsink::kTreeName), 2);
+
+    rec.close_run(kRun, /*now_ms=*/1000 + 30010);
+    CHECK(rec.fatal_reason() == nullptr);
+    CHECK_EQ(rec.entries_written(), 2);
   }
   remove_tree(dir);
 }
@@ -835,6 +981,8 @@ int main(int argc, char** argv) {
 
   test_writes_one_entry_per_fragment_and_reads_back();
   test_shutdown_without_eos_keeps_the_inprogress_name();
+  test_mixed_run_defense_keeps_the_old_run_inprogress();
+  test_write_triggers_autosave_without_tick();
   test_rollover_splits_the_run_into_numbered_parts();
   test_out_of_range_channel_is_counted_not_silently_dropped();
   test_a_single_fragment_event_becomes_one_entry();

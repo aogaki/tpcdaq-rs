@@ -1,7 +1,8 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-08-14(**P2 改修波: 025・023 完了コミット済み(ゲート 335 green)、
-024(root-sink + テストインフラ)実装中** — 完了したら 026 monitor + WS 起票へ)**
+**最終更新: 2026-08-14(**P2 改修波 3 ユニット(023/024/025)全完了・コミット済み —
+フルゲート 337 passed / 0 failed。026 monitor + WS を起票・発注** — 次: 026 完了レビュー
+→ 027 Web UI 起票)**
 
 ## いま
 
@@ -39,11 +40,10 @@ P4 = run 制御**(「SPEC に P4 が無い」は Claude の読み違い — P4 �
   実データ値一致(次回 LAN)+ TPCReco 再配布許諾(Warsaw))。
 - [022_root_sink_monitor_pub.md](archive/022_root_sink_monitor_pub.md) — **完了・
   archive 済み**(2026-08-14。「最近完了」参照)。
-- 以降順次(番号は起票時に採番。023〜025 は P2 改修が先取り — 下記):
-  **026 monitor + WS**(§5.4・§10 — 022 の PUB を購読。tests/root_sink_monitor_pub.rs の
-  named struct パーサが本番パーサの先行形。起票時チェック: R-P2-13 geometry 可視化フック)
-  → Web UI(§11)→ P3 E2E(§12-8〜10 + R10、跨 run 計測 v1.10)→ 負荷ハーネス起票
-  (R-P2-11、§12-5/6)。
+- [026_monitor_ws.md](026_monitor_ws.md) — **起票済み・発注中**(2026-08-14。
+  §5.4 + §10。R-P2-13 の geometry 可視化フック結線を含む。implementer/Opus)。
+- 以降順次: 027 Web UI(§11 — WS の TS 側デコーダ + §10.4 適合もここ)→ P3 E2E
+  (§12-8〜10 + R10、跨 run 計測 v1.10)→ 負荷ハーネス起票(R-P2-11、§12-5/6)。
 
 **ユーザー決定(2026-08-14)→ SPEC v1.10 に反映済み・改修ユニット発注中**:
 1. 016 逸脱 = Fable 推奨どおり(**Counters Option 化 = §9.2 改訂** / comment token 不要を
@@ -56,9 +56,9 @@ P4 = run 制御**(「SPEC に P4 が無い」は Claude の読み違い — P4 �
 - ~~023 Rust 異常系~~ → **完了・archive 済み・コミット済み**(2026-08-14。取り込み後
   ゲート 335 green。逸脱受理 4 — 特に「Stop では打ち切らない」は発注書の誤りを正す判断。
   「最近完了」参照)。
-- [024_p2_hardening_root_sink.md](024_p2_hardening_root_sink.md) — root-sink C++
-  (R-P2-1 mismatch fatal exit 6 / R-P2-2 AutoSave 飢餓 / R-P2-5 pending_events)+
-  spawn テストインフラ(TOCTOU リトライ + Drop ガード)。implementer/Sonnet。
+- ~~024 root-sink C++ + テストインフラ~~ → **完了・archive 済み・コミット済み**
+  (2026-08-14。取り込み後フルゲート **337 green** + intake/monitor 3 回連続 0 fail。
+  「最近完了」参照)。**P2 レビューの実装処置はこれで全クローズ**(残: R-P2-11 のみ)。
 - ~~025 controller フォローアップ~~ → **完了・archive 済み・コミット済み**(2026-08-14。
   取り込み後ゲート 323 green。「最近完了」参照)。
 - 残る P2 処置: R-P2-11 負荷ハーネス(P3 E2E 後に起票、Warsaw 前必須)/ R-P2-13 の
@@ -115,6 +115,13 @@ frameType 2 rev 5 固定・ローテーション書き込み後判定(v1.7、実
 
 ## 最近完了
 
+- 2026-08-14: [024_p2_hardening_root_sink.md](archive/024_p2_hardening_root_sink.md) —
+  **root-sink 改修 + spawn テストインフラ(P2 R-P2-1/2/5 クローズ = 実装処置完遂)**
+  (run_number 混在 = fatal exit 6(§6.2-5 v1.10、`_Exit` 前カウンタ転写の副次バグ修正
+  つき)/ 混在 run 防御 finalize=false / AutoSave を write() 側でも判定 /
+  status `pending_events` 11 キー + 閾値 warn / SinkGuard + spawn 早期死リトライで
+  TOCTOU flake 構造解消(3 回連続 0 fail)。recorder 233・monitor_pub 92 CHECK。
+  取り込み後フルゲート 337 green。教訓: test-root に root_sink 本体依存を追加)
 - 2026-08-14: [023_p2_hardening_rust.md](archive/023_p2_hardening_rust.md) —
   **Rust 異常系改修(P2 R-P2-3/8/9/10/12 クローズ)**(poisoned Mutex 即 Error /
   receiver 送信の中断可能ロスレス化 + abandon 可視カウント + スレッド join(下流死で

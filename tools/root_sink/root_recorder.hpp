@@ -245,12 +245,19 @@ class Recorder {
     if (ev.fragments.empty()) return;
     if (!run_active_ || run_ != ev.run_number) {
       // run が変わった = 前の run は close_run 済みのはず。part を 0 に戻す。
+      //
+      // **ここに来るのは本来 root_sink.cxx の consume() が run_number_mismatch の
+      // 増分を検知して fatal(exit 6)にする経路(SPEC §6.2-5 v1.10、R-P2-1)** —— この
+      // 分岐は到達不能になったはずの防御。それでも万一(上流のプロトコル違反が
+      // fatal 化をすり抜けた等)ここに来たら、**finalize しない**(旧 run を
+      // 完成 run 名に化けさせない。§6.5「異常終了は inprogress のまま」と同じ扱い)。
       if (run_active_ && file_ != nullptr) {
         std::fprintf(stderr,
-                     "root_sink: recorder saw run %u while run %u was still open — "
-                     "finalizing the old one\n",
-                     ev.run_number, run_);
-        close_part(/*finalize=*/true);
+                     "root_sink: PROTOCOL VIOLATION recorder saw run %u while run %u "
+                     "was still open (this should have been fatal upstream, SPEC "
+                     "6.2-5 v1.10) — keeping %u inprogress, NOT finalizing it\n",
+                     ev.run_number, run_, run_);
+        close_part(/*finalize=*/false);
       }
       run_ = ev.run_number;
       run_active_ = true;
@@ -297,6 +304,10 @@ class Recorder {
       bytes_written_.store(closed_bytes_ + static_cast<uint64_t>(file_->GetEND()),
                             std::memory_order_relaxed);
     }
+
+    // R-P2-2: write() 単独でも AutoSave の期限を見る(呼び手の tick() だけに頼ると、
+    // データが途切れない run では 1 度も走らなかった —— P2_REVIEW.md R-P2-2)。
+    maybe_autosave(now_ms);
 
     // ロールオーバ判定は **イベント単位**(フレーム単位ではなく)—— 1 イベントの
     // フラグメントが 2 ファイルに割れないようにする。GetEND() = 現在のファイル末尾
@@ -396,12 +407,9 @@ class Recorder {
   }
 
   // データが来ない間も呼ばれる(呼び手の tick)。AutoSave の面倒だけ見る。
-  void tick(uint64_t now_ms) {
-    if (file_ == nullptr || tree_ == nullptr) return;
-    if (now_ms < last_autosave_ms_ + kAutoSaveIntervalMs) return;
-    tree_->AutoSave("SaveSelf");  // ツリーとキーを書くがファイルは閉じない
-    last_autosave_ms_ = now_ms;
-  }
+  // **write() 側からも同じ期限判定を呼ぶ**(R-P2-2、maybe_autosave() 参照)ので、
+  // ここは薄い委譲になっている。
+  void tick(uint64_t now_ms) { maybe_autosave(now_ms); }
 
   // --- 状態・カウンタ ---
   //
@@ -709,6 +717,18 @@ class Recorder {
     fatal_ = reason;
     fatal_detail_ = detail;
     std::fprintf(stderr, "root_sink: FATAL %s: %s\n", reason, detail.c_str());
+  }
+
+  // AutoSave の期限判定(write()/tick() 共通、R-P2-2)。**write() 側からも呼ぶのが
+  // 本ユニットの修正点**(P2_REVIEW.md R-P2-2)—— 以前は呼び手の tick() 頼みで、
+  // データが途切れない run では AutoSave が一度も走らなかった(kill -9 / 電源断時の
+  // inprogress 回復性が下がる。生 graw がバックストップなのでデータ喪失ではないが、
+  // run.root だけでも途中まで読めた方が安全 — SPEC §6.1)。
+  void maybe_autosave(uint64_t now_ms) {
+    if (file_ == nullptr || tree_ == nullptr) return;
+    if (now_ms < last_autosave_ms_ + kAutoSaveIntervalMs) return;
+    tree_->AutoSave("SaveSelf");  // ツリーとキーを書くがファイルは閉じない
+    last_autosave_ms_ = now_ms;
   }
 
   struct Sample {

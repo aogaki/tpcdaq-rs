@@ -187,7 +187,11 @@ test: $(TESTS)
 	./test_monitor_hist
 	./test_monitor_pub
 
-test-root: $(ROOTTESTS)
+# root_sink 本体も依存に含める: Rust 統合テスト(TPCDAQ_ROOT_SINK_BIN)が参照する
+# バイナリの再ビルド漏れを防ぐ(024 取り込みレビューで stale バイナリの偽 red を実測
+# — テストバイナリだけ新しく本体が古い、が起きない)。ROOT リンクは test-root 側の
+# 前提なのでここに置く(非 ROOT 環境の `make test` には影響しない)。
+test-root: $(ROOTTESTS) root_sink
 	./test_recorder
 	./test_pevent
 

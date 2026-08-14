@@ -23,6 +23,9 @@
 //   * malformed バッチ → 即 exit 2(SPEC §6.2-6。「warn して捨てる」をしない)。
 //   * sequence_number のギャップ・巻き戻り → 即 exit 3(SPEC §6.2-5)。
 //   * ROOT の書き出し失敗 → 即 exit 5(黙って書けないまま走り続けない)。
+//   * run 中の run_number 食い違い(Data/EOS とも)→ 即 exit 6(SPEC §6.2-5 v1.10、
+//     R-P2-1。decoder は単一ストリームで run を混ぜない契約 —— 混在に「正しく続ける」
+//     方法はない。idle 中の stale EOS・期待外 source_id は従来どおり fatal にしない)。
 //   異常終了時も同じ JSON 1 行を出す("fatal" フィールドに理由が入る)。落ちた瞬間の
 //   カウンタは事故調査で一番効くので捨てない(CLAUDE.md「silent failure を作らない」)。
 
@@ -91,6 +94,7 @@ constexpr int kExitMalformed = 2;  // SPEC §6.2-6
 constexpr int kExitSeq = 3;        // SPEC §6.2-5
 constexpr int kExitZmq = 4;
 constexpr int kExitRootIo = 5;     // ROOT の open / 書き出し失敗(011)
+constexpr int kExitRunMismatch = 6;  // run 中の run_number 食い違い(SPEC §6.2-5 v1.10)
 
 // --------------------------------------------------------------------------
 // シグナル
@@ -616,6 +620,21 @@ void absorb(std::vector<rootsink::BuiltEvent>&& built, const rootsink::EventBuil
   c.unexpected_fragments = eb.unexpected_fragments();
   c.duplicate_fragments = eb.duplicate_fragments();
   c.pending_events = eb.pending();
+
+  // pending の警告閾値(SPEC §5.3 v1.10、R-P2-5)。判定は monitor_pub.hpp の純関数、
+  // 「一度だけ」のラッチはここ(集計スレッドのローカル static —— absorb() の呼び手は
+  // 常にこの 1 スレッドなのでロック不要)。hard limit ではなく warn のみ
+  // (build_timeout を伸ばすとロスレス契約と衝突するため)。
+  static bool pending_warned = false;
+  if (!pending_warned && rsmon::pending_events_exceeds_warn_threshold(c.pending_events)) {
+    pending_warned = true;
+    std::fprintf(stderr,
+                 "root_sink: WARNING pending_events=%" PRIu64
+                 " exceeds warn threshold %" PRIu64
+                 " (--build-timeout-ms may be too large for the incoming rate — SPEC "
+                 "5.3)\n",
+                 c.pending_events, rsmon::kPendingWarnThreshold);
+  }
 }
 
 // 1 メッセージを解釈してカウンタを進める。プロトコル違反はここで即死(戻らない)。
@@ -642,7 +661,23 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
         fatal(c, kExitMalformed, "malformed-batch", e.what());
       }
 
+      const uint64_t mismatch_before = run.run_number_mismatch();
       const DataAction da = run.on_data(h.source_id, h.run_number);
+      if (run.run_number_mismatch() > mismatch_before) {
+        // SPEC §6.2-5 v1.10(R-P2-1): run 中の run_number 食い違いは同格の fatal に
+        // 昇格。旧「カウンタのみ」は、EOS を見ていない旧 run が完成 run 名(rename)に
+        // 化ける経路を残していた(root_recorder.hpp の混在 run 防御は最後の砦として
+        // finalize=false のまま残す)。**idle 中の stale EOS・期待外 source_id は
+        // ここに来ない**(RunState が run を開く前にしか mismatch を数えないため)。
+        // fatal() は戻らない(std::_Exit)ので、JSON に出す前にカウンタを転写する
+        // (落ちた瞬間のカウンタを捨てない、CLAUDE.md)。
+        c.run_number_mismatch = run.run_number_mismatch();
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "source_id=%u run_number_open=%u run_number_incoming=%u",
+                      h.source_id, run.run_number(), h.run_number);
+        fatal(c, kExitRunMismatch, "run-number-mismatch", buf);
+      }
       if (da == DataAction::Unexpected) {
         // 期待していないソースのデータは混ぜない。数えて可視化する(CLAUDE.md)。
         std::fprintf(stderr,
@@ -719,7 +754,20 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
 
     case MsgKind::EndOfStream: {
       ++c.eos;
+      const uint64_t mismatch_before = run.run_number_mismatch();
       const EosAction ea = run.on_eos(env.source_id, env.run_number);
+      if (run.run_number_mismatch() > mismatch_before) {
+        // Data 側と同格(SPEC §6.2-5 v1.10、R-P2-1)。run.run_number() は on_eos() が
+        // 閉じていてもまだ書き換わっていない(次の Opened まで不変)ので、開いていた
+        // run 番号がそのまま detail に出る。fatal() は戻らないので、JSON に出す前に
+        // カウンタを転写する(CLAUDE.md)。
+        c.run_number_mismatch = run.run_number_mismatch();
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "source_id=%u run_number_open=%u run_number_incoming=%u",
+                      env.source_id, run.run_number(), env.run_number);
+        fatal(c, kExitRunMismatch, "run-number-mismatch", buf);
+      }
       if (ea == EosAction::Closed) {
         c.runs = run.runs_closed();
         // 組み上げ中の残りを全部出す(揃わなかったものは incomplete で —— 捨てない)。
@@ -789,6 +837,7 @@ void update_status_material(const rootsink::RunState& run, const Counts& c) {
   g_mon.status.events_built = c.events_complete + c.events_incomplete;
   g_mon.status.events_incomplete = c.events_incomplete;
   g_mon.status.late_fragments = c.late_fragments;
+  g_mon.status.pending_events = c.pending_events;
   std::memcpy(g_mon.status.frames_per_cobo, c.frames_per_cobo,
               sizeof(g_mon.status.frames_per_cobo));
 }
