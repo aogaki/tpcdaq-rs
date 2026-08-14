@@ -37,6 +37,7 @@
 #include <cstring>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -45,6 +46,8 @@
 #include <vector>
 
 #include "eb_core.hpp"
+#include "monitor_hist.hpp"
+#include "monitor_pub.hpp"
 #include "root_recorder.hpp"
 #include "rs_core.hpp"
 #include "tpc_wire.hpp"
@@ -70,6 +73,18 @@ constexpr int kRecorderTickMs = 100;
 // 512bucket × 4B ≈ 557 KiB なので、ELITPC(4 フラグメント/イベント)でも
 // 16 × 4 × 557 KiB ≈ 35 MiB —— 詰まったら背圧(捨てない)。CLI で開けるノブは増やさない。
 constexpr std::size_t kRecorderQueue = 16;
+
+// --- モニタ PUB(TODO/022、SPEC §5.3)---
+constexpr const char* kDefaultPubBind = "tcp://*:47004";  // SPEC §3.2
+// スナップショットは ~2.4 MB 級(ELITPC の W 面)なので、溜め込ませない。
+// モニタ系は「最新優先で落としてよい」側(CLAUDE.md の絶対ルール)。
+constexpr int kPubSndHwm = 10;
+// Publisher の起床上限。実際は次の配信期限まで寝る(status 1 Hz / snapshot_hz /
+// event_publish_hz のうち一番早いもの)。
+constexpr int kPubTickMs = 100;
+constexpr uint64_t kStatusPeriodMs = 1000;  // status は 1 Hz 固定(run 外でも常時)
+constexpr uint32_t kDefaultSnapshotHz = 1;
+constexpr uint32_t kDefaultEventPublishHz = 20;
 
 constexpr int kExitUsage = 1;
 constexpr int kExitMalformed = 2;  // SPEC §6.2-6
@@ -137,7 +152,50 @@ struct Counts {
   uint64_t unexpected_sources = 0;   // 期待ソース集合外からの Data/EOS
   uint64_t run_number_mismatch = 0;  // run 中に食い違う run_number
   uint64_t recorder_queue = 0;       // 集計 → Recorder の在庫(瞬間値、011)
+  // CoBo 毎のフラグメント数(status の材料 — SPEC §5.3。Fragment.cobo は u8)。
+  uint64_t frames_per_cobo[rsmon::kMaxCobo] = {};
 };
+
+// --------------------------------------------------------------------------
+// モニタ配線(TODO/022、SPEC §5.1 のスレッド規約)
+// --------------------------------------------------------------------------
+//
+// **ロック規約**:
+//   * `hist_mutex` を触るのは **集計スレッドと Publisher だけ**。Recorder(TTree)
+//     スレッドとは一切共有しない —— これが「モニタが保存を邪魔しない」の実装手段。
+//     ロック中に許すのは配列 fill / memcpy / 数個の u64 コピーのみ。
+//     **msgpack 直列化と zmq send は必ずロックの外**。
+//   * `slot_mutex` は built event の受け渡しだけ(最新優先の 1 枠)。
+//
+// **最新優先の作り**(100 Hz × ~2 MB/event を毎回コピーしないため):
+//   Publisher が配信間隔ごとに `hungry` を立てる → 集計スレッドは emit 時に hungry で
+//   あればそのイベントを**コピー**して slot に置き、hungry を下ろす。hungry でなければ
+//   `publish_drops` を数えるだけ(モニタ系のドロップは silent にしない)。
+struct Monitor {
+  std::mutex hist_mutex;
+  std::unique_ptr<rsmon::HistAccumulator> hist;  // --geometry があるときだけ
+  rsmon::Status status;                          // hist_mutex 下で更新
+
+  std::atomic<bool> hungry{false};
+  std::mutex slot_mutex;
+  rootsink::BuiltEvent slot;
+  bool slot_full = false;
+
+  std::atomic<uint64_t> publish_drops{0};
+  std::atomic<uint64_t> snapshots_published{0};
+  std::atomic<uint64_t> events_published{0};
+  std::atomic<bool> pub_bind_failed{false};
+  std::atomic<bool> stop{false};
+
+  uint32_t snapshot_hz = kDefaultSnapshotHz;
+  uint32_t event_hz = kDefaultEventPublishHz;
+
+  // ヒスト集計と built_event 配信は **--geometry があるときだけ**(SPEC §5.2 の
+  // フィル規則がジオメトリ無しでは定義できない)。status は常時。
+  bool data_enabled() const { return hist != nullptr; }
+};
+
+Monitor g_mon;
 
 // Recorder は別スレッドが回すが、fatal 時は join できないまま JSON を出す
 // (落ちた瞬間のカウンタを捨てない)。カウンタは atomic + mutex 保護のスナップショットで
@@ -206,13 +264,20 @@ void print_counts_json(const Counts& c, const char* fatal) {
       ",\"items_out_of_range\":%" PRIu64 ",\"recorder_queue\":%" PRIu64
       ",\"duplicate_event_ids\":%" PRIu64 ",\"channels_without_strip\":%" PRIu64
       ",\"charge_keys_out_of_range\":%" PRIu64 ",\"frames_outside_geometry\":%" PRIu64
+      ",\"snapshots_published\":%" PRIu64 ",\"events_published\":%" PRIu64
+      ",\"publish_drops\":%" PRIu64 ",\"pub_bind_failed\":%d"
       ",\"root_files\":%s,\"fatal\":\"%s\"}\n",
       c.batches, c.fragments, c.items, c.eos, c.runs, c.events_complete,
       c.events_incomplete, c.late_fragments, c.unexpected_fragments,
       c.duplicate_fragments, c.pending_events, c.heartbeats, c.unknown, c.stale_eos,
       c.unexpected_sources, c.run_number_mismatch, entries_written, items_out_of_range,
       c.recorder_queue, duplicate_event_ids, channels_without_strip,
-      charge_keys_out_of_range, frames_outside_geometry, files_json.c_str(), fatal);
+      charge_keys_out_of_range, frames_outside_geometry,
+      g_mon.snapshots_published.load(std::memory_order_relaxed),
+      g_mon.events_published.load(std::memory_order_relaxed),
+      g_mon.publish_drops.load(std::memory_order_relaxed),
+      g_mon.pub_bind_failed.load(std::memory_order_relaxed) ? 1 : 0, files_json.c_str(),
+      fatal);
   std::fflush(stdout);
 }
 
@@ -252,6 +317,10 @@ struct Options {
   // 実データ照合(同 run の grawToEventTPC 出力と比較)と、P4 で controller が正式な
   // run TS を配る経路(SPEC §6.4 実装注記)の受け口。
   long run_id = 0;
+  // モニタ PUB(TODO/022、SPEC §5.3/§3.2)
+  std::string pub = kDefaultPubBind;
+  uint32_t snapshot_hz = kDefaultSnapshotHz;      // 0 = off
+  uint32_t event_publish_hz = kDefaultEventPublishHz;  // 0 = off
 };
 
 void usage(const char* argv0) {
@@ -262,6 +331,7 @@ void usage(const char* argv0) {
       "       [--format pevent|gdataframe] [--geometry FILE.dat] [--pedestal-remove 0|1]\n"
       "       [--min-pedestal-cell N] [--max-pedestal-cell N]\n"
       "       [--min-signal-cell N] [--max-signal-cell N]\n"
+      "       [--pub ENDPOINT] [--snapshot-hz N] [--event-publish-hz N]\n"
       "\n"
       "  --bind ENDPOINT   PULL bind endpoint (default %s)\n"
       "  --rcvhwm N        receive high-water mark, must be > 0 (default %d)\n"
@@ -294,6 +364,12 @@ void usage(const char* argv0) {
       "                    signal time window (default %d..%d)\n"
       "  --run-id N        override EventInfo.runId (YYYYmmddHHMMSS as one number;\n"
       "                    default 0 = derive from the wall clock when the run opens)\n"
+      "  --pub ENDPOINT    monitor PUB bind endpoint (default %s). status is always\n"
+      "                    published at 1 Hz, even while idle\n"
+      "  --snapshot-hz N   histogram snapshot rate, 0 = off (default %u)\n"
+      "  --event-publish-hz N\n"
+      "                    upper bound on the latest-built-event rate, 0 = off\n"
+      "                    (default %u). Histograms and built events need --geometry\n"
       "\n"
       "SIGINT/SIGTERM: drain, print one JSON line of counters to stdout, exit 0.\n"
       "A run that never saw its EndOfStream keeps the run_inprogress_<unixtime>.root\n"
@@ -302,7 +378,8 @@ void usage(const char* argv0) {
       rootsink::kDefaultBuildTimeoutMs, rootsink::kDefaultMaxRootBytes,
       rootsink::kDefaultCompression, tpcpevent::kDefaultMinPedestalCell,
       tpcpevent::kDefaultMaxPedestalCell, tpcpevent::kDefaultMinSignalCell,
-      tpcpevent::kDefaultMaxSignalCell);
+      tpcpevent::kDefaultMaxSignalCell, kDefaultPubBind, kDefaultSnapshotHz,
+      kDefaultEventPublishHz);
 }
 
 // 半端な既定値で走らない(SPEC §3.2「設定パースエラーは起動失敗」)。
@@ -434,6 +511,13 @@ Options parse_args(int argc, char** argv) {
           static_cast<int>(parse_nonnegative("--max-signal-cell", argv[++i]));
     } else if (a == "--run-id" && has_value) {
       opt.run_id = parse_nonnegative("--run-id", argv[++i]);
+    } else if (a == "--pub" && has_value) {
+      opt.pub = argv[++i];
+    } else if (a == "--snapshot-hz" && has_value) {
+      opt.snapshot_hz = static_cast<uint32_t>(parse_nonnegative("--snapshot-hz", argv[++i]));
+    } else if (a == "--event-publish-hz" && has_value) {
+      opt.event_publish_hz =
+          static_cast<uint32_t>(parse_nonnegative("--event-publish-hz", argv[++i]));
     } else {
       std::fprintf(stderr, "root_sink: unknown or incomplete option '%s'\n", a.c_str());
       usage(argv[0]);
@@ -467,6 +551,13 @@ uint64_t now_ms() {
       std::chrono::duration_cast<std::chrono::milliseconds>(since_epoch).count());
 }
 
+// 送信時 unix ns(SPEC §2.2 の created_ns —— レイテンシ計測用なので壁時計)。
+uint64_t now_unix_ns() {
+  const auto since_epoch = std::chrono::system_clock::now().time_since_epoch();
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(since_epoch).count());
+}
+
 // 集計スレッド → Recorder スレッドの荷物。イベントに **in-band 制御マーカー**
 // (RunClose)を混ぜる delila-rs の流儀(SPEC §6.1)—— run の finalize を別経路の
 // フラグでやると、キューに残ったイベントより先に閉じてしまう。
@@ -475,6 +566,10 @@ struct RecordItem {
   Kind kind = Kind::Event;
   uint32_t run_number = 0;         // Kind::RunClose のとき有効
   rootsink::BuiltEvent event;      // Kind::Event のとき有効
+  // Kind::RunClose のとき、その run の最終ヒスト(TODO/022)。**run 毎 1 回のコピー**で
+  // Recorder スレッドに渡し、TTree finalize の後に `run{run:04}_monitor.root` へ書く
+  // (ROOT IO は Recorder スレッドだけ —— SPEC §5.1)。--geometry 無しなら nullptr。
+  std::unique_ptr<rsmon::HistSnapshot> hists;
 };
 
 using RecordChannel = rootsink::Channel<RecordItem>;
@@ -483,13 +578,36 @@ using RecordChannel = rootsink::Channel<RecordItem>;
 // **push は満杯なら待つ** = 背圧。ここで捨てたらロスレス契約が崩れる(CLAUDE.md)。
 void absorb(std::vector<rootsink::BuiltEvent>&& built, const rootsink::EventBuilder& eb,
             Counts& c, RecordChannel* rec) {
-  if (rec != nullptr) {
-    for (rootsink::BuiltEvent& ev : built) {
+  for (rootsink::BuiltEvent& ev : built) {
+    // --- モニタ集計(TODO/022)---------------------------------------------
+    // ロック中にやるのは配列加算だけ(SPEC §5.1)。直列化も送信もここではしない。
+    if (g_mon.data_enabled()) {
+      {
+        std::lock_guard<std::mutex> lk(g_mon.hist_mutex);
+        g_mon.hist->on_event(ev);
+      }
+      // 最新優先の built event スロット。Publisher が hungry を立てたときだけコピー ——
+      // 100 Hz × ~2 MB/event を毎回コピーしない(コピーは高々 event_publish_hz 回/秒)。
+      if (g_mon.event_hz > 0) {
+        if (g_mon.hungry.exchange(false, std::memory_order_acq_rel)) {
+          std::lock_guard<std::mutex> lk(g_mon.slot_mutex);
+          g_mon.slot = ev;
+          g_mon.slot_full = true;
+        } else {
+          // モニタ系のドロップは落としてよいが **silent にしない**(CLAUDE.md)。
+          g_mon.publish_drops.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    }
+    // --- 保存系(ロスレス)。push は満杯なら待つ = 背圧 --------------------
+    if (rec != nullptr) {
       RecordItem item;
       item.kind = RecordItem::Kind::Event;
       item.event = std::move(ev);
       rec->push(std::move(item));
     }
+  }
+  if (rec != nullptr) {
     c.recorder_queue = rec->size();
   }
   c.events_complete = eb.events_complete();
@@ -536,6 +654,12 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
       }
       if (da == DataAction::Opened) {
         seq.reset();  // run 開始で sequence_number は 0 に戻る(SPEC §2.2)
+        // ヒストは run start でリセット(SPEC §5.2)。CoBo 毎フレーム数も run 単位。
+        if (g_mon.data_enabled()) {
+          std::lock_guard<std::mutex> lk(g_mon.hist_mutex);
+          g_mon.hist->reset();
+        }
+        std::memset(c.frames_per_cobo, 0, sizeof(c.frames_per_cobo));
         std::fprintf(stderr, "root_sink: run %u opened (source_id=%u)\n", h.run_number,
                      h.source_id);
       }
@@ -560,6 +684,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
       const uint64_t tick = now_ms();
       for (const tpcwire::FragmentView& f : frags) {
         c.items += f.item_count();
+        ++c.frames_per_cobo[f.cobo];  // cobo は u8 —— 配列長 256 で必ず収まる
         std::optional<rootsink::LateFragment> late =
             eb.feed(rootsink::OwnedFragment::from_view(f, h.run_number), tick);
         if (late.has_value()) {
@@ -604,6 +729,16 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
           RecordItem item;
           item.kind = RecordItem::Kind::RunClose;
           item.run_number = run.run_number();
+          if (g_mon.data_enabled()) {
+            // 最終ヒストを同梱する(run 毎 1 回のコピー)。**確保はロック外**で、
+            // ロック中は memcpy だけ(SPEC §5.1)。
+            item.hists.reset(new rsmon::HistSnapshot());
+            g_mon.hist->prepare(*item.hists);
+            std::lock_guard<std::mutex> lk(g_mon.hist_mutex);
+            g_mon.hist->copy_into(*item.hists);
+          }
+          // push は満杯なら**待つ**(背圧)。ロックは上のスコープで既に手放している ——
+          // 保存側の詰まりで Publisher を巻き込まない(SPEC §5.1)。
           rec->push(std::move(item));
           c.recorder_queue = rec->size();
         }
@@ -641,6 +776,149 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
   }
 }
 
+// --------------------------------------------------------------------------
+// Publisher スレッド(TODO/022 / SPEC §5.3)
+// --------------------------------------------------------------------------
+
+// 集計スレッドが status の材料を置く(hist_mutex 下。コピーだけ)。
+void update_status_material(const rootsink::RunState& run, const Counts& c) {
+  std::lock_guard<std::mutex> lk(g_mon.hist_mutex);
+  // idle のときの run は「直近クローズした run」(RunState は閉じても番号を持つ)。
+  g_mon.status.run = run.run_number();
+  g_mon.status.running = run.is_open();
+  g_mon.status.events_built = c.events_complete + c.events_incomplete;
+  g_mon.status.events_incomplete = c.events_incomplete;
+  g_mon.status.late_fragments = c.late_fragments;
+  std::memcpy(g_mon.status.frames_per_cobo, c.frames_per_cobo,
+              sizeof(g_mon.status.frames_per_cobo));
+}
+
+// 落としてよい送信(PUB)。EAGAIN = 購読側が遅れて HWM に当たった = 意図した間引き。
+bool pub_send(void* pub, const std::vector<uint8_t>& msg) {
+  return zmq_send(pub, msg.data(), msg.size(), ZMQ_DONTWAIT) >= 0;
+}
+
+// PUB を所有する唯一のスレッド。**直列化と送信は必ず hist_mutex の外**(SPEC §5.1)。
+void publisher_thread(void* ctx, Options opt, rootsink::Recorder* recorder) {
+  void* pub = zmq_socket(ctx, ZMQ_PUB);
+  if (pub == nullptr) {
+    std::fprintf(stderr, "root_sink: ERROR monitor PUB zmq_socket failed: %s\n",
+                 zmq_strerror(zmq_errno()));
+    g_mon.pub_bind_failed.store(true, std::memory_order_relaxed);
+    return;
+  }
+  zmq_setsockopt(pub, ZMQ_SNDHWM, &kPubSndHwm, sizeof(kPubSndHwm));
+  const int linger = 0;
+  zmq_setsockopt(pub, ZMQ_LINGER, &linger, sizeof(linger));
+  if (zmq_bind(pub, opt.pub.c_str()) != 0) {
+    // **保存系は落とさない**(CLAUDE.md の絶対ルール: 保存 > モニタ)。モニタ PUB が
+    // 立たないことは大声で出し、終了 JSON にも残す —— silent にはしない。
+    std::fprintf(stderr,
+                 "root_sink: ERROR monitor PUB zmq_bind(%s) failed: %s — monitoring is "
+                 "OFF for this process (storage continues, pub_bind_failed=1)\n",
+                 opt.pub.c_str(), zmq_strerror(zmq_errno()));
+    g_mon.pub_bind_failed.store(true, std::memory_order_relaxed);
+    zmq_close(pub);
+    return;
+  }
+
+  rsmon::Encoder enc;
+  std::vector<uint8_t> buf;      // 使い回す(スナップショットは ~2.4 MB 級)
+  rsmon::HistSnapshot snap;      // 二重バッファの片側
+  rootsink::BuiltEvent event;    // slot から swap で受け取る作業バッファ
+  if (g_mon.data_enabled()) {
+    // ビン数は構築時に決まって以後変わらない —— 受け皿の確保はロック外で 1 回だけ。
+    g_mon.hist->prepare(snap);
+  }
+
+  const uint64_t snapshot_period =
+      g_mon.snapshot_hz > 0 ? std::max<uint64_t>(1, 1000 / g_mon.snapshot_hz) : 0;
+  const uint64_t event_period =
+      g_mon.event_hz > 0 ? std::max<uint64_t>(1, 1000 / g_mon.event_hz) : 0;
+  const bool snapshots_on = snapshot_period > 0 && g_mon.data_enabled();
+  const bool events_on = event_period > 0 && g_mon.data_enabled();
+
+  uint64_t next_status = now_ms();
+  uint64_t next_snapshot = next_status;
+  uint64_t next_event = next_status;
+
+  while (!g_mon.stop.load(std::memory_order_relaxed)) {
+    const uint64_t now = now_ms();
+
+    if (now >= next_status) {
+      rsmon::Status s;
+      {
+        std::lock_guard<std::mutex> lk(g_mon.hist_mutex);
+        s = g_mon.status;  // 小さな POD のコピーだけ
+        if (g_mon.data_enabled()) {
+          for (size_t p = 0; p < rsmon::kPlaneCount; ++p) {
+            s.saturation[p] = g_mon.hist->saturation(static_cast<tpcgeo::Plane>(p));
+          }
+        }
+      }
+      s.bytes_written = (recorder != nullptr) ? recorder->bytes_written() : 0;
+      s.publish_drops = g_mon.publish_drops.load(std::memory_order_relaxed);
+      enc.status(s, now_unix_ns(), buf);  // ← ロック外
+      pub_send(pub, buf);
+      next_status = now + kStatusPeriodMs;
+    }
+
+    if (snapshots_on && now >= next_snapshot) {
+      uint32_t run = 0;
+      {
+        std::lock_guard<std::mutex> lk(g_mon.hist_mutex);
+        run = g_mon.status.run;
+        g_mon.hist->copy_into(snap);  // memcpy だけ
+      }
+      enc.hist_snapshot(run, snap, now_unix_ns(), buf);  // ← ロック外
+      if (pub_send(pub, buf)) {
+        g_mon.snapshots_published.fetch_add(1, std::memory_order_relaxed);
+      }
+      next_snapshot = now + snapshot_period;
+    }
+
+    if (events_on && now >= next_event) {
+      bool have = false;
+      {
+        std::lock_guard<std::mutex> lk(g_mon.slot_mutex);
+        if (g_mon.slot_full) {
+          // swap: Publisher 側の古いバッファを slot に返す(次のコピーが容量を再利用)。
+          std::swap(event, g_mon.slot);
+          g_mon.slot_full = false;
+          have = true;
+        }
+      }
+      if (have) {
+        enc.built_event(event, now_unix_ns(), buf);  // ← ロック外
+        if (pub_send(pub, buf)) {
+          g_mon.events_published.fetch_add(1, std::memory_order_relaxed);
+        } else {
+          // 送れなかった分も間引きとして数える(published + drops = 全イベント)。
+          // PUB は遅い購読者向けにソケット層で捨てるので実際にはまず起きないが、
+          // 数え落ちを作らない(CLAUDE.md)。
+          g_mon.publish_drops.fetch_add(1, std::memory_order_relaxed);
+        }
+      } else {
+        // 次の emit でコピーしてもらう(集計スレッドはこの旗が立っている時だけ払う)。
+        g_mon.hungry.store(true, std::memory_order_release);
+      }
+      next_event = now + event_period;
+    }
+
+    // 次の配信期限まで寝る(上限 kPubTickMs = 停止に気づく間隔)。
+    uint64_t next = next_status;
+    if (snapshots_on && next_snapshot < next) next = next_snapshot;
+    if (events_on && next_event < next) next = next_event;
+    const uint64_t t = now_ms();
+    uint64_t sleep_ms = (next > t) ? (next - t) : 0;
+    if (sleep_ms > static_cast<uint64_t>(kPubTickMs)) sleep_ms = kPubTickMs;
+    if (sleep_ms == 0) sleep_ms = 1;
+    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+  }
+
+  zmq_close(pub);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -651,30 +929,35 @@ int main(int argc, char** argv) {
 
   // ROOT 作法(SPEC §6.1)。バッチモード = GUI を開かない、スレッド安全化は
   // Recorder スレッドが TFile を触るため。--no-root では ROOT に一切触らない。
+  // ジオメトリは **PEventTPC 出力とモニタ集計の共有物**(TODO/022)。--no-root でも
+  // --geometry があれば読む —— ヒストは ROOT を書かなくても PUB で配れる(SPEC §5.3)。
   std::unique_ptr<rootsink::Recorder> recorder;
   std::unique_ptr<RecordChannel> rec_chan;
-  std::unique_ptr<tpcgeo::Geometry> geometry;  // Recorder より長生きすること
+  std::unique_ptr<tpcgeo::Geometry> geometry;  // Recorder / HistAccumulator より長生き
+  if (!opt.geometry.empty()) {
+    try {
+      geometry.reset(new tpcgeo::Geometry(tpcgeo::load(opt.geometry)));
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "root_sink: --geometry %s: %s\n", opt.geometry.c_str(), e.what());
+      return kExitUsage;
+    }
+    // ジオメトリの素性を必ず出す(黙って半端な .dat で走らない —— CLAUDE.md)。
+    std::fprintf(stderr,
+                 "root_sink: geometry %s: cobos=%zu max_strip=U%u/V%u/W%u "
+                 "duplicates=%zu malformed_lines=%zu\n",
+                 opt.geometry.c_str(), geometry->cobo_count(),
+                 static_cast<unsigned>(geometry->max_strip[0]),
+                 static_cast<unsigned>(geometry->max_strip[1]),
+                 static_cast<unsigned>(geometry->max_strip[2]),
+                 geometry->duplicate_warnings().size(), geometry->malformed_lines().size());
+    g_mon.hist.reset(new rsmon::HistAccumulator(*geometry));
+  }
+  g_mon.snapshot_hz = opt.snapshot_hz;
+  g_mon.event_hz = opt.event_publish_hz;
+
   if (!opt.no_root) {
     gROOT->SetBatch(kTRUE);
     ROOT::EnableThreadSafety();
-    if (opt.format == rootsink::OutputFormat::PEvent) {
-      try {
-        geometry.reset(new tpcgeo::Geometry(tpcgeo::load(opt.geometry)));
-      } catch (const std::exception& e) {
-        std::fprintf(stderr, "root_sink: --geometry %s: %s\n", opt.geometry.c_str(), e.what());
-        return kExitUsage;
-      }
-      // ジオメトリの素性を必ず出す(黙って半端な .dat で走らない —— CLAUDE.md)。
-      std::fprintf(stderr,
-                   "root_sink: geometry %s: cobos=%zu max_strip=U%u/V%u/W%u "
-                   "duplicates=%zu malformed_lines=%zu\n",
-                   opt.geometry.c_str(), geometry->cobo_count(),
-                   static_cast<unsigned>(geometry->max_strip[0]),
-                   static_cast<unsigned>(geometry->max_strip[1]),
-                   static_cast<unsigned>(geometry->max_strip[2]),
-                   geometry->duplicate_warnings().size(),
-                   geometry->malformed_lines().size());
-    }
     rootsink::RecorderConfig rcfg;
     rcfg.output_root = opt.output_root;
     rcfg.max_root_bytes = opt.max_root_bytes;
@@ -742,6 +1025,12 @@ int main(int argc, char** argv) {
                  rootsink::kTreeName, opt.output_root.c_str(), opt.max_root_bytes,
                  opt.root_compression);
   }
+  // モニタ PUB の素性(TODO/022)。何を配るのかを黙って決めない —— CLAUDE.md。
+  std::fprintf(stderr,
+               "root_sink: monitor PUB bind %s (snapshot_hz=%u event_publish_hz=%u "
+               "sndhwm=%d histograms=%s)\n",
+               opt.pub.c_str(), opt.snapshot_hz, opt.event_publish_hz, kPubSndHwm,
+               g_mon.data_enabled() ? "on" : "off (no --geometry: status only)");
   std::fflush(stderr);
 
   // Recorder スレッド(ROOT IO はここだけ。SPEC §6.2-8)。
@@ -754,6 +1043,8 @@ int main(int argc, char** argv) {
         if (pr == rootsink::PopResult::Value) {
           if (item.kind == RecordItem::Kind::RunClose) {
             recorder->close_run(item.run_number, now_ms());
+            // TTree finalize の**後**にモニタヒストを書く(SPEC §6.5 / R10 = §12-9)。
+            if (item.hists) recorder->write_monitor_root(item.run_number, *item.hists);
           } else {
             recorder->write(item.event, now_ms());
           }
@@ -773,6 +1064,9 @@ int main(int argc, char** argv) {
     });
   }
 
+  // Publisher スレッド(PUB を所有。TODO/022 / SPEC §5.1)。
+  std::thread publish_thread(publisher_thread, ctx, opt, recorder.get());
+
   // 集計スレッド。P2 の期待ソース集合は {decoder} のみ(SPEC §2.3)。
   std::thread aggregate([&] {
     rootsink::RunState run({rootsink::kDecoderSourceId});
@@ -790,6 +1084,8 @@ int main(int argc, char** argv) {
         // データが来なくても壁時計は進む —— アイドル中の build_timeout はここで働く。
         absorb(eb.poll(now_ms()), eb, counts, rec_chan.get());
       }
+      // status の材料を置き直す(Publisher が 1 Hz で読む。ロック中はコピーだけ)。
+      update_status_material(run, counts);
       if (pr == rootsink::PopResult::Closed) break;
     }
     // 停止時に組み上げ中だったイベントも数に出す(黙って消さない)。**書きもする** ——
@@ -837,6 +1133,9 @@ int main(int argc, char** argv) {
     rec_chan->close();
   }
   if (record_thread.joinable()) record_thread.join();
+  // Publisher は最後に畳む(Recorder の atomic を読むので、Recorder より先に止める)。
+  g_mon.stop.store(true, std::memory_order_relaxed);
+  if (publish_thread.joinable()) publish_thread.join();
 
   print_counts_json(counts, "");
 

@@ -35,6 +35,8 @@
 
 #include <TClonesArray.h>
 #include <TFile.h>
+#include <TH1D.h>
+#include <TH2D.h>
 #include <TROOT.h>
 #include <TRefArray.h>
 #include <TTree.h>
@@ -648,6 +650,158 @@ void test_explicit_compression_setting_is_honored() {
 }
 
 // ---------------------------------------------------------------------------
+// 7. モニタヒストの ROOT 書き出し(TODO/022、SPEC §5.2/§6.5/§12-9)
+// ---------------------------------------------------------------------------
+//
+// **ROOT IO は Recorder スレッドだけ**(SPEC §5.1)—— 集計器(monitor_hist.hpp)は
+// ROOT を知らず、run close で受け取った配列を Recorder が TH1D/TH2D にして
+// `run{run:04}_monitor.root` に書く。ここはその書き手の照合。
+
+// 既知の値を入れた 9 枚の受け皿。形は HistAccumulator が作るものと同じ
+// (2D = Nstrip × 512 / 1D = 512)。値は非対称に、手で置く。
+rsmon::HistSnapshot make_known_snapshot() {
+  static const char* kNames[9] = {"StripTimeU", "StripTimeV", "StripTimeW",
+                                  "ChargeU",    "ChargeV",    "ChargeW",
+                                  "ChargeMaxU", "ChargeMaxV", "ChargeMaxW"};
+  rsmon::HistSnapshot s;
+  for (size_t i = 0; i < rsmon::kHistCount; ++i) {
+    s[i].id = static_cast<uint8_t>(i + 1);
+    s[i].name = kNames[i];
+    if (i < 3) {
+      s[i].nx = static_cast<uint32_t>(2 + i);  // U2 / V3 / W4(面ごとに違う)
+      s[i].ny = rsmon::kBuckets;
+    } else {
+      s[i].nx = rsmon::kChargeBins;
+      s[i].ny = 1;
+    }
+    s[i].bins.assign(static_cast<size_t>(s[i].nx) * s[i].ny, 0.0);
+  }
+  // 添字は SPEC §5.3: 2D = (strip-1)*512 + bucket
+  s[0].bins[(1 - 1) * 512 + 3] = 100.0;   // StripTimeU strip1 bucket3
+  s[0].bins[(2 - 1) * 512 + 7] = 4095.0;  // StripTimeU strip2 bucket7
+  s[2].bins[(4 - 1) * 512 + 9] = 42.0;    // StripTimeW strip4 bucket9
+  s[3].bins[31] = 2.0;                    // ChargeU  bin 31(波高 250 → 250/8)
+  s[8].bins[511] = 1.0;                   // ChargeMaxW bin 511(波高 4095)
+  return s;
+}
+
+void test_monitor_root_holds_the_nine_histograms() {
+  const std::string dir = scratch_dir("monitorroot");
+  const uint32_t kRun = 31;
+  uint64_t bytes_written = 0;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.format = rootsink::OutputFormat::GDataFrame;  // TTree 側は本題ではない
+    rootsink::Recorder rec(cfg);
+    rootsink::BuiltEvent ev;
+    ev.run_number = kRun;
+    ev.event_idx = 0;
+    rootsink::OwnedFragment f = make_fragment(kRun, 0, 0, 0);
+    push_item(f.items, pack_item(0, 1, 0, 5));
+    ev.fragments.push_back(std::move(f));
+    rec.write(ev, 1000);
+    // bytes_written は「書いた ROOT の実バイト数」(status の材料 — SPEC §5.3)
+    CHECK(rec.bytes_written() > 0);
+    rec.close_run(kRun, 1010);
+    rec.write_monitor_root(kRun, make_known_snapshot());
+    CHECK(rec.fatal_reason() == nullptr);
+    bytes_written = rec.bytes_written();
+  }
+
+  const std::string path = dir + "/run0031/run0031_monitor.root";
+  CHECK(exists(path));
+  // TTree 側の run ファイルも無傷(モニタ書き出しが保存側を壊していない)
+  CHECK(exists(dir + "/run0031/run0031.root"));
+  CHECK_EQ(bytes_written, rootsink::file_size_bytes(dir + "/run0031/run0031.root"));
+
+  TFile* in = TFile::Open(path.c_str(), "READ");
+  CHECK(in != nullptr && !in->IsZombie());
+  if (in == nullptr || in->IsZombie()) {
+    delete in;
+    remove_tree(dir);
+    return;
+  }
+
+  // --- 9 枚が名前どおりに在る(SPEC §5.2 の表)---
+  static const char* kNames[9] = {"StripTimeU", "StripTimeV", "StripTimeW",
+                                  "ChargeU",    "ChargeV",    "ChargeW",
+                                  "ChargeMaxU", "ChargeMaxV", "ChargeMaxW"};
+  for (int i = 0; i < 9; ++i) CHECK(in->Get(kNames[i]) != nullptr);
+
+  // --- 2D: ビン数・軸レンジ・ビン値 ---
+  TH2D* stu = dynamic_cast<TH2D*>(in->Get("StripTimeU"));
+  CHECK(stu != nullptr);
+  if (stu != nullptr) {
+    CHECK_EQ(stu->GetNbinsX(), 2);    // Nstrip(ジオメトリ由来)
+    CHECK_EQ(stu->GetNbinsY(), 512);  // bucket
+    CHECK(stu->GetXaxis()->GetXmin() == 1.0);  // x = strip 1..N+1
+    CHECK(stu->GetXaxis()->GetXmax() == 3.0);
+    CHECK(stu->GetYaxis()->GetXmin() == 0.0);  // y = bucket 0..512
+    CHECK(stu->GetYaxis()->GetXmax() == 512.0);
+    // ROOT のビン番号は 1 起点: strip s → x ビン s、bucket b → y ビン b+1
+    CHECK(stu->GetBinContent(1, 4) == 100.0);
+    CHECK(stu->GetBinContent(2, 8) == 4095.0);
+    CHECK(stu->GetBinContent(1, 1) == 0.0);
+    CHECK(stu->Integral() == 100.0 + 4095.0);
+  }
+  TH2D* stw = dynamic_cast<TH2D*>(in->Get("StripTimeW"));
+  CHECK(stw != nullptr);
+  if (stw != nullptr) {
+    CHECK_EQ(stw->GetNbinsX(), 4);
+    CHECK(stw->GetXaxis()->GetXmax() == 5.0);
+    CHECK(stw->GetBinContent(4, 10) == 42.0);
+    CHECK(stw->Integral() == 42.0);
+  }
+  TH2D* stv = dynamic_cast<TH2D*>(in->Get("StripTimeV"));
+  CHECK(stv != nullptr);
+  if (stv != nullptr) {
+    CHECK_EQ(stv->GetNbinsX(), 3);
+    CHECK(stv->Integral() == 0.0);  // 空でも 9 枚とも書く
+  }
+
+  // --- 1D: 512 ビン・[0,4096] 固定レンジ(オートレンジ禁止 — SPEC §5.2)---
+  TH1D* chu = dynamic_cast<TH1D*>(in->Get("ChargeU"));
+  CHECK(chu != nullptr);
+  if (chu != nullptr) {
+    CHECK_EQ(chu->GetNbinsX(), 512);
+    CHECK(chu->GetXaxis()->GetXmin() == 0.0);
+    CHECK(chu->GetXaxis()->GetXmax() == 4096.0);
+    CHECK(chu->GetBinContent(32) == 2.0);  // 添字 31 → ROOT ビン 32
+    CHECK(chu->Integral() == 2.0);
+  }
+  TH1D* cmw = dynamic_cast<TH1D*>(in->Get("ChargeMaxW"));
+  CHECK(cmw != nullptr);
+  if (cmw != nullptr) {
+    CHECK(cmw->GetBinContent(512) == 1.0);  // 添字 511
+    CHECK(cmw->Integral() == 1.0);
+  }
+
+  in->Close();
+  delete in;
+  remove_tree(dir);
+}
+
+// 0 イベントの run は monitor.root も作らない(SPEC §6.5 の遅延オープンと同じ理屈)。
+void test_zero_event_run_writes_no_monitor_root() {
+  const std::string dir = scratch_dir("monitorempty");
+  const uint32_t kRun = 32;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.format = rootsink::OutputFormat::GDataFrame;
+    rootsink::Recorder rec(cfg);
+    rec.close_run(kRun, 1000);  // データが 1 件も来なかった run
+    rec.write_monitor_root(kRun, make_known_snapshot());
+    CHECK(rec.fatal_reason() == nullptr);
+    CHECK_EQ(rec.bytes_written(), 0);
+  }
+  CHECK(!exists(dir + "/run0032/run0032_monitor.root"));
+  CHECK(!exists(dir + "/run0032/run0032.root"));
+  remove_tree(dir);
+}
+
+// ---------------------------------------------------------------------------
 // inspect モード(E2E の entries 照合に使う)
 // ---------------------------------------------------------------------------
 int inspect(const std::string& path) {
@@ -686,5 +840,7 @@ int main(int argc, char** argv) {
   test_a_single_fragment_event_becomes_one_entry();
   test_default_compression_is_101_zlib1();
   test_explicit_compression_setting_is_honored();
+  test_monitor_root_holds_the_nine_histograms();
+  test_zero_event_run_writes_no_monitor_root();
   return tpccheck::report("test_recorder");
 }

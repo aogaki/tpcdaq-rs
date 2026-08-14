@@ -67,6 +67,8 @@
 #include <vector>
 
 #include <TFile.h>
+#include <TH1D.h>
+#include <TH2D.h>
 #include <TObject.h>
 #include <TProcessID.h>
 #include <TROOT.h>
@@ -77,6 +79,7 @@
 #include "GDataSample.h"
 #include "GFrameHeader.h"
 #include "eb_core.hpp"
+#include "monitor_hist.hpp"
 #include "pevent_fill.hpp"
 
 namespace rootsink {
@@ -108,6 +111,10 @@ constexpr uint64_t kDefaultMaxRootBytes = 1ULL << 30;  // 1 GiB(--max-root-bytes
 // AutoSave 間隔(delila-rs Recorder 由来 / SPEC §6.1)。run 中でも inprogress を
 // ROOT で開けるようにしておく = 異常終了時にそこまでのデータが読める。
 constexpr uint64_t kAutoSaveIntervalMs = 30000;
+
+// モニタヒストの 1D 軸レンジ(SPEC §5.2「x レンジ 0–4096 固定。オートレンジ禁止 ——
+// 飽和天井 4095 が常に見えること」)。TODO/022。
+constexpr double kChargeAxisMax = 4096.0;
 
 // AGET の物理的な上限(GFrameHeader::MAX_CHANNELS と同じ 68)。
 constexpr int kMaxAget = 4;
@@ -248,6 +255,7 @@ class Recorder {
       run_ = ev.run_number;
       run_active_ = true;
       next_part_ = 0;
+      run_events_ = 0;
       have_last_event_id_ = false;
       if (cfg_.format == OutputFormat::PEvent) {
         // runId = **run 開始時刻**の %Y%m%d%H%M%S(TPCReco RunIdParser と同じ導出、
@@ -280,6 +288,15 @@ class Recorder {
     } else {
       for (const OwnedFragment& f : ev.fragments) fill(f);
     }
+    ++run_events_;  // この run に何か書いたか(0 イベント run の判定 — SPEC §6.5)
+
+    // `bytes_written`(status の材料、SPEC §5.3)。GetEND() = 現在のファイル末尾
+    // オフセットなので、閉じた part の合計 + 開いている part の現在サイズ。
+    // **読むのは Publisher スレッド**なので atomic に置く(ROOT には触らせない)。
+    if (file_ != nullptr) {
+      bytes_written_.store(closed_bytes_ + static_cast<uint64_t>(file_->GetEND()),
+                            std::memory_order_relaxed);
+    }
 
     // ロールオーバ判定は **イベント単位**(フレーム単位ではなく)—— 1 イベントの
     // フラグメントが 2 ファイルに割れないようにする。GetEND() = 現在のファイル末尾
@@ -302,6 +319,73 @@ class Recorder {
                    run_number);
     }
     run_active_ = false;
+  }
+
+  // モニタヒスト 9 枚を `run{run:04}_monitor.root` に書く(SPEC §5.2/§6.5、TODO/022)。
+  //
+  // **呼ぶのは close_run() の直後**(TTree finalize 後)。集計は monitor_hist.hpp が
+  // 持ち、ROOT 化はここ = Recorder スレッドだけ —— 「ROOT IO は 1 スレッド」の原則を
+  // モニタ経路でも崩さない(SPEC §5.1)。R10(EOS から 10 s 以内)は即時書きで満たす。
+  //
+  // **0 イベントの run には書かない**(§6.5 の遅延オープンと同じ理屈)。run が
+  // 閉じないまま停止した場合は呼ばれない(RunClose マーカー経由でしか来ない)ので、
+  // 未完了 run のヒストが完全 run に化けることもない。
+  void write_monitor_root(uint32_t run, const rsmon::HistSnapshot& hists) {
+    if (fatal_ != nullptr) return;
+    if (run_ != run || run_events_ == 0) {
+      std::fprintf(stderr, "root_sink: run %u had no events — no monitor.root\n", run);
+      return;
+    }
+    const std::string dir = run_dir(run);
+    if (!mkdir_p(dir)) {
+      set_fatal("monitor-root-mkdir", dir + ": " + std::strerror(errno));
+      return;
+    }
+    char name[64];
+    std::snprintf(name, sizeof(name), "/run%04u_monitor.root", run);
+    const std::string path = dir + name;
+    TFile* out = TFile::Open(path.c_str(), "RECREATE", "", cfg_.compression);
+    if (out == nullptr || out->IsZombie()) {
+      delete out;
+      set_fatal("monitor-root-open", path);
+      return;
+    }
+    out->cd();
+    for (const rsmon::HistBuffer& h : hists) {
+      if (h.nx == 0) {
+        // ジオメトリにその面のストリップが 1 本も無い(Nstrip = 0)。ビン 0 本の
+        // ヒストは作れないので飛ばす —— 黙ってではなく 1 行出す(CLAUDE.md)。
+        std::fprintf(stderr, "root_sink: monitor hist %s has 0 bins (no strips) — skipped\n",
+                     h.name);
+        continue;
+      }
+      if (h.ny > 1) {
+        // x = strip(1..N+1)、y = bucket(0..512)。SPEC §5.2 の軸。
+        TH2D* th = new TH2D(h.name, h.name, static_cast<Int_t>(h.nx), 1.0,
+                            1.0 + static_cast<double>(h.nx), static_cast<Int_t>(h.ny), 0.0,
+                            static_cast<double>(h.ny));
+        for (uint32_t x = 0; x < h.nx; ++x) {
+          for (uint32_t y = 0; y < h.ny; ++y) {
+            // 添字は (strip-1)*512 + bucket(SPEC §5.3)。ROOT のビンは 1 起点。
+            th->SetBinContent(static_cast<Int_t>(x) + 1, static_cast<Int_t>(y) + 1,
+                              h.bins[static_cast<size_t>(x) * h.ny + y]);
+          }
+        }
+        th->SetDirectory(out);
+      } else {
+        // x = 波高 [0, 4096) 固定(オートレンジ禁止 — SPEC §5.2)。
+        TH1D* th = new TH1D(h.name, h.name, static_cast<Int_t>(h.nx), 0.0, kChargeAxisMax);
+        for (uint32_t x = 0; x < h.nx; ++x) {
+          th->SetBinContent(static_cast<Int_t>(x) + 1, h.bins[x]);
+        }
+        th->SetDirectory(out);
+      }
+    }
+    out->Write();
+    out->Close();
+    delete out;  // ヒストは TFile のディレクトリが所有(道連れで消える)
+    std::fprintf(stderr, "root_sink: wrote %s (%" PRIu64 " bytes)\n", path.c_str(),
+                 file_size_bytes(path));
   }
 
   // 停止(SIGTERM / 異常)。開いていれば **inprogress のまま**閉じる ——
@@ -327,6 +411,10 @@ class Recorder {
   // ロックは**ファイルを閉じるときだけ**なので、ホットパス(fill)には乗らない。
   bool is_open() const { return file_ != nullptr; }
   uint64_t entries_written() const { return entries_written_.load(std::memory_order_relaxed); }
+  // イベント ROOT に書いた実バイト数(閉じた part の合計 + 開いている part の現在サイズ)。
+  // status の `bytes_written`(SPEC §5.3)—— **Publisher スレッドから読まれる**ので
+  // atomic。monitor.root の分は含めない(保存系のスループットを表す数字なので)。
+  uint64_t bytes_written() const { return bytes_written_.load(std::memory_order_relaxed); }
   uint64_t items_out_of_range() const {
     return items_out_of_range_.load(std::memory_order_relaxed);
   }
@@ -602,6 +690,8 @@ class Recorder {
                    " entries, NOT finalized)\n",
                    written.c_str(), part_entries_);
     }
+    closed_bytes_ += bytes;
+    bytes_written_.store(closed_bytes_, std::memory_order_relaxed);
     RootFileRecord rec;
     rec.path = recorded;
     rec.entries = part_entries_;
@@ -643,7 +733,10 @@ class Recorder {
   uint32_t part_ = 0;       // 開いている part
   uint32_t next_part_ = 0;  // 次に開く part
   uint64_t part_entries_ = 0;
+  uint64_t run_events_ = 0;    // この run に書いたイベント数(0 なら monitor.root も作らない)
+  uint64_t closed_bytes_ = 0;  // 閉じた part のバイト合計(bytes_written の土台)
   std::atomic<uint64_t> entries_written_{0};
+  std::atomic<uint64_t> bytes_written_{0};
   std::atomic<uint64_t> items_out_of_range_{0};
   std::atomic<uint64_t> duplicate_event_ids_{0};
   std::atomic<uint64_t> channels_without_strip_{0};

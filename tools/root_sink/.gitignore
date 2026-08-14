@@ -8,6 +8,8 @@ test_conformance
 test_recorder
 test_pevent
 test_geo
+test_monitor_hist
+test_monitor_pub
 compare_gdataframe
 compare_pevent
 # ROOT 辞書(rootcling が LinkDefGET.h から毎ビルド生成する — TODO/011)

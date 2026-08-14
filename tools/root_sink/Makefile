@@ -2,7 +2,7 @@
 #                             + 011 GDataFrame TTree 書き出し)。
 #
 #   make            root_sink をビルド(libzmq + ROOT + TPCReco 参照)
-#   make test       **ROOT 非依存**の単体テスト 5 本をビルドして実行
+#   make test       **ROOT 非依存**の単体テスト 7 本をビルドして実行
 #   make test GOLDEN=/path/to/golden_stream.bin
 #                   適合性テストにフィクスチャを渡す(未指定なら SKIP)
 #   make test-root  Recorder / PEventTPC のテスト(ROOT リンク)—— test とは別立て
@@ -11,8 +11,9 @@
 #   make compare    比較ツール(compare_gdataframe / compare_pevent)
 #   make clean
 #
-# 純ヘッダ(tpc_wire.hpp / rs_core.hpp / eb_core.hpp)は ZMQ 非依存・**ROOT 非依存** ——
-# `make test` の 4 本は g++ 一発で通る(ヘッダテストに ROOT を混ぜない、TODO/011 §3)。
+# 純ヘッダ(tpc_wire.hpp / rs_core.hpp / eb_core.hpp / geo.hpp / monitor_hist.hpp /
+# monitor_pub.hpp)は ZMQ 非依存・**ROOT 非依存** —— `make test` の 7 本は g++ 一発で通る
+# (ヘッダテストに ROOT を混ぜない、TODO/011 §3)。
 # ROOT が要るのは `make`(本体)と `make test-root` だけ。
 #
 # **NDEBUG を定義しないこと**: closed channel への push の assert(SPEC §6.2-7)を
@@ -73,7 +74,8 @@ GET_DICT = getdict.cxx
 GOLDEN ?=
 
 HEADERS   = tpc_wire.hpp rs_core.hpp eb_core.hpp check.hpp
-TESTS     = test_tpc_wire test_rs_core test_eb_core test_conformance test_geo
+TESTS     = test_tpc_wire test_rs_core test_eb_core test_conformance test_geo \
+            test_monitor_hist test_monitor_pub
 ROOTTESTS = test_recorder test_pevent
 
 .PHONY: all test test-root compare clean tpcreco-check
@@ -122,6 +124,7 @@ PEVENT_CFLAGS = $(TPCRECO_INC) $(BOOST_CFLAGS)
 PEVENT_DEPS   = pevent_fill.hpp geo.hpp $(TPCRECO_DICT)
 
 root_sink: root_sink.cxx tpc_wire.hpp rs_core.hpp eb_core.hpp root_recorder.hpp \
+           monitor_hist.hpp monitor_pub.hpp \
            $(PEVENT_DEPS) $(GET_DICT) $(GET_SRC) | tpcreco-check
 	$(CXX) $(CXXFLAGS) $(ZMQ_CFLAGS) $(ROOT_CFLAGS) $(PEVENT_CFLAGS) -I$(GET_DIR) \
 	  root_sink.cxx $(GET_DICT) $(GET_SRC) $(TPCRECO_DICT) $(TPCRECO_SRC) \
@@ -142,14 +145,22 @@ test_conformance: test_conformance.cpp tpc_wire.hpp check.hpp
 test_geo: test_geo.cpp geo.hpp check.hpp
 	$(CXX) $(CXXFLAGS) $< -o $@
 
+test_monitor_hist: test_monitor_hist.cpp monitor_hist.hpp geo.hpp eb_core.hpp tpc_wire.hpp \
+                   check.hpp
+	$(CXX) $(CXXFLAGS) $< -o $@
+
+test_monitor_pub: test_monitor_pub.cpp monitor_pub.hpp monitor_hist.hpp geo.hpp eb_core.hpp \
+                  tpc_wire.hpp check.hpp
+	$(CXX) $(CXXFLAGS) $< -o $@
+
 test_recorder: test_recorder.cxx root_recorder.hpp eb_core.hpp tpc_wire.hpp check.hpp \
-               $(PEVENT_DEPS) $(GET_DICT) $(GET_SRC) | tpcreco-check
+               monitor_hist.hpp $(PEVENT_DEPS) $(GET_DICT) $(GET_SRC) | tpcreco-check
 	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) $(PEVENT_CFLAGS) -I$(GET_DIR) \
 	  test_recorder.cxx $(GET_DICT) $(GET_SRC) $(TPCRECO_DICT) $(TPCRECO_SRC) \
 	  $(ROOT_LIBS) $(LDFLAGS) -o $@
 
 test_pevent: test_pevent.cxx root_recorder.hpp eb_core.hpp tpc_wire.hpp check.hpp \
-             $(PEVENT_DEPS) $(GET_DICT) $(GET_SRC) | tpcreco-check
+             monitor_hist.hpp $(PEVENT_DEPS) $(GET_DICT) $(GET_SRC) | tpcreco-check
 	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) $(PEVENT_CFLAGS) -I$(GET_DIR) \
 	  test_pevent.cxx $(GET_DICT) $(GET_SRC) $(TPCRECO_DICT) $(TPCRECO_SRC) \
 	  $(ROOT_LIBS) $(LDFLAGS) -o $@
@@ -173,6 +184,8 @@ test: $(TESTS)
 	./test_eb_core
 	./test_conformance $(GOLDEN)
 	./test_geo
+	./test_monitor_hist
+	./test_monitor_pub
 
 test-root: $(ROOTTESTS)
 	./test_recorder
