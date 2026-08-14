@@ -1,0 +1,119 @@
+<div class="logbook">
+  <!-- 追記(R11: シフト全員が書ける。token は要らない) -->
+  <section class="composer">
+    <h2>コメントを追記</h2>
+    <div class="row">
+      <label class="who">
+        author
+        <input
+          type="text"
+          [value]="author()"
+          (input)="setAuthor($event)"
+          placeholder="自己申告(記録に残ります)"
+          autocomplete="off"
+        />
+      </label>
+      <button type="button" class="post" [disabled]="!canPost()" (click)="post()">
+        {{ posting() ? '送信中…' : '追記する' }}
+      </button>
+    </div>
+    <textarea
+      rows="2"
+      [value]="text()"
+      (input)="setText($event)"
+      placeholder="例: beam tuned, 4 Hz"
+    ></textarea>
+    @if (postError(); as error) {
+      <p class="issue">追記できませんでした: {{ error }}</p>
+    }
+    @if (postedAt(); as at) {
+      <p class="ok">{{ at }} に追記しました。</p>
+    }
+  </section>
+
+  <!-- 取得の健全性(silent failure を作らない) -->
+  <section class="feedstate">
+    <span class="chip">since_seq {{ sinceSeq() }}</span>
+    <span class="chip">{{ pollSeconds }} s ポーリング</span>
+    <span class="chip">{{ entries().length }} 件</span>
+    @if (lastOkAt(); as at) {
+      <span class="chip ok">最終取得 {{ at }}</span>
+    } @else {
+      <span class="chip unknown">まだ 1 度も取得できていません</span>
+    }
+    <span class="spacer"></span>
+    <button type="button" class="reload" (click)="refresh()">今すぐ取得</button>
+  </section>
+
+  @if (lastError(); as error) {
+    <p class="banner error">
+      ログブックを取得できません: {{ error }}(最終試行 {{ lastTryAt() }})—— controller
+      (:8080)が動いているか確認してください。<strong>下の一覧は最後に取れた時点のものです。</strong>
+    </p>
+  }
+  @if (tailCorrupt()) {
+    <p class="banner warn">
+      <strong>tail_corrupt</strong> — JSONL の最終行が壊れています(書き込み中断の痕跡、SPEC
+      §9.1)。その 1 行は表示されていません。
+    </p>
+  }
+  @if (unknownTypes() > 0) {
+    <p class="banner warn">
+      未知のレコード種別を {{ unknownTypes() }} 件受け取りました(捨てずに生 JSON
+      で表示しています)。UI が仕様に追いついていない可能性があります。
+    </p>
+  }
+  @if (malformed() > 0) {
+    <p class="banner warn">
+      取り込めなかった行が {{ malformed() }} 件あります(`seq` が読めない行)。
+    </p>
+  }
+
+  <!-- タイムライン(新しい順) -->
+  @if (entries().length === 0) {
+    <p class="empty">
+      まだレコードがありません。run を開始するか、上のフォームからコメントを追記してください。
+    </p>
+  }
+
+  <ol class="timeline">
+    @for (entry of entries(); track entry.seq) {
+      <li class="entry" [class]="'sev-' + entry.severity">
+        <div class="when" [title]="entry.ts">
+          <span class="time">{{ entry.time }}</span>
+          <span class="date">{{ entry.date }}</span>
+        </div>
+        <div class="what">
+          <div class="head">
+            <span class="kind" [class]="'kind-' + entry.kind">{{ entry.type }}</span>
+            <span class="title">{{ entry.title }}</span>
+            <span class="actor">actor: {{ entry.actor }}</span>
+            <span class="seq">#{{ entry.seq }}</span>
+          </div>
+          @if (entry.body; as body) {
+            <p class="body">{{ body }}</p>
+          }
+          @if (entry.fields.length > 0) {
+            <div class="fields">
+              @for (field of entry.fields; track field.label) {
+                <span class="field"
+                  ><b>{{ field.label }}</b> {{ field.value }}</span
+                >
+              }
+            </div>
+          }
+          @for (detail of entry.details; track detail.label) {
+            <details class="detail">
+              <summary>{{ detail.label }}</summary>
+              <ul>
+                @for (line of detail.lines; track $index) {
+                  <li>{{ line }}</li>
+                }
+              </ul>
+            </details>
+          }
+        </div>
+      </li>
+    }
+  </ol>
+</div>

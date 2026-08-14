@@ -1,0 +1,183 @@
+<div class="run">
+  <!-- ユーザー決定を画面にも書く(なぜ押せないのかがその場で分かるように) -->
+  <p class="banner info">
+    <strong>Run 制御はレイアウトのみ</strong> — {{ actionCount }} 個の操作はすべて
+    <em>disabled</em> です(ユーザー決定 2026-08-13: モック関数・仮バックエンドを作らない)。 REST
+    の配線は P4。有効化は <code>run-actions.ts</code> の <code>RUN_CONTROL_ENABLED</code> を
+    <code>true</code> にする 1 箇所だけです(現在 <code>{{ enabled }}</code
+    >)。閲覧系の <code>GET /api/status</code> は実際に叩いています。
+  </p>
+
+  <!-- ① 現在の状態(GET /api/status = 閲覧系・認証なし) -->
+  <section class="card">
+    <header>
+      <h2>状態</h2>
+      <span class="chip">{{ pollSeconds }} s ポーリング</span>
+      @if (lastOkAt(); as at) {
+        <span class="chip ok">最終取得 {{ at }}</span>
+      } @else {
+        <span class="chip unknown">まだ 1 度も取得できていません</span>
+      }
+      <span class="spacer"></span>
+      <button type="button" (click)="refresh()">今すぐ取得</button>
+    </header>
+
+    @if (statusError(); as error) {
+      <p class="banner error">
+        <code>GET /api/status</code> を取得できません: {{ error }}(最終試行 {{ lastTryAt() }})。
+        <strong>controller(:8080)が動いていない可能性があります。</strong>
+        —— 下の値は表示しません(取れていないものを 0 や「正常」と書かないため)。
+      </p>
+    }
+
+    @if (status(); as view) {
+      <div class="facts">
+        <div class="fact">
+          <span class="label">phase</span>
+          <span class="value">{{ view.phase }}</span>
+        </div>
+        <div class="fact">
+          <span class="label">run</span>
+          @if (view.run; as run) {
+            <span class="value">#{{ run.run }} · {{ run.elapsedS.toFixed(1) }} s</span>
+          } @else {
+            <span class="value unknown">実行中の run はありません</span>
+          }
+        </div>
+        <div class="fact">
+          <span class="label">操作権</span>
+          <span class="value">{{ view.operator ?? '誰も持っていません' }}</span>
+        </div>
+        <div class="fact">
+          <span class="label">ECC</span>
+          <span class="value" [class]="'tone-' + view.ecc.tone">
+            {{ view.ecc.label }}
+            @if (view.ecc.tone === 'unknown') {
+              <span class="hint">(ecc-bridge に届いていない = 停止中でも異常でもない)</span>
+            }
+          </span>
+        </div>
+        @if (view.logPosts; as posts) {
+          <div class="fact">
+            <span class="label">log posts</span>
+            <span class="value">accepted {{ posts.accepted }} / rejected {{ posts.rejected }}</span>
+          </div>
+        }
+      </div>
+
+      @if (view.run; as run) {
+        <p class="runline">
+          operator {{ run.operator }} · started {{ run.startedTs }}
+          @if (run.comment) {
+            · “{{ run.comment }}”
+          }
+        </p>
+      }
+
+      @if (view.ecc.error; as eccError) {
+        <p class="eccerror">ECC: {{ eccError }}</p>
+      }
+
+      <table class="components">
+        <thead>
+          <tr>
+            <th>component</th>
+            <th>state</th>
+            <th>run</th>
+            <th>endpoint</th>
+            <th>error</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (component of components(); track component.name) {
+            <tr [class.unreachable]="!component.reachable">
+              <td>{{ component.name }}</td>
+              <td>{{ component.state }}</td>
+              <td>{{ component.runNumber ?? '—' }}</td>
+              <td class="mono">{{ component.endpoint }}</td>
+              <td class="err">{{ component.error ?? '' }}</td>
+            </tr>
+          } @empty {
+            <tr>
+              <td colspan="5" class="unknown">コンポーネントの情報がありません</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+
+      @for (note of notes(); track $index) {
+        <p class="note">note: {{ note }}</p>
+      }
+    }
+  </section>
+
+  <!-- ② 操作一覧(完成形レイアウト・全 disabled)。操作権の群には token 取得 UI を同居させる -->
+  @for (group of groups; track group.id) {
+    <section class="card">
+      <header>
+        <h2>{{ group.label }}</h2>
+      </header>
+      <p class="sub">{{ group.note }}</p>
+
+      @if (group.id === 'control') {
+        <div class="tokenform">
+          <label>
+            operator
+            <input
+              type="text"
+              [value]="operator()"
+              (input)="setOperator($event)"
+              autocomplete="off"
+            />
+          </label>
+          <label>
+            passphrase
+            <input
+              type="password"
+              [value]="passphrase()"
+              (input)="setPassphrase($event)"
+              autocomplete="off"
+            />
+          </label>
+          <span class="token">token: <em>未取得</em>(P4 で配線)</span>
+        </div>
+      }
+
+      <div class="actions">
+        @for (action of group.actions; track action.endpoint) {
+          <div class="action" [class.destructive]="action.destructive">
+            <button
+              type="button"
+              [disabled]="disabled(action)"
+              [class.danger]="action.destructive"
+              (click)="activate(action)"
+              [title]="action.note"
+            >
+              {{ action.label }}
+            </button>
+            <span class="endpoint mono">POST {{ action.endpoint }} {{ action.body }}</span>
+            <span class="note">{{ action.note }}</span>
+          </div>
+        }
+      </div>
+    </section>
+  }
+
+  @if (notWired(); as message) {
+    <p class="banner info">{{ message }}</p>
+  }
+
+  <!-- 破壊的操作の確認(SPEC §11 の確認パターン。ガワだけ — 実行しても何も送らない) -->
+  <dialog #confirmDialog class="confirm" (cancel)="closeConfirm()">
+    @if (pending(); as action) {
+      <h3>{{ action.label }} を実行しますか?</h3>
+      <p class="what">{{ action.note }}</p>
+      <p class="mono">POST {{ action.endpoint }} {{ action.body }}</p>
+      <p class="warn">この操作は取得中の run を止める / ECC の状態を壊す可能性があります。</p>
+      <div class="row">
+        <button type="button" (click)="closeConfirm()">やめる</button>
+        <button type="button" class="danger" (click)="confirm()">実行する</button>
+      </div>
+    }
+  </dialog>
+</div>

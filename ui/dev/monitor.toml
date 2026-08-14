@@ -1,0 +1,35 @@
+# ライブスモーク用の最小 config(開発専用。実験の設定ではない)。
+#
+#   cargo run --bin monitor -- --config ui/dev/monitor.toml
+#
+# **リポジトリのルートから**動かすこと(geometry のパスが相対)。
+# root-sink を上げていなければ `status` は来ないので、UI 側に stale バッジが出るのが正
+# (monitor は独自タイマを持たない — 026 申し送り)。`meta` は monitor がジオメトリから
+# 作るので接続した瞬間に届く。
+
+[system]
+experiment = "mini_eTPC (ui dev)"
+output_root = "/tmp/tpcdaq-ui-dev"
+geometry = "tests/fixtures/geometry_mini_reduced.dat"
+
+[[cobo]]
+id = 0
+listen = "0.0.0.0:46005"
+data_sender_id = "CoBo[0]"
+
+[decoder]
+workers = 1
+
+[root_sink]
+snapshot_hz = 1.0
+event_publish_hz = 20.0
+build_timeout_ms = 1000
+
+[monitor]
+ws_listen = "0.0.0.0:9000"
+
+[controller]
+rest_listen = "0.0.0.0:8080"
+passphrase = "change-me"
+ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+config_id = "ui-dev"

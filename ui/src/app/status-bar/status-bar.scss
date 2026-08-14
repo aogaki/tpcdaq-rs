@@ -1,0 +1,85 @@
+.status-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 1rem;
+  padding: 0.35rem 1rem;
+  border-top: 1px solid var(--mat-sys-outline-variant);
+  background: var(--mat-sys-surface-container);
+  color: var(--mat-sys-on-surface);
+  font: var(--mat-sys-body-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  white-space: nowrap;
+}
+
+.key {
+  color: var(--mat-sys-on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.7rem;
+}
+
+.bad {
+  color: var(--mat-sys-error);
+  font-weight: 600;
+}
+
+.issue {
+  max-width: 28rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--mat-sys-on-surface-variant);
+
+  mat-icon {
+    font-size: 1rem;
+    width: 1rem;
+    height: 1rem;
+  }
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+
+  mat-icon {
+    font-size: 1rem;
+    width: 1rem;
+    height: 1rem;
+  }
+}
+
+// 「繋がっていない」と「繋がっているが status が来ない」は別の色にする。
+.health-fresh {
+  background: color-mix(in srgb, var(--mat-sys-primary) 22%, transparent);
+  color: var(--mat-sys-primary);
+}
+
+.health-waiting {
+  background: color-mix(in srgb, var(--mat-sys-tertiary) 22%, transparent);
+  color: var(--mat-sys-tertiary);
+}
+
+.health-stale {
+  background: color-mix(in srgb, #ffb300 28%, transparent);
+  color: #ffca28;
+  border-color: #ffb300;
+}
+
+.health-offline {
+  background: color-mix(in srgb, var(--mat-sys-error) 22%, transparent);
+  color: var(--mat-sys-error);
+  border-color: var(--mat-sys-error);
+}

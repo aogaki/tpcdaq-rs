@@ -1,0 +1,17 @@
+同梱フォント(029 必須処置 C — オフライン DAQ 機で外部ネットワークに出ないため self-host)
+
+- roboto-latin.woff2 / roboto-latin-ext.woff2
+  Roboto (variable, wght 100-900), Google Fonts v51
+  取得元: https://fonts.googleapis.com/css2?family=Roboto:wght@100..900&display=swap
+          -> https://fonts.gstatic.com/s/roboto/v51/...
+  ライセンス: Apache License 2.0
+              https://github.com/googlefonts/roboto/blob/main/LICENSE
+
+- material-icons.woff2
+  Material Icons, Google Fonts v145
+  取得元: https://fonts.googleapis.com/icon?family=Material+Icons
+          -> https://fonts.gstatic.com/s/materialicons/v145/...
+  ライセンス: Apache License 2.0
+              https://github.com/google/material-design-icons/blob/master/LICENSE
+
+Apache License 2.0 の全文: https://www.apache.org/licenses/LICENSE-2.0

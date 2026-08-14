@@ -1,0 +1,42 @@
+<div class="shell">
+  <mat-toolbar class="topbar">
+    <button
+      type="button"
+      mat-icon-button
+      (click)="sidenav.toggle()"
+      aria-label="Toggle navigation"
+      matTooltip="ナビゲーションの開閉"
+    >
+      <mat-icon>menu</mat-icon>
+    </button>
+    <span class="brand">tpcdaq</span>
+    <span class="subtitle">{{ subtitle() }}</span>
+    <span class="spacer"></span>
+    <span class="endpoint" [matTooltip]="'接続先の出所: ' + endpointSource()">{{ wsUrl() }}</span>
+  </mat-toolbar>
+
+  <mat-sidenav-container class="body" [hasBackdrop]="false">
+    <mat-sidenav #sidenav mode="side" opened class="nav">
+      <mat-nav-list>
+        @for (item of nav; track item.path) {
+          <a
+            mat-list-item
+            [routerLink]="['/', item.path]"
+            routerLinkActive
+            #active="routerLinkActive"
+            [activated]="active.isActive"
+          >
+            <mat-icon matListItemIcon>{{ item.icon }}</mat-icon>
+            <span matListItemTitle>{{ item.label }}</span>
+          </a>
+        }
+      </mat-nav-list>
+    </mat-sidenav>
+
+    <mat-sidenav-content class="content">
+      <router-outlet />
+    </mat-sidenav-content>
+  </mat-sidenav-container>
+
+  <app-status-bar />
+</div>

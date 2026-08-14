@@ -1,0 +1,265 @@
+.run {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem 2rem;
+  max-width: 74rem;
+}
+
+h2 {
+  margin: 0;
+  font: var(--mat-sys-title-small);
+}
+
+h3 {
+  margin: 0 0 0.5rem;
+  font: var(--mat-sys-title-small);
+}
+
+.card {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: var(--tpc-radius);
+  background: var(--mat-sys-surface-container-low);
+  padding: 0.75rem 0.9rem;
+}
+
+.card > header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.sub,
+.note,
+.hint,
+.runline {
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-small);
+}
+
+.sub {
+  margin: 0 0 0.6rem;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+}
+
+.banner {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid;
+  border-radius: 4px;
+  background: var(--mat-sys-surface-container-low);
+  font: var(--mat-sys-body-small);
+}
+
+.banner.info {
+  border-color: var(--tpc-info);
+}
+
+.banner.error {
+  border-color: var(--tpc-error);
+  color: var(--tpc-error);
+}
+
+.chip {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-small);
+}
+
+.chip.ok {
+  color: var(--tpc-ok);
+  border-color: color-mix(in srgb, var(--tpc-ok) 45%, transparent);
+}
+
+.chip.unknown,
+.unknown {
+  color: var(--tpc-unknown);
+}
+
+/* ---- 状態 ---- */
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+}
+
+.fact {
+  display: flex;
+  flex-direction: column;
+}
+
+.label {
+  color: var(--mat-sys-on-surface-variant);
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.value {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.tone-ok {
+  color: var(--tpc-ok);
+}
+
+.tone-unknown {
+  color: var(--tpc-unknown);
+}
+
+.tone-error {
+  color: var(--tpc-error);
+}
+
+.eccerror {
+  margin: 0.5rem 0 0;
+  color: var(--tpc-unknown);
+  font: var(--mat-sys-body-small);
+  word-break: break-all;
+}
+
+.components {
+  width: 100%;
+  margin-top: 0.75rem;
+  border-collapse: collapse;
+  font: var(--mat-sys-body-small);
+}
+
+.components th {
+  text-align: left;
+  color: var(--mat-sys-on-surface-variant);
+  font-weight: 500;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--mat-sys-outline-variant);
+  padding: 0.25rem 0.5rem 0.25rem 0;
+}
+
+.components td {
+  padding: 0.25rem 0.5rem 0.25rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--mat-sys-outline-variant) 40%, transparent);
+}
+
+.components tr.unreachable td {
+  color: var(--tpc-unknown);
+}
+
+.components .err {
+  color: var(--tpc-error);
+}
+
+/* ---- 操作権 ---- */
+
+.tokenform {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.tokenform label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-small);
+}
+
+.token {
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-small);
+}
+
+input {
+  background: var(--mat-sys-surface-container-high);
+  color: var(--mat-sys-on-surface);
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  width: 14rem;
+}
+
+/* ---- 操作ボタン ---- */
+
+button {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--mat-sys-on-surface);
+  font: inherit;
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+}
+
+button.danger {
+  border-color: var(--tpc-error);
+  color: var(--tpc-error);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.action {
+  display: grid;
+  grid-template-columns: 11rem minmax(14rem, auto) 1fr;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.action button {
+  width: 100%;
+}
+
+.endpoint {
+  color: var(--mat-sys-on-surface-variant);
+}
+
+/* ---- 確認ダイアログ(ガワ) ---- */
+
+.confirm {
+  border: 1px solid var(--tpc-error);
+  border-radius: var(--tpc-radius);
+  background: var(--mat-sys-surface-container-high);
+  color: var(--mat-sys-on-surface);
+  padding: 1rem 1.25rem;
+  max-width: 32rem;
+}
+
+.confirm::backdrop {
+  background: rgb(0 0 0 / 60%);
+}
+
+.confirm .warn {
+  color: var(--tpc-error);
+  font: var(--mat-sys-body-small);
+}
+
+.confirm .row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}

@@ -1,0 +1,110 @@
+// Include theming for Angular Material with `mat.theme()`.
+// This Sass mixin will define CSS variables that are used for styling Angular Material
+// components according to the Material 3 design spec.
+// Learn more about theming and how to use it for your application's
+// custom components at https://material.angular.dev/guide/theming
+@use '@angular/material' as mat;
+
+// ---------------------------------------------------------------------
+// フォント(029 必須処置 C) — **外部ネットワーク依存ゼロ**
+// ---------------------------------------------------------------------
+// `ng add @angular/material` が index.html に置いた Google Fonts の CDN 参照は削除した。
+// CSS はビルド時にインライン化されるが `.woff2` は runtime に fonts.gstatic.com へ取りに
+// 行くので、オフラインの DAQ 機では毎回失敗してシステムフォントに落ちる(Warsaw 展開の前提)。
+// 実体は `public/fonts/`(ビルド出力の直下に配られる)。ライセンスは同ディレクトリの
+// LICENSE.txt(どちらも Apache-2.0)。
+//
+// Roboto は可変フォント 1 本(wght 100–900)。subset は latin と latin-ext のみ —— 日本語は
+// システムフォントに落ちるが、これは CDN 版でも同じ(Roboto に CJK グリフは無い)。
+
+@font-face {
+  font-family: Roboto;
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/roboto-latin.woff2') format('woff2');
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329,
+    U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: Roboto;
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/roboto-latin-ext.woff2') format('woff2');
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329,
+    U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F,
+    U+A720-A7FF;
+}
+
+@font-face {
+  font-family: 'Material Icons';
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url('/fonts/material-icons.woff2') format('woff2');
+}
+
+// `<mat-icon>` は既定でこのクラスを付けてリガチャ(`menu` → ☰)で描く。
+// CDN の CSS が持っていた規則をそのまま持ち込む(これが無いとアイコン名が生の文字で出る)。
+.material-icons {
+  font-family: 'Material Icons';
+  font-weight: normal;
+  font-style: normal;
+  font-size: 24px;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  font-feature-settings: 'liga';
+  -webkit-font-smoothing: antialiased;
+}
+
+html {
+  height: 100%;
+  @include mat.theme(
+    (
+      color: (
+        primary: mat.$azure-palette,
+        tertiary: mat.$blue-palette,
+      ),
+      typography: Roboto,
+      density: 0,
+    )
+  );
+}
+
+:root {
+  // 029 意匠仕上げ(SPEC §11)。状態色は**意味ごとに 1 色**だけ決めて全画面で共有する。
+  // 「不明」と「異常」を同じ赤にしない(controller が居ない開発機で赤い嘘を出さないため)。
+  --tpc-ok: #4ade80;
+  --tpc-warn: #fbbf24;
+  --tpc-error: #f87171;
+  --tpc-unknown: #94a3b8;
+  --tpc-info: #26c6da;
+  --tpc-radius: 6px;
+}
+
+body {
+  // SPEC §11: モニタは Grafana 風ダーク。既定をダークに固定する
+  // (明暗の切替 UI は 029 の意匠仕上げで検討)。
+  color-scheme: dark;
+
+  // Set a default background, font and text colors for the application using
+  // Angular Material's system-level CSS variables. Learn more about these
+  // variables at https://material.angular.dev/guide/system-variables
+  background-color: var(--mat-sys-surface);
+  color: var(--mat-sys-on-surface);
+  font: var(--mat-sys-body-medium);
+
+  // Reset the user agent margin.
+  margin: 0;
+  height: 100%;
+}
+/* You can add global styles to this file, and also import other style files */

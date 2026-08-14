@@ -1,0 +1,255 @@
+.logbook {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem 2rem;
+  max-width: 74rem;
+}
+
+h2 {
+  margin: 0 0 0.5rem;
+  font: var(--mat-sys-title-small);
+}
+
+/* ---- 追記フォーム ---- */
+
+.composer {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: var(--tpc-radius);
+  background: var(--mat-sys-surface-container-low);
+  padding: 0.75rem 0.9rem;
+}
+
+.composer .row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.who {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-small);
+}
+
+input,
+textarea {
+  background: var(--mat-sys-surface-container-high);
+  color: var(--mat-sys-on-surface);
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+}
+
+input {
+  width: 16rem;
+}
+
+textarea {
+  width: 100%;
+  margin-top: 0.5rem;
+  box-sizing: border-box;
+  resize: vertical;
+}
+
+button {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--mat-sys-on-surface);
+  font: inherit;
+  padding: 0.4rem 0.9rem;
+  cursor: pointer;
+}
+
+.post:not(:disabled) {
+  background: var(--mat-sys-primary);
+  color: var(--mat-sys-on-primary);
+  border-color: var(--mat-sys-primary);
+  font-weight: 600;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---- 取得の健全性 ---- */
+
+.feedstate {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  font: var(--mat-sys-body-small);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.chip {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.chip.ok {
+  color: var(--tpc-ok);
+  border-color: color-mix(in srgb, var(--tpc-ok) 45%, transparent);
+}
+
+.chip.unknown {
+  color: var(--tpc-unknown);
+}
+
+.banner {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid;
+  border-radius: 4px;
+  font: var(--mat-sys-body-small);
+  background: var(--mat-sys-surface-container-low);
+}
+
+.banner.error {
+  border-color: var(--tpc-error);
+  color: var(--tpc-error);
+}
+
+.banner.warn {
+  border-color: var(--tpc-warn);
+  color: var(--tpc-warn);
+}
+
+.issue {
+  margin: 0.5rem 0 0;
+  color: var(--tpc-error);
+  font: var(--mat-sys-body-small);
+}
+
+.ok {
+  margin: 0.5rem 0 0;
+  color: var(--tpc-ok);
+  font: var(--mat-sys-body-small);
+}
+
+.empty {
+  color: var(--mat-sys-on-surface-variant);
+}
+
+/* ---- タイムライン ---- */
+
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.entry {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-left: 3px solid var(--mat-sys-outline-variant);
+  border-radius: var(--tpc-radius);
+  background: var(--mat-sys-surface-container-low);
+}
+
+.entry.sev-attention {
+  border-left-color: var(--tpc-warn);
+}
+
+.entry.sev-error {
+  border-left-color: var(--tpc-error);
+  background: color-mix(in srgb, var(--tpc-error) 8%, var(--mat-sys-surface-container-low));
+}
+
+.when {
+  display: flex;
+  flex-direction: column;
+  min-width: 7rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.time {
+  font-weight: 600;
+}
+
+.date,
+.actor,
+.seq {
+  color: var(--mat-sys-on-surface-variant);
+  font-size: 0.75rem;
+}
+
+.what {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.head .title {
+  font-weight: 600;
+}
+
+.kind {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 4px;
+  padding: 0 0.35rem;
+  font-size: 0.7rem;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.kind-unknown {
+  color: var(--tpc-warn);
+  border-color: var(--tpc-warn);
+}
+
+.body {
+  margin: 0.35rem 0 0;
+  white-space: pre-wrap;
+}
+
+.fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.35rem;
+  font: var(--mat-sys-body-small);
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.field b {
+  color: var(--mat-sys-on-surface);
+  font-weight: 500;
+}
+
+.detail {
+  margin-top: 0.35rem;
+  font: var(--mat-sys-body-small);
+}
+
+.detail summary {
+  cursor: pointer;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.detail ul {
+  margin: 0.25rem 0 0;
+  padding-left: 1.2rem;
+  font-variant-numeric: tabular-nums;
+}

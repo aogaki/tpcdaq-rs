@@ -1,0 +1,111 @@
+<div class="waveform">
+  <app-display-controls>
+    <span class="event">{{ eventLabel() }}</span>
+    @if (rendered()) {
+      <span class="flag" [class.bad]="incomplete()">
+        {{ incomplete() ? 'INCOMPLETE' : 'complete' }}
+      </span>
+    }
+  </app-display-controls>
+
+  <div class="picks">
+    <!-- select 側に [value] を付けると option より先に評価されて先頭が選ばれてしまう
+         (= 画面と実際の値がずれる)。option 側の [selected] で選ぶ。 -->
+    <label>
+      (cobo,asad)
+      <select (change)="selectKey($event)">
+        @for (key of keys(); track key) {
+          <option [value]="key" [selected]="key === selectedKey()">{{ key }}</option>
+        }
+        @if (keys().length === 0) {
+          <option value="">—</option>
+        }
+      </select>
+    </label>
+
+    <span class="agets">
+      AGET
+      @for (aget of agetChoices(); track aget) {
+        <button
+          type="button"
+          class="chip"
+          [class.on]="agets().includes(aget)"
+          (click)="toggleAget(aget)"
+        >
+          {{ aget }}
+        </button>
+      }
+      @if (agetChoices().length === 0) {
+        <span class="dim">—</span>
+      }
+    </span>
+
+    <label>
+      ch
+      <input type="number" min="0" [value]="chFrom()" (change)="setChFrom($event)" />
+      –
+      <input type="number" min="0" [value]="chTo()" (change)="setChTo($event)" />
+      <button type="button" class="chip" (click)="allChannels()">all</button>
+    </label>
+
+    <label>
+      max series
+      <select (change)="setMaxSeries($event)">
+        @for (limit of seriesLimits; track limit) {
+          <option [value]="limit" [selected]="limit === maxSeries()">{{ limit }}</option>
+        }
+      </select>
+    </label>
+
+    <label>
+      max points
+      <select (change)="setMaxPoints($event)">
+        @for (limit of pointLimits; track limit) {
+          <option [value]="limit" [selected]="limit === maxPoints()">{{ limit }}</option>
+        }
+      </select>
+    </label>
+
+    <span class="modes">
+      <button
+        type="button"
+        class="chip"
+        [class.on]="mode() === 'overlay'"
+        (click)="mode.set('overlay')"
+      >
+        overlay
+      </button>
+      <button type="button" class="chip" [class.on]="mode() === 'grid'" (click)="mode.set('grid')">
+        grid
+      </button>
+    </span>
+  </div>
+
+  <!-- 間引きの申告(silent 禁止)。実際に描いた結果からそのまま出す。 -->
+  <p class="decimation">
+    @if (rendered(); as plot) {
+      requested {{ plot.requestedSeries }} series · drawn {{ plot.series.length }}
+      @if (plot.droppedSeries > 0) {
+        <strong class="dropped">· {{ plot.droppedSeries }} series not drawn (max series)</strong>
+      }
+      · stride {{ plot.stride }}
+      @if (plot.droppedSamplesPerSeries > 0) {
+        <strong class="dropped">
+          · {{ plot.droppedSamplesPerSeries }} of {{ plot.nBuckets }} samples/series dropped
+        </strong>
+      }
+      @if (plot.outOfRange > 0) {
+        <strong class="dropped">· {{ plot.outOfRange }} (aget,ch) out of range</strong>
+      }
+      · raw ADC, FPN included, no subtraction (R13)
+    } @else {
+      —
+    }
+  </p>
+
+  @if (issue(); as text) {
+    <p class="issue">{{ text }}</p>
+  }
+
+  <div class="chart" #chart [style.height.px]="chartHeightPx()"></div>
+</div>

@@ -17,3 +17,14 @@ logs/
 .idea/
 reference/
 .claude/
+
+# Web UI (027) — generated output. package-lock.json IS committed.
+ui/node_modules/
+ui/dist/
+ui/.angular/
+ui/coverage/
+# 運用配置物(接続先の上書き)。環境ごとに置くのでリポには入れない。
+ui/public/ui-config.json
+
+# macOS Spotlight — target/(7.8G)と ui/node_modules を延々索引させない(2026-08-14)
+.metadata_never_index

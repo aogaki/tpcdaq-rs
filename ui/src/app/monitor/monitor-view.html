@@ -1,0 +1,47 @@
+<div class="monitor">
+  <app-display-controls>
+    <!-- R9: イベント ID はタブに関係なく常時見えるところに置く。 -->
+    <span class="event" [class.none]="!hasEvent()">{{ eventLabel() }}</span>
+    @if (hasEvent()) {
+      <span class="flag" [class.bad]="incomplete()">
+        {{ incomplete() ? 'INCOMPLETE' : 'complete' }}
+      </span>
+    }
+  </app-display-controls>
+
+  <mat-tab-group class="tabs" [preserveContent]="false">
+    <mat-tab label="Histograms (9)">
+      <ng-template matTabContent>
+        <p class="hint">
+          x 軸は monitor から届いた範囲のまま固定(オートレンジなし)—— 飽和天井 4095
+          が常に見える(SPEC §5.2)。ビン数・strip 数はメッセージ由来。
+        </p>
+        @for (group of rows; track group.row.key) {
+          <section class="row">
+            <h3>{{ group.row.label }}</h3>
+            <div class="grid">
+              @for (cell of group.cells; track cell.id) {
+                <app-jsroot-panel [spec]="cell.spec" [message]="histoMessage(cell.id)" />
+              }
+            </div>
+          </section>
+        }
+      </ng-template>
+    </mat-tab>
+
+    <mat-tab label="Event display">
+      <ng-template matTabContent>
+        <p class="hint">
+          最新の built event(`0x02 Uvw`)を面毎に strip × time bucket で表示。生 ADC・減算なし。
+        </p>
+        <section class="row">
+          <div class="grid">
+            @for (plane of planes; track plane.index) {
+              <app-jsroot-panel [spec]="plane.spec" [message]="uvwMessage(plane.index)" />
+            }
+          </div>
+        </section>
+      </ng-template>
+    </mat-tab>
+  </mat-tab-group>
+</div>
