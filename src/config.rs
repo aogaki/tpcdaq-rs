@@ -18,6 +18,15 @@ pub const COBO_LISTEN_PORT_BASE: u32 = 46005;
 /// monitor WS の既定 listen アドレス(SPEC §3.2)。
 pub const DEFAULT_MONITOR_WS_LISTEN: &str = "0.0.0.0:9000";
 
+/// monitor SUB の既定接続先(SPEC §3.2「root-sink PUB bind = tcp://\*:47004」の受け側)。
+pub const DEFAULT_MONITOR_SUB_ENDPOINT: &str = "tcp://127.0.0.1:47004";
+
+/// monitor の live 送信キュー(0x02/0x03/0x10/0x11)の既定段数(TODO/026)。
+///
+/// live は **drop-oldest + `ws_dropped` 計数**(SPEC §10.3)。段数は「遅いクライアントが
+/// どれだけ遅れてよいか」であって、ロスレス契約とは無関係(モニタ系)。
+pub const DEFAULT_MONITOR_LIVE_QUEUE: usize = 64;
+
 /// controller REST の既定 listen アドレス(SPEC §3.2)。
 pub const DEFAULT_CONTROLLER_REST_LISTEN: &str = "0.0.0.0:8080";
 
@@ -146,6 +155,9 @@ pub enum ConfigError {
     #[error("invalid [receiver] setting: {0}")]
     InvalidReceiver(String),
 
+    #[error("invalid [monitor] setting: {0}")]
+    InvalidMonitor(String),
+
     #[error("invalid [controller] setting: {0}")]
     InvalidController(String),
 }
@@ -241,10 +253,18 @@ pub struct RootSinkConfig {
     pub build_timeout_ms: u64,
 }
 
-/// `ws_listen` を省略すると `DEFAULT_MONITOR_WS_LISTEN`(SPEC §3.2)が既定として入る。
+/// monitor 固有の設定(`[monitor]`)。すべて省略可で、SPEC §3.2 の既定が入る(026 で追記)。
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorConfig {
+    /// WS の listen アドレス(既定 [`DEFAULT_MONITOR_WS_LISTEN`])。
     pub ws_listen: String,
+    /// root-sink のモニタ PUB への SUB 接続先(既定 [`DEFAULT_MONITOR_SUB_ENDPOINT`])。
+    pub sub_endpoint: String,
+    /// 表示変換に使うジオメトリ。省略時は `[system] geometry` をそのまま使う
+    /// (monitor だけ別のジオメトリを見たいときのための上書き口)。
+    pub geometry: PathBuf,
+    /// live 送信キューの段数(既定 [`DEFAULT_MONITOR_LIVE_QUEUE`])。
+    pub live_queue: usize,
 }
 
 /// `rest_listen` を省略すると `DEFAULT_CONTROLLER_REST_LISTEN`(SPEC §3.2)が既定として入る。
@@ -347,6 +367,13 @@ struct RawGrawWriter {
 struct RawMonitor {
     #[serde(default)]
     ws_listen: Option<String>,
+    // ---- 026 で追記(すべて省略可)----
+    #[serde(default)]
+    sub_endpoint: Option<String>,
+    #[serde(default)]
+    geometry: Option<PathBuf>,
+    #[serde(default)]
+    live_queue: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -472,6 +499,15 @@ fn resolve(raw: RawConfig) -> Config {
             .monitor
             .ws_listen
             .unwrap_or_else(|| DEFAULT_MONITOR_WS_LISTEN.to_string()),
+        sub_endpoint: raw
+            .monitor
+            .sub_endpoint
+            .unwrap_or_else(|| DEFAULT_MONITOR_SUB_ENDPOINT.to_string()),
+        geometry: raw
+            .monitor
+            .geometry
+            .unwrap_or_else(|| raw.system.geometry.clone()),
+        live_queue: raw.monitor.live_queue.unwrap_or(DEFAULT_MONITOR_LIVE_QUEUE),
     };
 
     let controller = ControllerConfig {
@@ -528,8 +564,23 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     validate_cobo_listen_unique(&config.cobo)?;
     validate_geometry_path(&config.system.geometry)?;
     validate_receiver(&config.receiver)?;
+    validate_monitor(&config.monitor)?;
     validate_controller(&config.controller, config.cobo.len())?;
     Ok(())
+}
+
+/// `[monitor]` の 026 追記分を検証する(SPEC §5.4 / §10)。
+///
+/// `live_queue = 0` は「live メッセージを 1 通も保持しない」= 全部落とす設定で、
+/// モニタとして意味を成さない。ジオメトリは表示変換(UVW グリッド)の前提なので、
+/// 上書きした場合も `[system] geometry` と同じ強さで存在を確認する。
+fn validate_monitor(monitor: &MonitorConfig) -> Result<(), ConfigError> {
+    if monitor.live_queue == 0 {
+        return Err(ConfigError::InvalidMonitor(
+            "live_queue must be greater than 0".to_string(),
+        ));
+    }
+    validate_geometry_path(&monitor.geometry)
 }
 
 /// `[controller]` の 016 追記分を検証する(SPEC §8.1)。
@@ -932,6 +983,87 @@ config_id = "default"
         let config = parse(&toml_str).unwrap();
 
         assert_eq!(config.monitor.ws_listen, DEFAULT_MONITOR_WS_LISTEN);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    // --- 026 で足した `[monitor]` キー(SPEC §3.2 の既定 + 上書き)---
+
+    #[test]
+    fn monitor_keys_default_to_the_spec_ports_when_omitted() {
+        let geometry = make_temp_geometry_file();
+        let config = parse(&minimal_toml(&geometry, "")).unwrap();
+
+        // SPEC §3.2: root-sink PUB bind = 47004 / monitor WS = 9000。
+        assert_eq!(config.monitor.sub_endpoint, DEFAULT_MONITOR_SUB_ENDPOINT);
+        assert_eq!(config.monitor.sub_endpoint, "tcp://127.0.0.1:47004");
+        assert_eq!(config.monitor.ws_listen, "0.0.0.0:9000");
+        assert_eq!(config.monitor.live_queue, DEFAULT_MONITOR_LIVE_QUEUE);
+        assert_eq!(config.monitor.live_queue, 64);
+        // `[monitor] geometry` 省略時は `[system] geometry` を使う。
+        assert_eq!(config.monitor.geometry, geometry);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    #[test]
+    fn monitor_keys_can_be_overridden() {
+        let geometry = make_temp_geometry_file();
+        let other = geometry.parent().unwrap().join("monitor_geometry.dat");
+        std::fs::write(&other, b"# monitor-side geometry override\n").unwrap();
+        let toml_str = minimal_toml(&geometry, "").replace(
+            "[monitor]\nws_listen = \"0.0.0.0:9000\"",
+            &format!(
+                "[monitor]\nws_listen = \"127.0.0.1:19000\"\n\
+                 sub_endpoint = \"tcp://127.0.0.1:57004\"\n\
+                 live_queue = 7\n\
+                 geometry = \"{}\"",
+                other.display()
+            ),
+        );
+
+        let config = parse(&toml_str).unwrap();
+
+        assert_eq!(config.monitor.ws_listen, "127.0.0.1:19000");
+        assert_eq!(config.monitor.sub_endpoint, "tcp://127.0.0.1:57004");
+        assert_eq!(config.monitor.live_queue, 7);
+        assert_eq!(config.monitor.geometry, other);
+        // `[system] geometry` 側は動かない。
+        assert_eq!(config.system.geometry, geometry);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// live_queue = 0 は「有界キュー段数 0」= 全部落とす設定。半端な既定値で走らない
+    /// (SPEC §3.2)ので起動失敗にする。
+    #[test]
+    fn monitor_live_queue_zero_is_rejected() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = minimal_toml(&geometry, "").replace(
+            "[monitor]\nws_listen = \"0.0.0.0:9000\"",
+            "[monitor]\nws_listen = \"0.0.0.0:9000\"\nlive_queue = 0",
+        );
+
+        let err = parse(&toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidMonitor(_)), "got {err:?}");
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// 存在しない `[monitor] geometry` は起動失敗(ジオメトリ無しでは表示変換ができない)。
+    #[test]
+    fn monitor_geometry_must_exist() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = minimal_toml(&geometry, "").replace(
+            "[monitor]\nws_listen = \"0.0.0.0:9000\"",
+            "[monitor]\nws_listen = \"0.0.0.0:9000\"\ngeometry = \"/nonexistent/monitor.dat\"",
+        );
+
+        let err = parse(&toml_str).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::GeometryNotFound(ref p) if p == Path::new("/nonexistent/monitor.dat")),
+            "got {err:?}"
+        );
 
         let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
     }

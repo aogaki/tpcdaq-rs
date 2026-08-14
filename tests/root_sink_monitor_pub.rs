@@ -2,7 +2,8 @@
 //!
 //! Rust から **本番エンコーダ**で作った Fragments を PUSH で流し込み、root_sink が
 //! PUB(47004)へ出すものを SUB で受けて rmp-serde の **named struct** で読む。
-//! ここで使うパーサは **023(monitor コンポーネント)の本番パーサの先行形**でもある ——
+//! パーサは **026 で `tpcdaq::monitor` の本番パーサへ昇格済み**(このファイルにあった
+//! 先行形の定義は消し、production の [`tpcdaq::monitor::decode_message`] を使う) ——
 //! SPEC §5.3 の map 形式(自己記述)がそのまま構造体で受かることを、ここで固定する。
 //!
 //! 主張すること:
@@ -23,18 +24,18 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime};
 
-use serde::de::DeserializeOwned;
-use serde::Deserialize;
 use serde_bytes::ByteBuf;
 
 use tpcdaq::geometry::{self, ChannelRole, Geometry};
+use tpcdaq::monitor::{
+    self, BuiltEventPayload, HistSnapshotPayload, MonitorMessage, MonitorPayload, StatusPayload,
+};
 use tpcdaq::msg::{self, Batch, Fragment, Fragments, Message};
 
 /// root-sink の期待ソース(SPEC §3.2: decoder = 100)。
@@ -48,115 +49,20 @@ const RUN_NUMBER: u32 = 7;
 const GEOMETRY: &str = "tests/fixtures/geometry_mini_reduced.dat";
 
 // ---------------------------------------------------------------------
-// SPEC §5.3 の payload(rmp-serde の named struct = 023 本番パーサの先行形)
+// SPEC §5.3 の payload = **本番パーサ**(`tpcdaq::monitor`、026 で昇格)
 // ---------------------------------------------------------------------
+//
+// ここにあった named struct 群(KindProbe / StatusPayload / HistPayload / …)は
+// 026 で `src/monitor.rs` へそのまま移した。テストも production と同じ 1 つのパーサを
+// 通すことで、二重定義が静かにズレる余地を無くしてある。
 
-#[derive(Debug, Deserialize)]
-struct KindProbe {
-    kind: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct SaturationPayload {
-    saturated: u64,
-    counted: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct StatusPayload {
-    kind: String,
-    run: u32,
-    state: String,
-    events_built: u64,
-    events_incomplete: u64,
-    late_fragments: u64,
-    /// ビルダ組み上げ中の瞬間値(SPEC §5.3 v1.10、R-P2-5、TODO/024)。`late_fragments`
-    /// の次のキー。
-    pending_events: u64,
-    frames_per_cobo: BTreeMap<String, u64>,
-    bytes_written: u64,
-    saturation: BTreeMap<String, SaturationPayload>,
-    publish_drops: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct HistPayload {
-    id: u8,
-    name: String,
-    nx: u32,
-    ny: u32,
-    /// f64 LE の生バイト列(長さ nx*ny*8)。
-    bins: ByteBuf,
-}
-
-impl HistPayload {
-    fn values(&self) -> Vec<f64> {
-        assert_eq!(
-            self.bins.len(),
-            (self.nx as usize) * (self.ny as usize) * 8,
-            "hist {} の bins 長が nx*ny*8 でない",
-            self.name
-        );
-        self.bins
-            .chunks_exact(8)
-            .map(|c| f64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
-            .collect()
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct HistSnapshotPayload {
-    kind: String,
-    run: u32,
-    hists: Vec<HistPayload>,
-}
-
-#[derive(Debug, Deserialize)]
-struct BuiltEventPayload {
-    kind: String,
-    run: u32,
-    event_idx: u32,
-    complete: bool,
-    fragments: Vec<Fragment>,
-}
-
-/// 受け取った 1 通(エンベロープ = SPEC §2.2 + payload の kind + 生バイト)。
-struct Received {
-    source_id: u32,
-    run: u32,
-    seq: u64,
-    created_ns: u64,
-    kind: String,
-    raw: Vec<u8>,
-}
-
-impl Received {
-    fn parse<T: DeserializeOwned>(&self) -> T {
-        match Message::<T>::from_msgpack(&self.raw) {
-            Ok(Message::Data(batch)) => batch.payload,
-            other => panic!(
-                "payload をその型で読めない: {other:?}",
-                other = other.is_ok()
-            ),
-        }
-    }
-}
-
-fn decode_received(raw: Vec<u8>) -> Received {
-    let Ok(Message::Data(batch)) = Message::<KindProbe>::from_msgpack(&raw) else {
+fn decode_received(raw: Vec<u8>) -> MonitorMessage {
+    monitor::decode_message(&raw).unwrap_or_else(|e| {
         panic!(
-            "モニタ PUB の 1 通が §2.2 の Data エンベロープでない ({} B)",
+            "モニタ PUB の 1 通が SPEC §5.3 として読めない ({} B): {e}",
             raw.len()
-        );
-    };
-    Received {
-        source_id: batch.source_id,
-        run: batch.run_number,
-        seq: batch.sequence_number,
-        created_ns: batch.created_ns,
-        kind: batch.payload.kind,
-        raw,
-    }
+        )
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -317,7 +223,7 @@ fn connect_sub(ctx: &zmq::Context, endpoint: &str) -> zmq::Socket {
 }
 
 /// `until` まで受け続ける。
-fn collect_until(sub: &zmq::Socket, until: Instant) -> Vec<Received> {
+fn collect_until(sub: &zmq::Socket, until: Instant) -> Vec<MonitorMessage> {
     let mut out = Vec::new();
     while Instant::now() < until {
         match sub.recv_bytes(0) {
@@ -328,8 +234,30 @@ fn collect_until(sub: &zmq::Socket, until: Instant) -> Vec<Received> {
     out
 }
 
-fn of_kind<'a>(msgs: &'a [Received], kind: &str) -> Vec<&'a Received> {
-    msgs.iter().filter(|m| m.kind == kind).collect()
+fn statuses(msgs: &[MonitorMessage]) -> Vec<&StatusPayload> {
+    msgs.iter().filter_map(|m| m.status()).collect()
+}
+
+fn snapshots(msgs: &[MonitorMessage]) -> Vec<&HistSnapshotPayload> {
+    msgs.iter().filter_map(|m| m.hist_snapshot()).collect()
+}
+
+fn built_events(msgs: &[MonitorMessage]) -> Vec<&BuiltEventPayload> {
+    msgs.iter().filter_map(|m| m.built_event()).collect()
+}
+
+/// 「この kind の通が 1 つも無いこと」を見るテスト用(未知 kind もここで拾える)。
+fn kind_of(message: &MonitorMessage) -> &str {
+    match &message.payload {
+        MonitorPayload::Status(_) => "status",
+        MonitorPayload::HistSnapshot(_) => "hist_snapshot",
+        MonitorPayload::BuiltEvent(_) => "built_event",
+        MonitorPayload::Unknown(kind) => kind,
+    }
+}
+
+fn count_of_kind(msgs: &[MonitorMessage], kind: &str) -> usize {
+    msgs.iter().filter(|m| kind_of(m) == kind).count()
 }
 
 // ---------------------------------------------------------------------
@@ -510,6 +438,11 @@ fn assert_snapshot_matches(snap: &HistSnapshotPayload, expected: &Expected, geo:
             assert_eq!(h.nx, CHARGE_BINS as u32, "1D は 512 ビン");
             assert_eq!(h.ny, 1, "1D の ny = 1");
         }
+        assert!(
+            h.is_consistent(),
+            "hist {} の bins 長が nx*ny*8 でない",
+            h.name
+        );
         let got = h.values();
         assert_eq!(
             got.len(),
@@ -545,21 +478,21 @@ fn status_is_published_at_one_hertz_even_while_idle() {
     // 観測窓だけ広げて余裕を持たせる。)
     let msgs = collect_until(&sub, Instant::now() + Duration::from_millis(4000));
 
-    let statuses = of_kind(&msgs, "status");
+    let statuses = statuses(&msgs);
     assert!(
         statuses.len() >= 2,
         "idle でも 1 Hz で status が来るはず(got {} 通 / 全 {} 通)",
         statuses.len(),
         msgs.len()
     );
-    for m in &statuses {
+    for m in msgs.iter().filter(|m| m.status().is_some()) {
         assert_eq!(m.source_id, MONITOR_SOURCE_ID, "source_id = 101(SPEC §3.2)");
         assert!(
             m.created_ns > 1_600_000_000_000_000_000,
             "created_ns が unix ns でない"
         );
     }
-    let s: StatusPayload = statuses.last().unwrap().parse();
+    let s = *statuses.last().unwrap();
     assert_eq!(s.kind, "status");
     assert_eq!(s.state, "idle", "run が開いていないので idle");
     assert_eq!(s.run, 0, "まだ run が無いので 0");
@@ -579,9 +512,13 @@ fn status_is_published_at_one_hertz_even_while_idle() {
     let mut last = None;
     for m in &msgs {
         if let Some(prev) = last {
-            assert!(m.seq > prev, "seq が単調でない: {prev} -> {}", m.seq);
+            assert!(
+                m.sequence_number > prev,
+                "seq が単調でない: {prev} -> {}",
+                m.sequence_number
+            );
         }
-        last = Some(m.seq);
+        last = Some(m.sequence_number);
     }
 
     let counts = sink.terminate(Duration::from_secs(10));
@@ -677,21 +614,19 @@ fn hist_snapshot_bins_match_an_independent_recomputation() {
     assert_eq!(expected.bins[6][31], 1.0, "ChargeMaxU bin31");
     assert_eq!(expected.bins[6][511], 1.0, "ChargeMaxU bin511");
 
-    let snapshots = of_kind(&msgs, "hist_snapshot");
+    let snapshots = snapshots(&msgs);
     assert!(
         snapshots.len() >= 2,
         "hist_snapshot が来ていない(got {})",
         snapshots.len()
     );
-    let last = snapshots.last().unwrap();
-    let snap: HistSnapshotPayload = last.parse();
+    let snap = *snapshots.last().unwrap();
     assert_eq!(snap.kind, "hist_snapshot");
     assert_eq!(snap.run, RUN_NUMBER, "EOS 後は直近クローズした run が載る");
-    assert_snapshot_matches(&snap, &expected, &geo);
+    assert_snapshot_matches(snap, &expected, &geo);
 
     // status も同じ数を主張していること
-    let statuses = of_kind(&msgs, "status");
-    let s: StatusPayload = statuses.last().unwrap().parse();
+    let s = *statuses(&msgs).last().unwrap();
     assert_eq!(s.state, "idle", "EOS で run は閉じている");
     assert_eq!(s.run, RUN_NUMBER);
     assert_eq!(s.events_built, 3);
@@ -763,7 +698,7 @@ fn built_events_are_published_and_throttling_is_counted() {
     push.send(end_of_stream(), 0).expect("send EndOfStream");
     let msgs = collector.join().expect("collector thread");
 
-    let events = of_kind(&msgs, "built_event");
+    let events = built_events(&msgs);
     assert!(
         events.len() >= 2,
         "2 Hz なら 3.6 秒で 2 通以上は来るはず(got {})",
@@ -774,17 +709,20 @@ fn built_events_are_published_and_throttling_is_counted() {
         "間引かれずに全部来ている(最新優先になっていない): {}",
         events.len()
     );
-    assert!(
-        of_kind(&msgs, "hist_snapshot").is_empty(),
+    assert_eq!(
+        count_of_kind(&msgs, "hist_snapshot"),
+        0,
         "--snapshot-hz 0 なのに hist_snapshot が来ている"
     );
 
     let mut last_idx: Option<u32> = None;
-    for m in &events {
-        let ev: BuiltEventPayload = m.parse();
+    for (m, ev) in msgs
+        .iter()
+        .filter_map(|m| m.built_event().map(|ev| (m, ev)))
+    {
         assert_eq!(ev.kind, "built_event");
         assert_eq!(ev.run, RUN_NUMBER);
-        assert_eq!(m.run, RUN_NUMBER, "エンベロープの run_number も載る");
+        assert_eq!(m.run_number, RUN_NUMBER, "エンベロープの run_number も載る");
         assert!(ev.complete, "期待集合 (0,0) は 1 フラグメントで complete");
         assert_eq!(ev.fragments.len(), 1, "mini = 1 イベント 1 フラグメント");
         // §2.4 の Fragment として読み戻せて、投入した値と一致する
@@ -862,12 +800,12 @@ fn event_publish_hz_zero_is_off_and_not_counted_as_drops() {
     let msgs = collect_until(&sub, Instant::now() + Duration::from_millis(2200));
 
     assert!(
-        of_kind(&msgs, "built_event").is_empty(),
+        built_events(&msgs).is_empty(),
         "--event-publish-hz 0 なのに built_event が来ている"
     );
-    assert!(!of_kind(&msgs, "status").is_empty(), "status は続くはず");
+    assert!(!statuses(&msgs).is_empty(), "status は続くはず");
     assert!(
-        !of_kind(&msgs, "hist_snapshot").is_empty(),
+        !snapshots(&msgs).is_empty(),
         "hist_snapshot は既定の 1 Hz で続くはず"
     );
 
@@ -1050,10 +988,10 @@ fn real_graw_hist_totals_match_an_independent_sum() {
     let geo = geometry::load(GEOMETRY).expect("load geometry fixture");
     let expected = recompute(&geo, &events);
 
-    let snapshots = of_kind(&msgs, "hist_snapshot");
+    let snapshots = snapshots(&msgs);
     assert!(!snapshots.is_empty(), "hist_snapshot が来ていない");
-    let snap: HistSnapshotPayload = snapshots.last().unwrap().parse();
-    assert_snapshot_matches(&snap, &expected, &geo);
+    let snap = *snapshots.last().unwrap();
+    assert_snapshot_matches(snap, &expected, &geo);
 
     // StripTime 3 枚の総和 = Strip 割り付けチャンネルの生 ADC 総和
     let strip_time_total: f64 = snap.hists[0..3]
@@ -1066,8 +1004,7 @@ fn real_graw_hist_totals_match_an_independent_sum() {
     );
     eprintln!("StripTime 総和 = {strip_time_total} (Strip 割り付け ch の生 ADC 総和と一致)");
 
-    let statuses = of_kind(&msgs, "status");
-    let s: StatusPayload = statuses.last().unwrap().parse();
+    let s = *statuses(&msgs).last().unwrap();
     assert_eq!(s.events_built, 108, "events_built");
     assert_eq!(s.events_incomplete, 0);
     assert_eq!(s.late_fragments, 0);

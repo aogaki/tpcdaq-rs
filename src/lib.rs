@@ -39,3 +39,6 @@ pub mod state;
 
 /// controller コンポーネント(REST + run シーケンス + ログブック)。SPEC §8.1/§1.3。(016 で実装)
 pub mod controller;
+
+/// monitor コンポーネント(root-sink PUB 購読 → 表示変換 → WS 配信)。SPEC §5.3/§5.4/§10。(026 で実装)
+pub mod monitor;

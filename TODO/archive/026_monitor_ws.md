@@ -1,6 +1,37 @@
 # 026 — monitor(Rust): root-sink PUB 購読 → 表示変換 → WS 配信
 
-**Status: OPEN(発注可)**
+**Status: COMPLETED**(2026-08-14 implementer/Opus(worktree)→ Fable レビュー PASS →
+main 取り込み)
+
+## 結果
+
+- **実装**(11 ファイル +4479/-141): src/monitor.rs(2574 行 = 本番 1712 + テスト 862 —
+  §5.3 受け側パーサ(022 テストから昇格)/ GapTracker(gap + **seq 巻き戻り =
+  source_restarts 別計上**)/ ws 純エンコーダ(13 B ヘッダ + 0x02/03/10/11)/
+  DisplayConverter(Uvw saturating-add 合流・Waveforms aget-major・Histo f64→f32 +
+  **2D 転置**(§5.3 strip-slow → §10.2 iy-outer)・malformed/strip 範囲外/misaligned
+  すべてカウンタ + warn-once・R-P2-13 unmapped フック結線)/ axum WS(subscribe
+  フィルタ、live = broadcast drop-oldest + ws_dropped、JSON = reliable)+
+  bin/monitor + bin/ws_proto_sample(§10.4-1)+ config [monitor] 4 キー。
+- **テスト(worktree でエージェント実行 + Fable がゲート再実行・核心コード読みで裏取り、
+  2026-08-14、macOS Darwin 25.5.0)**: fmt / clippy クリーン、cargo test(env あり/なし
+  とも)**377 passed / 0 failed / 1 ignored**。新規 40(単体 22 + config 4 + bin 4 +
+  WS 統合 6 + 適合 2 + E2E 2)。flake 確認 ×3 安定。
+  **実データ E2E**: 108 events / 15,040,512 items → root_sink 実バイナリ PUB → monitor →
+  WS で **U/V/W 2D 全ビンが独立再計算と一致**(f32 相対 1e-5)、monitorGaps=0 /
+  wsDropped=0 / publish_drops=107(= 20 Hz 上限 × 全速 108 イベントの正しい間引き)。
+  main 取り込み後の統合ゲートは CURRENT.md 記載値。
+- **レビュー(Fable)**: 逸脱 12 件中、設計 11 件すべて受理(②2D 転置は §10.2「iy 外側」の
+  正しい読み — E2E 全ビン一致で固定 / ⑧source_restarts は巨大偽ギャップ防止の正しい追加 /
+  ⑤geometry 既定 = [system] / ⑨status は root-sink 由来周期)。①の TDD 順序逸脱
+  (monitor.rs は実装先行)は**手順違反として記録**(SPEC から独立に期待値を起こした旨の
+  申告があり内容は受理。次回は config と同様 test-first で)。
+- **申し送り(027 UI 起票へ)**: WS パスは `/` と `/ws` 両受け — **027 で `/ws` に固定**。
+  JSON casing は §10.3 の文言どおり(status = snake_case + monitorGaps/clients/wsDropped)。
+  root-sink 停止中は status JSON が止まる — UI 側に staleness 表示を置く。
+  SPEC v1.11 収載候補: source_restarts / WS パス /(geometry.rs 参照アクセサ —
+  Aux ch の per-sample String 確保の解消。表示系のため実害小、geometry を触る次の
+  ユニットで)。
 **仕様**: SPEC **v1.10** §5.3(PUB ワイヤ — 受け側)/ §5.4(monitor の責務)/
 §10(WS プロトコル — 本ユニットの核)/ §3.2(WS 9000、PUB 47004)/ §12-10(WS 適合性)
 **依存**: 022(PUB ワイヤ実装 — tests/root_sink_monitor_pub.rs の named struct パーサが

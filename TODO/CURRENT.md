@@ -1,8 +1,8 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-08-14(**P2 改修波 3 ユニット(023/024/025)全完了・コミット済み —
-フルゲート 337 passed / 0 failed。026 monitor + WS を起票・発注** — 次: 026 完了レビュー
-→ 027 Web UI 起票)**
+**最終更新: 2026-08-14(**026 monitor + WS 完了 — モニタ経路がワイヤまで開通**
+(リプレイ → root-sink PUB → monitor → WS、実データ全ビン独立再計算一致)。フルゲート
+**377 passed / 0 failed**。次: 027 Web UI 起票(デモ最短経路の最終ピース))**
 
 ## いま
 
@@ -40,10 +40,12 @@ P4 = run 制御**(「SPEC に P4 が無い」は Claude の読み違い — P4 �
   実データ値一致(次回 LAN)+ TPCReco 再配布許諾(Warsaw))。
 - [022_root_sink_monitor_pub.md](archive/022_root_sink_monitor_pub.md) — **完了・
   archive 済み**(2026-08-14。「最近完了」参照)。
-- [026_monitor_ws.md](026_monitor_ws.md) — **起票済み・発注中**(2026-08-14。
-  §5.4 + §10。R-P2-13 の geometry 可視化フック結線を含む。implementer/Opus)。
-- 以降順次: 027 Web UI(§11 — WS の TS 側デコーダ + §10.4 適合もここ)→ P3 E2E
-  (§12-8〜10 + R10、跨 run 計測 v1.10)→ 負荷ハーネス起票(R-P2-11、§12-5/6)。
+- ~~026 monitor + WS~~ → **完了・archive 済み・コミット済み**(2026-08-14。取り込み後
+  フルゲート 377 green。「最近完了」参照。**027 への申し送りは archive/026 の結果節**:
+  WS パス /ws 固定・JSON casing・status staleness 表示)。
+- 以降順次: **027 Web UI**(§11 — Angular + Material + ECharts。WS の TS 側デコーダ +
+  §10.4 適合もここ。run 制御ボタンは disabled 見た目のみ = 2026-08-13 ユーザー決定)→
+  P3 E2E(§12-8〜10 + R10、跨 run 計測 v1.10)→ 負荷ハーネス起票(R-P2-11、§12-5/6)。
 
 **ユーザー決定(2026-08-14)→ SPEC v1.10 に反映済み・改修ユニット発注中**:
 1. 016 逸脱 = Fable 推奨どおり(**Counters Option 化 = §9.2 改訂** / comment token 不要を
@@ -115,6 +117,12 @@ frameType 2 rev 5 固定・ローテーション書き込み後判定(v1.7、実
 
 ## 最近完了
 
+- 2026-08-14: [026_monitor_ws.md](archive/026_monitor_ws.md) — **monitor + WS(モニタ経路
+  ワイヤ開通 = デモ経路の Rust 側完成)**(§5.3 受け側パーサ昇格 / GapTracker(gap +
+  source_restarts)/ ws 純エンコーダ 13 B + 4 型 / DisplayConverter(2D 転置 = §10.2
+  iy-outer、全異常カウンタ + warn-once、R-P2-13 結線)/ axum WS(subscribe、live
+  drop-oldest + wsDropped)/ ws_proto_sample。新規 40 テスト。実データ E2E: WS の
+  U/V/W 全ビンが独立再計算一致・monitorGaps=0。377 green。TDD 順序逸脱 1 件を記録)
 - 2026-08-14: [024_p2_hardening_root_sink.md](archive/024_p2_hardening_root_sink.md) —
   **root-sink 改修 + spawn テストインフラ(P2 R-P2-1/2/5 クローズ = 実装処置完遂)**
   (run_number 混在 = fatal exit 6(§6.2-5 v1.10、`_Exit` 前カウンタ転写の副次バグ修正
