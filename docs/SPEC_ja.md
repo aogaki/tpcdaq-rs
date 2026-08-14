@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.8(2026-08-13 — 実装の正本)**
+- **status**: **v1.10(2026-08-14 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -41,6 +41,32 @@
   (normal ch のみ・strip 射影・signal 窓・FPN ベースのペデスタル減算既定 ON)。
   GDataFrame は**内部充填表現 + テスト専用出力**へ降格(P2 の mini 実データ全値一致
   オラクルを持つ唯一の回帰のため、PEventTPC の同 run 実データオラクルが閉じるまで維持)。
+  / **v1.9(2026-08-14)§5 モニタ PUB の実装確定**(TODO/022 起票に伴う具体化):
+  ①§3.2 source_id 空間に **root-sink = 101** を追加(PUB Batch の source_id)。
+  ②§5.3 に PUB ワイヤ形式を確定(エンベロープは §2.2 と同形、payload は map 形式 msgpack の
+  `status` / `hist_snapshot` / `built_event` 3 種。ヒストのビン値は f64 LE の Bin で運ぶ)。
+  ③モニタ PUB リンクの sequence_number は **run リセットなしの単調増加**(§2.2 の
+  run 開始 0 リセットはロスレスリンクの連続性検証の規則。モニタリンクの用途はギャップ =
+  ドロップ数の可視化のみで、リセットは巻き戻り誤検出の特例を生むだけのため)。
+  ④§5.2 の「波高」の集計単位を明確化: **ジオメトリで Strip に割り付いたチャンネル毎**
+  (= 物理ストリップ毎。同一ストリップ番号の複数セクションは同一ビンへ別エントリ)、
+  そのイベントでサンプルが 1 個以上あったチャンネルのみ計数。incomplete イベントは
+  届いた分で fill、emit 済みイベントへの遅延フラグメントは fill しない(late_fragments
+  カウンタのみ)。
+  / **v1.10(2026-08-14)P2 批判的レビュー(TODO/P2_REVIEW.md)+ 016 レビューの
+  処置確定(ユーザー承認)による改訂 8 点**:
+  ①§6.2-5 を拡張 — root-sink は **run 中の run_number 食い違い(Data/EOS とも)を
+  fatal(exit 6)に昇格**(R-P2-1。decoder は単一ストリームで run を混ぜない契約 —
+  混在に「正しく続ける」方法はなく、旧挙動はプロトコル違反 run が完成 run 名に化けた)。
+  ②§1.4 に検出応答の役割非対称を明文化(R-P2-6)。
+  ③§6.3 に重複フラグメントの意味論を明記(R-P2-4 — 計数のうえ全部 fill)。
+  ④§5.3 status に `pending_events` を追加(R-P2-5 — ビルダ組み上げ中の瞬間値の可視化)。
+  ⑤§9.2 run_stop counters の **取得不能項目は null**(016 逸脱③ — 0 と「不明」を
+  混同させない。events_built/events_incomplete/late_fragments は root-sink が REP を
+  持たない間は null)。
+  ⑥§8.1 — comment 投稿は token 免除の明文化(016 逸脱⑧ — 記録系。シフト全員が書ける)。
+  ⑦§8.1 — run 番号手動設定 REST の形を確定(`POST /api/run/next`)。
+  ⑧§12-8 に run 境界跨ぎのスループット測定を追加(R-P2-14)。
 - **正本性**: 本書が実装の正本。PROPOSAL v0.4 と食い違う場合は本書が勝つ(差分は §14 に列挙。
   PROPOSAL v0.5 への反映は Warsaw フィードバックと併せて判断 — 未実施)。
 - **入力**: PROPOSAL_ja.md v0.4 / delila-rs 実装調査 / C++ 版 tpcdaq 実装調査 /
@@ -161,6 +187,10 @@ CoBo k ──TCP:46005+k──▶ [receiver k] ──PUSH──▶ (PULL bind) [
    run を異常停止して JSONL に記録する。「静かに間引いて run を続ける」ことはしない。
 4. モニタ系(root-sink → monitor の PUB)は常時間引き可。ドロップは sequence_number ギャップとして
    受信側で検出し、UI に累積数を表示する。
+5. **契約違反検出時の応答の役割非対称(v1.10 明文化、R-P2-6)**: REP を持つコンポーネント
+   (receiver / decoder / graw-writer)は **Error 状態を報告して drain は継続**し、止める判断は
+   controller が行う(§1.3)。REP を持たない root-sink は **即 fatal 終了**が唯一の可視な
+   失敗表明であり、黙って走り続けるより正しい(§6.2-5/6)。
 
 ## 2. ZMQ メッセージ仕様
 
@@ -308,7 +338,7 @@ receiver プロセスは `tpcdaq-receiver --config x.toml --cobo-id K` で CoBo 
 | コンポーネント REP | graw-writer = `47100`、decoder = `47101`、root-sink = `47102`、receiver k = `47110+k`(v1.2 で固定) |
 | ecc-bridge REP | `tcp://*:47200` |
 | controller REST / monitor WS | `8080` / `9000` |
-| source_id | receiver = `cobo_id`、decoder = 100、psu = 200(Batch の source_id 空間) |
+| source_id | receiver = `cobo_id`、decoder = 100、root-sink = 101(モニタ PUB、v1.9)、psu = 200(Batch の source_id 空間) |
 
 - ch 数・CoBo 数・ポートを**コードに焼き込まない**。すべて TOML とジオメトリ(§4)から来る。
 - 設定パースエラーは起動失敗(半端な既定値で走らない — C++ 版 app_config の全リセット方式より厳しくする)。
@@ -404,6 +434,13 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 - x レンジ 0–4096 固定。オートレンジ禁止(飽和天井 4095 が常に見えること — UI 側も同様)。
 - 同一ストリップ番号の複数セクションは同一ビンに合算する(制限として明記。セクション別ビューは将来課題)。
 - FPN・Aux・Unmapped チャンネルはヒストに入れない(波形ビューには出す)。
+- **波高の集計単位(v1.9 明確化)**: ジオメトリで Strip に割り付いたチャンネル毎
+  (= 物理ストリップ毎)。Charge{U,V,W} は該当チャンネル 1 本につき 1 エントリで、
+  同一ストリップ番号の複数セクションは同一ビンへ**別エントリ**として入る。
+  そのイベントでサンプルが 1 個以上あったチャンネルのみ波高を計上する(部分読み出しで
+  サンプル 0 のチャンネルは飽和率の分母にも入れない)。incomplete イベントは届いた分で
+  fill する(全イベント積算 = R3。捨てない)。emit 済みイベントへの遅延フラグメントは
+  fill しない(§6.3 の late_fragments カウンタが可視化を担う)。
 - **飽和率(採用)**: 面毎に `波高 ≥ 4095 のストリップ数 / 波高を数えたストリップ総数`(run 積算)。
   ヒストではなくカウンタ 2 個 × 3 面。status(§5.3)に載せ UI に % 表示。
 
@@ -411,10 +448,26 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 
 - ヒストスナップショット: 全 9 枚を `snapshot_hz`(既定 1 Hz)で publish。ビン値は f64 のまま運ぶ
   (ワイヤは §2.3 の map 形式 msgpack。W 面 2D で ~1 MB/s 程度 — 問題ない)。
-- status(1 Hz): `{ run, state, events_built, events_incomplete, late_fragments, frames_per_cobo,
-  bytes_written, saturation: {U,V,W}, publish_drops }`。
+- status(1 Hz、run 外でも常時): `{ run, state, events_built, events_incomplete, late_fragments,
+  pending_events, frames_per_cobo, bytes_written, saturation: {U,V,W}, publish_drops }`。
+  `events_built` = emit 済みイベント総数(complete + incomplete)。`publish_drops` =
+  built event の間引き数(§5.4 の「モニタ取りこぼし数」とは別 — こちらは送り手側の意図的間引き)。
+  `pending_events`(v1.10、R-P2-5)= ビルダ組み上げ中の瞬間値。pending のメモリ上界は
+  レート × build_timeout に比例するため常時可視化し、実装は警告閾値(定数 1000)超過で
+  warn を一度出す(hard limit はロスレス契約と衝突するので設けない)。
 - 最新 built event: `event_publish_hz`(既定 20)を上限に、**最新優先**で publish(全ストリップ生波形
   込み = 波形ビュー R13 と同一ペイロード)。イベント ID(run / event_idx)必携(R9)。
+- **ワイヤ形式(v1.9 確定)**: エンベロープは §2.2 と同形
+  (`{"Data": [source_id=101, run_number, sequence_number, created_ns, payload]}`)。
+  sequence_number は **run リセットなしの単調増加**(§2.2 の 0 リセット規則の例外 —
+  モニタリンクの用途はギャップ = ドロップ数の可視化のみ)。payload は map 形式 msgpack
+  (`to_vec_named` 相当の自己記述)で、`kind` キーで 3 種を判別する:
+
+  | kind | 内容 |
+  |---|---|
+  | `"status"` | 上記 status のフィールドをそのまま map で。`state` は文字列、`frames_per_cobo` は `{cobo(10進文字列): u64}`、`saturation` は `{"U": {"saturated": u64, "counted": u64}, "V": …, "W": …}` |
+  | `"hist_snapshot"` | `{ kind, run: u32, hists: [ { id: u8(1..9), name: str, nx: u32, ny: u32(1D は 1), bins: Bin } ×9 ] }`。`bins` = f64 LE の生バイト列(長さ nx*ny*8)。2D の添字 = `(strip-1)*512 + bucket`(strip が遅い軸)、1D の添字 = ビン番号 0..511。under/overflow ビンは持たない(ADC 0..4095・bucket 0..511・strip 1..N は構造上レンジ内) |
+  | `"built_event"` | `{ kind, run: u32, event_idx: u32, complete: bool, fragments: [ §2.4 の Fragment positional array, … ] }`(フラグメント順 = (cobo,asad) 昇順 = §6.3 v1.3) |
 
 ### 5.4 monitor(Rust)の責務
 
@@ -444,6 +497,10 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 3. 内部 Channel(受信→ビルダ→Writer)を有界化(push は cap>0 でブロックする実装が既にある)。
 4. モニタ tee(Publisher 行き)だけは有界 + 落とし可のまま(背圧に参加させない)。ドロップはカウント。
 5. sequence_number 連続性チェックを追加(現状は明示的に skip している)。ギャップ = Error。
+   **v1.10 拡張(R-P2-1)**: run 中の run_number 食い違い(Data/EOS とも)も同格の
+   **fatal(exit 6)**。旧「カウンタのみ」は混在 run が完成 run 名のファイルに化ける経路を
+   残していた。idle 中の stale EOS(計数して無視)と期待外 source_id(計数して混ぜない)は
+   従来どおり fatal にしない。
 6. malformed バッチ: warn+skip → **Error 停止**(ロスレス契約では黙って捨てない)。
 7. closed channel への push が silent discard になっている箇所を明示化(assert)。
 8. run 境界(RunOpen/RunClose)でのブロッキング外部 IO 禁止。
@@ -465,6 +522,10 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
   データ自体は生 graw(ロスレス保存系)に必ず在る — run.root は v1.8 から「解析用の変換出力」
   であり(FPN 落とし・窓切り・ペデスタル減算を含む)、ロスレス保証の担い手ではない。
   (旧 GDataFrame テストモードでは従来どおり追記 — 011/012 回帰の維持のため。)
+- **重複フラグメント(同一イベント内の同一 (cobo,asad)、v1.10 明文化 — R-P2-4)**:
+  `duplicate_fragments` で計数のうえ、**イベントに全部載せて全部 fill する(加算)** —
+  「捨てない」を優先する。実機で重複は発生しない想定であり、PEventTPC の chargeMap /
+  モニタヒストが二重加算になることは計数で可視。実機オラクルとの差異が観測されたら再訪。
 - 単一 CoBo 構成では実質素通し(期待集合が 1 要素)。多ソースの検証は graw_replay ×2 並走(§12-4)。
 
 ### 6.4 TTree(PEventTPC / TPCReco 互換 — v1.8 全面改訂)
@@ -603,9 +664,13 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
   - `POST /api/ecc/{describe|prepare|configure|start|stop|breakup|reset} {token}` — 段階操作
     (R6: GET controller と同じ操作感)
   - `GET /api/logbook?since_seq=N` / `POST /api/logbook/comment {author, text}`(R11)
-  - 状態変更系はすべて token 必須 + 監査ログ(audit レコード)。閲覧系は認証なし(二層アクセス制御)
+  - 状態変更系はすべて token 必須 + 監査ログ(audit レコード)。閲覧系は認証なし(二層アクセス制御)。
+    **例外(v1.10 明文化)**: `POST /api/logbook/comment` は **token 不要** — DAQ 状態を変えない
+    記録系であり、R11(シフト全員が書けるログブック)を操作権 1 名モデルより優先する。
+    author は自己申告(レコードに残る)。
 - run 番号: `<output_root>/tpcdaq_state.json` に `next_run` を永続化(controller 単一書き手)。
-  手動設定も REST で可(audit 記録)。
+  手動設定は **`POST /api/run/next {token, next_run}`**(v1.10 で形を確定): run 実行中は拒否、
+  正整数のみ、audit 記録。次の run/start から有効。
 - Web UI(Angular)静的ファイルは controller が配信(delila-rs と同じ「Rust だけでデプロイ」方式)。
 
 ### 8.2 ecc-bridge(C++)
@@ -642,7 +707,7 @@ fake-ECC servant(C++ 版のテストハーネス)相手の e2e を CI に置く(
 | type | 追加フィールド |
 |---|---|
 | `run_start` | `run`, `config_id`, `geometry: {path, sha256}`, `cobos: [{id, listen}]`, `operator`, `comment`, `expected_fragments`(期待 (cobo,asad) 集合) |
-| `run_stop` | `run`, `duration_s`, `ok: bool`, `reason`("normal" / "error:..."), `counters: {events_built, events_incomplete, late_fragments, frames: {cobo: n}, overflow_frames, malformed}`, `files: [{path, bytes}]`(graw 群 + root + monitor.root 実績) |
+| `run_stop` | `run`, `duration_s`, `ok: bool`, `reason`("normal" / "error:..."), `counters: {events_built, events_incomplete, late_fragments, frames: {cobo: n}, overflow_frames, malformed}`(**v1.10: 各項目は nullable — null = 「その時点で取得不能」であり 0 と混同しない**。root-sink が REP を持たない間、events_built/events_incomplete/late_fragments は null。取れる分は GetStatus 実測)、`files: [{path, bytes}]`(graw 群 + root + monitor.root 実績) |
 | `audit` | `action`(REST エンドポイント名), `params`(要約), `operator`, `ok`, `error` |
 | `comment` | `author`, `text`(自由記述、R11) |
 | `psu` | `device`, `channel`, `event`("TRIP"/"ON"/"OFF"/"VSET"/...), `values: {vmon, imon, vset}`(P6 で詳細化) |
@@ -743,7 +808,7 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
 | 5 | 連続負荷 | **100 Hz 相当ペース(mini ≈ 28 MB/s)のループリプレイで連続 24 時間、保存系 drop 0**(全カウンタ 0: overflow / gap / malformed / late)。各プロセス RSS が上限内かつ後半 12 時間で単調増加なし。ディスク節約のため「書いて検証して消す」ハーネス可 |
 | 6 | 瞬発負荷 | ペーシングなし全速リプレイ(≥ 3× 目標レート)10 分で drop 0(バッファ設計の証明) |
 | 7 | run 制御 e2e | fake-ECC 相手に describe→…→start→データ→stop→JSONL 記録まで全通し green。listen-before-start の負性テスト含む |
-| 8 | モニタ非干渉 | スナップショット配信を 0 Hz/2 倍にしても保存スループット変化が測定誤差内(±2%)。freeze 中も events カウンタが進む |
+| 8 | モニタ非干渉 | スナップショット配信を 0 Hz/2 倍にしても保存スループット変化が測定誤差内(±2%)。freeze 中も events カウンタが進む。**run 境界跨ぎ(連続 2 run)のスループットも測定し、境界での intake 停滞が無いことを確認**(v1.10、R-P2-14 = §6.2-8 の定量化) |
 | 9 | R10 期限 | 最終 EOS から **10 秒以内**に `run<N>_monitor.root` が完成 |
 | 10 | WS 適合性 | §10.4 の全メッセージ型 green |
 | 11 | JSONL 耐性 | run 中 kill -9 後、最終行以外の全行が parse 可能。再起動後 next_run が重複しない |

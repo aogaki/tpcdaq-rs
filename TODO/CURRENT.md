@@ -1,8 +1,8 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-08-14(**021 同 run 値一致クローズ + 015 logbook + 017 ecc-bridge 完了** —
-run.root が実機 grawToEventTPC 出力と全 3852 イベント完全一致。P4 素材(015/016/017)が
-controller を残して完備。次: コミット → P3 波の続き(ヒスト + PUB 起票))**
+**最終更新: 2026-08-14(**022・016 完了コミット済み + P2 レビュー処置確定(ユーザー承認)
+→ SPEC v1.10 + 改修 3 ユニット(023/024/025)起票・並列発注** — 統合ゲートは
+316 passed / 0 failed。次: 023/024/025 完了レビュー → 026 monitor + WS 起票)**
 
 ## いま
 
@@ -28,8 +28,8 @@ P4 = run 制御**(「SPEC に P4 が無い」は Claude の読み違い — P4 �
 **P4 前倒し分**:
 - 015 logbook / 017 ecc-bridge → **どちらも完了・archive 済み**(2026-08-14 再発注 →
   全 green、逸脱受理。「最近完了」参照)
-- [016_controller.md](016_controller.md) — **起票済み・P4 開始時に発注**(依存 015/017 が
-  両方解消 — いつでも出せる)
+- [016_controller.md](archive/016_controller.md) — **完了・archive 済み**(2026-08-14。
+  「最近完了」参照。ユーザー判断待ち 2 点は下記)。
 
 
 **P3(モニタ + WS + UI)— 波 1**:
@@ -38,8 +38,32 @@ P4 = run 制御**(「SPEC に P4 が無い」は Claude の読み違い — P4 �
   解消** — ELITPC はワイヤ上 1 CoBo × 4 AsAd。「最近完了」参照)
 - 020 PEventTPC 出力 → **完了・archive 済み**(v1.8。「最近完了」参照。残: 同 run ペアでの
   実データ値一致(次回 LAN)+ TPCReco 再配布許諾(Warsaw))。
-- 以降順次(番号は起票時に採番 — 繰り下げ多発のため事前採番をやめる): root-sink ヒスト集計 + PUB
-  (§5、018 依存)→ monitor + WS(§5.4・§10)→ Web UI(§11)→ P3 E2E(§12-8〜10 + R10)。
+- [022_root_sink_monitor_pub.md](archive/022_root_sink_monitor_pub.md) — **完了・
+  archive 済み**(2026-08-14。「最近完了」参照)。
+- 以降順次(番号は起票時に採番。023〜025 は P2 改修が先取り — 下記):
+  **026 monitor + WS**(§5.4・§10 — 022 の PUB を購読。tests/root_sink_monitor_pub.rs の
+  named struct パーサが本番パーサの先行形。起票時チェック: R-P2-13 geometry 可視化フック)
+  → Web UI(§11)→ P3 E2E(§12-8〜10 + R10、跨 run 計測 v1.10)→ 負荷ハーネス起票
+  (R-P2-11、§12-5/6)。
+
+**ユーザー決定(2026-08-14)→ SPEC v1.10 に反映済み・改修ユニット発注中**:
+1. 016 逸脱 = Fable 推奨どおり(**Counters Option 化 = §9.2 改訂** / comment token 不要を
+   §8.1 に明文化)。
+2. P2 処置表 = **全面「改善してください」承認**(R-P2-1 の mismatch fatal 昇格を含む —
+   §6.2-5 v1.10)。
+3. インフラ + フォローアップ = 起票承認(「なんだって記録に残したい」)。
+
+**改修 3 ユニット(2026-08-14 起票・worktree 並列発注)**:
+- [023_p2_hardening_rust.md](023_p2_hardening_rust.md) — Rust 異常系を decoder 水準へ
+  (R-P2-8 poisoned Mutex / R-P2-3 receiver 送信経路 / R-P2-9 graw-writer / R-P2-10/12)。
+  implementer/Opus。
+- [024_p2_hardening_root_sink.md](024_p2_hardening_root_sink.md) — root-sink C++
+  (R-P2-1 mismatch fatal exit 6 / R-P2-2 AutoSave 飢餓 / R-P2-5 pending_events)+
+  spawn テストインフラ(TOCTOU リトライ + Drop ガード)。implementer/Sonnet。
+- [025_controller_followups.md](025_controller_followups.md) — asad_inventory /
+  `POST /api/run/next` / Counters null 化 / logbook 復旧 warn。implementer/Sonnet。
+- 残る P2 処置: R-P2-11 負荷ハーネス(P3 E2E 後に起票、Warsaw 前必須)/ R-P2-13 の
+  geometry 可視化フックは 026 monitor 起票時のチェック項目。
 - **UI ユニット起票時の方針(ユーザー決定 2026-08-13)**: run 制御のボタン類は完成形レイアウトとして
   **見た目だけ置き disabled**(P4 の REST が来たら配線するだけ)。**デモ用のモック関数・
   仮バックエンドは作らない** — デモで動くのはモニタ経路(リプレイ → PUB → WS → UI)のみ。
@@ -66,16 +90,20 @@ frameType 2 rev 5 固定・ローテーション書き込み後判定(v1.7、実
 
 ## 継続事項
 
-- **P2 完了時に批判的レビューを一度行う(ユーザー指示 2026-08-13)** — 波 1+2 の全 diff・SPEC 整合・
-  テスト網羅を Fable が一括で批判的に見る(単なる green 確認ではなく設計の粗探し)。
+- ~~P2 完了時に批判的レビューを一度行う(ユーザー指示 2026-08-13)~~ →
+  **完了・クローズ(2026-08-14)**: 所見 14 件([P2_REVIEW.md](P2_REVIEW.md)、
+  正常系保存経路への所見なし)→ 処置表を**ユーザー承認**、SPEC v1.10 反映 +
+  023/024/025 へ分割発注済み(上記)。残タスクは R-P2-11(負荷ハーネス、P3 E2E 後)のみ。
+- ~~P2 批判的レビューの論点(009 逸脱 6): Fragment.cobo と source_id の不一致検出~~ →
+  **013 で実装済みと確認**(decoder.rs:251、R-P2-7)。
 
 - 006 レビュー指摘の再訪: 下流全死 + EOF 前 Reset での EOS 再試行が畳めない件(shutdown 経路の上限)→ 007/009 の停止設計で考慮。
 - ~~008 レビュー申し送り: SeqCheck 初回 0 強制~~ → **010 で解消**(厳格モード実装・実配線確認済み)。
 - **delila-rs への申し送り**(010 で発見): `tools/root_sink/eb_core.hpp` の `pop_for`(bool 戻り)は
   timeout と closed を区別できず、「空で戻る → 生産者が push+close → 呼び手が break」の競合で
-  **最後の 1 通を落とす**。tpcdaq-rs は PopResult 3 値で回避済み。delila-rs 側も要修正。
-- P2 批判的レビューの論点(009 逸脱 6): Fragment.cobo(ヘッダ値)と受信 source_id の不一致検出を
-  入れるか(DataLinkSet 誤配線の早期検出になる)。
+  **最後の 1 通を落とす**。tpcdaq-rs は PopResult 3 値で回避済み。delila-rs 側も要修正 →
+  **issue 化済み(2026-08-14): https://github.com/ELI-NP/delila-rs/issues/26**(現行 2 呼び出し
+  箇所は in-band pill 終了のため潜在、API 契約が競合を招く旨と 3 値修正案を記載)。
 - Warsaw 確認事項: ~~2-CoBo ジオメトリ .dat の有無~~(**019 で解消** — 不要と確定)、
   **データリンク本数(zCoBo 2 枚 → TCP 1 本か 2 本か、SPEC §13-7)**、PROPOSAL v0.5 反映判断。
 - ~~P2 レビュー R2(frameType 1 の実データ回帰なし)~~ → **019 でクローズ**(実機は 2022 時点で
@@ -85,6 +113,20 @@ frameType 2 rev 5 固定・ローテーション書き込み後判定(v1.7、実
 
 ## 最近完了
 
+- 2026-08-14: [022_root_sink_monitor_pub.md](archive/022_root_sink_monitor_pub.md) —
+  **root-sink ヒスト集計 + モニタ PUB(P3 モニタ経路の起点)**(SPEC v1.9 §5 実装。
+  monitor_hist 202 + monitor_pub 87 + recorder 216 CHECK、Rust 統合 6 本。hist_snapshot が
+  Rust 独立再計算と全一致、実データ StripTime 総和 963,434,812 一致、R10 実測 green、
+  §12-8 初計測 +0.3% 未満。逸脱 8 件受理 — PUB bind 非 fatal(保存 > モニタ)等。
+  既知: intake テストの free_endpoint TOCTOU flake を Fable が原因特定 → インフラ小
+  ユニット候補)
+- 2026-08-14: [016_controller.md](archive/016_controller.md) — **controller(P4 の核、
+  worktree 並列発注で前倒し完了)**(REST 8 エンドポイント + Sequencer(開始・巻き戻し・
+  停止・強制 EOS・中止 = §1.3 v1.6 機械照合)+ LogPost。新規 41 テスト、統合後リポ全体
+  **316 green**。ecc 実配線 2 本 green。逸脱 9 件中 6 受理・2 ユーザー判断待ち・
+  フォローアップ 2)
+- 2026-08-14: **P2 批判的レビュー完了**([P2_REVIEW.md](P2_REVIEW.md)) — 所見 14 件
+  (high 2 / med 5 / low 6 / info 1)。正常系保存経路への所見なし。処置はユーザー判断待ち。
 - 2026-08-14: [021_same_run_oracle.md](archive/021_same_run_oracle.md) — **同 run 実データ値一致
   = §12-3 v1.8 ③ クローズ**(実 graw 4 本 → フルチェーン → run.root が実機 grawToEventTPC
   出力と `compared 3852 events, 0 differences` の完全一致。graw_replay 複数ファイル
