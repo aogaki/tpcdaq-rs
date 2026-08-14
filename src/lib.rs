@@ -36,3 +36,6 @@ pub mod logbook;
 
 /// `tpcdaq_state.json` の `next_run` 永続化。SPEC §8.1。(015 で実装)
 pub mod state;
+
+/// controller コンポーネント(REST + run シーケンス + ログブック)。SPEC §8.1/§1.3。(016 で実装)
+pub mod controller;

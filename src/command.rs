@@ -322,6 +322,97 @@ pub async fn run_command_task<H>(
 }
 
 // ---------------------------------------------------------------------
+// REQ クライアント(controller 側、016 で追加。SPEC §2.6「タイムアウト付き」)
+// ---------------------------------------------------------------------
+
+/// [`request`] の失敗。**どの段で失敗したかを型で残す**(呼び手が audit / ログに
+/// そのまま書けるように — silent failure を作らない、CLAUDE.md)。
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {
+    #[error("cannot create/connect REQ socket to {endpoint}: {source}")]
+    Socket {
+        endpoint: String,
+        #[source]
+        source: zmq::Error,
+    },
+
+    #[error("cannot encode command: {0}")]
+    Encode(#[from] serde_json::Error),
+
+    #[error("send to {endpoint} failed: {source}")]
+    Send {
+        endpoint: String,
+        #[source]
+        source: zmq::Error,
+    },
+
+    /// タイムアウト(`EAGAIN`)もここに来る。呼び手はこれを「不達」として扱う。
+    #[error("no reply from {endpoint} within {timeout_ms} ms: {source}")]
+    Recv {
+        endpoint: String,
+        timeout_ms: i32,
+        #[source]
+        source: zmq::Error,
+    },
+
+    #[error("reply from {endpoint} is not a CommandResponse: {source}")]
+    Decode {
+        endpoint: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+/// コマンド 1 件を REQ/REP で送り、応答を待つ(**同期・ブロッキング**)。
+///
+/// # なぜ毎回ソケットを作るか
+///
+/// REQ ソケットは send → recv の厳密な交替を強制する状態機械を持ち、**タイムアウトで
+/// recv を諦めた時点でその状態機械が壊れる**(次の send が `EFSM` で失敗する)。
+/// 使い捨てにすれば「1 回の往復 = 1 個のソケット」で状態を持ち越さず、再接続の
+/// リトライロジックも要らない(KISS)。呼ばれるのは run シーケンスと status ポーリング
+/// (高々数 Hz)だけで、ホットパスではない。
+///
+/// `timeout` は送受信の両方に効く。相手が居ない・遅い場合は [`ClientError::Recv`]
+/// (`EAGAIN`)になり、**永久に待たない**。
+pub fn request(
+    context: &zmq::Context,
+    endpoint: &str,
+    command: &Command,
+    timeout: Duration,
+) -> Result<CommandResponse, ClientError> {
+    let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    let socket_err = |source: zmq::Error| ClientError::Socket {
+        endpoint: endpoint.to_string(),
+        source,
+    };
+
+    let socket = context.socket(zmq::REQ).map_err(socket_err)?;
+    socket.set_rcvtimeo(timeout_ms).map_err(socket_err)?;
+    socket.set_sndtimeo(timeout_ms).map_err(socket_err)?;
+    // 応答を待たずに捨てるとき、未送分を抱えたまま context が閉じないようにする。
+    socket.set_linger(0).map_err(socket_err)?;
+    socket.connect(endpoint).map_err(socket_err)?;
+
+    let payload = command.to_json()?;
+    socket
+        .send(payload, 0)
+        .map_err(|source| ClientError::Send {
+            endpoint: endpoint.to_string(),
+            source,
+        })?;
+    let reply = socket.recv_bytes(0).map_err(|source| ClientError::Recv {
+        endpoint: endpoint.to_string(),
+        timeout_ms,
+        source,
+    })?;
+    CommandResponse::from_json(&reply).map_err(|source| ClientError::Decode {
+        endpoint: endpoint.to_string(),
+        source,
+    })
+}
+
+// ---------------------------------------------------------------------
 // テスト(仕様書 — 先に書く)
 // ---------------------------------------------------------------------
 
@@ -558,5 +649,77 @@ mod tests {
             let text = serde_json::to_string(&state).unwrap();
             assert_eq!(text, format!("\"{state}\""));
         }
+    }
+
+    // -----------------------------------------------------------------
+    // REQ クライアント(016 で追加)
+    // -----------------------------------------------------------------
+
+    /// 実 ZMQ(port 0)で `run_command_task` と 1 往復し、応答がそのまま戻ること。
+    #[tokio::test]
+    async fn request_round_trips_against_a_real_command_task() {
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
+        let (bound_tx, bound_rx) = oneshot::channel();
+        let task = tokio::spawn(run_command_task(
+            "tcp://127.0.0.1:0".to_string(),
+            "test",
+            shutdown_rx,
+            Some(bound_tx),
+            |cmd| match cmd {
+                // 非対称な応答(取り違え検出用)。
+                Command::Arm => CommandResponse::success(ComponentState::Armed, "armed")
+                    .with_run_number(57)
+                    .with_metrics(json!({"router_port": 46123})),
+                other => CommandResponse::error(ComponentState::Idle, format!("no: {other}")),
+            },
+        ));
+        let endpoint = bound_rx.await.unwrap();
+
+        // `request` はブロッキング(controller も spawn_blocking から呼ぶ)。ここで直に
+        // 呼ぶと REP タスクと同じ executor スレッドを塞いで自分で自分を待つことになる。
+        let (armed, refused) = tokio::task::spawn_blocking(move || {
+            let context = zmq::Context::new();
+            let timeout = Duration::from_millis(2000);
+            let armed = request(&context, &endpoint, &Command::Arm, timeout);
+            let refused = request(&context, &endpoint, &Command::Stop, timeout);
+            (armed, refused)
+        })
+        .await
+        .unwrap();
+
+        let armed = armed.unwrap();
+        assert!(armed.success);
+        assert_eq!(armed.state, ComponentState::Armed);
+        assert_eq!(armed.run_number, Some(57));
+        assert_eq!(armed.metrics.unwrap()["router_port"], json!(46123));
+
+        // 断られた応答も `Ok`(不達との区別は呼び手の仕事)。
+        assert!(!refused.unwrap().success);
+
+        let _ = shutdown_tx.send(());
+        let _ = task.await;
+    }
+
+    /// 相手が居なければ**永久に待たず** `Recv`(タイムアウト)で戻る(SPEC §2.6)。
+    #[tokio::test]
+    async fn request_times_out_instead_of_hanging_when_nobody_answers() {
+        // 誰も bind していないアドレス(確保して即座に手放す)。
+        let dead = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            format!("tcp://{addr}")
+        };
+        let context = zmq::Context::new();
+        let started = std::time::Instant::now();
+        let error = request(
+            &context,
+            &dead,
+            &Command::GetStatus,
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert!(matches!(error, ClientError::Recv { .. }), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5), "戻りが遅すぎる");
     }
 }

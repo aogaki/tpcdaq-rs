@@ -21,6 +21,12 @@ pub const DEFAULT_MONITOR_WS_LISTEN: &str = "0.0.0.0:9000";
 /// controller REST の既定 listen アドレス(SPEC §3.2)。
 pub const DEFAULT_CONTROLLER_REST_LISTEN: &str = "0.0.0.0:8080";
 
+/// controller のログ投稿 PULL bind の既定(SPEC §3.2「controller ログ投稿 PULL bind = 47005」)。
+pub const DEFAULT_CONTROLLER_LOG_PULL_BIND: &str = "tcp://*:47005";
+
+/// EOS 伝播待ちの既定タイムアウト(秒、SPEC §1.3「EOF が 5 秒来なければ強制 EOS」)。
+pub const DEFAULT_CONTROLLER_EOS_TIMEOUT_S: u64 = 5;
+
 /// decoder の Batch source_id(SPEC §3.2 の source_id 表)。
 pub const DECODER_SOURCE_ID: u32 = 100;
 
@@ -62,6 +68,21 @@ pub const DEFAULT_ROOT_SINK_ENDPOINT: &str = "tcp://127.0.0.1:47003";
 
 /// decoder のコマンド REP bind アドレス(SPEC §3.2 v1.2「decoder = 47101」)。
 pub const DECODER_COMMAND_LISTEN: &str = "tcp://*:47101";
+
+/// controller → graw-writer のコマンド REQ 接続先(SPEC §3.2「graw-writer = 47100」)。
+/// bind 側 [`GRAW_WRITER_COMMAND_LISTEN`] とはポートは同じでアドレス表記だけが違う。
+pub const DEFAULT_GRAW_WRITER_COMMAND_ENDPOINT: &str = "tcp://127.0.0.1:47100";
+
+/// controller → decoder のコマンド REQ 接続先(SPEC §3.2「decoder = 47101」)。
+pub const DEFAULT_DECODER_COMMAND_ENDPOINT: &str = "tcp://127.0.0.1:47101";
+
+/// controller → ecc-bridge の REQ 接続先(SPEC §3.2「ecc-bridge REP = tcp://*:47200」)。
+pub const DEFAULT_ECC_COMMAND_ENDPOINT: &str = "tcp://127.0.0.1:47200";
+
+/// controller → receiver k のコマンド REQ 接続先の既定(SPEC §3.2「receiver k = 47110+k」)。
+pub fn default_receiver_command_endpoint(cobo_id: u32) -> String {
+    format!("tcp://127.0.0.1:{}", RECEIVER_COMMAND_PORT_BASE + cobo_id)
+}
 
 /// decoder の PUSH 送信タイムアウトの既定(ミリ秒、TODO/009 の停止設計)。
 ///
@@ -116,6 +137,9 @@ pub enum ConfigError {
 
     #[error("invalid [receiver] setting: {0}")]
     InvalidReceiver(String),
+
+    #[error("invalid [controller] setting: {0}")]
+    InvalidController(String),
 }
 
 // ---------------------------------------------------------------------
@@ -216,12 +240,34 @@ pub struct MonitorConfig {
 }
 
 /// `rest_listen` を省略すると `DEFAULT_CONTROLLER_REST_LISTEN`(SPEC §3.2)が既定として入る。
+///
+/// 016 で追記したキー(SPEC §8.1 の controller)はすべて省略可。コンポーネントのコマンド
+/// エンドポイント表は SPEC §3.2 の既定(47100 / 47101 / 47110+k / 47200)を入れたうえで、
+/// 設定で上書きできる。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ControllerConfig {
     pub rest_listen: String,
     pub passphrase: String,
+    /// ecc-bridge が使う **Ice** プロキシ文字列(controller は使わず ecc-bridge へ渡す設定)。
     pub ecc_proxy: String,
     pub config_id: String,
+    /// ログ投稿 PULL の bind(SPEC §2.3 LogPost / §3.2)。
+    pub log_pull_bind: String,
+    /// EOS 伝播待ちのタイムアウト(秒、SPEC §1.3)。
+    pub eos_timeout_s: u64,
+    /// Web UI 静的ファイルの根。`None` = 配信しない(SPEC §8.1、UI は後波)。
+    pub ui_dir: Option<PathBuf>,
+    /// controller → graw-writer のコマンド REQ 接続先。
+    pub graw_writer_command: String,
+    /// controller → decoder のコマンド REQ 接続先。
+    pub decoder_command: String,
+    /// controller → receiver のコマンド REQ 接続先。**`[[cobo]]` と同じ順・同じ長さ**。
+    pub receiver_commands: Vec<String>,
+    /// controller → ecc-bridge の REQ 接続先。
+    pub ecc_command: String,
+    /// DataLinkSet の `router_ip`(SPEC §8.2)。`None` なら receiver の実 bind アドレスから
+    /// 導く(`0.0.0.0` のような不定アドレスなら `127.0.0.1` に落として警告する)。
+    pub router_ip: Option<String>,
 }
 
 // ---------------------------------------------------------------------
@@ -303,6 +349,23 @@ struct RawController {
     passphrase: String,
     ecc_proxy: String,
     config_id: String,
+    // ---- 016 で追記(すべて省略可)----
+    #[serde(default)]
+    log_pull_bind: Option<String>,
+    #[serde(default)]
+    eos_timeout_s: Option<u64>,
+    #[serde(default)]
+    ui_dir: Option<PathBuf>,
+    #[serde(default)]
+    graw_writer_command: Option<String>,
+    #[serde(default)]
+    decoder_command: Option<String>,
+    #[serde(default)]
+    receiver_commands: Option<Vec<String>>,
+    #[serde(default)]
+    ecc_command: Option<String>,
+    #[serde(default)]
+    router_ip: Option<String>,
 }
 
 // ---------------------------------------------------------------------
@@ -330,7 +393,7 @@ pub fn load(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
 }
 
 fn resolve(raw: RawConfig) -> Config {
-    let cobo = raw
+    let cobo: Vec<CoboConfig> = raw
         .cobo
         .into_iter()
         .map(|c| {
@@ -411,6 +474,33 @@ fn resolve(raw: RawConfig) -> Config {
         passphrase: raw.controller.passphrase,
         ecc_proxy: raw.controller.ecc_proxy,
         config_id: raw.controller.config_id,
+        log_pull_bind: raw
+            .controller
+            .log_pull_bind
+            .unwrap_or_else(|| DEFAULT_CONTROLLER_LOG_PULL_BIND.to_string()),
+        eos_timeout_s: raw
+            .controller
+            .eos_timeout_s
+            .unwrap_or(DEFAULT_CONTROLLER_EOS_TIMEOUT_S),
+        ui_dir: raw.controller.ui_dir,
+        graw_writer_command: raw
+            .controller
+            .graw_writer_command
+            .unwrap_or_else(|| DEFAULT_GRAW_WRITER_COMMAND_ENDPOINT.to_string()),
+        decoder_command: raw
+            .controller
+            .decoder_command
+            .unwrap_or_else(|| DEFAULT_DECODER_COMMAND_ENDPOINT.to_string()),
+        receiver_commands: raw.controller.receiver_commands.unwrap_or_else(|| {
+            cobo.iter()
+                .map(|c| default_receiver_command_endpoint(c.id))
+                .collect()
+        }),
+        ecc_command: raw
+            .controller
+            .ecc_command
+            .unwrap_or_else(|| DEFAULT_ECC_COMMAND_ENDPOINT.to_string()),
+        router_ip: raw.controller.router_ip,
     };
 
     Config {
@@ -430,6 +520,31 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     validate_cobo_listen_unique(&config.cobo)?;
     validate_geometry_path(&config.system.geometry)?;
     validate_receiver(&config.receiver)?;
+    validate_controller(&config.controller, config.cobo.len())?;
+    Ok(())
+}
+
+/// `[controller]` の 016 追記分を検証する(SPEC §8.1)。
+///
+/// `receiver_commands` を手書きで上書きしたとき本数がずれていると、controller は
+/// 一部の receiver に永久に到達できないまま起動してしまう(= 静かな配線ミス)。
+/// `eos_timeout_s = 0` は「EOS を一切待たずに必ず強制 EOS」になり、SPEC §1.3 の
+/// 停止シーケンスが意味を失うので拒否する。
+fn validate_controller(
+    controller: &ControllerConfig,
+    cobo_count: usize,
+) -> Result<(), ConfigError> {
+    if controller.receiver_commands.len() != cobo_count {
+        return Err(ConfigError::InvalidController(format!(
+            "receiver_commands has {} entries but there are {cobo_count} [[cobo]] blocks",
+            controller.receiver_commands.len()
+        )));
+    }
+    if controller.eos_timeout_s == 0 {
+        return Err(ConfigError::InvalidController(
+            "eos_timeout_s must be greater than 0".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -1378,6 +1493,185 @@ batch_max_ms = 25
         assert_eq!(DEFAULT_ROOT_SINK_ENDPOINT, "tcp://127.0.0.1:47003");
         // decoder の PULL bind と、receiver 側が connect する先はポートが一致すること。
         assert_eq!(DEFAULT_DECODER_ENDPOINT, "tcp://127.0.0.1:47002");
+    }
+
+    // -----------------------------------------------------------------
+    // 016 で足した `[controller]` キー(SPEC §8.1 / §3.2)
+    // -----------------------------------------------------------------
+
+    /// `[controller]` セクションだけを差し替えた最小構成の TOML(`[[cobo]]` は 2 台)。
+    fn toml_with_controller_section(geometry: &Path, controller_section: &str) -> String {
+        format!(
+            r#"
+[system]
+experiment = "ELITPC"
+output_root = "/data/tpcdaq"
+geometry = "{geometry}"
+
+[[cobo]]
+id = 0
+data_sender_id = "CoBo[0]"
+
+[[cobo]]
+id = 1
+data_sender_id = "CoBo[1]"
+
+[decoder]
+workers = 1
+
+[root_sink]
+snapshot_hz = 1.0
+event_publish_hz = 20.0
+build_timeout_ms = 1000
+
+[monitor]
+ws_listen = "0.0.0.0:9000"
+
+{controller_section}
+"#,
+            geometry = geometry.display()
+        )
+    }
+
+    /// 省略時は SPEC §3.2 の既定表がそのまま入る(receiver は `[[cobo]]` の id で 47110+k)。
+    #[test]
+    fn controller_016_keys_default_to_the_spec_port_table() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = toml_with_controller_section(
+            &geometry,
+            "[controller]\npassphrase = \"change-me\"\n\
+             ecc_proxy = \"GetEcc:tcp -h 127.0.0.1 -p 46002\"\nconfig_id = \"default\"\n",
+        );
+        let config = parse(&toml_str).unwrap();
+
+        assert_eq!(config.controller.log_pull_bind, "tcp://*:47005");
+        assert_eq!(config.controller.eos_timeout_s, 5);
+        assert_eq!(config.controller.ui_dir, None);
+        assert_eq!(
+            config.controller.graw_writer_command,
+            "tcp://127.0.0.1:47100"
+        );
+        assert_eq!(config.controller.decoder_command, "tcp://127.0.0.1:47101");
+        assert_eq!(
+            config.controller.receiver_commands,
+            vec!["tcp://127.0.0.1:47110", "tcp://127.0.0.1:47111"]
+        );
+        assert_eq!(config.controller.ecc_command, "tcp://127.0.0.1:47200");
+        assert_eq!(config.controller.router_ip, None);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// すべて設定で上書きできる(非対称な値で取り違えを検出する)。
+    #[test]
+    fn controller_016_keys_are_overridable() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = toml_with_controller_section(
+            &geometry,
+            r#"[controller]
+rest_listen = "0.0.0.0:8090"
+passphrase = "elitpc-pass"
+ecc_proxy = "GetEcc:tcp -h 10.0.0.2 -p 46002"
+config_id = "elitpc"
+log_pull_bind = "tcp://*:47105"
+eos_timeout_s = 9
+ui_dir = "/srv/tpcdaq-ui"
+graw_writer_command = "tcp://10.0.0.3:47100"
+decoder_command = "tcp://10.0.0.4:47101"
+receiver_commands = ["tcp://10.0.0.5:47110", "tcp://10.0.0.6:47111"]
+ecc_command = "tcp://10.0.0.7:47200"
+router_ip = "10.0.0.1"
+"#,
+        );
+        let config = parse(&toml_str).unwrap();
+
+        assert_eq!(config.controller.log_pull_bind, "tcp://*:47105");
+        assert_eq!(config.controller.eos_timeout_s, 9);
+        assert_eq!(
+            config.controller.ui_dir,
+            Some(PathBuf::from("/srv/tpcdaq-ui"))
+        );
+        assert_eq!(
+            config.controller.graw_writer_command,
+            "tcp://10.0.0.3:47100"
+        );
+        assert_eq!(config.controller.decoder_command, "tcp://10.0.0.4:47101");
+        assert_eq!(
+            config.controller.receiver_commands,
+            vec!["tcp://10.0.0.5:47110", "tcp://10.0.0.6:47111"]
+        );
+        assert_eq!(config.controller.ecc_command, "tcp://10.0.0.7:47200");
+        assert_eq!(config.controller.router_ip.as_deref(), Some("10.0.0.1"));
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// 本数がずれた `receiver_commands` は起動失敗(黙って一部の receiver を見失わない)。
+    #[test]
+    fn controller_receiver_commands_must_match_the_cobo_count() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = toml_with_controller_section(
+            &geometry,
+            "[controller]\npassphrase = \"p\"\necc_proxy = \"x\"\nconfig_id = \"c\"\n\
+             receiver_commands = [\"tcp://127.0.0.1:47110\"]\n",
+        );
+        let err = parse(&toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidController(_)), "{err}");
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// `eos_timeout_s = 0` は「常に強制 EOS」になり停止シーケンスが意味を失う。
+    #[test]
+    fn controller_eos_timeout_zero_is_rejected() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = toml_with_controller_section(
+            &geometry,
+            "[controller]\npassphrase = \"p\"\necc_proxy = \"x\"\nconfig_id = \"c\"\n\
+             eos_timeout_s = 0\n",
+        );
+        let err = parse(&toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidController(_)), "{err}");
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    #[test]
+    fn controller_unknown_field_is_err() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = toml_with_controller_section(
+            &geometry,
+            "[controller]\npassphrase = \"p\"\necc_proxy = \"x\"\nconfig_id = \"c\"\n\
+             eos_timeout_ms = 5000\n",
+        );
+        let err = parse(&toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)), "{err}");
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// SPEC §3.2「controller ログ投稿 PULL bind = 47005 / ecc-bridge REP = 47200 /
+    /// コンポーネント REP = graw-writer 47100・decoder 47101・receiver k = 47110+k」。
+    #[test]
+    fn controller_endpoint_defaults_match_spec_3_2() {
+        assert_eq!(DEFAULT_CONTROLLER_LOG_PULL_BIND, "tcp://*:47005");
+        assert_eq!(DEFAULT_ECC_COMMAND_ENDPOINT, "tcp://127.0.0.1:47200");
+        assert_eq!(
+            DEFAULT_GRAW_WRITER_COMMAND_ENDPOINT,
+            "tcp://127.0.0.1:47100"
+        );
+        assert_eq!(DEFAULT_DECODER_COMMAND_ENDPOINT, "tcp://127.0.0.1:47101");
+        assert_eq!(
+            default_receiver_command_endpoint(0),
+            "tcp://127.0.0.1:47110"
+        );
+        assert_eq!(
+            default_receiver_command_endpoint(3),
+            "tcp://127.0.0.1:47113"
+        );
+        // bind 側(コンポーネントが開く口)と connect 側(controller が叩く口)でポート一致。
+        assert!(GRAW_WRITER_COMMAND_LISTEN.ends_with(":47100"));
+        assert!(DECODER_COMMAND_LISTEN.ends_with(":47101"));
     }
 
     #[test]

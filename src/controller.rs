@@ -1,0 +1,2760 @@
+//! controller — REST + run シーケンス + ログブック統合(SPEC §8.1 / §1.3 / §2.6 / §9)。
+//!
+//! # 立ち位置
+//!
+//! controller は §1.3 の状態機械の**外**にいるオーケストレータで、自分自身は
+//! `Idle / Starting / Running / Stopping`([`Phase`])の 4 相しか持たない。各コンポーネントの
+//! 状態機械を動かすのは JSON REQ/REP(§2.6)、ECC を動かすのは ecc-bridge の JSON REQ/REP
+//! (§8.2)、外の世界への口は REST(§8.1)だけである。
+//!
+//! # 三層構造(テスト容易性のための切り方)
+//!
+//! 1. [`Transport`] — 「外に何かを送る」1 枚の trait(コンポーネントへのコマンド / ecc-bridge /
+//!    待ち時間)。実物は [`ZmqTransport`]、テストはコマンド列を記録するモック。
+//! 2. [`Sequencer`] — §1.3 の run 開始 / 停止 / 中止シーケンスの**純ロジック**。IO は
+//!    [`Transport`] 越しだけ、時刻も `Transport::sleep` 経由なので、モックで全分岐を機械照合できる。
+//! 3. [`Controller`] + axum — REST・操作権・監査・ログブック書き込みの配線。
+//!
+//! # 巻き戻し(SPEC §1.3「半端な Running を残さない」)
+//!
+//! 開始シーケンスのどの段で失敗しても、**実行済みのコンポーネントだけ**を上流から畳む。
+//! `Stop` は `Running` からしか合法でない(§1.3 の遷移表: `Armed`/`Configured` からの `Stop` は
+//! 不許可)ので、`Stop` に続けて `Reset` を送り、必ず `Idle` まで戻す。ecc start 前に失敗した
+//! 場合はまだ CoBo からデータが 1 バイトも流れていない(= 閉じるべき run が存在しない)ので、
+//! この `Reset` は「run クローズ前に Reset しない」規則(v1.6)に抵触しない。
+//!
+//! # 中止(SPEC §1.3 v1.6)
+//!
+//! 中止も必ず EOS で閉じる: `ecc stop`(不達でも続行)→ receiver へ `Stop`(= 強制 EOS)→
+//! EOS がチェーンを流れて run がクローズしたことを graw-writer / decoder の `GetStatus` で
+//! 確認 → **その後で**各コンポーネントの `Stop` / `Reset`。run クローズ前に decoder を
+//! `Reset` しない(送出打ち切りの seq ギャップが root-sink を fatal 死させるため)。
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
+
+use axum::extract::{Path as UrlPath, Query, State};
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use tokio::sync::{broadcast, oneshot};
+use tower_http::services::ServeDir;
+use tracing::{error, info, warn};
+
+use crate::command::{Command, CommandResponse, ComponentState, RunConfig};
+use crate::config::Config;
+use crate::geometry::Geometry;
+use crate::logbook::{
+    CoboListen, Counters, Geometry as GeometryRecord, LogbookRecord, LogbookWriter, OutputFile,
+};
+
+// ---------------------------------------------------------------------
+// 定数
+// ---------------------------------------------------------------------
+
+/// コンポーネントへの 1 コマンドの待ち時間(SPEC §2.6「タイムアウト付き」)。
+/// 相手が居ない・固まっているときに run シーケンスが永久に止まらないための上限。
+pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// ecc-bridge への 1 リクエストの待ち時間。実機の `describe` / `configure` は
+/// FPGA 設定を含むため秒単位で掛かる(GET の運用実績)。コンポーネントより長く取る。
+pub const DEFAULT_ECC_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `GET /api/status` の 1 コンポーネントあたりの待ち時間。
+/// 死んだコンポーネントが 1 個あるだけで UI が固まらないよう、シーケンス用より短くする。
+pub const DEFAULT_STATUS_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// EOS 伝播の観測間隔(SPEC §1.3 の EOS 待ち)。
+pub const DEFAULT_EOS_POLL: Duration = Duration::from_millis(200);
+
+/// ログ投稿 PULL の recv タイムアウト(ms)。停止合図を見るための目覚まし。
+const LOG_PULL_POLL_MS: i32 = 200;
+
+/// ログブックの `actor`(SPEC §9.1「書き手は controller ただ一人」)。
+const ACTOR: &str = "controller";
+
+// ---------------------------------------------------------------------
+// 起動パラメタ
+// ---------------------------------------------------------------------
+
+/// DataLinkSet と run_start に必要な CoBo 1 台分の情報。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoboSpec {
+    pub id: u32,
+    /// 設定上の listen(run_start レコードに載る。実際の bind ポートは Arm 応答から取る)。
+    pub listen: String,
+    /// ECC の NodeId 表記そのまま(`CoBo[0]`、SPEC §8.2 の実機の罠)。
+    pub data_sender_id: String,
+}
+
+/// コンポーネントの種別。receiver だけが CoBo に紐づく。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComponentKind {
+    GrawWriter,
+    Decoder,
+    Receiver { cobo_id: u32 },
+}
+
+/// 1 コンポーネントのコマンド REP 接続先(SPEC §3.2 の表)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentEndpoint {
+    /// ログ・status・監査に出す名前(`graw-writer` / `decoder` / `receiver0`)。
+    pub name: String,
+    pub endpoint: String,
+    pub kind: ComponentKind,
+}
+
+/// controller 1 プロセス分の起動パラメタ(= 設定の解決結果)。
+///
+/// `components` は**下流から上流の順**(graw-writer → decoder → receivers)で持つ。
+/// 開始シーケンスはこの順、停止シーケンスは逆順に進む(SPEC §1.3)。
+/// monitor は P3 後波なのでまだ並ばない。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControllerParams {
+    pub rest_listen: String,
+    pub passphrase: String,
+    pub log_pull_bind: String,
+    pub ui_dir: Option<PathBuf>,
+    pub config_id: String,
+    pub output_root: PathBuf,
+    pub geometry_path: PathBuf,
+    pub cobos: Vec<CoboSpec>,
+    pub components: Vec<ComponentEndpoint>,
+    pub ecc_endpoint: String,
+    /// DataLinkSet の `router_ip`。`None` なら receiver の実 bind アドレスから導く。
+    pub router_ip: Option<String>,
+    pub eos_timeout: Duration,
+    pub eos_poll: Duration,
+    pub command_timeout: Duration,
+    pub ecc_timeout: Duration,
+    pub status_timeout: Duration,
+}
+
+impl ControllerParams {
+    /// 設定から起動パラメタを解決する(SPEC §3.1 `[controller]` + §3.2 の既定ポート表)。
+    pub fn from_config(config: &Config) -> Self {
+        let mut components = vec![
+            ComponentEndpoint {
+                name: "graw-writer".to_string(),
+                endpoint: config.controller.graw_writer_command.clone(),
+                kind: ComponentKind::GrawWriter,
+            },
+            ComponentEndpoint {
+                name: "decoder".to_string(),
+                endpoint: config.controller.decoder_command.clone(),
+                kind: ComponentKind::Decoder,
+            },
+        ];
+        // `receiver_commands` は検証済みで `[[cobo]]` と同じ長さ・同じ順(config.rs)。
+        for (cobo, endpoint) in config
+            .cobo
+            .iter()
+            .zip(config.controller.receiver_commands.iter())
+        {
+            components.push(ComponentEndpoint {
+                name: format!("receiver{}", cobo.id),
+                endpoint: endpoint.clone(),
+                kind: ComponentKind::Receiver { cobo_id: cobo.id },
+            });
+        }
+
+        Self {
+            rest_listen: config.controller.rest_listen.clone(),
+            passphrase: config.controller.passphrase.clone(),
+            log_pull_bind: config.controller.log_pull_bind.clone(),
+            ui_dir: config.controller.ui_dir.clone(),
+            config_id: config.controller.config_id.clone(),
+            output_root: config.system.output_root.clone(),
+            geometry_path: config.system.geometry.clone(),
+            cobos: config
+                .cobo
+                .iter()
+                .map(|c| CoboSpec {
+                    id: c.id,
+                    listen: c.listen.clone(),
+                    data_sender_id: c.data_sender_id.clone(),
+                })
+                .collect(),
+            components,
+            ecc_endpoint: config.controller.ecc_command.clone(),
+            router_ip: config.controller.router_ip.clone(),
+            eos_timeout: Duration::from_secs(config.controller.eos_timeout_s),
+            eos_poll: DEFAULT_EOS_POLL,
+            command_timeout: DEFAULT_COMMAND_TIMEOUT,
+            ecc_timeout: DEFAULT_ECC_TIMEOUT,
+            status_timeout: DEFAULT_STATUS_TIMEOUT,
+        }
+    }
+
+    /// ログブック `run_start.cobos`(SPEC §9.2)。
+    fn cobo_listens(&self) -> Vec<CoboListen> {
+        self.cobos
+            .iter()
+            .map(|c| CoboListen {
+                id: c.id,
+                listen: c.listen.clone(),
+            })
+            .collect()
+    }
+
+    fn data_sender_id(&self, cobo_id: u32) -> String {
+        match self.cobos.iter().find(|c| c.id == cobo_id) {
+            Some(cobo) => cobo.data_sender_id.clone(),
+            None => {
+                // components と cobos は同じ設定から作るので起きないが、起きたら黙らない。
+                warn!(
+                    cobo_id,
+                    "no [[cobo]] block for this receiver — falling back to CoBo[k]"
+                );
+                format!("CoBo[{cobo_id}]")
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// ecc-bridge の応答(SPEC §8.2)
+// ---------------------------------------------------------------------
+
+/// ecc-bridge の 3 フィールド応答。`state` は `Off/Idle/Described/Prepared/Ready/Running/
+/// Paused/Unknown`(ECC 不達は `Unknown`)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EccReply {
+    pub ok: bool,
+    pub state: String,
+    #[serde(default)]
+    pub error: String,
+}
+
+// ---------------------------------------------------------------------
+// Transport(外への口 = テストの差し替え点)
+// ---------------------------------------------------------------------
+
+/// controller が外へ触る唯一の口。[`Sequencer`] はこれ以外の IO を知らない。
+pub trait Transport {
+    /// コンポーネントへ 1 コマンド(JSON REQ/REP、SPEC §2.6)。`Err` は**不達**
+    /// (`success: false` の応答は `Ok` で返る — 断り方の区別は呼び手の仕事)。
+    fn command(&mut self, endpoint: &str, command: &Command) -> Result<CommandResponse, String>;
+
+    /// ecc-bridge へ 1 リクエスト(JSON REQ/REP、SPEC §8.2)。
+    fn ecc(&mut self, request: &Value) -> Result<EccReply, String>;
+
+    /// EOS 待ちなどの休止。モックは仮想時間を進めるだけでよい。
+    fn sleep(&mut self, duration: Duration);
+}
+
+/// 実物の ZMQ Transport。ソケットは**呼び出し毎に作って捨てる**
+/// ([`crate::command::request`] の doc コメント参照 — REQ の状態機械を持ち越さないため)。
+#[derive(Clone)]
+pub struct ZmqTransport {
+    context: zmq::Context,
+    ecc_endpoint: String,
+    command_timeout: Duration,
+    ecc_timeout: Duration,
+}
+
+impl ZmqTransport {
+    pub fn new(ecc_endpoint: String, command_timeout: Duration, ecc_timeout: Duration) -> Self {
+        Self {
+            context: zmq::Context::new(),
+            ecc_endpoint,
+            command_timeout,
+            ecc_timeout,
+        }
+    }
+
+    /// タイムアウトだけ差し替えた複製(status ポーリング用)。
+    fn with_command_timeout(&self, timeout: Duration) -> Self {
+        Self {
+            context: self.context.clone(),
+            ecc_endpoint: self.ecc_endpoint.clone(),
+            command_timeout: timeout,
+            ecc_timeout: timeout,
+        }
+    }
+}
+
+impl Transport for ZmqTransport {
+    fn command(&mut self, endpoint: &str, command: &Command) -> Result<CommandResponse, String> {
+        crate::command::request(&self.context, endpoint, command, self.command_timeout)
+            .map_err(|e| e.to_string())
+    }
+
+    fn ecc(&mut self, request: &Value) -> Result<EccReply, String> {
+        let timeout_ms = i32::try_from(self.ecc_timeout.as_millis()).unwrap_or(i32::MAX);
+        let endpoint = self.ecc_endpoint.clone();
+        let fail = |what: &str, e: zmq::Error| format!("ecc-bridge {endpoint}: {what}: {e}");
+
+        let socket = self
+            .context
+            .socket(zmq::REQ)
+            .map_err(|e| fail("cannot create REQ socket", e))?;
+        socket
+            .set_rcvtimeo(timeout_ms)
+            .map_err(|e| fail("cannot set rcvtimeo", e))?;
+        socket
+            .set_sndtimeo(timeout_ms)
+            .map_err(|e| fail("cannot set sndtimeo", e))?;
+        socket
+            .set_linger(0)
+            .map_err(|e| fail("cannot set linger", e))?;
+        socket
+            .connect(&endpoint)
+            .map_err(|e| fail("cannot connect", e))?;
+
+        let payload = serde_json::to_vec(request)
+            .map_err(|e| format!("ecc-bridge {endpoint}: cannot encode request: {e}"))?;
+        socket
+            .send(payload, 0)
+            .map_err(|e| fail("send failed", e))?;
+        let reply = socket
+            .recv_bytes(0)
+            .map_err(|e| fail(&format!("no reply within {timeout_ms} ms"), e))?;
+        serde_json::from_slice(&reply).map_err(|e| {
+            format!(
+                "ecc-bridge {endpoint}: reply is not {{ok,state,error}}: {e} ({})",
+                String::from_utf8_lossy(&reply)
+            )
+        })
+    }
+
+    fn sleep(&mut self, duration: Duration) {
+        std::thread::sleep(duration);
+    }
+}
+
+// ---------------------------------------------------------------------
+// シーケンサ(SPEC §1.3 の純ロジック)
+// ---------------------------------------------------------------------
+
+/// run 開始の成功報告。
+#[derive(Debug, Clone, PartialEq)]
+pub struct StartReport {
+    pub run: u32,
+    /// Arm 応答から回収した (cobo_id, router_ip, router_port)。DataLinkSet の材料。
+    pub links: Vec<RouterLink>,
+}
+
+/// receiver が実際に bind した口(SPEC §8.2「router_port は receiver が実際に bind した
+/// ポートを controller が Arm 応答から取って渡す」)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterLink {
+    pub cobo_id: u32,
+    pub router_ip: String,
+    pub router_port: u16,
+}
+
+/// run 開始の失敗報告(監査ログにそのまま載る)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct StartFailure {
+    /// `Configure` / `Arm` / `Start` / `ecc` / `geometry` のどこで落ちたか。
+    pub stage: &'static str,
+    pub detail: String,
+    /// 巻き戻しで送ったコマンドのうち失敗したものの記録(silent にしない)。
+    pub rollback_notes: Vec<String>,
+}
+
+impl std::fmt::Display for StartFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} stage failed: {}", self.stage, self.detail)?;
+        if !self.rollback_notes.is_empty() {
+            write!(f, " (rollback: {})", self.rollback_notes.join("; "))?;
+        }
+        Ok(())
+    }
+}
+
+/// 停止の種類(SPEC §1.3: 正常停止と中止で EOS の待ち方だけが違う)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopMode {
+    /// 正常停止。EOS の自然到達を `eos_timeout` まで待ってから強制する。
+    Normal,
+    /// 中止。待たずに即・強制 EOS(v1.6)。文字列は `run_stop.reason` の `abort:` の後ろ。
+    Abort(String),
+}
+
+/// run 停止の報告(そのまま `run_stop` レコードになる)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct StopReport {
+    pub ok: bool,
+    /// `"normal"` / `"abort:..."` / `"error:eos-timeout"`(SPEC §9.2)。
+    pub reason: String,
+    pub counters: Counters,
+    pub files: Vec<OutputFile>,
+    /// receiver へ `Stop` を送って EOS を強制したか(SPEC §1.3 の 5 秒分岐)。
+    pub forced_eos: bool,
+    /// EOS がチェーンを流れ切ったことを観測できたか。
+    pub eos_closed: bool,
+    /// 途中で起きた異常の記録(不達・不許可遷移など。silent にしない)。
+    pub notes: Vec<String>,
+}
+
+/// §1.3 の run シーケンスそのもの。IO は [`Transport`] 越しだけ。
+pub struct Sequencer<'a> {
+    params: &'a ControllerParams,
+    transport: &'a mut dyn Transport,
+}
+
+impl<'a> Sequencer<'a> {
+    pub fn new(params: &'a ControllerParams, transport: &'a mut dyn Transport) -> Self {
+        Self { params, transport }
+    }
+
+    // -----------------------------------------------------------------
+    // 開始(SPEC §1.3)
+    // -----------------------------------------------------------------
+
+    /// run 開始シーケンス。
+    ///
+    /// `Configure`(下流から)→ `Arm`(receiver の実 bind ポートを回収)→ `Start{run}` →
+    /// ecc `describe` → `prepare` → `configure`(DataLinkSet)→ `start`。
+    /// **どの段の失敗も巻き戻す**(以降を実行せず、実行済みコンポーネントを畳む)。
+    pub fn start_run(
+        &mut self,
+        run: u32,
+        comment: &str,
+        run_start_ts: &str,
+    ) -> Result<StartReport, StartFailure> {
+        let params = self.params;
+        let mut touched = vec![false; params.components.len()];
+
+        // 1. Configure(下流から: graw-writer → decoder → receivers)
+        //    SPEC §6.4 v1.8: 正式な run 開始 TS は controller が 1 つだけ決めてここで配る。
+        let run_config = RunConfig {
+            run_number: run,
+            comment: comment.to_string(),
+            config: json!({ "run_start_ts": run_start_ts }),
+        };
+        for (i, component) in params.components.iter().enumerate() {
+            if let Err(detail) = self.apply(component, &Command::Configure(run_config.clone())) {
+                return Err(self.rollback("Configure", detail, &touched));
+            }
+            touched[i] = true;
+        }
+
+        // 2. Arm — receiver はここで bind + listen(listen-before-start)。実ポートを回収する。
+        let mut links = Vec::new();
+        for (i, component) in params.components.iter().enumerate() {
+            let response = match self.apply(component, &Command::Arm) {
+                Ok(response) => response,
+                Err(detail) => return Err(self.rollback("Arm", detail, &touched)),
+            };
+            touched[i] = true;
+            if let ComponentKind::Receiver { cobo_id } = component.kind {
+                match self.router_link(cobo_id, &response) {
+                    Ok(link) => links.push(link),
+                    Err(detail) => {
+                        return Err(self.rollback(
+                            "Arm",
+                            format!("{}: {detail}", component.name),
+                            &touched,
+                        ))
+                    }
+                }
+            }
+        }
+
+        // 3. Start{run}
+        for (i, component) in params.components.iter().enumerate() {
+            if let Err(detail) = self.apply(component, &Command::Start { run_number: run }) {
+                return Err(self.rollback("Start", detail, &touched));
+            }
+            touched[i] = true;
+        }
+
+        // 4. ecc-bridge 経由(listen-before-start: ここに来た時点で全 receiver は listen 済み)
+        let requests = [
+            json!({"action": "describe", "config_id": params.config_id}),
+            json!({"action": "prepare", "config_id": params.config_id}),
+            self.configure_request(&links),
+            json!({"action": "start"}),
+        ];
+        for request in &requests {
+            if let Err(detail) = self.apply_ecc(request) {
+                return Err(self.rollback("ecc", detail, &touched));
+            }
+        }
+
+        Ok(StartReport { run, links })
+    }
+
+    /// 実行済みコンポーネントだけを**上流から**畳む(SPEC §1.3「半端な Running を残さない」)。
+    ///
+    /// `Stop` → `Reset` の順に送る。`Stop` は `Running` からしか合法でない(§1.3 遷移表)ため、
+    /// `Configured` / `Armed` で止まったコンポーネントは `Stop` が断られる —— それでも
+    /// `Reset` が必ず `Idle` へ戻す。断られた事実は `rollback_notes` に残す(silent にしない)。
+    fn rollback(&mut self, stage: &'static str, detail: String, touched: &[bool]) -> StartFailure {
+        let params = self.params;
+        let mut rollback_notes = Vec::new();
+        error!(stage, %detail, "run start failed — rolling back");
+        for (i, component) in params.components.iter().enumerate().rev() {
+            if !touched[i] {
+                continue;
+            }
+            for command in [Command::Stop, Command::Reset] {
+                if let Err(note) = self.apply(component, &command) {
+                    rollback_notes.push(note);
+                }
+            }
+        }
+        StartFailure {
+            stage,
+            detail,
+            rollback_notes,
+        }
+    }
+
+    /// Arm 応答から DataLinkSet 1 本分を組む(SPEC §8.2)。
+    fn router_link(&self, cobo_id: u32, response: &CommandResponse) -> Result<RouterLink, String> {
+        let metrics = response.metrics.as_ref();
+        let port = metrics
+            .and_then(|m| m.get("router_port"))
+            .and_then(Value::as_u64)
+            .and_then(|p| u16::try_from(p).ok())
+            .ok_or_else(|| "Arm response carries no router_port".to_string())?;
+        let bind_address = metrics
+            .and_then(|m| m.get("bind_address"))
+            .and_then(Value::as_str);
+        Ok(RouterLink {
+            cobo_id,
+            router_ip: self.router_ip(cobo_id, bind_address),
+            router_port: port,
+        })
+    }
+
+    /// DataLinkSet の `router_ip`。設定が最優先、無ければ receiver の実 bind アドレスから。
+    /// `0.0.0.0` のような不定アドレスは CoBo から見て接続先にならないので落として警告する。
+    fn router_ip(&self, cobo_id: u32, bind_address: Option<&str>) -> String {
+        if let Some(ip) = &self.params.router_ip {
+            return ip.clone();
+        }
+        let host = bind_address
+            .and_then(|address| address.rsplit_once(':'))
+            .map(|(host, _)| host.trim_matches(|c| c == '[' || c == ']'));
+        match host {
+            Some(host) if !host.is_empty() && host != "0.0.0.0" && host != "*" && host != "::" => {
+                host.to_string()
+            }
+            _ => {
+                warn!(
+                    cobo_id,
+                    bind_address = bind_address.unwrap_or("<none>"),
+                    "receiver binds an unspecified address — using 127.0.0.1 as router_ip \
+                     (set [controller] router_ip for a real CoBo network)"
+                );
+                "127.0.0.1".to_string()
+            }
+        }
+    }
+
+    fn configure_request(&self, links: &[RouterLink]) -> Value {
+        let items: Vec<Value> = links
+            .iter()
+            .map(|link| {
+                json!({
+                    "sender": self.params.data_sender_id(link.cobo_id),
+                    "router_ip": link.router_ip,
+                    "router_port": link.router_port,
+                    // 実機の罠: flowType は大文字 TCP(SPEC §8.2)。
+                    "type": "TCP",
+                })
+            })
+            .collect();
+        json!({
+            "action": "configure",
+            "config_id": self.params.config_id,
+            "links": items,
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // 停止・中止(SPEC §1.3 / v1.6)
+    // -----------------------------------------------------------------
+
+    /// run 停止シーケンス。**中止でも必ず EOS で閉じてから**コンポーネントを畳む(v1.6)。
+    pub fn stop_run(&mut self, mode: StopMode) -> StopReport {
+        let params = self.params;
+        let mut notes = Vec::new();
+
+        // 1. ecc stop(CoBo が送信を止め TCP が閉じる)。中止では不達でも続行する。
+        let ecc_stop_failed = match self.apply_ecc(&json!({"action": "stop"})) {
+            Ok(()) => false,
+            Err(detail) => {
+                warn!(%detail, "ecc stop failed — continuing to close the run with EOS");
+                notes.push(detail);
+                true
+            }
+        };
+
+        // 2. EOS 伝播待ち。中止は待たずに即・強制する(v1.6)。
+        let mut eos_closed = match mode {
+            StopMode::Normal => self.wait_for_eos(&mut notes),
+            StopMode::Abort(_) => false,
+        };
+        let forced_eos = !eos_closed;
+        if forced_eos {
+            // 強制 EOS = receiver へ Stop(drain タスクが未送 EOS を出してから畳む)。
+            info!("EOS did not arrive — forcing it via receiver Stop (SPEC §1.3)");
+            for component in params.components.iter() {
+                if matches!(component.kind, ComponentKind::Receiver { .. }) {
+                    if let Err(note) = self.apply(component, &Command::Stop) {
+                        notes.push(note);
+                    }
+                }
+            }
+            eos_closed = self.wait_for_eos(&mut notes);
+        }
+
+        // 3. run_stop の材料を集める(Stop / Reset の前 —— graw-writer は Reset で
+        //    RunWriter を手放し、ファイル実績が metrics から消える)。
+        let statuses = self.collect_status(&mut notes);
+        let counters = counters_from(params, &statuses);
+        let files = files_from(&statuses);
+
+        // 4. コンポーネントを畳む(上流から)。ここは run クローズ後なので Reset してよい。
+        //    強制 EOS で既に Stop 済みの receiver へは Stop を撃ち直さない。
+        for (i, component) in params.components.iter().enumerate().rev() {
+            let already_stopped =
+                forced_eos && matches!(component.kind, ComponentKind::Receiver { .. });
+            if !already_stopped {
+                if let Err(note) = self.apply(component, &Command::Stop) {
+                    notes.push(note);
+                }
+            }
+            // Stop 後は Configured(または Error)なので、次の run のために Idle へ戻す。
+            let state = statuses.get(i).and_then(|s| s.state);
+            if state == Some(ComponentState::Error) {
+                warn!(
+                    component = component.name,
+                    "component is in Error — resetting after run close"
+                );
+            }
+            if let Err(note) = self.apply(component, &Command::Reset) {
+                notes.push(note);
+            }
+        }
+
+        let reason = if let StopMode::Abort(why) = &mode {
+            format!("abort:{why}")
+        } else if !eos_closed {
+            "error:eos-timeout".to_string()
+        } else if ecc_stop_failed {
+            "abort:ecc-stop-failed".to_string()
+        } else {
+            "normal".to_string()
+        };
+        StopReport {
+            ok: reason == "normal",
+            reason,
+            counters,
+            files,
+            forced_eos,
+            eos_closed,
+            notes,
+        }
+    }
+
+    /// EOS がチェーンを流れ切る(= root-sink が run をクローズできる)まで待つ。
+    /// root-sink は REP を持たないので、**graw-writer / decoder の `GetStatus`** で代理観測する
+    /// (SPEC §1.3 の「GetStatus と時間で監視」)。
+    fn wait_for_eos(&mut self, notes: &mut Vec<String>) -> bool {
+        let params = self.params;
+        let mut waited = Duration::ZERO;
+        loop {
+            if self.eos_complete(notes) {
+                return true;
+            }
+            if waited >= params.eos_timeout {
+                let note = format!(
+                    "EOS did not propagate within {} ms",
+                    params.eos_timeout.as_millis()
+                );
+                warn!("{note}");
+                push_once(notes, note);
+                return false;
+            }
+            self.transport.sleep(params.eos_poll);
+            waited += params.eos_poll;
+        }
+    }
+
+    /// EOS 到達の判定(2 点とも満たすこと):
+    /// - decoder: `eos_in` が上流 CoBo 数に達した(全 receiver の EOS を受け取った)
+    /// - graw-writer: `files_open == 0`(全期待ソースの EOS 受領で全ファイルを閉じた、SPEC §7)
+    fn eos_complete(&mut self, notes: &mut Vec<String>) -> bool {
+        let params = self.params;
+        let expected_eos = params.cobos.len() as u64;
+        for component in params.components.iter() {
+            let key = match component.kind {
+                ComponentKind::Decoder => "eos_in",
+                ComponentKind::GrawWriter => "files_open",
+                ComponentKind::Receiver { .. } => continue,
+            };
+            let response = match self
+                .transport
+                .command(&component.endpoint, &Command::GetStatus)
+            {
+                Ok(response) => response,
+                Err(e) => {
+                    push_once(notes, format!("{}: GetStatus failed: {e}", component.name));
+                    return false;
+                }
+            };
+            let value = response
+                .metrics
+                .as_ref()
+                .and_then(|m| m.get(key))
+                .and_then(Value::as_u64);
+            let done = match (component.kind, value) {
+                (ComponentKind::Decoder, Some(eos_in)) => eos_in >= expected_eos,
+                (ComponentKind::GrawWriter, Some(open)) => open == 0,
+                (_, None) => {
+                    push_once(
+                        notes,
+                        format!("{}: GetStatus metrics has no {key}", component.name),
+                    );
+                    false
+                }
+                _ => false,
+            };
+            if !done {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// 全コンポーネントの `GetStatus`(`components` と同じ順)。
+    fn collect_status(&mut self, notes: &mut Vec<String>) -> Vec<ComponentStatus> {
+        let params = self.params;
+        let mut out = Vec::with_capacity(params.components.len());
+        for component in params.components.iter() {
+            let status = match self
+                .transport
+                .command(&component.endpoint, &Command::GetStatus)
+            {
+                Ok(response) => ComponentStatus::from_response(component, &response),
+                Err(e) => {
+                    push_once(notes, format!("{}: GetStatus failed: {e}", component.name));
+                    ComponentStatus::unreachable(component, e)
+                }
+            };
+            out.push(status);
+        }
+        out
+    }
+
+    // -----------------------------------------------------------------
+    // 下請け
+    // -----------------------------------------------------------------
+
+    /// コマンドを 1 件送り、**不達も「断られた」も `Err`** にまとめる(呼び手はどちらでも
+    /// シーケンスを止めるので区別しない。文字列にはどちらか判る形で残す)。
+    fn apply(
+        &mut self,
+        component: &ComponentEndpoint,
+        command: &Command,
+    ) -> Result<CommandResponse, String> {
+        match self.transport.command(&component.endpoint, command) {
+            Err(e) => Err(format!("{}: {command} unreachable: {e}", component.name)),
+            Ok(response) if !response.success => Err(format!(
+                "{}: {command} refused in state {}: {}",
+                component.name, response.state, response.message
+            )),
+            Ok(response) => {
+                info!(component = component.name, %command, state = %response.state, "command applied");
+                Ok(response)
+            }
+        }
+    }
+
+    fn apply_ecc(&mut self, request: &Value) -> Result<(), String> {
+        let action = request
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("<none>")
+            .to_string();
+        match self.transport.ecc(request) {
+            Err(e) => Err(format!("ecc {action} unreachable: {e}")),
+            Ok(reply) if !reply.ok => Err(format!(
+                "ecc {action} failed in state {}: {}",
+                reply.state, reply.error
+            )),
+            Ok(reply) => {
+                info!(action, state = reply.state, "ecc command applied");
+                Ok(())
+            }
+        }
+    }
+}
+
+/// 同じ文言を何度も積まない(EOS 待ちは毎周期同じ失敗を出しうる)。
+fn push_once(notes: &mut Vec<String>, note: String) {
+    if !notes.contains(&note) {
+        notes.push(note);
+    }
+}
+
+// ---------------------------------------------------------------------
+// コンポーネント状態のスナップショット
+// ---------------------------------------------------------------------
+
+/// `GET /api/status` と run_stop の材料。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComponentStatus {
+    pub name: String,
+    pub kind: ComponentKind,
+    pub endpoint: String,
+    pub reachable: bool,
+    pub state: Option<ComponentState>,
+    pub run_number: Option<u32>,
+    pub metrics: Option<Value>,
+    pub error: Option<String>,
+}
+
+impl ComponentStatus {
+    fn from_response(component: &ComponentEndpoint, response: &CommandResponse) -> Self {
+        Self {
+            name: component.name.clone(),
+            kind: component.kind,
+            endpoint: component.endpoint.clone(),
+            reachable: true,
+            state: Some(response.state),
+            run_number: response.run_number,
+            metrics: response.metrics.clone(),
+            error: (!response.success).then(|| response.message.clone()),
+        }
+    }
+
+    fn unreachable(component: &ComponentEndpoint, error: String) -> Self {
+        Self {
+            name: component.name.clone(),
+            kind: component.kind,
+            endpoint: component.endpoint.clone(),
+            reachable: false,
+            state: None,
+            run_number: None,
+            metrics: None,
+            error: Some(error),
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "name": self.name,
+            "endpoint": self.endpoint,
+            "reachable": self.reachable,
+            "state": self.state.map(|s| s.to_string()),
+            "run_number": self.run_number,
+            "metrics": self.metrics,
+            "error": self.error,
+        })
+    }
+
+    fn metric_u64(&self, key: &str) -> Option<u64> {
+        self.metrics
+            .as_ref()
+            .and_then(|m| m.get(key))
+            .and_then(Value::as_u64)
+    }
+}
+
+/// run_stop の `counters`(SPEC §9.2)を GetStatus 実測から充填する。
+///
+/// **取れる分だけ入れる**: `events_built` / `events_incomplete` / `late_fragments` は
+/// root-sink だけが持つ値で、root-sink は REP を持たない(SPEC §1.3)。015 の
+/// [`Counters`] は `u64` 非 Option なので、取得できない項目は `0` のまま残る
+/// (「無い項目は null」は §9.2 のスキーマ変更が要るので 016 の範囲外)。
+fn counters_from(params: &ControllerParams, statuses: &[ComponentStatus]) -> Counters {
+    let mut frames = BTreeMap::new();
+    let mut overflow_frames = 0u64;
+    let mut malformed = 0u64;
+    for status in statuses {
+        match status.kind {
+            ComponentKind::Receiver { cobo_id } => {
+                frames.insert(
+                    cobo_id.to_string(),
+                    status.metric_u64("frames").unwrap_or(0),
+                );
+                overflow_frames += status.metric_u64("overflow_frames").unwrap_or(0);
+            }
+            ComponentKind::Decoder => {
+                malformed += status.metric_u64("malformed").unwrap_or(0);
+            }
+            ComponentKind::GrawWriter => {}
+        }
+    }
+    // 設定にある CoBo が status に居ない(不達)場合も鍵は出す(欠落を隠さない)。
+    for cobo in &params.cobos {
+        frames.entry(cobo.id.to_string()).or_insert(0);
+    }
+    Counters {
+        events_built: 0,
+        events_incomplete: 0,
+        late_fragments: 0,
+        frames,
+        overflow_frames,
+        malformed,
+    }
+}
+
+/// run_stop の `files`(SPEC §9.2)。graw-writer の metrics の実績をそのまま写す。
+fn files_from(statuses: &[ComponentStatus]) -> Vec<OutputFile> {
+    let mut files = Vec::new();
+    for status in statuses {
+        if status.kind != ComponentKind::GrawWriter {
+            continue;
+        }
+        let entries = status
+            .metrics
+            .as_ref()
+            .and_then(|m| m.get("files"))
+            .and_then(Value::as_array);
+        for entry in entries.into_iter().flatten() {
+            let path = entry.get("path").and_then(Value::as_str);
+            let bytes = entry.get("bytes").and_then(Value::as_u64);
+            if let (Some(path), Some(bytes)) = (path, bytes) {
+                files.push(OutputFile {
+                    path: path.to_string(),
+                    bytes,
+                });
+            }
+        }
+    }
+    files
+}
+
+// ---------------------------------------------------------------------
+// 操作権(SPEC §8.1)
+// ---------------------------------------------------------------------
+
+/// 操作権を握っている 1 クライアント。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Session {
+    token: String,
+    operator: String,
+}
+
+/// トークンを 1 つ発行する。
+///
+/// **これは認証ではない**(SPEC §3.1「事故防止であり認証ではない」)。二重操作の事故を
+/// 防ぐための識別子なので、暗号論的乱数は使わず単調な素材(起動からの ns + 連番 + pid)で
+/// 十分とする(依存を増やさない)。
+fn new_token() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}-{:x}-{n:x}", std::process::id(), nanos)
+}
+
+// ---------------------------------------------------------------------
+// controller 自身の run 状態
+// ---------------------------------------------------------------------
+
+/// controller の 4 相(§1.3 の状態機械の**外**にあるオーケストレータの相)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Phase {
+    #[default]
+    Idle,
+    Starting,
+    Running,
+    Stopping,
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Phase::Idle => "Idle",
+            Phase::Starting => "Starting",
+            Phase::Running => "Running",
+            Phase::Stopping => "Stopping",
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ActiveRun {
+    run: u32,
+    operator: String,
+    comment: String,
+    started_ts: String,
+    started_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct RunState {
+    phase: Phase,
+    active: Option<ActiveRun>,
+}
+
+/// ログ投稿(§2.3 LogPost)の受理・拒否カウンタ。silent にしないための可視化フック。
+#[derive(Debug, Default)]
+struct LogPostCounters {
+    accepted: AtomicU64,
+    rejected: AtomicU64,
+}
+
+// ---------------------------------------------------------------------
+// Controller(REST の状態)
+// ---------------------------------------------------------------------
+
+/// axum の共有状態。REST ハンドラはここを通してしか外に触らない。
+pub struct Controller {
+    params: ControllerParams,
+    transport: ZmqTransport,
+    /// SPEC §9.1「書き手は controller ただ一人」—— REST も LogPost スレッドもここを通る。
+    logbook: Arc<Mutex<LogbookWriter>>,
+    logbook_path: PathBuf,
+    state_path: PathBuf,
+    session: Mutex<Option<Session>>,
+    run: Mutex<RunState>,
+    log_posts: Arc<LogPostCounters>,
+}
+
+/// 毒された Mutex でも controller を止めない(中身は controller 自身が作ったものだけで、
+/// panic による不整合を持ち込む相手が居ない)。`.unwrap()` を使わないための共通口でもある。
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl Controller {
+    /// ログブックを開いて controller を組み立てる(`output_root` は無ければ作る)。
+    pub fn new(params: ControllerParams) -> Result<Self, ControllerError> {
+        std::fs::create_dir_all(&params.output_root).map_err(|source| ControllerError::Io {
+            path: params.output_root.clone(),
+            source,
+        })?;
+        let logbook_path = params.output_root.join("logbook.jsonl");
+        let state_path = params.output_root.join("tpcdaq_state.json");
+        let logbook = LogbookWriter::open(&logbook_path)?;
+        let transport = ZmqTransport::new(
+            params.ecc_endpoint.clone(),
+            params.command_timeout,
+            params.ecc_timeout,
+        );
+        Ok(Self {
+            params,
+            transport,
+            logbook: Arc::new(Mutex::new(logbook)),
+            logbook_path,
+            state_path,
+            session: Mutex::new(None),
+            run: Mutex::new(RunState::default()),
+            log_posts: Arc::new(LogPostCounters::default()),
+        })
+    }
+
+    pub fn params(&self) -> &ControllerParams {
+        &self.params
+    }
+
+    // ---- ログブック ----
+
+    /// 1 レコード追記。失敗しても run を止めない(が、必ずログに出す)。
+    fn append(&self, record: LogbookRecord) {
+        let mut writer = lock(&self.logbook);
+        if let Err(e) = writer.append(record) {
+            error!(error = %e, "cannot append to the logbook");
+        }
+    }
+
+    /// 監査レコード(SPEC §8.1「状態変更系はすべて token 必須 + 監査ログ」)。
+    fn audit(&self, action: &str, params: Value, operator: &str, ok: bool, error: Option<String>) {
+        self.append(LogbookRecord::Audit {
+            actor: ACTOR.to_string(),
+            action: action.to_string(),
+            params,
+            operator: operator.to_string(),
+            ok,
+            error,
+        });
+    }
+
+    // ---- 操作権 ----
+
+    /// 常に横取りできる(C++ 版 CommandRouter 方式、SPEC §8.1)。奪われた側の名前を返す。
+    fn acquire(&self, operator: &str) -> (String, Option<String>) {
+        let token = new_token();
+        let mut session = lock(&self.session);
+        let preempted = session.as_ref().map(|s| s.operator.clone());
+        *session = Some(Session {
+            token: token.clone(),
+            operator: operator.to_string(),
+        });
+        (token, preempted)
+    }
+
+    /// token を検証し、操作者名を返す。合わなければ `Err`(REST では 401)。
+    fn authorize(&self, token: &str) -> Result<String, &'static str> {
+        let session = lock(&self.session);
+        match session.as_ref() {
+            None => Err("no operator holds the control token"),
+            Some(s) if s.token != token => Err("stale or unknown token"),
+            Some(s) => Ok(s.operator.clone()),
+        }
+    }
+}
+
+/// controller の起動時エラー。
+#[derive(Debug, thiserror::Error)]
+pub enum ControllerError {
+    #[error("io error on {}: {source}", path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("logbook error: {0}")]
+    Logbook(#[from] crate::logbook::LogbookError),
+
+    #[error("cannot bind REST listener on {listen}: {source}")]
+    Bind {
+        listen: String,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("cannot bind the log post PULL socket on {bind}: {source}")]
+    LogPull {
+        bind: String,
+        #[source]
+        source: zmq::Error,
+    },
+
+    #[error("REST server failed: {0}")]
+    Serve(#[source] std::io::Error),
+}
+
+// ---------------------------------------------------------------------
+// run_start の材料(ジオメトリ)
+// ---------------------------------------------------------------------
+
+/// `run_start.geometry`(SPEC §9.2)と `expected_fragments` をジオメトリファイルから作る。
+///
+/// `expected_fragments` = ジオメトリが申告している (cobo, asad) 在庫。root-sink の
+/// EventBuilder が使う期待集合と同じ定義(`tools/root_sink/eb_core.hpp`)。
+/// [`crate::geometry::Geometry`] には AsAd 枚数の公開アクセサが無いので、公開 API である
+/// [`crate::geometry::dump_tsv`] の先頭 2 列から拾う(`lookup` で総当たりすると
+/// `unmapped_hit_count` を汚すため使わない)。
+fn geometry_record(path: &Path) -> Result<(GeometryRecord, Vec<(u32, u32)>), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let sha256 = format!("{:x}", hasher.finalize());
+
+    let text = String::from_utf8_lossy(&bytes);
+    let geometry = crate::geometry::parse(&text);
+    let fragments = expected_fragments(&geometry);
+    if fragments.is_empty() {
+        warn!(path = %path.display(), "geometry declares no (cobo, asad) — expected_fragments is empty");
+    }
+    Ok((
+        GeometryRecord {
+            path: path.display().to_string(),
+            sha256,
+        },
+        fragments,
+    ))
+}
+
+fn expected_fragments(geometry: &Geometry) -> Vec<(u32, u32)> {
+    let dump = crate::geometry::dump_tsv(geometry);
+    let mut set = BTreeSet::new();
+    for line in dump.lines() {
+        let mut columns = line.split('\t');
+        if let (Some(cobo), Some(asad)) = (columns.next(), columns.next()) {
+            if let (Ok(cobo), Ok(asad)) = (cobo.parse::<u32>(), asad.parse::<u32>()) {
+                set.insert((cobo, asad));
+            }
+        }
+    }
+    set.into_iter().collect()
+}
+
+/// 正式な run 開始 TS(SPEC §6.4 v1.8)。graw-writer のファイル名 TS と同じ書式にして、
+/// 将来そのまま採用できるようにしておく(`src/graw_writer.rs` の `local_timestamp`)。
+fn run_start_timestamp() -> String {
+    chrono::Local::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3f")
+        .to_string()
+}
+
+// ---------------------------------------------------------------------
+// REST ハンドラ(SPEC §8.1)
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct AcquireRequest {
+    operator: String,
+    passphrase: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenRequest {
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RunStartRequest {
+    token: String,
+    #[serde(default)]
+    comment: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommentRequest {
+    author: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SinceQuery {
+    #[serde(default)]
+    since_seq: u64,
+}
+
+type Reply = (StatusCode, Json<Value>);
+
+fn ok_json(body: Value) -> Reply {
+    (StatusCode::OK, Json(body))
+}
+
+fn err_json(code: StatusCode, message: impl Into<String>) -> Reply {
+    (code, Json(json!({"error": message.into()})))
+}
+
+/// 全コンポーネント + ecc + 自身の相(SPEC §8.1)。閲覧系なので認証は要らない。
+async fn get_status(State(controller): State<Arc<Controller>>) -> Reply {
+    let reply = tokio::task::spawn_blocking(move || {
+        let mut transport = controller
+            .transport
+            .with_command_timeout(controller.params.status_timeout);
+        let mut notes = Vec::new();
+        let components: Vec<Value> = {
+            let mut sequencer = Sequencer::new(&controller.params, &mut transport);
+            sequencer
+                .collect_status(&mut notes)
+                .iter()
+                .map(ComponentStatus::to_json)
+                .collect()
+        };
+        let ecc = match transport.ecc(&json!({"action": "status"})) {
+            Ok(reply) => json!({"ok": reply.ok, "state": reply.state, "error": reply.error}),
+            Err(e) => json!({"ok": false, "state": "Unknown", "error": e}),
+        };
+        let run_state = lock(&controller.run);
+        let operator = lock(&controller.session)
+            .as_ref()
+            .map(|s| s.operator.clone());
+        json!({
+            "phase": run_state.phase.to_string(),
+            "run": run_state.active.as_ref().map(|active| json!({
+                "run": active.run,
+                "operator": active.operator,
+                "comment": active.comment,
+                "started_ts": active.started_ts,
+                "elapsed_s": active.started_at.elapsed().as_secs_f64(),
+            })),
+            "operator": operator,
+            "components": components,
+            "ecc": ecc,
+            "log_posts": {
+                "accepted": controller.log_posts.accepted.load(Ordering::Relaxed),
+                "rejected": controller.log_posts.rejected.load(Ordering::Relaxed),
+            },
+            "notes": notes,
+        })
+    })
+    .await;
+    match reply {
+        Ok(body) => ok_json(body),
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("status task: {e}"),
+        ),
+    }
+}
+
+/// 操作権の取得(常に横取り可、横取りは監査へ)。
+async fn post_acquire(
+    State(controller): State<Arc<Controller>>,
+    Json(request): Json<AcquireRequest>,
+) -> Reply {
+    if request.passphrase != controller.params.passphrase {
+        controller.audit(
+            "control/acquire",
+            json!({"operator": request.operator}),
+            &request.operator,
+            false,
+            Some("wrong passphrase".to_string()),
+        );
+        warn!(
+            operator = request.operator,
+            "control/acquire refused — wrong passphrase"
+        );
+        return err_json(StatusCode::FORBIDDEN, "wrong passphrase");
+    }
+    let (token, preempted) = controller.acquire(&request.operator);
+    controller.audit(
+        "control/acquire",
+        json!({"operator": request.operator, "preempted": preempted}),
+        &request.operator,
+        true,
+        None,
+    );
+    if let Some(previous) = &preempted {
+        warn!(
+            operator = request.operator,
+            previous, "control token taken over"
+        );
+    }
+    ok_json(json!({"token": token, "preempted": preempted}))
+}
+
+async fn post_release(
+    State(controller): State<Arc<Controller>>,
+    Json(request): Json<TokenRequest>,
+) -> Reply {
+    let operator = match controller.authorize(&request.token) {
+        Ok(operator) => operator,
+        Err(why) => return unauthorized(&controller, "control/release", json!({}), why),
+    };
+    *lock(&controller.session) = None;
+    controller.audit("control/release", json!({}), &operator, true, None);
+    ok_json(json!({"released": true}))
+}
+
+/// token 無し / 不一致は 401 相当 + 監査(SPEC §8.1)。
+fn unauthorized(controller: &Controller, action: &str, params: Value, why: &str) -> Reply {
+    controller.audit(
+        action,
+        params,
+        "<unauthorized>",
+        false,
+        Some(why.to_string()),
+    );
+    warn!(action, why, "rejected an unauthorized request");
+    err_json(StatusCode::UNAUTHORIZED, why)
+}
+
+/// run 開始(§1.3 のシーケンス)。
+async fn post_run_start(
+    State(controller): State<Arc<Controller>>,
+    Json(request): Json<RunStartRequest>,
+) -> Reply {
+    let operator = match controller.authorize(&request.token) {
+        Ok(operator) => operator,
+        Err(why) => {
+            return unauthorized(
+                &controller,
+                "run/start",
+                json!({"comment": request.comment}),
+                why,
+            )
+        }
+    };
+
+    // 相の占有(Idle からしか始められない = 二重 start を弾く)。
+    {
+        let mut run_state = lock(&controller.run);
+        if run_state.phase != Phase::Idle {
+            let why = format!("controller is {} — not Idle", run_state.phase);
+            drop(run_state);
+            controller.audit(
+                "run/start",
+                json!({"comment": request.comment}),
+                &operator,
+                false,
+                Some(why.clone()),
+            );
+            return err_json(StatusCode::CONFLICT, why);
+        }
+        run_state.phase = Phase::Starting;
+    }
+
+    // ブロッキングタスクが panic しても相を Starting のまま固めない(制御不能にしない)。
+    let recovery = Arc::clone(&controller);
+    let reply = tokio::task::spawn_blocking(move || {
+        let outcome = start_run_blocking(&controller, &operator, &request.comment);
+        let mut run_state = lock(&controller.run);
+        match outcome {
+            Ok((run, ts)) => {
+                run_state.phase = Phase::Running;
+                run_state.active = Some(ActiveRun {
+                    run,
+                    operator,
+                    comment: request.comment,
+                    started_ts: ts,
+                    started_at: Instant::now(),
+                });
+                ok_json(json!({"run": run, "phase": "Running"}))
+            }
+            Err(detail) => {
+                run_state.phase = Phase::Idle;
+                run_state.active = None;
+                err_json(StatusCode::INTERNAL_SERVER_ERROR, detail)
+            }
+        }
+    })
+    .await;
+    match reply {
+        Ok(reply) => reply,
+        Err(e) => {
+            let mut run_state = lock(&recovery.run);
+            run_state.phase = Phase::Idle;
+            run_state.active = None;
+            error!(error = %e, "run start task died — back to Idle");
+            err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("run start task: {e}"),
+            )
+        }
+    }
+}
+
+/// run 開始の本体(ブロッキング)。成功したら (run 番号, 開始 TS)。
+fn start_run_blocking(
+    controller: &Controller,
+    operator: &str,
+    comment: &str,
+) -> Result<(u32, String), String> {
+    // ジオメトリはコンポーネントに触る前に読む(run_start レコードに必須 — SPEC §9.2)。
+    let geometry = match geometry_record(&controller.params.geometry_path) {
+        Ok(geometry) => geometry,
+        Err(detail) => {
+            controller.audit(
+                "run/start",
+                json!({"comment": comment}),
+                operator,
+                false,
+                Some(detail.clone()),
+            );
+            return Err(detail);
+        }
+    };
+
+    // run 番号採番(015、controller 単一書き手)。
+    let run = match crate::state::take_next_run(&controller.state_path) {
+        Ok(run) => run,
+        Err(e) => {
+            let detail = format!("cannot take the next run number: {e}");
+            controller.audit(
+                "run/start",
+                json!({"comment": comment}),
+                operator,
+                false,
+                Some(detail.clone()),
+            );
+            return Err(detail);
+        }
+    };
+
+    let run_start_ts = run_start_timestamp();
+    let mut transport = controller.transport.clone();
+    let result = {
+        let mut sequencer = Sequencer::new(&controller.params, &mut transport);
+        sequencer.start_run(run, comment, &run_start_ts)
+    };
+
+    match result {
+        Ok(report) => {
+            let (geometry, expected_fragments) = geometry;
+            controller.append(LogbookRecord::RunStart {
+                actor: ACTOR.to_string(),
+                run,
+                config_id: controller.params.config_id.clone(),
+                geometry,
+                cobos: controller.params.cobo_listens(),
+                operator: operator.to_string(),
+                comment: comment.to_string(),
+                expected_fragments,
+            });
+            controller.audit(
+                "run/start",
+                json!({"run": run, "comment": comment, "links": report.links.iter()
+                    .map(|l| json!({"cobo": l.cobo_id, "router_ip": l.router_ip, "router_port": l.router_port}))
+                    .collect::<Vec<_>>()}),
+                operator,
+                true,
+                None,
+            );
+            info!(run, ts = run_start_ts, "run started");
+            Ok((run, run_start_ts))
+        }
+        Err(failure) => {
+            let detail = failure.to_string();
+            controller.audit(
+                "run/start",
+                json!({"run": run, "comment": comment, "stage": failure.stage}),
+                operator,
+                false,
+                Some(detail.clone()),
+            );
+            Err(detail)
+        }
+    }
+}
+
+/// run 停止(§1.3)。コンポーネントが Error に落ちていれば中止経路(v1.6)へ切り替える。
+async fn post_run_stop(
+    State(controller): State<Arc<Controller>>,
+    Json(request): Json<TokenRequest>,
+) -> Reply {
+    let operator = match controller.authorize(&request.token) {
+        Ok(operator) => operator,
+        Err(why) => return unauthorized(&controller, "run/stop", json!({}), why),
+    };
+
+    let active = {
+        let mut run_state = lock(&controller.run);
+        if run_state.phase != Phase::Running {
+            let why = format!("controller is {} — no run to stop", run_state.phase);
+            drop(run_state);
+            controller.audit("run/stop", json!({}), &operator, false, Some(why.clone()));
+            return err_json(StatusCode::CONFLICT, why);
+        }
+        run_state.phase = Phase::Stopping;
+        run_state.active.clone()
+    };
+
+    // 停止タスクが panic しても相を Stopping のまま固めない(次の run を出せなくしない)。
+    let recovery = Arc::clone(&controller);
+    let reply = tokio::task::spawn_blocking(move || {
+        let body = stop_run_blocking(&controller, &operator, active);
+        let mut run_state = lock(&controller.run);
+        run_state.phase = Phase::Idle;
+        run_state.active = None;
+        ok_json(body)
+    })
+    .await;
+    match reply {
+        Ok(reply) => reply,
+        Err(e) => {
+            let mut run_state = lock(&recovery.run);
+            run_state.phase = Phase::Idle;
+            run_state.active = None;
+            error!(error = %e, "run stop task died — back to Idle");
+            err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("run stop task: {e}"),
+            )
+        }
+    }
+}
+
+fn stop_run_blocking(controller: &Controller, operator: &str, active: Option<ActiveRun>) -> Value {
+    let mut transport = controller.transport.clone();
+
+    // 中止判定(SPEC §1.4-3): 走行中のコンポーネントが Error なら異常停止として扱う。
+    let mode = {
+        let mut notes = Vec::new();
+        let mut sequencer = Sequencer::new(&controller.params, &mut transport);
+        let statuses = sequencer.collect_status(&mut notes);
+        let broken: Vec<&str> = statuses
+            .iter()
+            .filter(|s| s.state == Some(ComponentState::Error) || !s.reachable)
+            .map(|s| s.name.as_str())
+            .collect();
+        if broken.is_empty() {
+            StopMode::Normal
+        } else {
+            warn!(components = ?broken, "stopping as an abort — component(s) in Error/unreachable");
+            StopMode::Abort(format!("component-error:{}", broken.join(",")))
+        }
+    };
+
+    let report = {
+        let mut sequencer = Sequencer::new(&controller.params, &mut transport);
+        sequencer.stop_run(mode)
+    };
+
+    let run = active.as_ref().map(|a| a.run).unwrap_or(0);
+    let duration_s = active
+        .as_ref()
+        .map(|a| a.started_at.elapsed().as_secs_f64())
+        .unwrap_or(0.0);
+    controller.append(LogbookRecord::RunStop {
+        actor: ACTOR.to_string(),
+        run,
+        duration_s,
+        ok: report.ok,
+        reason: report.reason.clone(),
+        counters: report.counters.clone(),
+        files: report.files.clone(),
+    });
+    controller.audit(
+        "run/stop",
+        json!({
+            "run": run,
+            "reason": report.reason,
+            "forced_eos": report.forced_eos,
+            "eos_closed": report.eos_closed,
+        }),
+        operator,
+        report.ok,
+        (!report.notes.is_empty()).then(|| report.notes.join("; ")),
+    );
+    info!(
+        run,
+        reason = report.reason,
+        forced_eos = report.forced_eos,
+        "run stopped"
+    );
+    json!({
+        "run": run,
+        "ok": report.ok,
+        "reason": report.reason,
+        "forced_eos": report.forced_eos,
+        "eos_closed": report.eos_closed,
+        "notes": report.notes,
+    })
+}
+
+/// ECC の段階操作(R6: GET controller と同じ操作感)。
+async fn post_ecc(
+    State(controller): State<Arc<Controller>>,
+    UrlPath(action): UrlPath<String>,
+    Json(request): Json<TokenRequest>,
+) -> Reply {
+    const ACTIONS: [&str; 7] = [
+        "describe",
+        "prepare",
+        "configure",
+        "start",
+        "stop",
+        "breakup",
+        "reset",
+    ];
+    let endpoint = format!("ecc/{action}");
+    let operator = match controller.authorize(&request.token) {
+        Ok(operator) => operator,
+        Err(why) => return unauthorized(&controller, &endpoint, json!({}), why),
+    };
+    if !ACTIONS.contains(&action.as_str()) {
+        let why = format!("unknown ecc action: {action}");
+        controller.audit(&endpoint, json!({}), &operator, false, Some(why.clone()));
+        return err_json(StatusCode::BAD_REQUEST, why);
+    }
+
+    let reply = tokio::task::spawn_blocking(move || {
+        let mut transport = controller.transport.clone();
+        let request_body = match action.as_str() {
+            // DataLinkSet は receiver が**実際に bind した**ポートで組む(SPEC §8.2)。
+            "configure" => match configure_request_now(&controller, &mut transport) {
+                Ok(body) => body,
+                Err(why) => {
+                    controller.audit(&endpoint, json!({}), &operator, false, Some(why.clone()));
+                    return err_json(StatusCode::CONFLICT, why);
+                }
+            },
+            "describe" | "prepare" => {
+                json!({"action": action, "config_id": controller.params.config_id})
+            }
+            _ => json!({"action": action}),
+        };
+        match transport.ecc(&request_body) {
+            Ok(reply) => {
+                controller.audit(
+                    &endpoint,
+                    request_body.clone(),
+                    &operator,
+                    reply.ok,
+                    (!reply.ok).then(|| reply.error.clone()),
+                );
+                ok_json(json!({"ok": reply.ok, "state": reply.state, "error": reply.error}))
+            }
+            Err(e) => {
+                controller.audit(&endpoint, request_body, &operator, false, Some(e.clone()));
+                err_json(StatusCode::BAD_GATEWAY, e)
+            }
+        }
+    })
+    .await;
+    match reply {
+        Ok(reply) => reply,
+        Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("ecc task: {e}")),
+    }
+}
+
+/// いまの receiver の bind 実績から DataLinkSet を組む(段階操作の `configure` 用)。
+fn configure_request_now(
+    controller: &Controller,
+    transport: &mut ZmqTransport,
+) -> Result<Value, String> {
+    let mut sequencer = Sequencer::new(&controller.params, transport);
+    let mut links = Vec::new();
+    for component in controller.params.components.iter() {
+        let ComponentKind::Receiver { cobo_id } = component.kind else {
+            continue;
+        };
+        let response = sequencer.apply(component, &Command::GetStatus)?;
+        let link = sequencer
+            .router_link(cobo_id, &response)
+            .map_err(|e| format!("{}: {e} (Arm the receivers first)", component.name))?;
+        links.push(link);
+    }
+    Ok(sequencer.configure_request(&links))
+}
+
+/// ログブックの読み出し(閲覧系 = 認証なし、SPEC §8.1 の二層)。
+async fn get_logbook(
+    State(controller): State<Arc<Controller>>,
+    Query(query): Query<SinceQuery>,
+) -> Reply {
+    let path = controller.logbook_path.clone();
+    let reply =
+        tokio::task::spawn_blocking(move || crate::logbook::read_since(&path, query.since_seq))
+            .await;
+    match reply {
+        Ok(Ok(result)) => ok_json(json!({
+            "records": result.records,
+            "tail_corrupt": result.tail_corrupt,
+        })),
+        Ok(Err(e)) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("logbook task: {e}"),
+        ),
+    }
+}
+
+/// コメント投稿(R11)。**状態を変えない**ので token は要求しない(記録は `author` が持つ)。
+async fn post_comment(
+    State(controller): State<Arc<Controller>>,
+    Json(request): Json<CommentRequest>,
+) -> Reply {
+    controller.append(LogbookRecord::Comment {
+        actor: "ui".to_string(),
+        author: request.author,
+        text: request.text,
+    });
+    ok_json(json!({"appended": true}))
+}
+
+// ---------------------------------------------------------------------
+// ログ投稿 PULL(SPEC §2.3 LogPost / §3.2)
+// ---------------------------------------------------------------------
+
+/// LogPost を受けてログブックへ流すスレッド。
+///
+/// ペイロードは「JSONL 1 レコード分の JSON 文字列」(§2.3)。`ts` / `seq` は controller が
+/// 付ける(§9.1)ので、投稿側は付けない。読めなかった投稿は捨てるが**数えて警告する**。
+fn spawn_log_post_thread(
+    bind: String,
+    logbook: Arc<Mutex<LogbookWriter>>,
+    counters: Arc<LogPostCounters>,
+    stop: Arc<AtomicBool>,
+) -> Result<(std::thread::JoinHandle<()>, String), ControllerError> {
+    let context = zmq::Context::new();
+    let socket = context
+        .socket(zmq::PULL)
+        .map_err(|source| ControllerError::LogPull {
+            bind: bind.clone(),
+            source,
+        })?;
+    crate::zmq_helper::apply_pull_hwm(&socket).map_err(|source| ControllerError::LogPull {
+        bind: bind.clone(),
+        source,
+    })?;
+    socket
+        .set_rcvtimeo(LOG_PULL_POLL_MS)
+        .map_err(|source| ControllerError::LogPull {
+            bind: bind.clone(),
+            source,
+        })?;
+    socket
+        .bind(&bind)
+        .map_err(|source| ControllerError::LogPull {
+            bind: bind.clone(),
+            source,
+        })?;
+    let endpoint = match socket.get_last_endpoint() {
+        Ok(Ok(endpoint)) => endpoint,
+        _ => bind.clone(),
+    };
+    info!(%endpoint, "log post PULL bound");
+
+    let handle = std::thread::Builder::new()
+        .name("controller-logpost".to_string())
+        .spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let message = match socket.recv_bytes(0) {
+                    Ok(message) => message,
+                    Err(zmq::Error::EAGAIN) => continue,
+                    Err(e) => {
+                        error!(error = %e, "log post recv failed");
+                        continue;
+                    }
+                };
+                match serde_json::from_slice::<LogbookRecord>(&message) {
+                    Ok(record) => {
+                        let mut writer = lock(&logbook);
+                        match writer.append(record) {
+                            Ok(_) => {
+                                counters.accepted.fetch_add(1, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                counters.rejected.fetch_add(1, Ordering::Relaxed);
+                                error!(error = %e, "cannot append a log post");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        counters.rejected.fetch_add(1, Ordering::Relaxed);
+                        warn!(error = %e, payload = %String::from_utf8_lossy(&message),
+                              "log post is not a logbook record — dropped");
+                    }
+                }
+            }
+            info!("log post task stopped");
+        })
+        .map_err(|source| ControllerError::Io {
+            path: PathBuf::from("controller-logpost"),
+            source,
+        })?;
+    Ok((handle, endpoint))
+}
+
+// ---------------------------------------------------------------------
+// エントリポイント
+// ---------------------------------------------------------------------
+
+/// REST ルータを組む(SPEC §8.1 のエンドポイント + `ui_dir` の静的配信)。
+pub fn router(controller: Arc<Controller>) -> Router {
+    let ui_dir = controller.params.ui_dir.clone();
+    let mut app = Router::new()
+        .route("/api/status", get(get_status))
+        .route("/api/control/acquire", post(post_acquire))
+        .route("/api/control/release", post(post_release))
+        .route("/api/run/start", post(post_run_start))
+        .route("/api/run/stop", post(post_run_stop))
+        .route("/api/ecc/{action}", post(post_ecc))
+        .route("/api/logbook", get(get_logbook))
+        .route("/api/logbook/comment", post(post_comment));
+    if let Some(dir) = ui_dir {
+        // UI は後波(P3)。ここは枠だけ — 設定に ui_dir が無ければ配信しない。
+        info!(dir = %dir.display(), "serving the web UI from disk");
+        app = app.fallback_service(ServeDir::new(dir));
+    }
+    app.with_state(controller)
+}
+
+/// 実際に bind した口(動的ポートを使うテスト用の自己申告)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundEndpoints {
+    pub rest: SocketAddr,
+    pub log_pull: String,
+}
+
+/// controller を起動し、`shutdown` が来るまで REST を提供する。
+///
+/// `bound` は REST とログ投稿 PULL の実 bind 先を 1 度だけ通知する(ポート 0 / `*` を使う
+/// テスト用。production は `None` でよい)。
+pub async fn run_controller(
+    params: ControllerParams,
+    mut shutdown: broadcast::Receiver<()>,
+    bound: Option<oneshot::Sender<BoundEndpoints>>,
+) -> Result<(), ControllerError> {
+    let rest_listen = params.rest_listen.clone();
+    let log_pull_bind = params.log_pull_bind.clone();
+    let controller = Arc::new(Controller::new(params)?);
+
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let (log_thread, log_pull) = spawn_log_post_thread(
+        log_pull_bind,
+        Arc::clone(&controller.logbook),
+        Arc::clone(&controller.log_posts),
+        Arc::clone(&stop_flag),
+    )?;
+
+    let listener = tokio::net::TcpListener::bind(&rest_listen)
+        .await
+        .map_err(|source| ControllerError::Bind {
+            listen: rest_listen.clone(),
+            source,
+        })?;
+    let local = listener
+        .local_addr()
+        .map_err(|source| ControllerError::Bind {
+            listen: rest_listen.clone(),
+            source,
+        })?;
+    info!(%local, "controller REST listening");
+    if let Some(tx) = bound {
+        let _ = tx.send(BoundEndpoints {
+            rest: local,
+            log_pull,
+        });
+    }
+
+    let result = axum::serve(listener, router(Arc::clone(&controller)))
+        .with_graceful_shutdown(async move {
+            let _ = shutdown.recv().await;
+        })
+        .await
+        .map_err(ControllerError::Serve);
+
+    stop_flag.store(true, Ordering::Relaxed);
+    if log_thread.join().is_err() {
+        error!("log post thread panicked");
+    }
+    info!("controller stopped");
+    result
+}
+
+// ---------------------------------------------------------------------
+// テスト(仕様書 — 先に書く)
+// ---------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------
+    // モック Transport(コマンド列を記録する)
+    // -----------------------------------------------------------------
+
+    /// 1 回の外向き操作の記録。`component` はコンポーネント名 or `"ecc"`。
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Call {
+        component: String,
+        action: String,
+    }
+
+    impl Call {
+        fn new(component: &str, action: &str) -> Self {
+            Self {
+                component: component.to_string(),
+                action: action.to_string(),
+            }
+        }
+    }
+
+    /// スクリプト可能なモック。
+    ///
+    /// - `fail`: (コンポーネント名, コマンド名) → その 1 件を `success: false` で断る
+    /// - `metrics`: コンポーネント名 → GetStatus / Arm 応答に載せる metrics
+    struct MockTransport {
+        calls: Vec<Call>,
+        names: BTreeMap<String, String>, // endpoint → name
+        fail: Vec<(String, String)>,
+        metrics: BTreeMap<String, Value>,
+        ecc_fail: Vec<String>,
+        /// EOS 完了を「N 回目の GetStatus 以降」にする(時間経過の模擬)。
+        eos_after_polls: Option<usize>,
+        eos_polls: usize,
+        slept: Duration,
+    }
+
+    impl MockTransport {
+        fn new(params: &ControllerParams) -> Self {
+            let mut names = BTreeMap::new();
+            let mut metrics = BTreeMap::new();
+            for (i, component) in params.components.iter().enumerate() {
+                names.insert(component.endpoint.clone(), component.name.clone());
+                let value = match component.kind {
+                    // 非対称な値(取り違え検出用)。
+                    ComponentKind::Receiver { cobo_id } => json!({
+                        "router_port": 46100 + cobo_id,
+                        "bind_address": format!("0.0.0.0:{}", 46100 + cobo_id),
+                        "frames": 3000 + i,
+                        "overflow_frames": 0,
+                    }),
+                    ComponentKind::Decoder => json!({"eos_in": 0, "malformed": 7}),
+                    ComponentKind::GrawWriter => json!({
+                        "files_open": 1,
+                        "files": [{"path": "run0001/CoBo0_AsAd0_ts_0000.graw", "bytes": 30_108_672u64}],
+                    }),
+                };
+                metrics.insert(component.name.clone(), value);
+            }
+            Self {
+                calls: Vec::new(),
+                names,
+                fail: Vec::new(),
+                metrics,
+                ecc_fail: Vec::new(),
+                eos_after_polls: None,
+                eos_polls: 0,
+                slept: Duration::ZERO,
+            }
+        }
+
+        /// EOS は最初から流れ切っている(正常停止で強制 EOS に落ちない)。
+        fn with_eos_closed(mut self) -> Self {
+            self.eos_after_polls = Some(0);
+            self
+        }
+
+        fn fail_on(mut self, component: &str, command: &str) -> Self {
+            self.fail.push((component.to_string(), command.to_string()));
+            self
+        }
+
+        fn fail_ecc(mut self, action: &str) -> Self {
+            self.ecc_fail.push(action.to_string());
+            self
+        }
+
+        fn name_of(&self, endpoint: &str) -> String {
+            self.names
+                .get(endpoint)
+                .cloned()
+                .unwrap_or_else(|| endpoint.to_string())
+        }
+
+        /// あるコンポーネントが受けた**状態を変えるコマンド**の列(`GetStatus` は
+        /// 観測であって操作ではないので除く)。
+        fn actions(&self, component: &str) -> Vec<String> {
+            self.calls
+                .iter()
+                .filter(|c| c.component == component && c.action != "GetStatus")
+                .map(|c| c.action.clone())
+                .collect()
+        }
+
+        /// GetStatus を除いた呼び出し列(順序照合を読みやすくするため)。
+        fn commands(&self) -> Vec<Call> {
+            self.calls
+                .iter()
+                .filter(|c| c.action != "GetStatus")
+                .cloned()
+                .collect()
+        }
+
+        fn index_of(&self, component: &str, action: &str) -> Option<usize> {
+            self.calls
+                .iter()
+                .position(|c| c.component == component && c.action == action)
+        }
+    }
+
+    /// コマンドの短い名前(記録用)。
+    fn action_name(command: &Command) -> String {
+        match command {
+            Command::Configure(_) => "Configure".to_string(),
+            Command::Arm => "Arm".to_string(),
+            Command::Start { .. } => "Start".to_string(),
+            Command::Stop => "Stop".to_string(),
+            Command::Reset => "Reset".to_string(),
+            Command::GetStatus => "GetStatus".to_string(),
+        }
+    }
+
+    impl Transport for MockTransport {
+        fn command(
+            &mut self,
+            endpoint: &str,
+            command: &Command,
+        ) -> Result<CommandResponse, String> {
+            let name = self.name_of(endpoint);
+            let action = action_name(command);
+            self.calls.push(Call::new(&name, &action));
+
+            let mut metrics = self.metrics.get(&name).cloned().unwrap_or(Value::Null);
+            if matches!(command, Command::GetStatus) {
+                // EOS の進み方を模擬する: 規定回数の GetStatus を過ぎたら「閉じた」形にする。
+                self.eos_polls += 1;
+                let closed = self
+                    .eos_after_polls
+                    .is_some_and(|after| self.eos_polls > after);
+                if closed {
+                    if let Some(map) = metrics.as_object_mut() {
+                        if map.contains_key("eos_in") {
+                            map.insert("eos_in".to_string(), json!(9));
+                        }
+                        if map.contains_key("files_open") {
+                            map.insert("files_open".to_string(), json!(0));
+                        }
+                    }
+                }
+            }
+
+            let refused = self.fail.iter().any(|(c, a)| c == &name && a == &action);
+            let state = ComponentState::Running;
+            let response = if refused {
+                CommandResponse::error(state, format!("mock refuses {action}"))
+            } else {
+                CommandResponse::success(state, format!("{action} ok"))
+            };
+            Ok(response.with_metrics(metrics))
+        }
+
+        fn ecc(&mut self, request: &Value) -> Result<EccReply, String> {
+            let action = request
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("<none>")
+                .to_string();
+            self.calls.push(Call::new("ecc", &action));
+            if self.ecc_fail.contains(&action) {
+                return Ok(EccReply {
+                    ok: false,
+                    state: "Ready".to_string(),
+                    error: format!("mock refuses {action}"),
+                });
+            }
+            Ok(EccReply {
+                ok: true,
+                state: "Running".to_string(),
+                error: String::new(),
+            })
+        }
+
+        fn sleep(&mut self, duration: Duration) {
+            self.slept += duration; // 仮想時間: 実際には眠らない
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // テスト用パラメタ(1 CoBo と 2 CoBo)
+    // -----------------------------------------------------------------
+
+    fn params_with(cobo_ids: &[u32]) -> ControllerParams {
+        let mut components = vec![
+            ComponentEndpoint {
+                name: "graw-writer".to_string(),
+                endpoint: "inproc://gw".to_string(),
+                kind: ComponentKind::GrawWriter,
+            },
+            ComponentEndpoint {
+                name: "decoder".to_string(),
+                endpoint: "inproc://dec".to_string(),
+                kind: ComponentKind::Decoder,
+            },
+        ];
+        let mut cobos = Vec::new();
+        for &id in cobo_ids {
+            components.push(ComponentEndpoint {
+                name: format!("receiver{id}"),
+                endpoint: format!("inproc://rx{id}"),
+                kind: ComponentKind::Receiver { cobo_id: id },
+            });
+            cobos.push(CoboSpec {
+                id,
+                listen: format!("0.0.0.0:{}", 46005 + id),
+                data_sender_id: format!("CoBo[{id}]"),
+            });
+        }
+        ControllerParams {
+            rest_listen: "127.0.0.1:0".to_string(),
+            passphrase: "secret".to_string(),
+            log_pull_bind: "inproc://logpost".to_string(),
+            ui_dir: None,
+            config_id: "mock".to_string(),
+            output_root: PathBuf::from("/tmp/tpcdaq-mock"),
+            geometry_path: PathBuf::from("/tmp/tpcdaq-mock/geometry.dat"),
+            cobos,
+            components,
+            ecc_endpoint: "inproc://ecc".to_string(),
+            router_ip: None,
+            eos_timeout: Duration::from_secs(5),
+            eos_poll: Duration::from_millis(200),
+            command_timeout: Duration::from_secs(1),
+            ecc_timeout: Duration::from_secs(1),
+            status_timeout: Duration::from_secs(1),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // 開始シーケンス(SPEC §1.3)
+    // -----------------------------------------------------------------
+
+    /// 順序の正本: Configure(下流から)→ Arm → Start → ecc 4 段。
+    #[test]
+    fn start_follows_the_spec_order_and_collects_router_ports() {
+        let params = params_with(&[0, 1]);
+        let mut mock = MockTransport::new(&params);
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(57, "gas test", "2026-08-14T10:00:00.000")
+            .unwrap();
+
+        let expected = vec![
+            Call::new("graw-writer", "Configure"),
+            Call::new("decoder", "Configure"),
+            Call::new("receiver0", "Configure"),
+            Call::new("receiver1", "Configure"),
+            Call::new("graw-writer", "Arm"),
+            Call::new("decoder", "Arm"),
+            Call::new("receiver0", "Arm"),
+            Call::new("receiver1", "Arm"),
+            Call::new("graw-writer", "Start"),
+            Call::new("decoder", "Start"),
+            Call::new("receiver0", "Start"),
+            Call::new("receiver1", "Start"),
+            Call::new("ecc", "describe"),
+            Call::new("ecc", "prepare"),
+            Call::new("ecc", "configure"),
+            Call::new("ecc", "start"),
+        ];
+        assert_eq!(mock.commands(), expected);
+
+        // Arm 応答から回収した実ポート(モックは 46100 + cobo_id を返す)。
+        assert_eq!(
+            report.links,
+            vec![
+                RouterLink {
+                    cobo_id: 0,
+                    router_ip: "127.0.0.1".to_string(), // 0.0.0.0 は落として警告(不定アドレス)
+                    router_port: 46100,
+                },
+                RouterLink {
+                    cobo_id: 1,
+                    router_ip: "127.0.0.1".to_string(),
+                    router_port: 46101,
+                },
+            ]
+        );
+    }
+
+    /// DataLinkSet の形(SPEC §8.2 の実機の罠: `CoBo[k]` 形式・大文字 `TCP`)。
+    #[test]
+    fn configure_request_carries_the_real_wire_quirks() {
+        let params = params_with(&[0, 1]);
+        let mut mock = MockTransport::new(&params);
+        let sequencer = Sequencer::new(&params, &mut mock);
+        let links = vec![
+            RouterLink {
+                cobo_id: 0,
+                router_ip: "10.0.0.1".to_string(),
+                router_port: 46005,
+            },
+            RouterLink {
+                cobo_id: 1,
+                router_ip: "10.0.0.1".to_string(),
+                router_port: 46006,
+            },
+        ];
+        assert_eq!(
+            sequencer.configure_request(&links),
+            json!({
+                "action": "configure",
+                "config_id": "mock",
+                "links": [
+                    {"sender": "CoBo[0]", "router_ip": "10.0.0.1", "router_port": 46005, "type": "TCP"},
+                    {"sender": "CoBo[1]", "router_ip": "10.0.0.1", "router_port": 46006, "type": "TCP"},
+                ],
+            })
+        );
+    }
+
+    /// **巻き戻し**: Configure が receiver0 で失敗 → 実行済み(graw-writer, decoder)だけ畳む。
+    /// 失敗した receiver0 と、触っていない receiver1 には Stop/Reset を送らない。
+    #[test]
+    fn configure_failure_rolls_back_only_the_components_already_commanded() {
+        let params = params_with(&[0, 1]);
+        let mut mock = MockTransport::new(&params).fail_on("receiver0", "Configure");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "Configure");
+        assert_eq!(
+            mock.commands(),
+            vec![
+                Call::new("graw-writer", "Configure"),
+                Call::new("decoder", "Configure"),
+                Call::new("receiver0", "Configure"), // ここで失敗
+                // 巻き戻しは上流から(= 開始順の逆)
+                Call::new("decoder", "Stop"),
+                Call::new("decoder", "Reset"),
+                Call::new("graw-writer", "Stop"),
+                Call::new("graw-writer", "Reset"),
+            ]
+        );
+        assert!(
+            mock.actions("receiver1").is_empty(),
+            "触っていない相手を畳まない"
+        );
+    }
+
+    /// **巻き戻し**(発注書の指定シナリオ): Arm が receiver1 で失敗 → 以降を実行せず
+    /// (Start も ecc も出さない)、Configure 済みの 4 台を上流から畳む。
+    #[test]
+    fn arm_failure_stops_every_component_it_already_commanded_and_never_starts() {
+        let params = params_with(&[0, 1]);
+        let mut mock = MockTransport::new(&params).fail_on("receiver1", "Arm");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "Arm");
+        let calls = mock.commands();
+        assert!(
+            !calls.iter().any(|c| c.action == "Start"),
+            "巻き戻し中に Start を出さない: {calls:?}"
+        );
+        assert!(
+            !calls.iter().any(|c| c.component == "ecc"),
+            "ecc へ進まない: {calls:?}"
+        );
+        // 実行済み 4 台すべてが Stop → Reset を受ける(Stop は Armed からは断られるので
+        // Reset が Idle まで戻す = 半端な状態を残さない)。
+        for name in ["receiver1", "receiver0", "decoder", "graw-writer"] {
+            let actions = mock.actions(name);
+            assert!(
+                actions.ends_with(&["Stop".to_string(), "Reset".to_string()]),
+                "{name} の巻き戻しが Stop → Reset で終わっていない: {actions:?}"
+            );
+        }
+    }
+
+    /// ecc 段の失敗も巻き戻す(全コンポーネントが Running のまま残らない)。
+    #[test]
+    fn ecc_failure_rolls_back_every_started_component() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).fail_ecc("start");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "ecc");
+        for name in ["graw-writer", "decoder", "receiver0"] {
+            let actions = mock.actions(name);
+            assert_eq!(
+                actions,
+                vec!["Configure", "Arm", "Start", "Stop", "Reset"],
+                "{name}"
+            );
+        }
+    }
+
+    /// receiver が router_port を返さなければ Arm 段の失敗として巻き戻す
+    /// (DataLinkSet を推測で組まない = silent failure を作らない)。
+    #[test]
+    fn a_receiver_without_a_router_port_fails_the_arm_stage() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params);
+        mock.metrics
+            .insert("receiver0".to_string(), json!({"frames": 0}));
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap_err();
+        assert_eq!(failure.stage, "Arm");
+        assert!(failure.detail.contains("router_port"), "{}", failure.detail);
+    }
+
+    // -----------------------------------------------------------------
+    // 停止シーケンス(SPEC §1.3)
+    // -----------------------------------------------------------------
+
+    /// 正常停止: EOS が自然に流れ切れば receiver へ強制 Stop を撃たない…
+    /// ではなく、**畳む段**の Stop は撃つ。強制 EOS(待たずの Stop)は起きない。
+    #[test]
+    fn normal_stop_waits_for_eos_and_does_not_force_it() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).with_eos_closed();
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert!(report.eos_closed);
+        assert!(!report.forced_eos, "EOS が来ているのに強制してはいけない");
+        assert_eq!(report.reason, "normal");
+        assert!(report.ok);
+        assert_eq!(mock.slept, Duration::ZERO, "待たずに閉じたなら眠らない");
+
+        // ecc stop が最初、コンポーネントは上流から Stop → Reset。
+        assert_eq!(
+            mock.commands(),
+            vec![
+                Call::new("ecc", "stop"),
+                Call::new("receiver0", "Stop"),
+                Call::new("receiver0", "Reset"),
+                Call::new("decoder", "Stop"),
+                Call::new("decoder", "Reset"),
+                Call::new("graw-writer", "Stop"),
+                Call::new("graw-writer", "Reset"),
+            ]
+        );
+    }
+
+    /// **強制 EOS 分岐**: EOS が来ないまま `eos_timeout` を超えたら receiver へ Stop を撃つ。
+    /// 撃った receiver へは畳む段で Stop を撃ち直さない(Reset だけ)。
+    #[test]
+    fn stop_forces_eos_through_the_receivers_after_the_timeout() {
+        let params = params_with(&[0]);
+        // 1 回の EOS 判定 = graw-writer への GetStatus 1 回(files_open != 0 でそこで打ち切る)。
+        // 最初の待ちは「即時判定 1 回 + 200 ms 毎に 25 回(= eos_timeout 5 s)」= 26 回で
+        // 諦める。27 回目(= 強制 EOS 直後の判定)で閉じる形にすると、眠った合計時間は
+        // ちょうど eos_timeout になる。
+        let mut mock = MockTransport::new(&params);
+        mock.eos_after_polls = Some(26);
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert!(report.forced_eos, "5 秒不達なら強制 EOS(SPEC §1.3)");
+        assert!(report.eos_closed, "強制 EOS の後は閉じる");
+        assert_eq!(
+            mock.slept, params.eos_timeout,
+            "諦めるまでちょうど eos_timeout 待つ"
+        );
+
+        let commands = mock.commands();
+        assert_eq!(commands[0], Call::new("ecc", "stop"));
+        assert_eq!(commands[1], Call::new("receiver0", "Stop"), "強制 EOS");
+        // 畳む段では receiver へ Stop を撃ち直さない。
+        assert_eq!(
+            mock.actions("receiver0"),
+            vec!["Stop", "Reset"],
+            "強制 EOS の Stop を二重に撃たない"
+        );
+    }
+
+    /// **中止経路**(SPEC §1.3 v1.6): 待たずに強制 EOS。**run がクローズする前に
+    /// decoder を Reset しない**。run_stop は ok=false / reason="abort:..."。
+    #[test]
+    fn abort_closes_with_eos_before_resetting_the_decoder() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).with_eos_closed();
+        let report =
+            Sequencer::new(&params, &mut mock).stop_run(StopMode::Abort("overflow".to_string()));
+
+        assert!(!report.ok);
+        assert_eq!(report.reason, "abort:overflow");
+        assert!(report.forced_eos, "中止は待たずに強制 EOS(v1.6)");
+
+        // 「EOS が流れ切ったと観測した」時点 = 強制 Stop の直後に来る GetStatus。
+        let forced_stop = mock.index_of("receiver0", "Stop").unwrap();
+        let decoder_reset = mock.index_of("decoder", "Reset").unwrap();
+        let eos_observed = mock
+            .calls
+            .iter()
+            .enumerate()
+            .position(|(i, c)| {
+                i > forced_stop && c.component == "decoder" && c.action == "GetStatus"
+            })
+            .unwrap();
+        assert!(
+            eos_observed < decoder_reset,
+            "run クローズの確認より前に decoder を Reset している: {:?}",
+            mock.calls
+        );
+        // decoder の Stop も EOS 確認の後(= 送出を打ち切らせない)。
+        let decoder_stop = mock.index_of("decoder", "Stop").unwrap();
+        assert!(eos_observed < decoder_stop);
+        // 中止でも ecc stop は最初に試す(不達でも続行する)。
+        assert_eq!(mock.commands()[0], Call::new("ecc", "stop"));
+    }
+
+    /// 中止は ecc が応答しなくても最後まで進む(SPEC §1.3 v1.6「不達でも続行」)。
+    #[test]
+    fn abort_continues_even_when_ecc_stop_fails() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .with_eos_closed()
+            .fail_ecc("stop");
+        let report =
+            Sequencer::new(&params, &mut mock).stop_run(StopMode::Abort("ecc-dead".to_string()));
+
+        assert_eq!(report.reason, "abort:ecc-dead");
+        assert!(
+            !report.notes.is_empty(),
+            "ecc stop の失敗を silent にしない"
+        );
+        for name in ["receiver0", "decoder", "graw-writer"] {
+            assert_eq!(mock.actions(name), vec!["Stop", "Reset"], "{name}");
+        }
+    }
+
+    /// 正常停止のつもりで ecc stop が通らなければ中止扱いに落ちる(ok=false)。
+    #[test]
+    fn a_normal_stop_whose_ecc_stop_fails_is_reported_as_an_abort() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .with_eos_closed()
+            .fail_ecc("stop");
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+        assert!(!report.ok);
+        assert_eq!(report.reason, "abort:ecc-stop-failed");
+    }
+
+    /// EOS が強制しても流れ切らなければ `error:eos-timeout`(silent にしない)。
+    #[test]
+    fn stop_reports_an_error_when_eos_never_propagates() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params); // eos_after_polls = None = 永久に閉じない
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+        assert!(!report.ok);
+        assert_eq!(report.reason, "error:eos-timeout");
+        assert!(!report.eos_closed);
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.contains("EOS did not propagate")));
+    }
+
+    // -----------------------------------------------------------------
+    // run_stop の材料(SPEC §9.2)
+    // -----------------------------------------------------------------
+
+    /// counters / files を GetStatus 実測から充填する。root-sink 由来の 3 項目は
+    /// 取得手段が無いので 0 のまま(015 の Counters は非 Option)。
+    #[test]
+    fn stop_fills_counters_and_files_from_get_status() {
+        let params = params_with(&[0, 1]);
+        let mut mock = MockTransport::new(&params).with_eos_closed();
+        // 非対称な実測値(取り違え検出用)。
+        mock.metrics.insert(
+            "receiver0".to_string(),
+            json!({"frames": 3852, "overflow_frames": 3, "router_port": 46100}),
+        );
+        mock.metrics.insert(
+            "receiver1".to_string(),
+            json!({"frames": 3849, "overflow_frames": 5, "router_port": 46101}),
+        );
+        mock.metrics
+            .insert("decoder".to_string(), json!({"eos_in": 9, "malformed": 4}));
+        mock.metrics.insert(
+            "graw-writer".to_string(),
+            json!({
+                "files_open": 0,
+                "files": [
+                    {"path": "run0057/CoBo0_AsAd0_ts_0000.graw", "bytes": 30_108_672u64},
+                    {"path": "run0057/CoBo0_AsAd1_ts_0000.graw", "bytes": 30_108_100u64},
+                ],
+            }),
+        );
+
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert_eq!(report.counters.frames.get("0"), Some(&3852));
+        assert_eq!(report.counters.frames.get("1"), Some(&3849));
+        assert_eq!(report.counters.overflow_frames, 8); // 3 + 5
+        assert_eq!(report.counters.malformed, 4);
+        // root-sink 由来(REP が無い)は取れないので 0 のまま。
+        assert_eq!(report.counters.events_built, 0);
+        assert_eq!(report.counters.events_incomplete, 0);
+        assert_eq!(report.counters.late_fragments, 0);
+        assert_eq!(
+            report.files,
+            vec![
+                OutputFile {
+                    path: "run0057/CoBo0_AsAd0_ts_0000.graw".to_string(),
+                    bytes: 30_108_672,
+                },
+                OutputFile {
+                    path: "run0057/CoBo0_AsAd1_ts_0000.graw".to_string(),
+                    bytes: 30_108_100,
+                },
+            ]
+        );
+    }
+
+    /// 設定にある CoBo が不達でも `frames` の鍵は出す(欠落を隠さない)。
+    #[test]
+    fn counters_keep_a_key_for_every_configured_cobo() {
+        let params = params_with(&[0, 1]);
+        let statuses = vec![];
+        let counters = counters_from(&params, &statuses);
+        assert_eq!(counters.frames.get("0"), Some(&0));
+        assert_eq!(counters.frames.get("1"), Some(&0));
+    }
+
+    // -----------------------------------------------------------------
+    // router_ip の解決
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn router_ip_prefers_the_config_then_the_actual_bind_address() {
+        let mut params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params);
+
+        // 設定が最優先。
+        params.router_ip = Some("192.168.1.10".to_string());
+        {
+            let sequencer = Sequencer::new(&params, &mut mock);
+            assert_eq!(
+                sequencer.router_ip(0, Some("0.0.0.0:46005")),
+                "192.168.1.10"
+            );
+        }
+
+        // 設定が無ければ実 bind アドレスの host 部。
+        params.router_ip = None;
+        let sequencer = Sequencer::new(&params, &mut mock);
+        assert_eq!(sequencer.router_ip(0, Some("10.0.0.7:46005")), "10.0.0.7");
+        // 不定アドレスは CoBo から見て接続先にならないので落とす。
+        assert_eq!(sequencer.router_ip(0, Some("0.0.0.0:46005")), "127.0.0.1");
+        assert_eq!(sequencer.router_ip(0, None), "127.0.0.1");
+    }
+
+    // -----------------------------------------------------------------
+    // ジオメトリ由来の run_start 材料(SPEC §9.2)
+    // -----------------------------------------------------------------
+
+    /// `expected_fragments` = ジオメトリが申告する (cobo, asad) 在庫。
+    /// sha256 は空でない 64 桁の 16 進(ファイルの実ハッシュ)。
+    #[test]
+    fn geometry_record_reports_the_sha256_and_the_expected_fragments() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/geometry_2cobo_fake.dat");
+        let (record, fragments) = geometry_record(&path).unwrap();
+        assert_eq!(record.path, path.display().to_string());
+        assert_eq!(record.sha256.len(), 64);
+        assert!(record.sha256.chars().all(|c| c.is_ascii_hexdigit()));
+        // 合成 2-CoBo フィクスチャの申告どおり: CoBo 0 は AsAd 1 枚、CoBo 1 は 2 枚
+        // (`grep -v '^#' tests/fixtures/geometry_2cobo_fake.dat | cut -f4,5 | sort -u` の実測)。
+        assert_eq!(fragments, vec![(0, 0), (1, 0), (1, 1)]);
+    }
+
+    /// 同じファイルなら同じハッシュ、1 バイト違えば違うハッシュ(取り違え検出)。
+    #[test]
+    fn geometry_sha256_changes_with_the_file_content() {
+        let dir = std::env::temp_dir().join(format!("tpcdaq-geo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("a.dat");
+        let b = dir.join("b.dat");
+        std::fs::write(&a, "0\t0\t0\t0\tU\t1\t2\n").unwrap();
+        std::fs::write(&b, "0\t0\t0\t1\tU\t1\t2\n").unwrap();
+        let sha_a = geometry_record(&a).unwrap().0.sha256;
+        let sha_b = geometry_record(&b).unwrap().0.sha256;
+        assert_eq!(sha_a, geometry_record(&a).unwrap().0.sha256);
+        assert_ne!(sha_a, sha_b);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------
+    // 操作権(SPEC §8.1)
+    // -----------------------------------------------------------------
+
+    fn test_controller(tag: &str) -> Controller {
+        let mut params = params_with(&[0]);
+        params.output_root =
+            std::env::temp_dir().join(format!("tpcdaq-controller-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&params.output_root);
+        Controller::new(params).unwrap()
+    }
+
+    #[test]
+    fn acquire_always_preempts_and_names_the_previous_holder() {
+        let controller = test_controller("preempt");
+        let (token_a, preempted) = controller.acquire("aogaki");
+        assert_eq!(preempted, None);
+        assert_eq!(controller.authorize(&token_a).unwrap(), "aogaki");
+
+        let (token_b, preempted) = controller.acquire("student");
+        assert_eq!(preempted.as_deref(), Some("aogaki"));
+        // 横取りされた側の token はもう効かない(操作権は常に 1 つ)。
+        assert!(controller.authorize(&token_a).is_err());
+        assert_eq!(controller.authorize(&token_b).unwrap(), "student");
+
+        let _ = std::fs::remove_dir_all(&controller.params.output_root);
+    }
+
+    #[test]
+    fn tokens_are_unique_per_acquire() {
+        let controller = test_controller("token-unique");
+        let mut seen = BTreeSet::new();
+        for _ in 0..100 {
+            assert!(
+                seen.insert(controller.acquire("aogaki").0),
+                "token が重複した"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&controller.params.output_root);
+    }
+
+    #[test]
+    fn authorize_rejects_an_empty_or_unknown_token() {
+        let controller = test_controller("token-reject");
+        assert!(
+            controller.authorize("").is_err(),
+            "誰も握っていなければ拒否"
+        );
+        controller.acquire("aogaki");
+        assert!(controller.authorize("bogus").is_err());
+        let _ = std::fs::remove_dir_all(&controller.params.output_root);
+    }
+
+    // -----------------------------------------------------------------
+    // 設定からのパラメタ解決(SPEC §3.2 の既定表)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn params_from_config_uses_the_spec_default_endpoint_table() {
+        let dir = std::env::temp_dir().join(format!("tpcdaq-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let geometry = dir.join("geometry.dat");
+        std::fs::write(&geometry, "0\t0\t0\t0\tU\t1\t2\n").unwrap();
+        let toml = format!(
+            r#"
+[system]
+experiment = "mini_eTPC"
+output_root = "/data/tpcdaq"
+geometry = "{geometry}"
+
+[[cobo]]
+id = 0
+data_sender_id = "CoBo[0]"
+
+[[cobo]]
+id = 1
+data_sender_id = "CoBo[1]"
+
+[decoder]
+workers = 1
+
+[root_sink]
+snapshot_hz = 1.0
+event_publish_hz = 20.0
+build_timeout_ms = 1000
+
+[monitor]
+ws_listen = "0.0.0.0:9000"
+
+[controller]
+passphrase = "change-me"
+ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+config_id = "default"
+"#,
+            geometry = geometry.display()
+        );
+        let config = crate::config::parse(&toml).unwrap();
+        let params = ControllerParams::from_config(&config);
+
+        assert_eq!(
+            params
+                .components
+                .iter()
+                .map(|c| (c.name.as_str(), c.endpoint.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("graw-writer", "tcp://127.0.0.1:47100"),
+                ("decoder", "tcp://127.0.0.1:47101"),
+                ("receiver0", "tcp://127.0.0.1:47110"),
+                ("receiver1", "tcp://127.0.0.1:47111"),
+            ]
+        );
+        assert_eq!(params.ecc_endpoint, "tcp://127.0.0.1:47200");
+        assert_eq!(params.log_pull_bind, "tcp://*:47005");
+        assert_eq!(params.eos_timeout, Duration::from_secs(5));
+        assert_eq!(params.rest_listen, "0.0.0.0:8080");
+        assert_eq!(params.ui_dir, None);
+        assert_eq!(params.cobos[1].data_sender_id, "CoBo[1]");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// run 開始 TS は graw-writer のファイル名 TS と同じ書式(SPEC §6.4 v1.8)。
+    #[test]
+    fn the_run_start_timestamp_has_the_graw_writer_shape() {
+        let ts = run_start_timestamp();
+        // "YYYY-MM-DDTHH:MM:SS.mmm" = 23 バイト固定。
+        assert_eq!(ts.len(), 23, "{ts}");
+        assert_eq!(&ts[4..5], "-");
+        assert_eq!(&ts[10..11], "T");
+        assert_eq!(&ts[19..20], ".");
+    }
+}
