@@ -657,8 +657,11 @@ async fn a_full_run_drives_every_component_in_spec_order_and_writes_the_logbook(
     );
     assert_eq!(run_stop["counters"]["overflow_frames"], json!(1)); // 0 + 1
     assert_eq!(run_stop["counters"]["malformed"], json!(4));
-    // root-sink は REP を持たない = 取得手段が無いので 0(015 の Counters は非 Option)。
-    assert_eq!(run_stop["counters"]["events_built"], json!(0));
+    // root-sink は REP を持たない = 取得手段が無いので null(025, SPEC v1.10 §9.2 —
+    // `Counters` の Option 化。016 時点は非 Option で 0 埋めだった)。
+    assert_eq!(run_stop["counters"]["events_built"], json!(null));
+    assert_eq!(run_stop["counters"]["events_incomplete"], json!(null));
+    assert_eq!(run_stop["counters"]["late_fragments"], json!(null));
     assert_eq!(
         run_stop["files"],
         json!([
@@ -816,6 +819,89 @@ async fn the_control_token_is_preemptible_and_the_takeover_is_audited() {
     assert_eq!(acquires[0]["params"]["preempted"], Value::Null);
     assert_eq!(acquires[1]["params"]["preempted"], json!("aogaki"));
     assert_eq!(acquires[1]["operator"], json!("student"));
+
+    harness.shutdown();
+}
+
+/// run 番号の手動設定(SPEC v1.10 §8.1、025)。token 不正は 401、0/負/非数は 400、
+/// run 実行中は 409、成功した設定は次の `run/start` でそのまま使われ、成否どちらも監査される。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_next_sets_the_manual_run_number_and_is_gated_by_auth_input_and_phase() {
+    let harness = harness("run-next", &[0], true, None).await;
+    let token = harness.acquire("aogaki");
+
+    // token 不正は 401(状態変更系 = 二層アクセス制御 — SPEC §8.1)。
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/next",
+        json!({"token": "bogus", "next_run": 5}),
+    );
+    assert_eq!(status, 401, "{body}");
+
+    // 0・負・非数(小数・文字列・null)はどれも 400(SPEC §8.1 v1.10「next_run は正整数のみ」)。
+    let bad_values = [
+        json!(0),
+        json!(-1),
+        json!("banana"),
+        json!(3.5),
+        json!(null),
+    ];
+    for bad in &bad_values {
+        let (status, body) = post(
+            harness.rest,
+            "/api/run/next",
+            json!({"token": token, "next_run": bad}),
+        );
+        assert_eq!(status, 400, "next_run={bad} => {status} {body}");
+    }
+
+    // 正常設定(非対称な値 777、既定の連番 1 から始まる採番と衝突しない)。
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/next",
+        json!({"token": token, "next_run": 777}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["next_run"], json!(777));
+
+    // 次の run/start がその番号で走る。
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["run"], json!(777));
+
+    // run 実行中(Idle 以外)は拒否(409 相当)。
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/next",
+        json!({"token": token, "next_run": 900}),
+    );
+    assert_eq!(status, 409, "{body}");
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+
+    // audit: 成功 1 件(next_run=777)+ 失敗が積み上がる(silent にしない — SPEC §8.1)。
+    // 手計算: token 不正 1 + 0/負/非数 5 + run 中 1 = 失敗 7 件。
+    let records = harness.logbook();
+    let run_next_audits: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["type"] == json!("audit") && r["action"] == json!("run/next"))
+        .collect();
+    assert!(
+        run_next_audits
+            .iter()
+            .any(|a| a["ok"] == json!(true) && a["params"]["next_run"] == json!(777)),
+        "{run_next_audits:?}"
+    );
+    let failed = run_next_audits
+        .iter()
+        .filter(|a| a["ok"] == json!(false))
+        .count();
+    assert_eq!(failed, 7, "{run_next_audits:?}");
 
     harness.shutdown();
 }

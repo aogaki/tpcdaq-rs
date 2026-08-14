@@ -135,6 +135,21 @@ fn clean_fixture_has_no_duplicate_or_malformed_warnings() {
     assert!(g.malformed_lines().is_empty());
 }
 
+/// 025: 単一 CoBo・単一 AsAd の縮小合成フィクスチャなら在庫は `(0, 0)` の 1 要素だけ。
+/// `asad_inventory()` は内部データ(`asad_offset`/`asad_count`)から直接組み立てるので、
+/// 呼んでも `unmapped_hit_count`(`lookup` 経由のホットパス可視化カウンタ)は増えない。
+#[test]
+fn asad_inventory_is_a_single_pair_for_the_one_cobo_one_asad_fixture() {
+    let g = geometry::load(FIXTURE).unwrap();
+    assert_eq!(g.unmapped_hit_count(), 0);
+    assert_eq!(g.asad_inventory(), vec![(0, 0)]);
+    assert_eq!(
+        g.unmapped_hit_count(),
+        0,
+        "asad_inventory は lookup を経由しない"
+    );
+}
+
 #[test]
 fn load_missing_file_returns_io_error() {
     let missing = concat!(

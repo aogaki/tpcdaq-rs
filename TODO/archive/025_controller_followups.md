@@ -1,6 +1,29 @@
 # 025 — controller フォローアップ: asad_counts + run 番号手動設定 REST
 
-**Status: OPEN(発注可)**
+**Status: COMPLETED**(2026-08-14 implementer/Sonnet(worktree)→ Fable レビュー PASS →
+main 取り込み)
+
+## 結果
+
+- **実装**: `Geometry::asad_inventory()`(asad_count を直接なぞる — lookup 非経由で
+  unmapped_hit_count を汚さない)/ controller の期待フラグメント導出を TSV パースから
+  置換 / `POST /api/run/next`(401→400→409→成功 の検証順は post_ecc に整合、成否とも
+  audit)/ `Counters` を `Option<u64>` 化(**None = 取得不能 → JSON null**、SPEC v1.10
+  §9.2。golden 更新 + 申し送りコメント)/ `recover_next_seq` をスキップ数返却の内部
+  ヘルパに分割し **スキップ > 1 で warn**(R-P2-13)。7 ファイル +462/-51。
+- **テスト(worktree でエージェント実行 + Fable がゲート再実行で裏取り、2026-08-14、
+  macOS Darwin 25.5.0)**: fmt / clippy(--all-targets、-D warnings)クリーン、
+  `cargo test` **317 passed / 0 failed**(新規 7: state atomic-rename 独立照合 /
+  logbook 2 行破損スキップ数 2 / Counters None→null・Some→数値 golden ×2 /
+  run/next 統合(401/400/409/成功/audit/次 run 反映)/ asad_inventory ×2(1-CoBo・
+  2-CoBo 合成))。ecc 実配線 2/2 green。main 取り込み後の統合ゲートは CURRENT.md 記載。
+- **レビュー(Fable)**: パッチ全読。逸脱 4 件すべて受理 — ①`next_run` を `Value` 受けで
+  手検証(axum extractor の 422 を避けて発注書どおりの一律 400 — 正しい判断)
+  ②検証順序は post_ecc 整合 ③golden を実 controller 出力(null パターン)に変更 +
+  対称テスト 2 本追加 ④`set_next_run` は 016 ベースラインに既存(規律確認テストのみ追加)。
+- **注記**: worktree の分岐が 016/022 コミット前だったため、エージェントは 016 分を
+  `git checkout main --` で同期してから作業(自前変更は所有 7 ファイルのみ —
+  `git diff main` で Fable が確認)。取り込みは所有ファイル限定パッチで実施。
 **仕様**: SPEC **v1.10** §8.1(`POST /api/run/next {token, next_run}` — run 中拒否・
 正整数のみ・audit 記録)/ §9.2(counters nullable — 016 で 0 埋めにした 3 項目を null 化)。
 出所 = archive/016_controller.md レビュー節のフォローアップ 2 件 + 逸脱③の確定処置。

@@ -30,7 +30,7 @@
 //! 確認 → **その後で**各コンポーネントの `Stop` / `Reset`。run クローズ前に decoder を
 //! `Reset` しない(送出打ち切りの seq ギャップが root-sink を fatal 死させるため)。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -869,9 +869,10 @@ impl ComponentStatus {
 /// run_stop の `counters`(SPEC §9.2)を GetStatus 実測から充填する。
 ///
 /// **取れる分だけ入れる**: `events_built` / `events_incomplete` / `late_fragments` は
-/// root-sink だけが持つ値で、root-sink は REP を持たない(SPEC §1.3)。015 の
-/// [`Counters`] は `u64` 非 Option なので、取得できない項目は `0` のまま残る
-/// (「無い項目は null」は §9.2 のスキーマ変更が要るので 016 の範囲外)。
+/// root-sink だけが持つ値で、root-sink は REP を持たない(SPEC §1.3)ので常に `None`。
+/// `overflow_frames` / `malformed` は receiver / decoder の GetStatus から実測できるので
+/// `Some`(025 で `Counters` が `Option<u64>` 化された — SPEC v1.10 §9.2、016 逸脱③の確定処置。
+/// 016 は非 Option で「取得不能」も `0` 埋めしていた)。
 fn counters_from(params: &ControllerParams, statuses: &[ComponentStatus]) -> Counters {
     let mut frames = BTreeMap::new();
     let mut overflow_frames = 0u64;
@@ -896,12 +897,12 @@ fn counters_from(params: &ControllerParams, statuses: &[ComponentStatus]) -> Cou
         frames.entry(cobo.id.to_string()).or_insert(0);
     }
     Counters {
-        events_built: 0,
-        events_incomplete: 0,
-        late_fragments: 0,
+        events_built: None,
+        events_incomplete: None,
+        late_fragments: None,
         frames,
-        overflow_frames,
-        malformed,
+        overflow_frames: Some(overflow_frames),
+        malformed: Some(malformed),
     }
 }
 
@@ -1146,9 +1147,9 @@ pub enum ControllerError {
 ///
 /// `expected_fragments` = ジオメトリが申告している (cobo, asad) 在庫。root-sink の
 /// EventBuilder が使う期待集合と同じ定義(`tools/root_sink/eb_core.hpp`)。
-/// [`crate::geometry::Geometry`] には AsAd 枚数の公開アクセサが無いので、公開 API である
-/// [`crate::geometry::dump_tsv`] の先頭 2 列から拾う(`lookup` で総当たりすると
-/// `unmapped_hit_count` を汚すため使わない)。
+/// [`crate::geometry::Geometry::asad_inventory`](025)を直接呼ぶ — `lookup` を経由しないので
+/// `unmapped_hit_count` を汚さない(旧実装は同じ理由で `dump_tsv` の先頭 2 列をパースして
+/// いたが、025 で専用アクセサに置き換えた)。
 fn geometry_record(path: &Path) -> Result<(GeometryRecord, Vec<(u32, u32)>), String> {
     let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     let mut hasher = Sha256::new();
@@ -1170,18 +1171,10 @@ fn geometry_record(path: &Path) -> Result<(GeometryRecord, Vec<(u32, u32)>), Str
     ))
 }
 
+/// 025: [`crate::geometry::Geometry::asad_inventory`] へ委譲するだけの薄いラッパ
+/// (呼び出し側 [`geometry_record`] のドキュメントを参照)。
 fn expected_fragments(geometry: &Geometry) -> Vec<(u32, u32)> {
-    let dump = crate::geometry::dump_tsv(geometry);
-    let mut set = BTreeSet::new();
-    for line in dump.lines() {
-        let mut columns = line.split('\t');
-        if let (Some(cobo), Some(asad)) = (columns.next(), columns.next()) {
-            if let (Ok(cobo), Ok(asad)) = (cobo.parse::<u32>(), asad.parse::<u32>()) {
-                set.insert((cobo, asad));
-            }
-        }
-    }
-    set.into_iter().collect()
+    geometry.asad_inventory()
 }
 
 /// 正式な run 開始 TS(SPEC §6.4 v1.8)。graw-writer のファイル名 TS と同じ書式にして、
@@ -1212,6 +1205,16 @@ struct RunStartRequest {
     token: String,
     #[serde(default)]
     comment: String,
+}
+
+/// `POST /api/run/next`(SPEC v1.10 §8.1)。`next_run` はまず `Value` のまま受けて
+/// 手でバリデーションする — `u32`/`u64` で直接受けると、型不一致(文字列・小数・負値)を
+/// axum の `Json` extractor が本ハンドラより先に弾いてしまい、発注書どおりの
+/// 「それ以外は 400」を一律に返せない(extractor 側の rejection は 422 になりうる)。
+#[derive(Debug, Deserialize)]
+struct RunNextRequest {
+    token: String,
+    next_run: Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1504,6 +1507,88 @@ fn start_run_blocking(
                 Some(detail.clone()),
             );
             Err(detail)
+        }
+    }
+}
+
+/// run 番号の手動設定(SPEC v1.10 §8.1)。次の `run/start` から有効になる。
+///
+/// 検証順序は既存の `post_ecc`(未知 action → 400)と揃えた: authorize(401)→ 入力の形
+/// (400)→ 相(Phase が Idle か、409)→ 成功。
+async fn post_run_next(
+    State(controller): State<Arc<Controller>>,
+    Json(request): Json<RunNextRequest>,
+) -> Reply {
+    let operator = match controller.authorize(&request.token) {
+        Ok(operator) => operator,
+        Err(why) => return unauthorized(&controller, "run/next", json!({}), why),
+    };
+
+    // 正整数のみ(0・負・非数はすべて 400)。`Value::as_u64` は非負整数の JSON 数値だけ
+    // `Some` を返す(小数・負値・文字列・真偽値・null はすべて `None`)。
+    let next_run = match request
+        .next_run
+        .as_u64()
+        .filter(|&n| n > 0 && n <= u32::MAX as u64)
+    {
+        Some(n) => n as u32,
+        None => {
+            let why = format!(
+                "next_run must be a positive integer, got {}",
+                request.next_run
+            );
+            controller.audit(
+                "run/next",
+                json!({"next_run": request.next_run}),
+                &operator,
+                false,
+                Some(why.clone()),
+            );
+            return err_json(StatusCode::BAD_REQUEST, why);
+        }
+    };
+
+    {
+        let run_state = lock(&controller.run);
+        if run_state.phase != Phase::Idle {
+            let why = format!(
+                "controller is {} — cannot set next_run while a run is active",
+                run_state.phase
+            );
+            drop(run_state);
+            controller.audit(
+                "run/next",
+                json!({"next_run": next_run}),
+                &operator,
+                false,
+                Some(why.clone()),
+            );
+            return err_json(StatusCode::CONFLICT, why);
+        }
+    }
+
+    match crate::state::set_next_run(&controller.state_path, next_run) {
+        Ok(()) => {
+            controller.audit(
+                "run/next",
+                json!({"next_run": next_run}),
+                &operator,
+                true,
+                None,
+            );
+            info!(next_run, "next run number set manually");
+            ok_json(json!({"next_run": next_run}))
+        }
+        Err(e) => {
+            let why = format!("cannot persist next_run: {e}");
+            controller.audit(
+                "run/next",
+                json!({"next_run": next_run}),
+                &operator,
+                false,
+                Some(why.clone()),
+            );
+            err_json(StatusCode::INTERNAL_SERVER_ERROR, why)
         }
     }
 }
@@ -1841,6 +1926,7 @@ pub fn router(controller: Arc<Controller>) -> Router {
         .route("/api/control/release", post(post_release))
         .route("/api/run/start", post(post_run_start))
         .route("/api/run/stop", post(post_run_stop))
+        .route("/api/run/next", post(post_run_next))
         .route("/api/ecc/{action}", post(post_ecc))
         .route("/api/logbook", get(get_logbook))
         .route("/api/logbook/comment", post(post_comment));
@@ -1923,6 +2009,9 @@ pub async fn run_controller(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    // 025: `expected_fragments` の TSV パース削除後は本体(非テストコード)で
+    // `BTreeSet` を使わなくなったので、テスト専用にここで import する。
+    use std::collections::BTreeSet;
 
     // -----------------------------------------------------------------
     // モック Transport(コマンド列を記録する)
@@ -2500,7 +2589,8 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// counters / files を GetStatus 実測から充填する。root-sink 由来の 3 項目は
-    /// 取得手段が無いので 0 のまま(015 の Counters は非 Option)。
+    /// 取得手段が無いので `None`(025 で `Counters` が `Option<u64>` 化された —
+    /// SPEC v1.10 §9.2。016 時点は非 Option で `0` 埋めだった)。
     #[test]
     fn stop_fills_counters_and_files_from_get_status() {
         let params = params_with(&[0, 1]);
@@ -2531,12 +2621,12 @@ mod tests {
 
         assert_eq!(report.counters.frames.get("0"), Some(&3852));
         assert_eq!(report.counters.frames.get("1"), Some(&3849));
-        assert_eq!(report.counters.overflow_frames, 8); // 3 + 5
-        assert_eq!(report.counters.malformed, 4);
-        // root-sink 由来(REP が無い)は取れないので 0 のまま。
-        assert_eq!(report.counters.events_built, 0);
-        assert_eq!(report.counters.events_incomplete, 0);
-        assert_eq!(report.counters.late_fragments, 0);
+        assert_eq!(report.counters.overflow_frames, Some(8)); // 3 + 5
+        assert_eq!(report.counters.malformed, Some(4));
+        // root-sink 由来(REP が無い)は取得不能 = null(0 と混同しない — 025, SPEC v1.10 §9.2)。
+        assert_eq!(report.counters.events_built, None);
+        assert_eq!(report.counters.events_incomplete, None);
+        assert_eq!(report.counters.late_fragments, None);
         assert_eq!(
             report.files,
             vec![

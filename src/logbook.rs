@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use tracing::warn;
 
 // ---------------------------------------------------------------------
 // エラー
@@ -84,14 +85,24 @@ pub struct CoboListen {
 /// content ベースの deserializer が数値キーへの復元に対応しておらず round-trip できない —
 /// 実装時に `cargo test` で確認済み)。`HashMap` ではなく `BTreeMap` にしてあるのは
 /// 決定的な順序でシリアライズするため。
+///
+/// # `Option<u64>`(025、SPEC v1.10 §9.2 — 016 逸脱③の確定処置)
+///
+/// `frames` を除く 5 項目は **`None` = その時点で取得不能で、`0`(=実測ゼロ)とは別の意味**。
+/// 016 では `u64` 非 Option で取得不能を `0` 埋めしていたが、それだと「0 イベント」と
+/// 「取得不能」がログブック上で区別できず記録品質を損なう(016 レビュー逸脱③)。
+/// serde の既定 `Option<T>` 直列化がそのまま「取得不能 → JSON `null`」になるので追加の
+/// 属性は要らない。`controller::counters_from` は root-sink 由来(REP を持たない)
+/// `events_built` / `events_incomplete` / `late_fragments` を常に `None` にし、
+/// GetStatus から実測できる `overflow_frames` / `malformed` は `Some` にする。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Counters {
-    pub events_built: u64,
-    pub events_incomplete: u64,
-    pub late_fragments: u64,
+    pub events_built: Option<u64>,
+    pub events_incomplete: Option<u64>,
+    pub late_fragments: Option<u64>,
     pub frames: BTreeMap<String, u64>,
-    pub overflow_frames: u64,
-    pub malformed: u64,
+    pub overflow_frames: Option<u64>,
+    pub malformed: Option<u64>,
 }
 
 /// `run_stop.files` の 1 要素(SPEC §9.2)。
@@ -245,20 +256,43 @@ fn io_err(path: &Path, source: std::io::Error) -> LogbookError {
     }
 }
 
-/// ファイル末尾から遡って最初に parse できた行の `seq + 1` を返す(SPEC §9.1「壊れた最終行は
-/// 無視」)。ファイル不在・全行破損は `1` から。
-fn recover_next_seq(path: &Path) -> Result<u64, LogbookError> {
+/// [`recover_next_seq_with_skip`] の内部実装。次に振る `seq` と、末尾から遡って
+/// スキップした(parse できなかった)行数を両方返す(025)。
+///
+/// スキップ数 0 = 末尾行がそのまま parse できた(通常終了)。スキップ数 1 = SPEC §9.1 が
+/// 明示的に許容する「末尾 1 行だけ壊れる」経路。2 以上はその前提から外れているので、
+/// 呼び出し元([`recover_next_seq`])が warn する。
+fn recover_next_seq_with_skip(path: &Path) -> Result<(u64, usize), LogbookError> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(1),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((1, 0)),
         Err(e) => return Err(io_err(path, e)),
     };
+    let mut skipped = 0usize;
     for line in content.lines().rev() {
         if let Ok(parsed) = parse_line(line) {
-            return Ok(parsed.seq + 1);
+            return Ok((parsed.seq + 1, skipped));
         }
+        skipped += 1;
     }
-    Ok(1)
+    Ok((1, skipped))
+}
+
+/// ファイル末尾から遡って最初に parse できた行の `seq + 1` を返す(SPEC §9.1「壊れた最終行は
+/// 無視」)。ファイル不在・全行破損は `1` から。**公開挙動は不変**(025 以前と同じ `Result<u64, _>`)
+/// —— 内部でスキップした行数だけ追加で見て、SPEC §9.1 の「末尾 1 行だけ壊れる」前提から
+/// 外れたとき(スキップ > 1)は `warn!` で可視化する(silent failure を作らない — CLAUDE.md)。
+fn recover_next_seq(path: &Path) -> Result<u64, LogbookError> {
+    let (next_seq, skipped) = recover_next_seq_with_skip(path)?;
+    if skipped > 1 {
+        warn!(
+            path = %path.display(),
+            skipped,
+            "logbook recovery skipped more than one trailing corrupt line — \
+             SPEC §9.1 only allows the very last line to be corrupt"
+        );
+    }
+    Ok(next_seq)
 }
 
 // ---------------------------------------------------------------------
@@ -414,8 +448,15 @@ mod tests {
     }
 
     fn sample_run_stop() -> LogbookRecord {
-        // 非対称な値(取り違え検出用): events_built/incomplete/late/overflow/malformed は
-        // すべて相異なる。frames は 2 CoBo 分。
+        // 非対称な値(取り違え検出用): frames は 2 CoBo 分、overflow_frames と malformed は
+        // 相異なる。
+        //
+        // 申し送り(025、SPEC v1.10 §9.2 — 016 逸脱③の確定処置): 016 は
+        // events_built/events_incomplete/late_fragments(root-sink 由来、REP が無く常に
+        // 取得不能)を `0` 埋めしていた。「0 イベント」と「取得不能」が区別できないため、
+        // 025 で `Counters` を `Option<u64>` 化し、この 3 項目は `None`(→ JSON `null`)にした。
+        // GetStatus から実測できる overflow_frames/malformed は `Some` のまま数値で出る —
+        // これが現実の controller(`counters_from`)の出力そのもの。
         let mut frames = BTreeMap::new();
         frames.insert("0".to_string(), 3852);
         frames.insert("1".to_string(), 3849);
@@ -426,12 +467,12 @@ mod tests {
             ok: true,
             reason: "normal".to_string(),
             counters: Counters {
-                events_built: 3852,
-                events_incomplete: 1,
-                late_fragments: 2,
+                events_built: None,
+                events_incomplete: None,
+                late_fragments: None,
                 frames,
-                overflow_frames: 3,
-                malformed: 4,
+                overflow_frames: Some(3),
+                malformed: Some(4),
             },
             files: vec![
                 OutputFile {
@@ -514,6 +555,11 @@ mod tests {
     }
 
     /// `run_stop` は SPEC に文字列例がないので、§9.2 の表のフィールド順に手で組んだオラクル。
+    ///
+    /// 025 で更新(golden 変更点): counters の `events_built`/`events_incomplete`/
+    /// `late_fragments` が `0` から `null` に変わった(`Option<u64>` 化、`sample_run_stop`
+    /// の申し送りコメント参照)。`overflow_frames`/`malformed` は `Some` なので数値のまま
+    /// (`Option<u64>` の既定直列化は `Some(n)` → `n` そのもの、`None` → `null`)。
     #[test]
     fn run_stop_matches_a_hand_assembled_oracle() {
         let line = LogbookLine {
@@ -524,8 +570,54 @@ mod tests {
         let json = serde_json::to_string(&line).unwrap();
         assert_eq!(
             json,
-            r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","counters":{"events_built":3852,"events_incomplete":1,"late_fragments":2,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}"#
+            r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}"#
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Counters の Option<u64> 直列化(025、SPEC v1.10 §9.2)
+    // -----------------------------------------------------------------
+
+    /// `None` は `null`(`0` と混同しない — Counters の doc コメント参照)。5 項目とも
+    /// 相異なる値ではなく全部 `None` にして「取得不能」経路をまとめて機械照合する。
+    #[test]
+    fn counters_none_serializes_as_null_not_zero() {
+        let counters = Counters {
+            events_built: None,
+            events_incomplete: None,
+            late_fragments: None,
+            frames: BTreeMap::new(),
+            overflow_frames: None,
+            malformed: None,
+        };
+        let json = serde_json::to_string(&counters).unwrap();
+        assert_eq!(
+            json,
+            r#"{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{},"overflow_frames":null,"malformed":null}"#
+        );
+        let back: Counters = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, counters);
+    }
+
+    /// `Some` は中身の数値がそのまま出る(`null` にならない)— Option 化が既存の
+    /// 「取れた値」経路を壊していないことの確認。非対称な値(取り違え検出用)。
+    #[test]
+    fn counters_some_serializes_as_the_plain_number_not_null() {
+        let counters = Counters {
+            events_built: Some(11),
+            events_incomplete: Some(22),
+            late_fragments: Some(33),
+            frames: BTreeMap::new(),
+            overflow_frames: Some(44),
+            malformed: Some(55),
+        };
+        let json = serde_json::to_string(&counters).unwrap();
+        assert_eq!(
+            json,
+            r#"{"events_built":11,"events_incomplete":22,"late_fragments":33,"frames":{},"overflow_frames":44,"malformed":55}"#
+        );
+        let back: Counters = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, counters);
     }
 
     /// `audit` も同様に手組みオラクル。
@@ -898,6 +990,38 @@ mod tests {
         let mut writer = LogbookWriter::open(&path).unwrap();
         assert_eq!(writer.next_seq(), 4);
         assert_eq!(writer.append(sample_comment()).unwrap(), 4);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// ②末尾から連続して 2 行破損(SPEC §9.1 が許容する「末尾 1 行だけ」を超えるケース、
+    /// 025 R-P2-13)。復旧そのものは成功する(2 行遡って見つかる)が、内部のスキップ数は 2 —
+    /// `recover_next_seq` はこの経路で `warn!` する(CLAUDE.md「silent failure を作らない」)。
+    /// 公開 API(`LogbookWriter::open`)の挙動は不変であることも合わせて確認する。
+    #[test]
+    fn two_trailing_corrupt_lines_still_recover_but_report_a_skip_of_two() {
+        let path = temp_path("two-trailing-corrupt");
+        {
+            let mut writer = LogbookWriter::open(&path).unwrap();
+            writer.append(sample_comment()).unwrap(); // seq 1
+            writer.append(sample_comment()).unwrap(); // seq 2
+        }
+        // seq 3 相当・seq 4 相当のつもりだった 2 行を、どちらも壊れた形で手で追記する
+        // (二重クラッシュ相当の異常系 — 通常の torn write は末尾 1 行だけのはず)。
+        {
+            use std::io::Write as _;
+            let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(b"not json at all, line one\n").unwrap();
+            f.write_all(b"not json at all, line two\n").unwrap();
+        }
+
+        let (next_seq, skipped) = recover_next_seq_with_skip(&path).unwrap();
+        assert_eq!(next_seq, 3, "seq 2 の行まで遡って見つかった値から復旧する");
+        assert_eq!(skipped, 2, "末尾から 2 行スキップした(warn 経路の機械照合)");
+
+        // 公開挙動は不変: LogbookWriter::open は同じ next_seq で再開する。
+        let writer = LogbookWriter::open(&path).unwrap();
+        assert_eq!(writer.next_seq(), 3);
 
         let _ = std::fs::remove_file(&path);
     }

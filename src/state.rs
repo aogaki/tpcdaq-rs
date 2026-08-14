@@ -205,6 +205,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
+    /// 025: `set_next_run` も `take_next_run` と同じ atomic-rename 規律(一時ファイル →
+    /// rename)であることを、ファイル内容を直接読み直して確認する(`take_next_run` を
+    /// 経由しない — テストの対象を持ち越さない独立照合)。
+    #[test]
+    fn set_next_run_is_atomic_and_the_persisted_value_survives_a_reread() {
+        let path = temp_state_path("set-next-run-atomic");
+        let _ = std::fs::remove_file(&path);
+
+        set_next_run(&path, 4242).unwrap();
+
+        assert!(path.exists());
+        assert!(!tmp_path_for(&path).exists(), "rename 後は .tmp が残らない");
+
+        // 再読込(プロセス再起動を模す): ファイルを直接パースして値が生き残っていること。
+        let text = std::fs::read_to_string(&path).unwrap();
+        let state: StateFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(state.next_run, 4242);
+
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
     // -----------------------------------------------------------------
     // 耐久(SPEC §12-11 の再現)
     // -----------------------------------------------------------------

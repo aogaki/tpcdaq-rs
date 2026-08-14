@@ -82,3 +82,20 @@ fn fixture_has_no_warnings() {
     assert!(g.duplicate_warnings().is_empty());
     assert!(g.malformed_lines().is_empty());
 }
+
+/// 025: controller の期待フラグメント導出(SPEC §9.2 `expected_fragments`)が使う在庫
+/// アクセサ。手計算(`grep -v '^#' .../geometry_2cobo_fake.dat | cut -f4,5 | sort -u`)
+/// と同じ集合 = CoBo 0 は AsAd 1 枚、CoBo 1 は AsAd 2 枚、ソート済み・重複なし。
+/// `lookup` を経由しないので `unmapped_hit_count` は増えない
+/// (016 が dump_tsv パースで回避していた副作用と同じ配慮 — TODO/025)。
+#[test]
+fn asad_inventory_lists_every_cobo_asad_pair_sorted_and_deduplicated() {
+    let g = geometry::load(FIXTURE).unwrap();
+    assert_eq!(g.unmapped_hit_count(), 0);
+    assert_eq!(g.asad_inventory(), vec![(0, 0), (1, 0), (1, 1)]);
+    assert_eq!(
+        g.unmapped_hit_count(),
+        0,
+        "asad_inventory は lookup を経由しない"
+    );
+}

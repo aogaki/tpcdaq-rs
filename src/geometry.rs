@@ -199,6 +199,22 @@ impl Geometry {
         self.asad_offset.len()
     }
 
+    /// `.dat` に現れた `(cobo, asad)` の在庫一覧(`cobo` 昇順 → `asad` 昇順、重複なし)。
+    ///
+    /// 025(controller の期待フラグメント導出、SPEC §9.2 `expected_fragments`)向け。
+    /// `asad_count`(構築時に確定した cobo ごとの AsAd 枚数)を直接なぞるだけで、
+    /// `lookup` は一切呼ばない — ホットパス可視化カウンタ [`Self::unmapped_hit_count`] を
+    /// 汚さないための配慮(016 が `dump_tsv` パース経由でこれを避けていた理由と同じ)。
+    pub fn asad_inventory(&self) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for (cobo, &count) in self.asad_count.iter().enumerate() {
+            for asad in 0..count {
+                out.push((cobo as u32, asad));
+            }
+        }
+        out
+    }
+
     fn index_of(&self, cobo: u32, asad: u32, aget: u32, raw_ch: u32) -> Option<usize> {
         compute_index(
             &self.asad_offset,
