@@ -2527,7 +2527,7 @@ build_timeout_ms = 1000
 
 [controller]
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#;
         let config = crate::config::parse(toml_str).unwrap();

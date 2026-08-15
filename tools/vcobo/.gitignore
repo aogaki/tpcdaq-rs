@@ -1,0 +1,12 @@
+# ビルド生成物 —— コミットしない。
+# slice/ は reference/20190315_patched の .ice から毎回生成する(GET 由来コードを
+# リポに持ち込まないため。tools/ecc_bridge と同じ流儀)。
+slice/
+vcobo_daq
+vcobo_ice_client
+make_graw_fixture
+test_vcobo_core
+*.o
+*.dSYM/
+*.graw
+ci_run/

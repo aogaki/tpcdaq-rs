@@ -28,6 +28,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::config::ConfigIds;
 use std::collections::BTreeMap;
 use tracing::warn;
 
@@ -134,7 +136,12 @@ pub enum LogbookRecord {
     RunStart {
         actor: String,
         run: u32,
+        /// 3 相同値ならその値、非同値なら **configure 相**の id(SPEC §9.2 v1.13)。
         config_id: String,
+        /// 3 相が**非同値のときだけ**出る(同値なら省略 —— null / 省略 ≠ 空値の
+        /// nullable 規律、SPEC §9.2 v1.13)。v1.13 より前の行には無いので `default`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        config_ids: Option<ConfigIds>,
         geometry: Geometry,
         cobos: Vec<CoboListen>,
         operator: String,
@@ -210,10 +217,23 @@ pub mod schema {
     /// 全レコード型に共通の先頭 4 フィールド(SPEC §9.2 表頭)。
     pub const COMMON: &[&str] = &["ts", "seq", "type", "actor"];
 
-    /// `run_start` の `actor` 以降(SPEC §9.2)。
+    /// `run_start` の `actor` 以降(SPEC §9.2)。3 相同値の形 = `config_ids` は出ない。
     pub const RUN_START: &[&str] = &[
         "run",
         "config_id",
+        "geometry",
+        "cobos",
+        "operator",
+        "comment",
+        "expected_fragments",
+    ];
+
+    /// `run_start` の `actor` 以降で、ConfigId の 3 相が**非同値**のとき(v1.13)。
+    /// `config_ids` は `config_id` の直後に入る。
+    pub const RUN_START_WITH_CONFIG_IDS: &[&str] = &[
+        "run",
+        "config_id",
+        "config_ids",
         "geometry",
         "cobos",
         "operator",
@@ -433,6 +453,8 @@ mod tests {
             actor: "controller".to_string(),
             run: 57,
             config_id: "default".to_string(),
+            // 3 相同値(既存設定の形)なので出さない —— ワイヤは v1.13 前と 1 バイトも変わらない。
+            config_ids: None,
             geometry: Geometry {
                 path: "config/geometry_mini_eTPC.dat".to_string(),
                 sha256: "ab12".to_string(),
@@ -572,6 +594,77 @@ mod tests {
             json,
             r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}"#
         );
+    }
+
+    // -----------------------------------------------------------------
+    // config_ids(SPEC §9.2 v1.13、TODO/042)
+    // -----------------------------------------------------------------
+
+    /// 3 相非同値の `run_start`。`config_id` は **configure 相**、`config_ids` に 3 相全部。
+    /// 3 値は非対称(相の取り違え検出用)。
+    fn sample_run_start_per_phase() -> LogbookRecord {
+        LogbookRecord::RunStart {
+            actor: "controller".to_string(),
+            run: 57,
+            config_id: "pulser".to_string(),
+            config_ids: Some(ConfigIds {
+                describe: "zCobo-ZC706".to_string(),
+                prepare: "prep-xcfg".to_string(),
+                configure: "pulser".to_string(),
+            }),
+            geometry: Geometry {
+                path: "config/geometry_mini_eTPC.dat".to_string(),
+                sha256: "ab12".to_string(),
+            },
+            cobos: vec![CoboListen {
+                id: 0,
+                listen: "0.0.0.0:46005".to_string(),
+            }],
+            operator: "aogaki".to_string(),
+            comment: "gas test".to_string(),
+            expected_fragments: vec![(0, 0)],
+        }
+    }
+
+    /// 3 相同値なら `config_ids` は**出ない**(省略 ≠ 空値 —— nullable 規律、SPEC §9.2)。
+    /// `run_start_matches_the_spec_example_verbatim` の golden が無変更で通ることと合わせて、
+    /// v1.13 が既存のワイヤ表現を 1 バイトも動かしていないことの証明。
+    #[test]
+    fn run_start_omits_config_ids_when_the_three_phases_agree() {
+        let line = LogbookLine {
+            ts: "2026-08-12T15:04:05.123+03:00".to_string(),
+            seq: 1042,
+            record: sample_run_start(),
+        };
+        let json = serde_json::to_string(&line).unwrap();
+        assert!(!json.contains("config_ids"), "{json}");
+    }
+
+    /// 非同値なら `config_id` の**直後**に `config_ids` が入る(SPEC §9.2 の表順)。
+    #[test]
+    fn run_start_carries_config_ids_when_the_phases_differ() {
+        let line = LogbookLine {
+            ts: "2026-08-12T15:04:05.123+03:00".to_string(),
+            seq: 1042,
+            record: sample_run_start_per_phase(),
+        };
+        let json = serde_json::to_string(&line).unwrap();
+        assert_eq!(
+            json,
+            r#"{"ts":"2026-08-12T15:04:05.123+03:00","seq":1042,"type":"run_start","actor":"controller","run":57,"config_id":"pulser","config_ids":{"describe":"zCobo-ZC706","prepare":"prep-xcfg","configure":"pulser"},"geometry":{"path":"config/geometry_mini_eTPC.dat","sha256":"ab12"},"cobos":[{"id":0,"listen":"0.0.0.0:46005"}],"operator":"aogaki","comment":"gas test","expected_fragments":[[0,0]]}"#
+        );
+        assert_eq!(
+            top_level_keys(&json),
+            expected_keys(schema::RUN_START_WITH_CONFIG_IDS)
+        );
+    }
+
+    /// v1.13 より前に書かれた行(`config_ids` 無し)もそのまま読める(前方互換)。
+    #[test]
+    fn run_start_without_config_ids_still_parses() {
+        let line = r#"{"ts":"2026-08-12T15:04:05.123+03:00","seq":1042,"type":"run_start","actor":"controller","run":57,"config_id":"default","geometry":{"path":"config/geometry_mini_eTPC.dat","sha256":"ab12"},"cobos":[{"id":0,"listen":"0.0.0.0:46005"}],"operator":"aogaki","comment":"gas test","expected_fragments":[[0,0]]}"#;
+        let parsed: LogbookLine = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed.record, sample_run_start());
     }
 
     // -----------------------------------------------------------------

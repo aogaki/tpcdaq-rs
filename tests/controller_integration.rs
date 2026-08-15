@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 use tpcdaq::command::{Command, CommandResponse, ComponentState};
+use tpcdaq::config::ConfigIds;
 use tpcdaq::controller::{
     run_controller, BoundEndpoints, CoboSpec, ComponentEndpoint, ComponentKind, ControllerParams,
 };
@@ -315,11 +316,31 @@ fn temp_root(tag: &str) -> PathBuf {
 
 /// フェイク一式 + controller を起動する。`eos_closed` が false なら
 /// 「EOS がまだ流れていない」形の metrics を返す(強制 EOS 分岐の再現用)。
+///
+/// ConfigId は 3 相同値(`"integration"`)—— 相ごとに変える版は [`harness_with_config_ids`]。
 async fn harness(
     tag: &str,
     cobo_ids: &[u32],
     eos_closed: bool,
     ui_dir: Option<PathBuf>,
+) -> Harness {
+    harness_with_config_ids(
+        tag,
+        cobo_ids,
+        eos_closed,
+        ui_dir,
+        ConfigIds::same("integration"),
+    )
+    .await
+}
+
+/// [`harness`] の ConfigId 指定版(042: describe / prepare / configure が別名の実運用)。
+async fn harness_with_config_ids(
+    tag: &str,
+    cobo_ids: &[u32],
+    eos_closed: bool,
+    ui_dir: Option<PathBuf>,
+    config_ids: ConfigIds,
 ) -> Harness {
     let (shutdown, _) = broadcast::channel(1);
     let output_root = temp_root(tag);
@@ -401,7 +422,7 @@ async fn harness(
         passphrase: "change-me".to_string(),
         log_pull_bind: "tcp://127.0.0.1:*".to_string(),
         ui_dir,
-        config_id: "integration".to_string(),
+        config_ids,
         output_root: output_root.clone(),
         geometry_path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/geometry_2cobo_fake.dat"),
@@ -1135,6 +1156,126 @@ async fn the_ecc_endpoints_drive_the_bridge_step_by_step() {
     assert_eq!(status, 400);
     let (status, _) = post(harness.rest, "/api/ecc/start", json!({"token": "bogus"}));
     assert_eq!(status, 401);
+
+    harness.shutdown();
+}
+
+// ---------------------------------------------------------------------
+// ConfigId の 3 相化(SPEC §3.1 / §8.2 / §9.2 v1.13、TODO/042)
+// ---------------------------------------------------------------------
+
+/// 3 相に**非対称な** id を持つ設定(実運用例: describe だけハードウェア記述、
+/// configure は測定条件 —— TODO/038 レーン A の実測)。相の取り違えを検出する。
+fn per_phase_ids() -> ConfigIds {
+    ConfigIds {
+        describe: "zCobo-ZC706".to_string(),
+        prepare: "prep-xcfg".to_string(),
+        configure: "pulser".to_string(),
+    }
+}
+
+/// run シーケンスは describe / prepare / configure に**その相の id** を載せ、
+/// logbook `run_start` は `config_id` = configure 相 + `config_ids` に 3 相全部を残す。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn per_phase_config_ids_ride_the_run_sequence_and_the_run_start_record() {
+    let harness = harness_with_config_ids("cfgids-run", &[0], true, None, per_phase_ids()).await;
+    let token = harness.acquire("aogaki");
+
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "3-phase ids"}),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    // --- ecc へ渡った id(SPEC §8.2 v1.13)---
+    assert_eq!(
+        harness.ecc.request("describe").unwrap()["config_id"],
+        json!("zCobo-ZC706")
+    );
+    assert_eq!(
+        harness.ecc.request("prepare").unwrap()["config_id"],
+        json!("prep-xcfg")
+    );
+    assert_eq!(
+        harness.ecc.request("configure").unwrap()["config_id"],
+        json!("pulser")
+    );
+    // id を使わないアクションには載せない。
+    assert_eq!(
+        harness.ecc.request("start").unwrap().get("config_id"),
+        None,
+        "start は config_id を取らない"
+    );
+
+    // --- logbook run_start(SPEC §9.2 v1.13)---
+    let records = harness.logbook();
+    let run_start = records
+        .iter()
+        .find(|r| r["type"] == json!("run_start"))
+        .expect("run_start record");
+    assert_eq!(run_start["config_id"], json!("pulser"));
+    assert_eq!(
+        run_start["config_ids"],
+        json!({"describe": "zCobo-ZC706", "prepare": "prep-xcfg", "configure": "pulser"})
+    );
+
+    harness.shutdown();
+}
+
+/// 段階操作(`/api/ecc/<action>`)も**踏んだ相の id** を渡す。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_ecc_endpoints_send_the_id_of_the_phase_being_stepped() {
+    let harness = harness_with_config_ids("cfgids-steps", &[0], true, None, per_phase_ids()).await;
+    let token = harness.acquire("aogaki");
+
+    for action in ["describe", "prepare", "configure", "start"] {
+        let (status, body) = post(
+            harness.rest,
+            &format!("/api/ecc/{action}"),
+            json!({"token": token}),
+        );
+        assert_eq!(status, 200, "{action}: {body}");
+    }
+
+    assert_eq!(
+        harness.ecc.request("describe").unwrap()["config_id"],
+        json!("zCobo-ZC706")
+    );
+    assert_eq!(
+        harness.ecc.request("prepare").unwrap()["config_id"],
+        json!("prep-xcfg")
+    );
+    assert_eq!(
+        harness.ecc.request("configure").unwrap()["config_id"],
+        json!("pulser")
+    );
+    assert_eq!(harness.ecc.request("start").unwrap().get("config_id"), None);
+
+    harness.shutdown();
+}
+
+/// 3 相同値(既存の文字列形設定)なら `config_ids` は**出ない**
+/// (省略 ≠ 空値 —— nullable 規律、SPEC §9.2)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_single_config_id_leaves_no_config_ids_in_the_run_start_record() {
+    let harness = harness("cfgids-same", &[0], true, None).await;
+    let token = harness.acquire("aogaki");
+
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let records = harness.logbook();
+    let run_start = records
+        .iter()
+        .find(|r| r["type"] == json!("run_start"))
+        .expect("run_start record");
+    assert_eq!(run_start["config_id"], json!("integration"));
+    assert_eq!(run_start.get("config_ids"), None, "{run_start}");
 
     harness.shutdown();
 }

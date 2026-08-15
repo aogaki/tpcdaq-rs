@@ -178,8 +178,9 @@ class EccClient {
 // ---------------------------------------------------------------------------
 
 struct Options {
-  std::string bind = "tcp://*:47200";                      // SPEC §3.2
-  std::string ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002";  // SPEC §3.1 の既定
+  std::string bind = "tcp://*:47200";                       // SPEC §3.2
+  // servant identity は "Ecc"(SPEC §3.1 v1.13 の訂正 — 実 ECC で実測、TODO/038)。
+  std::string ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002";  // SPEC §3.1 の既定
 };
 
 void usage() {
@@ -188,7 +189,7 @@ void usage() {
       "\n"
       "  --bind ENDPOINT   ZMQ REP bind (default tcp://*:47200)\n"
       "  --ecc-proxy PROXY Ice proxy of the ECC state machine\n"
-      "                    (default \"GetEcc:tcp -h 127.0.0.1 -p 46002\")\n"
+      "                    (default \"Ecc:tcp -h 127.0.0.1 -p 46002\")\n"
       "\n"
       "Prints one line \"BIND <endpoint>\" on stdout once the REP socket is bound\n"
       "(so a test can use an ephemeral port), then serves JSON requests (SPEC 8.2)\n"

@@ -28,6 +28,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 use tpcdaq::command::{Command, CommandResponse, ComponentState};
+use tpcdaq::config::ConfigIds;
 use tpcdaq::controller::{
     run_controller, BoundEndpoints, CoboSpec, ComponentEndpoint, ComponentKind, ControllerParams,
 };
@@ -230,7 +231,7 @@ async fn a_run_start_drives_the_real_bridge_through_to_ecc_start() {
         passphrase: "change-me".to_string(),
         log_pull_bind: "tcp://127.0.0.1:*".to_string(),
         ui_dir: None,
-        config_id: "controller-ecc".to_string(),
+        config_ids: ConfigIds::same("controller-ecc"),
         output_root: output_root.clone(),
         geometry_path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/geometry_mini_reduced.dat"),
@@ -388,7 +389,7 @@ async fn the_step_by_step_ecc_endpoints_reach_the_real_bridge() {
         passphrase: "change-me".to_string(),
         log_pull_bind: "tcp://127.0.0.1:*".to_string(),
         ui_dir: None,
-        config_id: "controller-ecc-steps".to_string(),
+        config_ids: ConfigIds::same("controller-ecc-steps"),
         output_root: output_root.clone(),
         geometry_path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/geometry_mini_reduced.dat"),

@@ -66,7 +66,7 @@ use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 
 use crate::command::{Command, CommandResponse, ComponentState, RunConfig};
-use crate::config::Config;
+use crate::config::{Config, ConfigIds};
 use crate::geometry::Geometry;
 use crate::logbook::{
     CoboListen, Counters, Geometry as GeometryRecord, LogbookRecord, LogbookWriter, OutputFile,
@@ -161,7 +161,9 @@ pub struct ControllerParams {
     pub passphrase: String,
     pub log_pull_bind: String,
     pub ui_dir: Option<PathBuf>,
-    pub config_id: String,
+    /// ECC の ConfigId(describe / prepare / configure の 3 相、SPEC §8.2 v1.13)。
+    /// 設定が文字列形なら 3 相同値が入っている。
+    pub config_ids: ConfigIds,
     pub output_root: PathBuf,
     pub geometry_path: PathBuf,
     pub cobos: Vec<CoboSpec>,
@@ -209,7 +211,7 @@ impl ControllerParams {
             passphrase: config.controller.passphrase.clone(),
             log_pull_bind: config.controller.log_pull_bind.clone(),
             ui_dir: config.controller.ui_dir.clone(),
-            config_id: config.controller.config_id.clone(),
+            config_ids: config.controller.config_id.clone(),
             output_root: config.system.output_root.clone(),
             geometry_path: config.system.geometry.clone(),
             cobos: config
@@ -555,9 +557,10 @@ impl<'a> Sequencer<'a> {
         }
 
         // 4. ecc-bridge 経由(listen-before-start: ここに来た時点で全 receiver は listen 済み)
+        // 相ごとに別の ConfigId を使う実運用があるので、**その相の id** を渡す(SPEC §8.2 v1.13)。
         let requests = [
-            json!({"action": "describe", "config_id": params.config_id}),
-            json!({"action": "prepare", "config_id": params.config_id}),
+            json!({"action": "describe", "config_id": params.config_ids.describe}),
+            json!({"action": "prepare", "config_id": params.config_ids.prepare}),
             self.configure_request(&links),
             json!({"action": "start"}),
         ];
@@ -790,7 +793,7 @@ impl<'a> Sequencer<'a> {
             .collect();
         json!({
             "action": "configure",
-            "config_id": self.params.config_id,
+            "config_id": self.params.config_ids.configure,
             "links": items,
         })
     }
@@ -1405,6 +1408,19 @@ fn expected_fragments(geometry: &Geometry) -> Vec<(u32, u32)> {
     geometry.asad_inventory()
 }
 
+/// logbook `run_start` の `(config_id, config_ids)`(SPEC §9.2 v1.13)。
+///
+/// - 3 相同値: `config_id` = その値、`config_ids` は**出さない**
+///   (省略 ≠ 空値 —— 025 の counters と同じ nullable 規律)。
+/// - 非同値: `config_id` = **configure 相**の id(run のデータ取得条件を代表する相)、
+///   `config_ids` に 3 相全部。
+fn run_start_config_fields(ids: &ConfigIds) -> (String, Option<ConfigIds>) {
+    match ids.same_value() {
+        Some(id) => (id.to_string(), None),
+        None => (ids.configure.clone(), Some(ids.clone())),
+    }
+}
+
 /// 正式な run 開始 TS(SPEC §6.4 v1.8)。graw-writer のファイル名 TS と同じ書式にして、
 /// 将来そのまま採用できるようにしておく(`src/graw_writer.rs` の `local_timestamp`)。
 fn run_start_timestamp() -> String {
@@ -1703,12 +1719,14 @@ fn start_run_blocking(
     match result {
         Ok(report) => {
             let (geometry, expected_fragments) = geometry;
+            let (config_id, config_ids) = run_start_config_fields(&controller.params.config_ids);
             // ここから先(run_start をログブックへ書いた後)は **絶対に採番を巻き戻さない** ——
             // 記録に残った run 番号を次の run が撃ち直すことになる(034 = 論点 C)。
             controller.append(LogbookRecord::RunStart {
                 actor: ACTOR.to_string(),
                 run,
-                config_id: controller.params.config_id.clone(),
+                config_id,
+                config_ids,
                 geometry,
                 cobos: controller.params.cobo_listens(),
                 operator: operator.to_string(),
@@ -2001,10 +2019,12 @@ async fn post_ecc(
                     return err_json(StatusCode::CONFLICT, why);
                 }
             },
-            "describe" | "prepare" => {
-                json!({"action": action, "config_id": controller.params.config_id})
-            }
-            _ => json!({"action": action}),
+            // describe / prepare は**その相の** ConfigId を載せる(SPEC §8.2 v1.13)。
+            // start / stop / breakup / reset は id を使わない = 載せない。
+            other => match controller.params.config_ids.for_action(other) {
+                Some(config_id) => json!({"action": action, "config_id": config_id}),
+                None => json!({"action": action}),
+            },
         };
         match transport.ecc(&request_body) {
             Ok(reply) => {
@@ -2300,6 +2320,8 @@ mod tests {
         /// コンポーネント名 → 残り「Arm を断る回数」(034: bind 解放待ちの模擬)。
         refuse_arm: BTreeMap<String, u32>,
         metrics: BTreeMap<String, Value>,
+        /// ECC が受けた**リクエスト本文**そのまま(action 名だけでは `config_id` を見られない)。
+        ecc_requests: Vec<Value>,
         ecc_fail: Vec<String>,
         /// この ECC が今いる状態(036)。[`ecc_transition`] で**実 ECC と同じように**動く。
         ecc_state: String,
@@ -2341,6 +2363,7 @@ mod tests {
                 fail: Vec::new(),
                 refuse_arm: BTreeMap::new(),
                 metrics,
+                ecc_requests: Vec::new(),
                 ecc_fail: Vec::new(),
                 ecc_state: "Idle".to_string(),
                 ecc_ignores: Vec::new(),
@@ -2415,6 +2438,13 @@ mod tests {
             self.calls
                 .iter()
                 .position(|c| c.component == component && c.action == action)
+        }
+
+        /// ECC が受けたリクエストのうち、その action の 1 通目(042: 相ごとの `config_id`)。
+        fn ecc_request(&self, action: &str) -> Option<&Value> {
+            self.ecc_requests
+                .iter()
+                .find(|r| r.get("action").and_then(Value::as_str) == Some(action))
         }
     }
 
@@ -2511,6 +2541,7 @@ mod tests {
                 .unwrap_or("<none>")
                 .to_string();
             self.calls.push(Call::new("ecc", &action));
+            self.ecc_requests.push(request.clone());
             if self.ecc_fail.contains(&action) {
                 return Ok(EccReply {
                     ok: false,
@@ -2571,7 +2602,7 @@ mod tests {
             passphrase: "secret".to_string(),
             log_pull_bind: "inproc://logpost".to_string(),
             ui_dir: None,
-            config_id: "mock".to_string(),
+            config_ids: ConfigIds::same("mock"),
             output_root: PathBuf::from("/tmp/tpcdaq-mock"),
             geometry_path: PathBuf::from("/tmp/tpcdaq-mock/geometry.dat"),
             cobos,
@@ -2918,6 +2949,81 @@ mod tests {
                 .filter(|a| *a == "Arm")
                 .count(),
             ARM_MAX_ATTEMPTS as usize
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // ConfigId の 3 相化(SPEC §3.1 / §8.2 / §9.2 v1.13、TODO/042)
+    // -----------------------------------------------------------------
+
+    /// 3 相に**非対称な** id を持つパラメタ(相の取り違え検出用)。
+    fn per_phase_ids() -> ConfigIds {
+        ConfigIds {
+            describe: "zCobo-ZC706".to_string(),
+            prepare: "prep-xcfg".to_string(),
+            configure: "pulser".to_string(),
+        }
+    }
+
+    /// run シーケンスの describe / prepare / configure は**それぞれ自分の相の id** を運ぶ。
+    /// id を使わない `start` には `config_id` を載せない(SPEC §8.2)。
+    #[test]
+    fn the_run_sequence_sends_the_id_of_each_phase() {
+        let params = ControllerParams {
+            config_ids: per_phase_ids(),
+            ..params_with(&[0])
+        };
+        let mut mock = MockTransport::new(&params);
+        Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-08-14T10:00:00.000")
+            .unwrap();
+
+        assert_eq!(
+            mock.ecc_request("describe").unwrap()["config_id"],
+            json!("zCobo-ZC706")
+        );
+        assert_eq!(
+            mock.ecc_request("prepare").unwrap()["config_id"],
+            json!("prep-xcfg")
+        );
+        assert_eq!(
+            mock.ecc_request("configure").unwrap()["config_id"],
+            json!("pulser")
+        );
+        assert_eq!(mock.ecc_request("start").unwrap().get("config_id"), None);
+    }
+
+    /// DataLinkSet(`configure`)に載るのは **configure 相**の id。
+    #[test]
+    fn configure_request_uses_the_configure_phase_id() {
+        let params = ControllerParams {
+            config_ids: per_phase_ids(),
+            ..params_with(&[0])
+        };
+        let mut mock = MockTransport::new(&params);
+        let sequencer = Sequencer::new(&params, &mut mock);
+        let links = vec![RouterLink {
+            cobo_id: 0,
+            router_ip: "10.0.0.1".to_string(),
+            router_port: 46005,
+        }];
+        assert_eq!(
+            sequencer.configure_request(&links)["config_id"],
+            json!("pulser")
+        );
+    }
+
+    /// logbook `run_start`(SPEC §9.2 v1.13): 同値なら `config_id` はその値・`config_ids` は
+    /// **出さない**。非同値なら `config_id` は configure 相・`config_ids` に 3 相全部。
+    #[test]
+    fn run_start_config_fields_follow_the_nullable_rule() {
+        assert_eq!(
+            run_start_config_fields(&ConfigIds::same("default")),
+            ("default".to_string(), None)
+        );
+        assert_eq!(
+            run_start_config_fields(&per_phase_ids()),
+            ("pulser".to_string(), Some(per_phase_ids()))
         );
     }
 
@@ -3425,7 +3531,7 @@ ws_listen = "0.0.0.0:9000"
 
 [controller]
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()

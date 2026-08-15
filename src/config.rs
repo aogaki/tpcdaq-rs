@@ -4,7 +4,7 @@
 //! 検証し、[`Config`] を返す。パース・検証のどちらが失敗しても `Err` を返す
 //! (半端な既定値のまま走らない — SPEC §3.2)。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -267,6 +267,60 @@ pub struct MonitorConfig {
     pub live_queue: usize,
 }
 
+/// ECC の ConfigId(SPEC §3.1 / §8.2 v1.13)。
+///
+/// 実 ECC の ConfigId は **describe / prepare / configure の 3 組**で、実運用は相ごとに
+/// 別名を使う(実例: `describe = "zCobo-ZC706"` / `configure = "pulser"` —— TODO/038 の実測)。
+/// 設定の `config_id = "x"`(文字列)は **3 相とも `x`** の略記で、ここへ展開される
+/// ([`ConfigIds::same`])。ecc-bridge の JSON は元よりアクション毎 `config_id` なので、
+/// controller が [`ConfigIds::for_action`] でその相の id を選んで渡すだけでよい。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigIds {
+    pub describe: String,
+    pub prepare: String,
+    pub configure: String,
+}
+
+impl ConfigIds {
+    /// 3 相同値(= 設定の文字列形)。
+    pub fn same(id: impl Into<String>) -> Self {
+        let id = id.into();
+        Self {
+            describe: id.clone(),
+            prepare: id.clone(),
+            configure: id,
+        }
+    }
+
+    /// 3 相が同値ならその値、非同値なら `None`。
+    ///
+    /// logbook `run_start` が `config_ids` を出すかどうかの分岐条件そのもの(SPEC §9.2 v1.13)。
+    pub fn same_value(&self) -> Option<&str> {
+        (self.describe == self.prepare && self.prepare == self.configure)
+            .then_some(self.describe.as_str())
+    }
+
+    /// ecc-bridge のアクション名 → その相の id。`config_id` を使わないアクション
+    /// (`start` / `stop` / `breakup` / `reset` / `status`)は `None`(SPEC §8.2)。
+    pub fn for_action(&self, action: &str) -> Option<&str> {
+        match action {
+            "describe" => Some(&self.describe),
+            "prepare" => Some(&self.prepare),
+            "configure" => Some(&self.configure),
+            _ => None,
+        }
+    }
+}
+
+/// 文字列との比較は **3 相すべてがその文字列**のときだけ真(略記の設定と等しい、の意)。
+/// 単一 id 時代の呼び出し・テストがそのまま読める。
+impl PartialEq<&str> for ConfigIds {
+    fn eq(&self, other: &&str) -> bool {
+        self.same_value() == Some(*other)
+    }
+}
+
 /// `rest_listen` を省略すると `DEFAULT_CONTROLLER_REST_LISTEN`(SPEC §3.2)が既定として入る。
 ///
 /// 016 で追記したキー(SPEC §8.1 の controller)はすべて省略可。コンポーネントのコマンド
@@ -278,7 +332,8 @@ pub struct ControllerConfig {
     pub passphrase: String,
     /// ecc-bridge が使う **Ice** プロキシ文字列(controller は使わず ecc-bridge へ渡す設定)。
     pub ecc_proxy: String,
-    pub config_id: String,
+    /// ECC の ConfigId(3 相)。TOML では文字列(3 相同値の略記)かテーブルで書ける。
+    pub config_id: ConfigIds,
     /// ログ投稿 PULL の bind(SPEC §2.3 LogPost / §3.2)。
     pub log_pull_bind: String,
     /// EOS 伝播待ちのタイムアウト(秒、SPEC §1.3)。
@@ -383,7 +438,7 @@ struct RawController {
     rest_listen: Option<String>,
     passphrase: String,
     ecc_proxy: String,
-    config_id: String,
+    config_id: RawConfigId,
     // ---- 016 で追記(すべて省略可)----
     #[serde(default)]
     log_pull_bind: Option<String>,
@@ -401,6 +456,31 @@ struct RawController {
     ecc_command: Option<String>,
     #[serde(default)]
     router_ip: Option<String>,
+}
+
+/// `[controller] config_id` の 2 通りの書き方(SPEC §3.1 v1.13)。
+///
+/// ```toml
+/// config_id = "default"                                    # 3 相同値の略記
+/// config_id = { describe = "zCobo-ZC706", prepare = "pulser", configure = "pulser" }
+/// ```
+///
+/// テーブル形で相が欠けていれば `Err`(untagged なのでメッセージは
+/// 「どの variant にも合わない」止まりだが、**黙って空 id にはしない**)。
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawConfigId {
+    Same(String),
+    PerPhase(ConfigIds),
+}
+
+impl From<RawConfigId> for ConfigIds {
+    fn from(raw: RawConfigId) -> Self {
+        match raw {
+            RawConfigId::Same(id) => ConfigIds::same(id),
+            RawConfigId::PerPhase(ids) => ids,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -517,7 +597,7 @@ fn resolve(raw: RawConfig) -> Config {
             .unwrap_or_else(|| DEFAULT_CONTROLLER_REST_LISTEN.to_string()),
         passphrase: raw.controller.passphrase,
         ecc_proxy: raw.controller.ecc_proxy,
-        config_id: raw.controller.config_id,
+        config_id: raw.controller.config_id.into(),
         log_pull_bind: raw
             .controller
             .log_pull_bind
@@ -721,7 +801,7 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()
@@ -755,7 +835,7 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()
@@ -802,7 +882,7 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()
@@ -829,10 +909,7 @@ config_id = "default"
 
         assert_eq!(config.controller.rest_listen, "0.0.0.0:8080");
         assert_eq!(config.controller.passphrase, "change-me");
-        assert_eq!(
-            config.controller.ecc_proxy,
-            "GetEcc:tcp -h 127.0.0.1 -p 46002"
-        );
+        assert_eq!(config.controller.ecc_proxy, "Ecc:tcp -h 127.0.0.1 -p 46002");
         assert_eq!(config.controller.config_id, "default");
 
         let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
@@ -874,7 +951,7 @@ ws_listen = "0.0.0.0:9001"
 [controller]
 rest_listen = "0.0.0.0:8090"
 passphrase = "elitpc-pass"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "elitpc"
 "#,
             geometry = geometry.display()
@@ -933,7 +1010,7 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()
@@ -974,7 +1051,7 @@ build_timeout_ms = 1000
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()
@@ -1096,7 +1173,7 @@ ws_listen = "0.0.0.0:9000"
 
 [controller]
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()
@@ -1157,7 +1234,7 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()
@@ -1204,7 +1281,7 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()
@@ -1246,7 +1323,7 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()
@@ -1287,7 +1364,7 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()
@@ -1334,7 +1411,7 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = missing_geometry.display()
@@ -1398,7 +1475,7 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "default"
 "#,
             geometry = geometry.display()
@@ -1680,7 +1757,7 @@ ws_listen = "0.0.0.0:9000"
         let toml_str = toml_with_controller_section(
             &geometry,
             "[controller]\npassphrase = \"change-me\"\n\
-             ecc_proxy = \"GetEcc:tcp -h 127.0.0.1 -p 46002\"\nconfig_id = \"default\"\n",
+             ecc_proxy = \"Ecc:tcp -h 127.0.0.1 -p 46002\"\nconfig_id = \"default\"\n",
         );
         let config = parse(&toml_str).unwrap();
 
@@ -1711,7 +1788,7 @@ ws_listen = "0.0.0.0:9000"
             r#"[controller]
 rest_listen = "0.0.0.0:8090"
 passphrase = "elitpc-pass"
-ecc_proxy = "GetEcc:tcp -h 10.0.0.2 -p 46002"
+ecc_proxy = "Ecc:tcp -h 10.0.0.2 -p 46002"
 config_id = "elitpc"
 log_pull_bind = "tcp://*:47105"
 eos_timeout_s = 9
@@ -1786,6 +1863,91 @@ router_ip = "10.0.0.1"
         );
         let err = parse(&toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::Parse(_)), "{err}");
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    // -----------------------------------------------------------------
+    // ConfigId の 3 相化(SPEC §3.1 v1.13、TODO/042)
+    // -----------------------------------------------------------------
+
+    /// 文字列形は「3 相同値」の略記 —— 既存設定の意味は変わらない(後方互換の本体)。
+    #[test]
+    fn config_id_string_expands_to_the_same_id_in_all_three_phases() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = toml_with_controller_section(
+            &geometry,
+            "[controller]\npassphrase = \"p\"\necc_proxy = \"x\"\nconfig_id = \"default\"\n",
+        );
+        let config = parse(&toml_str).unwrap();
+
+        assert_eq!(config.controller.config_id, ConfigIds::same("default"));
+        assert_eq!(config.controller.config_id.same_value(), Some("default"));
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// テーブル形は相ごとに別の id を持てる(実運用例: `describe = zCobo-ZC706`、
+    /// `configure = pulser` —— TODO/038 レーン A の実測)。**3 値すべて非対称**にして
+    /// 相の取り違えを検出する。
+    #[test]
+    fn config_id_table_sets_each_phase_independently() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = toml_with_controller_section(
+            &geometry,
+            "[controller]\npassphrase = \"p\"\necc_proxy = \"x\"\n\
+             config_id = { describe = \"zCobo-ZC706\", prepare = \"prep-xcfg\", \
+             configure = \"pulser\" }\n",
+        );
+        let config = parse(&toml_str).unwrap();
+        let ids = &config.controller.config_id;
+
+        assert_eq!(ids.describe, "zCobo-ZC706");
+        assert_eq!(ids.prepare, "prep-xcfg");
+        assert_eq!(ids.configure, "pulser");
+        // 非同値 = 略記に畳めない(logbook `config_ids` を出す分岐条件、SPEC §9.2)。
+        assert_eq!(ids.same_value(), None);
+        // アクション名 → 相の対応(SPEC §8.2)。id を使わないアクションは None。
+        assert_eq!(ids.for_action("describe"), Some("zCobo-ZC706"));
+        assert_eq!(ids.for_action("prepare"), Some("prep-xcfg"));
+        assert_eq!(ids.for_action("configure"), Some("pulser"));
+        assert_eq!(ids.for_action("start"), None);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// 相が欠けたテーブルは起動失敗。空 id を黙って ECC へ投げない
+    /// (CLAUDE.md「silent failure を作らない」)。
+    #[test]
+    fn config_id_table_missing_a_phase_is_rejected() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = toml_with_controller_section(
+            &geometry,
+            "[controller]\npassphrase = \"p\"\necc_proxy = \"x\"\n\
+             config_id = { describe = \"a\", configure = \"b\" }\n",
+        );
+        let err = parse(&toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse(_)), "{err}");
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// 相が同値なら文字列形とテーブル形は**同じ設定**(表現だけの違い)。
+    #[test]
+    fn config_id_table_with_equal_phases_is_the_string_form() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = toml_with_controller_section(
+            &geometry,
+            "[controller]\npassphrase = \"p\"\necc_proxy = \"x\"\n\
+             config_id = { describe = \"pulser\", prepare = \"pulser\", \
+             configure = \"pulser\" }\n",
+        );
+        let config = parse(&toml_str).unwrap();
+
+        assert_eq!(config.controller.config_id, ConfigIds::same("pulser"));
+        assert_eq!(config.controller.config_id.same_value(), Some("pulser"));
+        // 既存テストと同じ「文字列との比較」がそのまま通る(後方互換の道具)。
+        assert_eq!(config.controller.config_id, "pulser");
 
         let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
     }

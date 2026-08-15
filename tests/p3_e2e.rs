@@ -59,6 +59,7 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tpcdaq::command::{Command, CommandResponse};
+use tpcdaq::config::ConfigIds;
 use tpcdaq::controller::{
     run_controller, BoundEndpoints, CoboSpec, ComponentEndpoint, ComponentKind, ControllerParams,
 };
@@ -756,7 +757,7 @@ impl Topology {
             passphrase: PASSPHRASE.to_string(),
             log_pull_bind: "tcp://127.0.0.1:*".to_string(),
             ui_dir: None,
-            config_id: "p3-e2e".to_string(),
+            config_ids: ConfigIds::same("p3-e2e"),
             output_root: data_root.clone(),
             geometry_path: env.geometry.clone(),
             cobos: vec![CoboSpec {
@@ -1016,7 +1017,8 @@ router_ip = "127.0.0.1"
         monitor_port = free_port(),
         rest_port = rest_port,
         passphrase = PASSPHRASE,
-        config_id = params.config_id,
+        // このハーネスは 3 相同値なので、TOML には文字列形(略記)を書く。
+        config_id = params.config_ids.configure,
         log_port = free_port(),
         eos_timeout_s = params.eos_timeout.as_secs(),
         graw_writer_command = endpoint(ComponentKind::GrawWriter),

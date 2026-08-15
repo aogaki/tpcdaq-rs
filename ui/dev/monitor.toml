@@ -31,5 +31,5 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "ui-dev"
