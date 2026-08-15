@@ -66,7 +66,9 @@ fn run(cfg: &args::Args) -> Result<u64, ReplayError> {
         .unwrap_or(0.0);
     let start = Instant::now();
 
-    if cfg.files.len() == 1 {
+    if cfg.laps.is_some() || cfg.laps_until_s.is_some() {
+        run_laps(cfg, &mut stream, rate_bytes_per_sec, start)
+    } else if cfg.files.len() == 1 {
         run_single(cfg, &mut stream, rate_bytes_per_sec, start)
     } else {
         run_merged(cfg, &mut stream, rate_bytes_per_sec, start)
@@ -139,6 +141,81 @@ fn run_merged(
             break;
         }
     }
+    Ok(total)
+}
+
+/// lap モード(TODO/031): `--laps` / `--laps-until-s` のいずれかが与えられたときの経路。
+/// 単一ファイルでも `merge::replay_once` のフレーム単位経路を通す(lap 0 は無変更のまま
+/// 送出するので、フレーム整列済みの実 .graw なら出力バイト列は入力ファイルと完全一致する)。
+///
+/// lap 0 で data フレーム(`peek_event_idx` が `Some` を返すフレーム)の eventIdx 最大値
+/// (`max_idx`)を実測し、lap L(L ≥ 1)ではヘッダ 22..26 へ `+ L * (max_idx + 1)` を
+/// 加算して送出する。制御フレームは全 lap で無変更のまま送出する。
+fn run_laps(
+    cfg: &args::Args,
+    stream: &mut TcpStream,
+    rate_bytes_per_sec: f64,
+    start: Instant,
+) -> Result<u64, ReplayError> {
+    let mut total: u64 = 0;
+    let mut lap: u32 = 0;
+    let mut max_idx: u32 = 0;
+
+    loop {
+        let is_first_lap = lap == 0;
+        let mut lap_max_idx: u32 = 0;
+
+        let sent = merge::replay_once(
+            &cfg.files,
+            cfg.chunk_bytes,
+            &mut |frame: &[u8]| -> Result<(), ReplayError> {
+                let Some(event_idx) = peek_event_idx(frame) else {
+                    // 制御フレーム: 全 lap で無変更のまま送出。
+                    return stream.write_all(frame).map_err(ReplayError::Send);
+                };
+                if is_first_lap {
+                    // lap 0 は無変更で送出しつつ、後続 lap のオフセット計算用に最大値を実測する。
+                    lap_max_idx = lap_max_idx.max(event_idx);
+                    return stream.write_all(frame).map_err(ReplayError::Send);
+                }
+
+                let offset = u64::from(lap) * (u64::from(max_idx) + 1);
+                let new_idx = (u64::from(event_idx) + offset) as u32;
+                let little = frame[0] & 0x80 != 0;
+                let mut patched = frame.to_vec();
+                if little {
+                    patched[22..26].copy_from_slice(&new_idx.to_le_bytes());
+                } else {
+                    patched[22..26].copy_from_slice(&new_idx.to_be_bytes());
+                }
+                stream.write_all(&patched).map_err(ReplayError::Send)
+            },
+            &mut |sent_total: u64| {
+                if rate_bytes_per_sec > 0.0 {
+                    let wait =
+                        pace::sleep_for(total + sent_total, rate_bytes_per_sec, start.elapsed());
+                    if wait > Duration::ZERO {
+                        std::thread::sleep(wait);
+                    }
+                }
+            },
+        )?;
+
+        total += sent;
+        if is_first_lap {
+            max_idx = lap_max_idx;
+        }
+        lap += 1;
+
+        let laps_done = cfg.laps.is_some_and(|n| lap >= n);
+        let time_done = cfg
+            .laps_until_s
+            .is_some_and(|s| start.elapsed().as_secs_f64() >= s);
+        if laps_done || time_done {
+            break;
+        }
+    }
+
     Ok(total)
 }
 
@@ -306,8 +383,11 @@ mod args {
     use std::path::PathBuf;
 
     pub const USAGE: &str =
-        "usage: graw_replay <host:port> <file.graw>... [--rate-mbps <f64>] [--loop] [--chunk-bytes <n=65536>]\n\
-         (複数ファイル = eventIdx 昇順インターリーブ送出。AsAd 昇順で渡すこと)";
+        "usage: graw_replay <host:port> <file.graw>... [--rate-mbps <f64>] [--loop] \
+         [--chunk-bytes <n=65536>] [--laps <n>] [--laps-until-s <f64>]\n\
+         (複数ファイル = eventIdx 昇順インターリーブ送出。AsAd 昇順で渡すこと。\n\
+         --laps/--laps-until-s は eventIdx を周回ごとに +lap*(max_idx+1) して送り直す \
+         lap モード。--loop とは併用不可)";
 
     const DEFAULT_CHUNK_BYTES: usize = 65536;
 
@@ -319,6 +399,10 @@ mod args {
         pub rate_mbps: Option<f64>,
         pub loop_replay: bool,
         pub chunk_bytes: usize,
+        /// TODO/031: N 周(lap 0..N-1)で終了する lap モード。
+        pub laps: Option<u32>,
+        /// TODO/031: S 秒経過後、現 lap を完走してから終了する lap モード。
+        pub laps_until_s: Option<f64>,
     }
 
     /// `raw`(プログラム名を除いた argv)を解釈する。エラーメッセージは利用者向けの文字列。
@@ -327,6 +411,8 @@ mod args {
         let mut rate_mbps: Option<f64> = None;
         let mut loop_replay = false;
         let mut chunk_bytes = DEFAULT_CHUNK_BYTES;
+        let mut laps: Option<u32> = None;
+        let mut laps_until_s: Option<f64> = None;
 
         let mut iter = raw.iter();
         while let Some(arg) = iter.next() {
@@ -358,6 +444,32 @@ mod args {
                     }
                     chunk_bytes = parsed;
                 }
+                "--laps" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "--laps requires a value".to_string())?;
+                    let parsed: u32 = value
+                        .parse()
+                        .map_err(|_| format!("--laps value is not an integer: {value}"))?;
+                    if parsed == 0 {
+                        return Err("--laps must be greater than 0".to_string());
+                    }
+                    laps = Some(parsed);
+                }
+                "--laps-until-s" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "--laps-until-s requires a value".to_string())?;
+                    let parsed: f64 = value
+                        .parse()
+                        .map_err(|_| format!("--laps-until-s value is not a number: {value}"))?;
+                    if !(parsed.is_finite() && parsed > 0.0) {
+                        return Err(format!(
+                            "--laps-until-s must be a positive finite number, got {value}"
+                        ));
+                    }
+                    laps_until_s = Some(parsed);
+                }
                 other if other.starts_with("--") => {
                     return Err(format!("unknown option: {other}"));
                 }
@@ -372,12 +484,21 @@ mod args {
             ));
         }
 
+        if loop_replay && (laps.is_some() || laps_until_s.is_some()) {
+            return Err(
+                "--loop cannot be combined with --laps/--laps-until-s (conflicting semantics)"
+                    .to_string(),
+            );
+        }
+
         Ok(Args {
             endpoint: positional[0].clone(),
             files: positional[1..].iter().map(PathBuf::from).collect(),
             rate_mbps,
             loop_replay,
             chunk_bytes,
+            laps,
+            laps_until_s,
         })
     }
 }
@@ -436,6 +557,8 @@ mod tests {
                 rate_mbps: None,
                 loop_replay: false,
                 chunk_bytes: 65536,
+                laps: None,
+                laps_until_s: None,
             }
         );
     }
@@ -460,8 +583,55 @@ mod tests {
                 rate_mbps: Some(28.0),
                 loop_replay: true,
                 chunk_bytes: 4096,
+                laps: None,
+                laps_until_s: None,
             }
         );
+    }
+
+    /// TODO/031: `--laps` は N 周を指す非ゼロの整数。単位や lap の意味は README/USAGE 参照。
+    #[test]
+    fn parse_accepts_laps_option() {
+        let got = args::parse(&strs(&["h:1", "f", "--laps", "3"])).unwrap();
+        assert_eq!(got.laps, Some(3));
+        assert_eq!(got.laps_until_s, None);
+    }
+
+    /// TODO/031: `--laps-until-s` は正の秒数。
+    #[test]
+    fn parse_accepts_laps_until_s_option() {
+        let got = args::parse(&strs(&["h:1", "f", "--laps-until-s", "1.5"])).unwrap();
+        assert_eq!(got.laps_until_s, Some(1.5));
+        assert_eq!(got.laps, None);
+    }
+
+    /// TODO/031: `--laps 0` は「0 周」という意味を持たないので引数エラー。
+    #[test]
+    fn parse_rejects_zero_laps() {
+        assert!(args::parse(&strs(&["h:1", "f", "--laps", "0"])).is_err());
+    }
+
+    /// TODO/031: `--laps-until-s` は 0 以下・非有限を拒否する。
+    #[test]
+    fn parse_rejects_non_positive_laps_until_s() {
+        assert!(args::parse(&strs(&["h:1", "f", "--laps-until-s", "0"])).is_err());
+        assert!(args::parse(&strs(&["h:1", "f", "--laps-until-s", "-1.0"])).is_err());
+        assert!(args::parse(&strs(&["h:1", "f", "--laps-until-s", "nan"])).is_err());
+        assert!(args::parse(&strs(&["h:1", "f", "--laps-until-s", "inf"])).is_err());
+    }
+
+    /// TODO/031: `--loop` と lap オプションの併用は意味が衝突するので引数エラー。
+    #[test]
+    fn parse_rejects_loop_combined_with_laps() {
+        assert!(args::parse(&strs(&["h:1", "f", "--loop", "--laps", "3"])).is_err());
+        assert!(args::parse(&strs(&["h:1", "f", "--loop", "--laps-until-s", "1.0"])).is_err());
+    }
+
+    /// TODO/031: 値なしの lap オプションは他の値必須オプション同様に引数エラー。
+    #[test]
+    fn parse_rejects_dangling_laps_flags_without_value() {
+        assert!(args::parse(&strs(&["h:1", "f", "--laps"])).is_err());
+        assert!(args::parse(&strs(&["h:1", "f", "--laps-until-s"])).is_err());
     }
 
     /// TODO/021: 複数ファイル = マージ送出。引数順(= AsAd 昇順で渡す)が保持されること。

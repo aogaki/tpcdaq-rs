@@ -317,3 +317,232 @@ fn connect_failure_exits_non_zero_with_clear_message() {
         "graw_replay must print a clear error to stderr on connect failure"
     );
 }
+
+// ---------------------------------------------------------------------------
+// lap モード(TODO/031): --laps / --laps-until-s
+// ---------------------------------------------------------------------------
+
+/// 受信バイト列からフレームを 1 本ずつ切り出す(既知の固定長フレームのみを扱う簡易版。
+/// `synth_frame`/`synth_ctrl_frame` はどちらも frame[0..4] に blkSize=1・big-endian の
+/// frameSize(バイト数そのもの)を書いているので、それを読み進めるだけで十分)。
+fn split_frames(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < bytes.len() {
+        // frameSize は frame[1..4] のビッグエンディアン 24bit(synth_frame/synth_ctrl_frame の
+        // 書き方に合わせる。blkSize=2^0=1 なので blk = byte)。
+        let size = ((bytes[pos + 1] as usize) << 16)
+            | ((bytes[pos + 2] as usize) << 8)
+            | (bytes[pos + 3] as usize);
+        out.push(bytes[pos..pos + size].to_vec());
+        pos += size;
+    }
+    out
+}
+
+/// lap 跨ぎで eventIdx が単調連続であること。
+///
+/// 手計算オラクル: 入力は eventIdx 0..=3 の 4 フレーム(asad 0 の単一ファイル)なので
+/// max_idx=3。`--laps 3` は lap 0/1/2 を送るので offset は lap0=+0(=0*4)/
+/// lap1=+4(=1*4)/lap2=+8(=2*4)。受信列の eventIdx は
+/// 0,1,2,3, 4,5,6,7, 8,9,10,11 の 12 個(単調連続)になる。
+#[test]
+fn laps_option_makes_event_idx_monotonically_continuous_across_laps() {
+    let frames: Vec<Vec<u8>> = (0..4u32).map(|e| synth_frame(e, 0, 0xA0)).collect();
+    let path = temp_path("laps_monotonic");
+    std::fs::write(&path, frames.concat()).expect("write fixture");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let mut child = Command::new(bin())
+        .arg(addr.to_string())
+        .arg(&path)
+        .arg("--laps")
+        .arg("3")
+        .spawn()
+        .expect("spawn graw_replay --laps");
+
+    let (mut sock, _peer) = listener.accept().expect("accept connection");
+    let mut received = Vec::new();
+    sock.read_to_end(&mut received).expect("read until close");
+
+    let status = child.wait().expect("wait for graw_replay");
+    assert!(
+        status.success(),
+        "--laps replay must exit 0, got {status:?}"
+    );
+
+    let received_frames = split_frames(&received);
+    assert_eq!(
+        received_frames.len(),
+        12,
+        "3 laps of 4 frames each must yield 12 frames total"
+    );
+
+    let event_idxs: Vec<u32> = received_frames
+        .iter()
+        .map(|f| u32::from_be_bytes(f[22..26].try_into().expect("4 bytes")))
+        .collect();
+    let expected: Vec<u32> = (0..12).collect();
+    assert_eq!(
+        event_idxs, expected,
+        "eventIdx across laps must be monotonically continuous 0..=11"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// lap 0 の出力バイト列は入力ファイルのバイト列と完全一致すること(単一ファイルでも
+/// merge のフレーム経路を通すが、フレーム整列済み入力なので連結 = 元バイト列)。
+/// あわせて lap 内の eventIdx 4B 以外のバイトが不変であること(22..26 を元へ戻すと
+/// 各 lap のフレームが入力フレームと完全一致する、で確認する)。
+#[test]
+fn lap_zero_matches_input_bytes_exactly_and_only_event_idx_bytes_change() {
+    let frames: Vec<Vec<u8>> = (0..4u32).map(|e| synth_frame(e, 0, 0x5C)).collect();
+    let content = frames.concat();
+    let path = temp_path("laps_bytes");
+    std::fs::write(&path, &content).expect("write fixture");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let mut child = Command::new(bin())
+        .arg(addr.to_string())
+        .arg(&path)
+        .arg("--laps")
+        .arg("2")
+        .spawn()
+        .expect("spawn graw_replay --laps");
+
+    let (mut sock, _peer) = listener.accept().expect("accept connection");
+    let mut received = Vec::new();
+    sock.read_to_end(&mut received).expect("read until close");
+
+    let status = child.wait().expect("wait for graw_replay");
+    assert!(
+        status.success(),
+        "--laps replay must exit 0, got {status:?}"
+    );
+
+    // lap 0 の出力(先頭 content.len() バイト)は入力そのもの。
+    assert_eq!(
+        &received[..content.len()],
+        content.as_slice(),
+        "lap 0 output bytes must exactly match the input file bytes"
+    );
+
+    // 各 lap を切り出し、eventIdx 4B(22..26)を元の値へ書き戻すと入力フレームと完全一致。
+    let received_frames = split_frames(&received);
+    assert_eq!(received_frames.len(), 8, "2 laps of 4 frames each");
+    for (i, recv_frame) in received_frames.iter().enumerate() {
+        let input_frame = &frames[i % 4];
+        let mut restored = recv_frame.clone();
+        restored[22..26].copy_from_slice(&input_frame[22..26]);
+        assert_eq!(
+            &restored, input_frame,
+            "frame {i}: bytes other than eventIdx (22..26) must be unchanged from the input"
+        );
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// 制御フレームは lap モードでも毎周そのまま(バイト一致で)送出されること。
+#[test]
+fn laps_option_replays_control_frames_unchanged_every_lap() {
+    let mut frames: Vec<Vec<u8>> = vec![synth_ctrl_frame(0xCC)];
+    frames.extend((0..2u32).map(|e| synth_frame(e, 0, 0xA0)));
+    let content = frames.concat();
+    let path = temp_path("laps_ctrl");
+    std::fs::write(&path, &content).expect("write fixture");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let mut child = Command::new(bin())
+        .arg(addr.to_string())
+        .arg(&path)
+        .arg("--laps")
+        .arg("3")
+        .spawn()
+        .expect("spawn graw_replay --laps");
+
+    let (mut sock, _peer) = listener.accept().expect("accept connection");
+    let mut received = Vec::new();
+    sock.read_to_end(&mut received).expect("read until close");
+
+    let status = child.wait().expect("wait for graw_replay");
+    assert!(
+        status.success(),
+        "--laps replay must exit 0, got {status:?}"
+    );
+
+    let received_frames = split_frames(&received);
+    assert_eq!(
+        received_frames.len(),
+        9,
+        "3 laps of (1 ctrl + 2 data) frames each"
+    );
+    // ctrl フレームはインターリーブ規則により各 lap の先頭に来る(index 0, 3, 6)。
+    for lap in 0..3 {
+        assert_eq!(
+            received_frames[lap * 3],
+            frames[0],
+            "control frame in lap {lap} must be byte-identical to the input"
+        );
+    }
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `--laps-until-s`: S 秒経過後、現 lap を完走してから終了する(フレーム境界を切らない)。
+/// 短い lap(3 フレーム、フレーム毎に約 10ms ペーシング)を複数回回せる長さの入力を使い、
+/// 受信総バイト数が「1 lap 分のバイト数」の整数倍であることを確認する。
+#[test]
+fn laps_until_s_stops_at_a_lap_boundary() {
+    let frames: Vec<Vec<u8>> = (0..3u32).map(|e| synth_frame(e, 0, 0x11)).collect();
+    let lap_bytes = frames.concat().len() as u64;
+    let path = temp_path("laps_until_s");
+    std::fs::write(&path, frames.concat()).expect("write fixture");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    // synth_frame は 96 B/フレームなので --rate-mbps で 1 フレームあたり十分な待ちを作り、
+    // --laps-until-s の「lap 途中では止まらない」判定に複数 lap 分の時間的余地を与える。
+    // 96 B / (0.05 Mbps / 8) = 96 / 6250 byte/s ≈ 15.4ms/フレーム。
+    let mut child = Command::new(bin())
+        .arg(addr.to_string())
+        .arg(&path)
+        .arg("--laps-until-s")
+        .arg("0.2")
+        .arg("--rate-mbps")
+        .arg("0.05")
+        .spawn()
+        .expect("spawn graw_replay --laps-until-s");
+
+    let (mut sock, _peer) = listener.accept().expect("accept connection");
+    let mut received = Vec::new();
+    sock.read_to_end(&mut received).expect("read until close");
+
+    let status = child.wait().expect("wait for graw_replay");
+    assert!(
+        status.success(),
+        "--laps-until-s replay must exit 0, got {status:?}"
+    );
+
+    assert!(
+        !received.is_empty(),
+        "must have replayed at least one lap before the deadline"
+    );
+    assert_eq!(
+        received.len() as u64 % lap_bytes,
+        0,
+        "received bytes ({}) must be an exact multiple of one lap's bytes ({lap_bytes}) — \
+         --laps-until-s must never cut a lap mid-way",
+        received.len()
+    );
+
+    let _ = std::fs::remove_file(&path);
+}

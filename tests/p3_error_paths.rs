@@ -44,32 +44,29 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+mod common;
+
+use std::io::Write;
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command as OsCommand, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::Command as OsCommand;
 use std::time::{Duration, Instant};
 
 use serde_bytes::ByteBuf;
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, oneshot};
-use tpcdaq::command::{Command, CommandResponse};
 use tpcdaq::config::ConfigIds;
 use tpcdaq::controller::{
     run_controller, BoundEndpoints, CoboSpec, ComponentEndpoint, ComponentKind, ControllerParams,
 };
-use tpcdaq::decoder::{run_decoder, DecoderParams};
-use tpcdaq::graw_writer::{run_graw_writer, GrawWriterParams};
 use tpcdaq::msg::{Batch, Fragment, Fragments, Message};
-use tpcdaq::receiver::{run_receiver, ReceiverParams};
 
-/// 実 .graw の P1 オラクル(SPEC §12-1/§12-2、2026-08-13 実測)。
-const REAL_GRAW_BYTES: u64 = 30_108_684;
-const REAL_GRAW_EVENTS: u64 = 108;
-const REAL_GRAW_ITEMS: u64 = 15_040_512;
-/// receiver が数えるフレーム = AsAd データ 108 + 先頭の制御フレーム 1(SPEC §12-1)。
-const REAL_GRAW_FRAMES: u64 = REAL_GRAW_EVENTS + 1;
+// E2E ハーネスの共通部品(TODO/031 追記 1 — 030 との逐語一致部を tests/common/ へ抽出)。
+use common::{
+    cleanup, count, e2e_env, endpoint_of, get_status_blocking, http_async, names_in, read_logbook,
+    scratch_dir, spawn_components, wait_for_file, Component, E2eEnv, Proc, Sink, REAL_GRAW_BYTES,
+    REAL_GRAW_EVENTS, REAL_GRAW_FRAMES, REAL_GRAW_ITEMS,
+};
 
 const OPERATOR: &str = "p3-error-paths";
 const PASSPHRASE: &str = "p3-error-paths-passphrase";
@@ -78,362 +75,8 @@ const PASSPHRASE: &str = "p3-error-paths-passphrase";
 /// F0 はこれを大きく下回るはず = 「毎停止 5 秒の空振り」が消えたことの実証。
 const RUN_STOP_BEFORE_QUIESCE_S: f64 = 5.7;
 
-// =====================================================================
-// env ゲート(030 と同じ 5 本)
-// =====================================================================
-
-struct E2eEnv {
-    root_sink: PathBuf,
-    ecc_bridge: PathBuf,
-    fake_ecc: PathBuf,
-    graw: PathBuf,
-    geometry: PathBuf,
-}
-
-/// 欠けた env 名を **stderr に列挙して** `None`(silent skip を作らない — CLAUDE.md)。
-fn e2e_env(test: &str) -> Option<E2eEnv> {
-    let mut missing = Vec::new();
-    let mut get = |name: &str| -> Option<PathBuf> {
-        match std::env::var_os(name) {
-            Some(value) => Some(PathBuf::from(value)),
-            None => {
-                missing.push(name.to_string());
-                None
-            }
-        }
-    };
-    let root_sink = get("TPCDAQ_ROOT_SINK_BIN");
-    let ecc_bridge = get("TPCDAQ_ECC_BRIDGE_BIN");
-    let fake_ecc = get("TPCDAQ_FAKE_ECC_BIN");
-    let graw = get("TPCDAQ_REAL_GRAW");
-    let geometry = get("TPCDAQ_REAL_GEOMETRY_MINI");
-    if !missing.is_empty() {
-        eprintln!("SKIP {test}: 未設定の env = {}", missing.join(", "));
-        return None;
-    }
-    Some(E2eEnv {
-        root_sink: root_sink?,
-        ecc_bridge: ecc_bridge?,
-        fake_ecc: fake_ecc?,
-        graw: graw?,
-        geometry: geometry?,
-    })
-}
-
-// =====================================================================
-// ポート・プロセス小道具(030 から必要最小限を複製 —— 共通化の判断は 031/044)
-// =====================================================================
-
-fn free_port() -> u16 {
-    let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe listener");
-    let port = probe.local_addr().expect("local_addr").port();
-    drop(probe);
-    port
-}
-
-fn free_endpoint() -> String {
-    format!("tcp://127.0.0.1:{}", free_port())
-}
-
-/// 子プロセスを必ず殺すラッパ(テストが落ちても孤児にしない)。
-struct Proc {
-    child: Child,
-    /// 起動時に stdout へ 1 行だけ出る自己申告(fake_ecc = "PROXY …" / bridge = "BIND …")。
-    banner: String,
-}
-
-impl Proc {
-    fn spawn_with_banner(mut command: OsCommand, prefix: &str) -> Proc {
-        let mut child = command
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .expect("spawn child");
-        let stdout = child.stdout.take().expect("child stdout");
-        let mut line = String::new();
-        let read = BufReader::new(stdout)
-            .read_line(&mut line)
-            .expect("read banner");
-        assert!(read > 0, "child exited before printing its {prefix} line");
-        let line = line.trim_end().to_string();
-        assert!(
-            line.starts_with(prefix),
-            "expected a {prefix} line, got {line:?}"
-        );
-        Proc {
-            child,
-            banner: line[prefix.len()..].trim().to_string(),
-        }
-    }
-}
-
-impl Drop for Proc {
-    fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-}
-
-fn signal(pid: u32, name: &str) {
-    let status = OsCommand::new("kill")
-        .arg(format!("-{name}"))
-        .arg(pid.to_string())
-        .status()
-        .expect("run kill(1)");
-    assert!(status.success(), "kill -{name} {pid} failed");
-}
-
-/// C++ 側の zmq bind 失敗の終了コード(`free_port()` の TOCTOU)。
-const EXIT_ZMQ: i32 = 4;
 /// run 中の run_number 食い違い(SPEC §6.2-5 v1.10、root_sink.cxx `kExitRunMismatch`)。
 const EXIT_RUN_MISMATCH: i32 = 6;
-
-type SinkLog = Arc<Mutex<Vec<String>>>;
-
-/// root_sink の実プロセス。`--bind` と `--pub` は動的、TOCTOU は 3 回まで張り直す。
-struct Sink {
-    child: Child,
-    data_ep: String,
-    pid: u32,
-    log: SinkLog,
-}
-
-impl Drop for Sink {
-    fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-    }
-}
-
-impl Sink {
-    fn spawn(bin: &Path, geometry: &Path, output_root: &Path) -> Sink {
-        for _ in 0..3 {
-            let data_ep = free_endpoint();
-            let pub_ep = free_endpoint();
-            let mut child = OsCommand::new(bin)
-                .args([
-                    "--bind",
-                    &data_ep,
-                    "--pub",
-                    &pub_ep,
-                    "--geometry",
-                    &geometry.to_string_lossy(),
-                    "--output-root",
-                    &output_root.to_string_lossy(),
-                    "--expect",
-                    "0:0",
-                ])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("spawn root_sink");
-            let log: SinkLog = Arc::new(Mutex::new(Vec::new()));
-            let stderr = child.stderr.take().expect("root_sink stderr");
-            std::thread::spawn({
-                let log = Arc::clone(&log);
-                move || {
-                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                        eprintln!("{line}"); // 素通し
-                        log.lock().expect("SinkLog mutex").push(line);
-                    }
-                }
-            });
-            std::thread::sleep(Duration::from_millis(400));
-            if let Some(status) = child.try_wait().expect("try_wait") {
-                if status.code() == Some(EXIT_ZMQ) {
-                    eprintln!("root_sink lost the bind race on {data_ep}/{pub_ep} — retrying");
-                    continue;
-                }
-                panic!("root_sink exited early: {status:?}");
-            }
-            let pid = child.id();
-            return Sink {
-                child,
-                data_ep,
-                pid,
-                log,
-            };
-        }
-        panic!("root_sink failed to bind after 3 attempts");
-    }
-
-    fn alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
-    }
-
-    fn wait_for_exit(&mut self, timeout: Duration) -> std::process::ExitStatus {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Some(status) = self.child.try_wait().expect("try_wait") {
-                return status;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "root_sink did not exit within {timeout:?}"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    /// 終了時に stdout へ 1 行だけ出るカウンタ JSON。
-    fn read_counts(&mut self) -> Value {
-        let mut out = String::new();
-        if let Some(mut stdout) = self.child.stdout.take() {
-            let _ = stdout.read_to_string(&mut out);
-        }
-        let line = out.lines().last().unwrap_or_default();
-        serde_json::from_str(line)
-            .unwrap_or_else(|e| panic!("root_sink stdout is not one JSON line: {out:?} ({e})"))
-    }
-
-    /// SIGTERM → 終了 JSON(正常終了を期待する)。
-    fn terminate(&mut self, timeout: Duration) -> Value {
-        if self.alive() {
-            signal(self.pid, "TERM");
-        }
-        let status = self.wait_for_exit(timeout);
-        let counts = self.read_counts();
-        assert!(
-            status.success(),
-            "root_sink exited with {status:?}; counters={counts}"
-        );
-        counts
-    }
-
-    fn stderr_has(&self, needle: &str) -> bool {
-        self.log
-            .lock()
-            .expect("SinkLog mutex")
-            .iter()
-            .any(|line| line.contains(needle))
-    }
-
-    fn wait_for_stderr(&self, needle: &str, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if self.stderr_has(needle) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        self.stderr_has(needle)
-    }
-}
-
-fn count(counts: &Value, key: &str) -> u64 {
-    counts[key]
-        .as_u64()
-        .unwrap_or_else(|| panic!("counter {key} missing in {counts}"))
-}
-
-// =====================================================================
-// 手書き HTTP クライアント(依存を増やさない)
-// =====================================================================
-
-fn http(method: &str, addr: SocketAddr, path: &str, body: Option<&str>) -> (u16, Value) {
-    let payload = body.unwrap_or("");
-    let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\
-         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
-        payload.len()
-    );
-    let mut stream = TcpStream::connect(addr).expect("connect to the controller");
-    stream
-        .set_read_timeout(Some(Duration::from_secs(180)))
-        .unwrap();
-    stream.write_all(request.as_bytes()).unwrap();
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).unwrap();
-    let text = String::from_utf8_lossy(&raw).to_string();
-    let status: u16 = text
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| panic!("no status line in {text:?}"));
-    let body = text
-        .split_once("\r\n\r\n")
-        .map(|(_, body)| body.to_string())
-        .unwrap_or_default();
-    (status, serde_json::from_str(&body).unwrap_or(Value::Null))
-}
-
-/// blocking な HTTP をランタイムのワーカーで塞がない(controller も同じランタイム上に居る)。
-async fn http_async(
-    method: &str,
-    addr: SocketAddr,
-    path: &str,
-    body: Option<String>,
-) -> (u16, Value) {
-    let method = method.to_string();
-    let path = path.to_string();
-    tokio::task::spawn_blocking(move || http(&method, addr, &path, body.as_deref()))
-        .await
-        .expect("http task")
-}
-
-// =====================================================================
-// ファイル小道具
-// =====================================================================
-
-fn scratch_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tpcdaq_p3_err_{}_{tag}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
-    dir
-}
-
-fn names_in(dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    out.sort();
-    out
-}
-
-fn wait_for_file(path: &Path, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if path.is_file() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    path.is_file()
-}
-
-fn cleanup(scratch: &Path) {
-    let _ = std::fs::remove_dir_all(scratch);
-}
-
-fn read_logbook(path: &Path) -> Vec<Value> {
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("read logbook {}: {e}", path.display()));
-    text.lines()
-        .map(|line| {
-            serde_json::from_str(line)
-                .unwrap_or_else(|e| panic!("logbook line is not JSON: {line:?} ({e})"))
-        })
-        .collect()
-}
-
-fn get_status_blocking(endpoint: &str) -> CommandResponse {
-    let context = zmq::Context::new();
-    tpcdaq::command::request(
-        &context,
-        endpoint,
-        &Command::GetStatus,
-        Duration::from_secs(5),
-    )
-    .unwrap_or_else(|e| panic!("GetStatus {endpoint}: {e}"))
-}
 
 // =====================================================================
 // リンク保持 CoBo(**実機 zCoBo の忠実な模擬** —— TODO/032 の確定事実)
@@ -470,13 +113,6 @@ impl LinkHoldingCobo {
 // =====================================================================
 // トポロジー(実配線。monitor / WS は 033 の関心外なので上げない)
 // =====================================================================
-
-struct Component {
-    name: &'static str,
-    command_endpoint: String,
-    shutdown: broadcast::Sender<()>,
-    handle: tokio::task::JoinHandle<()>,
-}
 
 struct Topology {
     scratch: PathBuf,
@@ -515,7 +151,7 @@ impl Default for TopologyOptions {
 
 impl Topology {
     async fn start(env: &E2eEnv, tag: &str, options: TopologyOptions) -> Topology {
-        let scratch = scratch_dir(tag);
+        let scratch = scratch_dir("tpcdaq_p3_err", tag);
         let data_root = scratch.join("data");
         std::fs::create_dir_all(&data_root).expect("create data root");
 
@@ -537,76 +173,13 @@ impl Topology {
         let bridge = Proc::spawn_with_banner(bridge_cmd, "BIND");
 
         // --- 2. root-sink(C++ 実バイナリ)---
-        let sink = Sink::spawn(&env.root_sink, &env.geometry, &data_root);
+        let sink = Sink::spawn(&env.root_sink, &env.geometry, &data_root, &[]);
 
         // --- 3. graw-writer / decoder / receiver(プロセス内タスク)---
-        let gw_pull = free_endpoint();
-        let dec_pull = free_endpoint();
-        let mut components = Vec::new();
-
-        let gw_params = GrawWriterParams {
-            pull_bind: gw_pull.clone(),
-            command_listen: "tcp://127.0.0.1:0".to_string(),
-            output_root: data_root.clone(),
-            max_file_bytes: tpcdaq::config::DEFAULT_GRAW_WRITER_MAX_FILE_BYTES,
-            flush_interval_ms: tpcdaq::config::DEFAULT_GRAW_WRITER_FLUSH_INTERVAL_MS,
-            expected_sources: vec![0],
-        };
-        let (gw_shutdown, gw_rx) = broadcast::channel(1);
-        let (gw_tx, gw_ep_rx) = oneshot::channel();
-        let gw_handle = tokio::spawn(run_graw_writer(gw_params, gw_rx, Some(gw_tx)));
-        let gw_command = gw_ep_rx.await.expect("graw-writer command endpoint");
-        components.push(Component {
-            name: "graw-writer",
-            command_endpoint: gw_command.clone(),
-            shutdown: gw_shutdown,
-            handle: gw_handle,
-        });
-
-        let dec_params = DecoderParams {
-            pull_bind: dec_pull.clone(),
-            push_connect: sink.data_ep.clone(),
-            command_listen: "tcp://127.0.0.1:0".to_string(),
-            batch_max_bytes: tpcdaq::config::DEFAULT_BATCH_MAX_BYTES,
-            batch_max_ms: tpcdaq::config::DEFAULT_BATCH_MAX_MS,
-            heartbeat_ms: tpcdaq::config::DEFAULT_HEARTBEAT_MS,
-            send_timeout_ms: tpcdaq::config::DEFAULT_DECODER_SEND_TIMEOUT_MS,
-            workers: 1,
-            expected_sources: vec![0],
-        };
-        let (dec_shutdown, dec_rx) = broadcast::channel(1);
-        let (dec_tx, dec_ep_rx) = oneshot::channel();
-        let dec_handle = tokio::spawn(run_decoder(dec_params, dec_rx, Some(dec_tx)));
-        let dec_command = dec_ep_rx.await.expect("decoder command endpoint");
-        components.push(Component {
-            name: "decoder",
-            command_endpoint: dec_command.clone(),
-            shutdown: dec_shutdown,
-            handle: dec_handle,
-        });
-
-        let recv_params = ReceiverParams {
-            cobo_id: 0,
-            listen: "127.0.0.1:0".to_string(),
-            command_listen: "tcp://127.0.0.1:0".to_string(),
-            graw_writer_endpoint: gw_pull,
-            decoder_endpoint: dec_pull,
-            batch_max_bytes: tpcdaq::config::DEFAULT_BATCH_MAX_BYTES,
-            batch_max_ms: tpcdaq::config::DEFAULT_BATCH_MAX_MS,
-            queue_frames: tpcdaq::config::DEFAULT_QUEUE_FRAMES,
-            heartbeat_ms: tpcdaq::config::DEFAULT_HEARTBEAT_MS,
-            hwm: tpcdaq::zmq_helper::DEFAULT_HWM,
-        };
-        let (recv_shutdown, recv_rx) = broadcast::channel(1);
-        let (recv_tx, recv_ep_rx) = oneshot::channel();
-        let recv_handle = tokio::spawn(run_receiver(recv_params, recv_rx, Some(recv_tx)));
-        let receiver_command = recv_ep_rx.await.expect("receiver command endpoint");
-        components.push(Component {
-            name: "receiver0",
-            command_endpoint: receiver_command.clone(),
-            shutdown: recv_shutdown,
-            handle: recv_handle,
-        });
+        let components = spawn_components(&data_root, &sink.data_ep).await;
+        let gw_command = endpoint_of(&components, "graw-writer");
+        let dec_command = endpoint_of(&components, "decoder");
+        let receiver_command = endpoint_of(&components, "receiver0");
 
         // --- 4. controller(REST、同一プロセスの tokio タスク)---
         let params = ControllerParams {
@@ -702,12 +275,7 @@ impl Topology {
     }
 
     fn endpoint_of(&self, name: &str) -> String {
-        self.components
-            .iter()
-            .find(|c| c.name == name)
-            .unwrap_or_else(|| panic!("component {name} が居ない"))
-            .command_endpoint
-            .clone()
+        endpoint_of(&self.components, name)
     }
 
     /// receiver の in-process task を **abort**(= 突然死)。
