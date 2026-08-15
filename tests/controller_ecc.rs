@@ -260,6 +260,9 @@ async fn a_run_start_drives_the_real_bridge_through_to_ecc_start() {
         ecc_endpoint: bridge.banner.clone(),
         router_ip: None,
         eos_timeout: Duration::from_millis(400),
+        // TODO/033-E で新設(SPEC §1.3 v1.12)。eos_timeout と同じく短く ——
+        // ここは静止検出そのものではなく既存シナリオの再現が目的。
+        eos_quiesce: Duration::from_millis(200),
         eos_poll: Duration::from_millis(50),
         command_timeout: Duration::from_secs(5),
         ecc_timeout: Duration::from_secs(30),
@@ -418,6 +421,9 @@ async fn the_step_by_step_ecc_endpoints_reach_the_real_bridge() {
         ecc_endpoint: bridge.banner.clone(),
         router_ip: None,
         eos_timeout: Duration::from_millis(400),
+        // TODO/033-E で新設(SPEC §1.3 v1.12)。eos_timeout と同じく短く ——
+        // ここは静止検出そのものではなく既存シナリオの再現が目的。
+        eos_quiesce: Duration::from_millis(200),
         eos_poll: Duration::from_millis(50),
         command_timeout: Duration::from_secs(5),
         ecc_timeout: Duration::from_secs(30),
@@ -468,6 +474,40 @@ async fn the_step_by_step_ecc_endpoints_reach_the_real_bridge() {
             .unwrap()
             .contains("Could not establish data link"),
         "実 ECC の文言をそのまま運ぶこと: {body}"
+    );
+
+    // --- 043: 失敗が残した error フラグが `/api/status` から見える ---
+    //
+    // 041 D-1 の発見の是正そのもの。実 ECC は遷移のアクションが失敗すると
+    // **state は動かさずフラグだけ立てる**(`CATCH_SM_EXCEPTIONS(SM::WHEN_START)`、
+    // BackEnd.cpp:1052 → handleStateMachineException、:329-333。state が動かない理由は
+    // SM::Exception が std::exception を継承しないこと —— rc/SM.h:92-96 と
+    // dhsm/Engine.cpp:298/361)。ここが見えないと、オペレータには
+    // 「ok=true / state=Ready」だけが見えて失敗が消える。
+    let (status, body) = http("GET", rest, "/api/status", None);
+    assert_eq!(status, 200);
+    assert_eq!(body["ecc"]["state"], json!("Ready"), "{}", body["ecc"]);
+    assert_eq!(
+        body["ecc"]["ecc_error"],
+        json!("WHEN_START"),
+        "start の失敗が残したフラグが素通しで載ること: {}",
+        body["ecc"]
+    );
+    // 輸送層の `error` は**別の軸**。status 自体は成功しているので空のまま(不変)。
+    assert_eq!(body["ecc"]["ok"], json!(true), "{}", body["ecc"]);
+    assert_eq!(body["ecc"]["error"], json!(""), "{}", body["ecc"]);
+
+    // 遷移が渡ればフラグは消える(`resetErrorFlag` は全遷移の 1 番目のアクション、
+    // BackEnd.cpp:249-290)。`Ready` からの breakup は EV_BREAK があるので渡る。
+    let (status, body) = http("POST", rest, "/api/ecc/breakup", Some(&body_token));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["state"], json!("Prepared"), "{body}");
+    let (_, body) = http("GET", rest, "/api/status", None);
+    assert_eq!(
+        body["ecc"]["ecc_error"],
+        json!("NO_ERR"),
+        "遷移が渡ればフラグは消える: {}",
+        body["ecc"]
     );
 
     let _ = shutdown.send(());

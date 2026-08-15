@@ -1,6 +1,7 @@
 # 033 — 異常系セマンティクスの裁定(SPEC §1.3 fatal 経路 / run_stop.reason)+ 異常系 E2E
 
-**Status: READY(裁定完了 2026-08-14 / Fable。**①ユーザー承認 = 済み** — 033-①②③は
+**Status: COMPLETED**(2026-08-15 implementer/Opus — 結果は末尾の「結果」節)
+**Status(起票時): READY(裁定完了 2026-08-14 / Fable。**①ユーザー承認 = 済み** — 033-①②③は
 **SPEC v1.12 に適用済み**(§1.3 停止シーケンスの受信静止検出 `eos_quiesce_ms` /
 §1.3 異常中止の機序訂正 + 終端条項 / §9.2 の `forced_eos`・`eos_closed`)。
 残る着手条件は ②[034](034_consecutive_run_ops.md) の完了のみ — `src/controller.rs` を
@@ -367,3 +368,35 @@ receiver を Stop すると尻尾を落とす(絶対ルール違反)。裁定は
   `forced_eos:true` が常態のため、**`forced_eos:false` は「stop 前にリンクが死んだ」強い印**
   (041 D-2: CoBo SIGKILL = OS の正常 FIN → 自然 EOF → reason:"normal" で閉じ、他に痕跡なし)。
   「唯一の異常の印は eos_closed:false」という v1.12 期の文言は v1.14 で改訂済み。
+
+---
+
+## 結果(2026-08-15 implementer/Opus → 発注側(Fable)レビュー PASS)
+
+- **ゲート全 green**: `cargo test` **430 passed / 0 failed / 1 ignored**(033 新規 13 本 +
+  同時進行 043 分を含む)/ fmt・clippy(--all-targets 含む)警告ゼロ /
+  root_sink 全スイート green(68/71/175/426/202/92 + conformance 49)/ C++ 無変更。
+- **A**: run_stop に `forced_eos`/`eos_closed`(v1.14 の意味論コメント込み。欠落 =
+  「記録なし」であって false ではない、を serde default + テストで固定)。**041 の保存
+  logbook(CoBo 突然死 run の audit 値)をオラクルとしてそのまま採用**し、REST↔台帳の
+  同値を機械照合。
+- **C**: decoder `eos_out`(eos_abandoned と対)+ controller の 3 点判定
+  (eos_in ≥ expected / eos_out ≥ 1 / files_open == 0)。欠落は note + 完了と読まない。
+- **D**: `tests/p3_error_paths.rs`(新規 1,180 行)— F0 実機正規停止(リンク保持 CoBo 役 +
+  強制 EOS、108 entries)/ F1 eos-timeout(run_inprogress 残存)/ F2 遅発 fatal
+  (**exit 6 + run-number-mismatch + run 1 カウンタ保全**を実測固定)。
+- **E**: 静止検出で **run/stop 5.607 s → 1.271〜1.534 s**(対照測定 4 回)。秒未満に
+  届かない残り ~0.8 s は EOS 伝播 + ファイル close の実仕事。
+  **併発見・修正**: 不達 receiver への GetStatus が poll 毎に `command_timeout`(5 s)を
+  燃やし停止が分単位化する穴(F1 実測 55 s → 「一度不達なら以後静止扱い」で 11.2 s。
+  poll 回数を単体テストで固定)。
+- **逸脱の裁定(発注側)**: ①F1+F2 を 1 関数に連結 = **受理**(発注書自身が「同じ
+  root_sink プロセスへ」と指定)②p3_e2e.rs 等への 1 行追従 = **受理**(機械的必然。
+  禁止理由 = 034 並行編集は消滅済み)③`eos_quiesce_ms = 0` = **拒否すべきと裁定**
+  (0 は「即・強制 EOS」= 本裁定が不採用とした挙動。`eos_timeout_s = 0` 拒否の前例に整合)。
+  validation 1 行 + テストは**小粒フォローアップへ**(CURRENT.md 記載)
+  ④UI 表示は P4 裁量(未接触)= 妥当 ⑤`status_timeout` が停止経路で未使用な件は
+  **044 レビューの検討候補に登録**。
+- 実行環境・日付: macOS Darwin 25.5.0(arm64)、2026-08-15。
+
+**Status: COMPLETED**

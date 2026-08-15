@@ -14,9 +14,10 @@ run 一周がフルスタックで回る。前波は
   Angular で 9 ヒスト + イベント表示 + 波形 + ログブック。Run 制御は完成形レイアウト + 全 disabled)。
 - **run 制御の実機ハードニング完了**: **032**(receiver 単一リンク + silent stall の可視化)/
   **034**(連続 run)/ **036**(実 ECC の `reset` = `EV_UNDO` への対応 + テストダブルの実機準拠化)。
-- **リポ全体ゲート: 415 passed / 0 failed**(042 で +13)。C++ 側 `test_ecc_bridge 187` /
-  `ecc_e2e 29` / root_sink 各テスト green + **vcobo 161**(92+57+6+6)。
-  clippy -D warnings クリーン。UI 適合 126 tests green。
+- **リポ全体ゲート: 430 passed / 0 failed / 1 ignored**(042 +13、043 +2、033 +13 ほか)。
+  C++ 側 `test_ecc_bridge 200` / `ecc_e2e 52` / root_sink 各テスト green +
+  **vcobo 161**(92+57+6+6)。clippy -D warnings クリーン。UI 適合 127 tests green。
+- **run/stop 所要 1.3 s**(033-E 静止検出。旧 5.6 s)。run/start ≈ 7 s(実 ECC 支配)。
 - **仮想 zCoBo スタック稼働**(2026-08-15): 実 ECC(実験と同一版)+ `tools/vcobo/` で
   検出器なしに run 一周が本番経路で回る。正本 = docs/VIRTUAL_ZCOBO_ja.md v1.2、
   レシピ = reference/_spike/demo/。
@@ -27,13 +28,14 @@ run 一周がフルスタックで回る。前波は
 
 **043 → 033 → 044(リファクタ窓)→ P4 UI 実配線 → 031 soak → ELI-NP** の順。
 
-1. **[043_ecc_error_surfacing.md](043_ecc_error_surfacing.md)** — READY(SPEC v1.14 適用済み。
-   P4 の前提)。
-2. **[033_error_path_semantics.md](033_error_path_semantics.md)** — READY(裁定済み +
-   2026-08-15 追記あり: v1.14 の `forced_eos:false` 意味論を A に織り込む。041 の実測
-   logbook が照合材料)。発注書 A/C/D/E。**run 経路コアの最後の計画変更**。
-3. **[044_refactor_window.md](044_refactor_window.md)** — リファクタ窓(BLOCKED、033 完了で
-   開く。**P4 起票前に必ず実施**。タイミング方針・進め方・凍結ルールはチケット本文が正)。
+1. ~~043~~ **完了(2026-08-15)** — `ecc_error` 全経路開通、set/clear 規則を一次資料で固定、
+   実 ECC で 041 D-1 再現。archive 済み。
+2. ~~033~~ **完了(2026-08-15)** — run_stop 2 フィールド / eos_out 3 点判定 / 異常系 E2E
+   F0-F2 / **quiesce 検出で run/stop 5.6 s → 1.3 s**。不達 receiver の停止分単位化の穴も
+   発見・修正。ゲート **430 passed**。archive 済み。
+3. **[044_refactor_window.md](044_refactor_window.md)** — **窓が開いた(033 完了)**。
+   次アクション = Fable の横断品質レビュー → ワークリスト追記 → 045〜起票。
+   **P4 起票前に必ず実施**。タイミング方針・凍結ルールはチケット本文が正。
 4. **P4 Run 制御 UI 実配線チケット群の起票**(Fable — 044 の後)。
 5. **[031_load_harness.md](031_load_harness.md)** — 負荷ハーネス。**044 の後に実走**
    (soak は実機に持っていく最終形で行う — 044 の裁定)。vcobo-daq の全速モードがソースに
@@ -121,10 +123,16 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 ## 保留・確認事項
 
+- **実 ECC の例外取りこぼし 2 箇所(043 発見 — 上流仕様なので改変しない。運用留意)**:
+  `GetEccImpl::breakup` は失敗時 Ice **UnknownException**(SM::Exception を catch しない)/
+  `onUnPrepare`(reset の Prepared→Described)は失敗時 dhsm が **halt** = 我々の map では
+  `Off` に見える。P4 の UI 表示と P5 の運用手順(歩き戻し失敗時のリカバリ)で考慮すること。
 - **Warsaw 確認**: TPCReco 再配布許諾(020 — third_party/tpcreco 昇格の条件)/
   PROPOSAL v0.5 反映判断。
 - **物理屋向け資料・デモは UI + ファイルデータソース完成まで待つ**(ユーザー決定)。
-- 小粒フォローアップ(次に該当ファイルを触るユニットへ相乗り): vcobo-daq の SIGINT
+- 小粒フォローアップ(次に該当ファイルを触るユニットへ相乗り): **`eos_quiesce_ms = 0` の
+  拒否 validation**(033 裁定③ — 0 は不採用挙動「即・強制 EOS」になる。`eos_timeout_s = 0`
+  拒否の前例に整合させる。テスト 1 本付き)/ vcobo-daq の SIGINT
   graceful 化(041 発見⑤ — 現状 stop_demo.sh が SIGKILL で対処、実害なし)/
   geometry.rs の参照アクセサ
   (Aux ch の per-sample String 確保解消 — 026 申し送り)/ poisoned 時 metrics を
@@ -144,9 +152,8 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 ## 完了ユニット台帳
 
-000〜042 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
-すべて各 md の「結果」節が正。未完は 031/033/043 のみ)。
-直近(2026-08-15、仮想 zCoBo トラック): **038** 実 ECC ローカルスパイク / **039** 実 ECC
-フルウォーク実走 / **040** vcobo-daq 本体 / **041** 統合デモ(実 ECC 歩き戻し初実証)/
-**042** ConfigId 3 相化(SPEC v1.13)。前日(2026-08-14): 027〜037(Web UI / P3 E2E /
-run 制御ハードニング / モデル運用)。
+000〜043 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
+すべて各 md の「結果」節が正。**未完は 031 と 044(窓・開放中)のみ**)。
+直近(2026-08-15): **038〜042** 仮想 zCoBo トラック(スパイク → フルウォーク → vcobo-daq →
+統合デモ → ConfigId 3 相化)/ **043** ecc_error 可視化 / **033** 異常系セマンティクス
+(quiesce 停止 1.3 s 化 + 異常系 E2E)。前日(2026-08-14): 027〜037。

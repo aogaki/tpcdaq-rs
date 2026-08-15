@@ -156,8 +156,29 @@ pub enum LogbookRecord {
         run: u32,
         duration_s: f64,
         ok: bool,
-        /// `"normal"` / `"error:..."`(SPEC §9.2)。
+        /// `"normal"` / `"error:eos-timeout"` / `"abort:<原因>"`(SPEC §9.2)。
+        /// abort は**停止を開始した時点の起因**であり、EOS の顛末は下の 2 つが持つ
+        /// (reason に合成しない — TODO/033 論点 2)。
         reason: String,
+        /// EOS を receiver `Stop` で**注入した**か(SPEC §9.2 v1.12 + v1.14 注記)。
+        ///
+        /// **実機 TCP flow では `true` が常態**: `ecc stop` はデータリンクを close しない
+        /// ので EOF は来ず、強制 EOS が正規経路である(§1.3 v1.12)。よって
+        /// **`false` は「stop より前にリンクが死んだ」ことの強い印**(v1.14 —— CoBo の
+        /// 突然死は OS の正常 FIN により自然 EOF になり、run は `reason:"normal"` として
+        /// 閉じて他に痕跡が残らない。TODO/041 D-2 実測)。リプレイ(graw_replay が
+        /// 閉じる)でも `false` になるので、実機の run でだけ意味を持つ。
+        ///
+        /// `#[serde(default)]` は **v1.12 より前に書かれた行を読むため**だけのもの。
+        /// そこで得られる `false` は「観測値」ではなく「記録が無い」であり、
+        /// 古い行の異常判定に使ってはならない(このリポの読み手は seq 復旧だけ)。
+        #[serde(default)]
+        forced_eos: bool,
+        /// EOS がチェーンを流れ切ったことを**観測できた**か(SPEC §9.2 v1.12)。
+        /// `false` は異常の印であり、reason が `abort:...` でも eos-timeout の事実は
+        /// ここで読める。`#[serde(default)]` の意味は `forced_eos` と同じ。
+        #[serde(default)]
+        eos_closed: bool,
         counters: Counters,
         files: Vec<OutputFile>,
     },
@@ -241,8 +262,18 @@ pub mod schema {
         "expected_fragments",
     ];
 
-    /// `run_stop` の `actor` 以降(SPEC §9.2)。
-    pub const RUN_STOP: &[&str] = &["run", "duration_s", "ok", "reason", "counters", "files"];
+    /// `run_stop` の `actor` 以降(SPEC §9.2。`forced_eos` / `eos_closed` は v1.12 追加で、
+    /// 表のとおり `reason` の直後 = `counters` の前に入る)。
+    pub const RUN_STOP: &[&str] = &[
+        "run",
+        "duration_s",
+        "ok",
+        "reason",
+        "forced_eos",
+        "eos_closed",
+        "counters",
+        "files",
+    ];
 
     /// `audit` の `actor` 以降(SPEC §9.2)。
     pub const AUDIT: &[&str] = &["action", "params", "operator", "ok", "error"];
@@ -488,6 +519,11 @@ mod tests {
             duration_s: 12.5,
             ok: true,
             reason: "normal".to_string(),
+            // 033-A(SPEC §9.2 v1.12 + v1.14): **実機の正常停止**の姿。`ecc stop` は
+            // データリンクを閉じない(§1.3 v1.12)ので EOF は来ず、EOS は receiver `Stop` で
+            // 注入される = `forced_eos: true` が常態。それが流れ切ったので `eos_closed: true`。
+            forced_eos: true,
+            eos_closed: true,
             counters: Counters {
                 events_built: None,
                 events_incomplete: None,
@@ -582,6 +618,9 @@ mod tests {
     /// `late_fragments` が `0` から `null` に変わった(`Option<u64>` 化、`sample_run_stop`
     /// の申し送りコメント参照)。`overflow_frames`/`malformed` は `Some` なので数値のまま
     /// (`Option<u64>` の既定直列化は `Some(n)` → `n` そのもの、`None` → `null`)。
+    ///
+    /// 033-A で更新(golden 変更点): `reason` の直後に `forced_eos` / `eos_closed`
+    /// (SPEC §9.2 v1.12)。**追加のみ**で既存フィールドは 1 つも動いていない。
     #[test]
     fn run_stop_matches_a_hand_assembled_oracle() {
         let line = LogbookLine {
@@ -592,8 +631,70 @@ mod tests {
         let json = serde_json::to_string(&line).unwrap();
         assert_eq!(
             json,
-            r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}"#
+            r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","forced_eos":true,"eos_closed":true,"counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}"#
         );
+    }
+
+    /// 033-A: **2 つの bool が独立に読める**ことを非対称値で固定する(true/true の
+    /// golden だけでは取り違えを検出できない)。
+    ///
+    /// 値の出典 = `reference/_spike/demo/out/logbook_D2_saved.jsonl`(TODO/041 D-2 の
+    /// 実測。run 中に vcobo を SIGKILL した run。`forced_eos: false` / `eos_closed: true` /
+    /// `reason: "normal"` / `ok: true` —— **OS が正常 FIN を投げるので自然 EOF になり、
+    /// reason は normal のまま**)。SPEC §9.2 v1.14 が「`forced_eos:false` は stop 前に
+    /// リンクが死んだ強い印」と書いているのは、まさにこの行のことである。
+    #[test]
+    fn run_stop_keeps_forced_eos_and_eos_closed_independent() {
+        let LogbookRecord::RunStop {
+            counters, files, ..
+        } = sample_run_stop()
+        else {
+            panic!("sample_run_stop が RunStop でない");
+        };
+        let record = LogbookRecord::RunStop {
+            actor: "controller".to_string(),
+            run: 1,
+            duration_s: 27.040875875,
+            ok: true,
+            reason: "normal".to_string(),
+            forced_eos: false,
+            eos_closed: true,
+            counters,
+            files,
+        };
+        let line = LogbookLine {
+            ts: "2026-08-15T12:17:53.621-04:00".to_string(),
+            seq: 4,
+            record,
+        };
+        let json = serde_json::to_string(&line).unwrap();
+        assert!(
+            json.contains(r#""reason":"normal","forced_eos":false,"eos_closed":true,"#),
+            "2 値が独立に出ていない: {json}"
+        );
+
+        let back: LogbookLine = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, line);
+    }
+
+    /// v1.12 より前に書かれた `run_stop` 行も読める(seq 復旧が 1 行スキップに
+    /// 落ちないこと —— それは次の seq を重複させる)。**欠落は「観測値 false」ではなく
+    /// 「記録が無い」**であり、この既定値を異常判定に使ってはならない。
+    #[test]
+    fn a_pre_v1_12_run_stop_line_still_parses() {
+        let old = r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852},"overflow_frames":3,"malformed":4},"files":[]}"#;
+        let line: LogbookLine = serde_json::from_str(old).expect("v1.12 前の行が読めない");
+        assert_eq!(line.seq, 7);
+        let LogbookRecord::RunStop {
+            forced_eos,
+            eos_closed,
+            ..
+        } = line.record
+        else {
+            panic!("run_stop として読めていない");
+        };
+        assert!(!forced_eos, "既定は false(= 記録が無い)");
+        assert!(!eos_closed, "既定は false(= 記録が無い)");
     }
 
     // -----------------------------------------------------------------

@@ -206,6 +206,11 @@ impl FakeEcc {
         let handle = std::thread::spawn(move || {
             // ECC の状態遷移(`tools/ecc_bridge/ecc_core.hpp` = 実 ECC の SM と同じ意味論)。
             let mut state = "Off".to_string();
+            // 043: GET の error フラグ。初期値は NO_ERR(`BackEnd::BackEnd()`、
+            // BackEnd.cpp:132)。**遷移が渡ったときだけ**消える(`resetErrorFlag` は全遷移の
+            // 1 番目のアクション、BackEnd.cpp:249-290 / :1146-1149)—— 無音の `Ignored` では
+            // アクションが 1 つも走らないので残る。この fake は失敗しないので立つことは無い。
+            let mut ecc_error = "NO_ERR".to_string();
             while !thread_stop.load(Ordering::Relaxed) {
                 let message = match socket.recv_bytes(0) {
                     Ok(message) => message,
@@ -240,8 +245,10 @@ impl FakeEcc {
                 };
                 if let Some(next) = next {
                     state = next.to_string();
+                    ecc_error = "NO_ERR".to_string();
                 }
-                let reply = json!({"ok": true, "state": state, "error": ""});
+                let reply =
+                    json!({"ok": true, "state": state, "error": "", "ecc_error": ecc_error});
                 let _ = socket.send(reply.to_string().as_bytes(), 0);
             }
         });
@@ -361,6 +368,9 @@ async fn harness_with_config_ids(
     let (decoder_endpoint, decoder, _) = spawn_fake(
         json!({
             "eos_in": if eos_closed { cobo_ids.len() } else { 0 },
+            // TODO/033-C: **自分の EOS を送り終えたか**(チェーンの最後のホップ)。
+            // controller の `eos_complete` は eos_in と対でこれも読む。
+            "eos_out": if eos_closed { 1 } else { 0 },
             "malformed": 4,
             "fragments_out": 3852,
         }),
@@ -399,6 +409,9 @@ async fn harness_with_config_ids(
                 // 非対称なフレーム数(CoBo 毎の取り違え検出用)。
                 "frames": 3852 - i as u64,
                 "overflow_frames": i as u64,
+                // TODO/033-E: 受信静止(quiesce)判定の材料。フェイクは値が**動かない**
+                // ので、EOS が来ない構成では第一段が静止で切り上がる(= 実機の姿)。
+                "bytes": 30_108_684u64 - i as u64,
             }),
             shutdown.subscribe(),
         )
@@ -432,6 +445,9 @@ async fn harness_with_config_ids(
         router_ip: None,
         // 強制 EOS 分岐を秒単位で待たずに試せるよう、テストでは短くする。
         eos_timeout: Duration::from_millis(400),
+        // TODO/033-E で新設(SPEC §1.3 v1.12)。eos_timeout と同じく短く ——
+        // ここは静止検出そのものではなく既存シナリオの再現が目的。
+        eos_quiesce: Duration::from_millis(200),
         eos_poll: Duration::from_millis(50),
         command_timeout: Duration::from_secs(5),
         ecc_timeout: Duration::from_secs(5),
@@ -596,6 +612,9 @@ async fn a_full_run_drives_every_component_in_spec_order_and_writes_the_logbook(
     assert_eq!(body["run"]["run"], json!(1));
     assert_eq!(body["operator"], json!("aogaki"));
     assert_eq!(body["ecc"]["state"], json!("Running"));
+    // 043: GET の error フラグは `/api/status` の ecc に**素通しで**載る(SPEC §8.2 v1.14)。
+    // ここは正常系なので `NO_ERR` —— 空文字や欠落なら素通しの配線が切れている。
+    assert_eq!(body["ecc"]["ecc_error"], json!("NO_ERR"), "{}", body["ecc"]);
     let components = body["components"].as_array().unwrap();
     assert_eq!(components.len(), 4);
     for component in components {
@@ -689,6 +708,11 @@ async fn a_full_run_drives_every_component_in_spec_order_and_writes_the_logbook(
     assert_eq!(run_stop["run"], json!(1));
     assert_eq!(run_stop["ok"], json!(true));
     assert_eq!(run_stop["reason"], json!("normal"));
+    // TODO/033-A(SPEC §9.2 v1.12): 停止の顛末は **run_stop にも**載る
+    // (以前は audit と REST 応答にしか無く、041 の実 run で不履行が確認された)。
+    // このハーネスは EOS が最初から流れ切っている形なので、注入していない = false。
+    assert_eq!(run_stop["forced_eos"], json!(false), "{run_stop}");
+    assert_eq!(run_stop["eos_closed"], json!(true), "{run_stop}");
     assert_eq!(
         run_stop["counters"]["frames"],
         json!({"0": 3852, "1": 3851})
@@ -746,6 +770,12 @@ async fn a_stop_without_eos_forces_it_through_the_receivers() {
         .unwrap();
     assert_eq!(run_stop["ok"], json!(false));
     assert_eq!(run_stop["reason"], json!("error:eos-timeout"));
+    // TODO/033-A: **audit と同じ 2 値が run_stop にも載る**(REST 応答と一致すること)。
+    // `eos_closed=false` が異常の印、`forced_eos=true` は実機なら常態(SPEC §9.2 v1.14)。
+    assert_eq!(run_stop["forced_eos"], body["forced_eos"], "{run_stop}");
+    assert_eq!(run_stop["eos_closed"], body["eos_closed"], "{run_stop}");
+    assert_eq!(run_stop["forced_eos"], json!(true), "{run_stop}");
+    assert_eq!(run_stop["eos_closed"], json!(false), "{run_stop}");
 
     harness.shutdown();
 }

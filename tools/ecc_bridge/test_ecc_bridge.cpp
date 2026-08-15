@@ -2,7 +2,7 @@
 //
 //   * DataLinkSet XML 生成の**文字列全文照合**(CoBo[0] 形式 / 大文字 TCP / 2 CoBo = DataLink 2 本)
 //   * JSON リクエスト parse とレスポンス生成(never throw — 壊れた入力も Result 化)
-//   * 状態文字列マップ(Off..Paused/Unknown)
+//   * 状態文字列マップ(Off..Paused/Unknown)と error フラグ文字列(NO_ERR..WHEN_RESET、043)
 //   * fake-ECC の状態遷移表 = **実 ECC の SM**(036): `reset` は 1 段戻すだけ・`Active` からは
 //     無音、`configure` は Prepared 以外で無音スキップ、`breakup` は Active→Prepared、
 //     順序違反(describe/prepare/start/stop)はエラー
@@ -181,16 +181,53 @@ void test_parse_defaults_flow_type() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. レスポンス生成(SPEC §8.2: {"ok", "state", "error"})
+// 3. レスポンス生成(SPEC §8.2 v1.14: {"ok", "state", "error", "ecc_error"})
 // ---------------------------------------------------------------------------
 
 void test_make_response() {
-  CHECK_STR(ecc::make_response(true, State::Running, ""),
-            "{\"ok\":true,\"state\":\"Running\",\"error\":\"\"}");
+  CHECK_STR(ecc::make_response(true, State::Running, "", ecc::Error::NoErr),
+            "{\"ok\":true,\"state\":\"Running\",\"error\":\"\",\"ecc_error\":\"NO_ERR\"}");
   // ECC 不達 = ok:false + state Unknown(§8.2)。error は JSON エスケープされる。
-  CHECK_STR(ecc::make_response(false, State::Unknown, "connect failed: \"refused\"\n"),
-            "{\"ok\":false,\"state\":\"Unknown\","
-            "\"error\":\"connect failed: \\\"refused\\\"\\n\"}");
+  // 状態が取れていないので `ecc_error` も Unknown —— 「NO_ERR」と言い切ってはならない。
+  CHECK_STR(
+      ecc::make_response(false, State::Unknown, "connect failed: \"refused\"\n",
+                         ecc::Error::Unknown),
+      "{\"ok\":false,\"state\":\"Unknown\","
+      "\"error\":\"connect failed: \\\"refused\\\"\\n\",\"ecc_error\":\"Unknown\"}");
+}
+
+// **043**: 041 D-1 の形 —— state は正常(Idle)なのに error フラグだけ立っている。
+// この 2 軸が独立に運ばれることを全文照合で固定する(片方に丸められたら落ちる)。
+void test_make_response_carries_ecc_error_beside_state() {
+  CHECK_STR(ecc::make_response(true, State::Idle, "", ecc::Error::WhenDescribe),
+            "{\"ok\":true,\"state\":\"Idle\",\"error\":\"\",\"ecc_error\":\"WHEN_DESCRIBE\"}");
+  // 輸送層 error と GET の error フラグは**別物**。両方載る(片方が他方を上書きしない)。
+  CHECK_STR(ecc::make_response(false, State::Ready, "Could not establish data link. refused",
+                               ecc::Error::WhenStart),
+            "{\"ok\":false,\"state\":\"Ready\","
+            "\"error\":\"Could not establish data link. refused\","
+            "\"ecc_error\":\"WHEN_START\"}");
+}
+
+// ---------------------------------------------------------------------------
+// 3b. error フラグの文字列(SM.h:58-70 の 10 値 + 我々の Unknown)
+//
+// 綴りは **SM.h / rc/SM.cpp:73-108 の operator<<** と同じ UPPER_SNAKE(SPEC §8.2 v1.14)。
+// オペレータが ECC のログと突き合わせる文字列なので、Ice 側の綴り(NoErr, WhenDescribe)には
+// 寄せない。順序は SM.h の enum 定義順そのまま(NO_ERR=0 .. WHEN_RESET=9)。
+// ---------------------------------------------------------------------------
+
+void test_error_strings() {
+  const ecc::Error all[] = {
+      ecc::Error::NoErr,      ecc::Error::WhenDescribe, ecc::Error::WhenPrepare,
+      ecc::Error::WhenConfigure, ecc::Error::WhenStart, ecc::Error::WhenStop,
+      ecc::Error::WhenPause,  ecc::Error::WhenResume,   ecc::Error::WhenBreakup,
+      ecc::Error::WhenReset,  ecc::Error::Unknown,
+  };
+  const char* names[] = {"NO_ERR",     "WHEN_DESCRIBE", "WHEN_PREPARE", "WHEN_CONFIGURE",
+                         "WHEN_START", "WHEN_STOP",     "WHEN_PAUSE",   "WHEN_RESUME",
+                         "WHEN_BREAKUP", "WHEN_RESET",  "Unknown"};
+  for (int i = 0; i < 11; ++i) CHECK_STR(ecc::to_string(all[i]), names[i]);
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +423,8 @@ int main() {
   test_parse_rejects_bad_input();
   test_parse_defaults_flow_type();
   test_make_response();
+  test_make_response_carries_ecc_error_beside_state();
+  test_error_strings();
   test_state_strings();
   test_state_machine_happy_path();
   test_reset_walks_back_one_step_at_a_time();

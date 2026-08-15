@@ -158,6 +158,11 @@ pub struct RunDecoder {
     heartbeats_in: u64,
     heartbeats_out: u64,
     heartbeats_abandoned: u64,
+    /// **自分の** EOS を送り終えた回数(TODO/033-C)。`eos_abandoned` と対で、
+    /// チェーンの**最後のホップ**(decoder → root-sink)を controller から観測できるようにする。
+    /// `RunDecoder` は `Start` 毎に新規生成されるので run 内の値であり、`rearm` でも消さない
+    /// (「この run の EOS を送り終えたか」を停止シーケンスが読む)。
+    eos_out: u64,
     eos_abandoned: u64,
     batches_abandoned: u64,
     /// `Batch.source_id` と `Fragment.cobo`(GRAW ヘッダ実値)の不一致数(TODO/013-4)。
@@ -204,6 +209,7 @@ impl RunDecoder {
             heartbeats_in: 0,
             heartbeats_out: 0,
             heartbeats_abandoned: 0,
+            eos_out: 0,
             eos_abandoned: 0,
             batches_abandoned: 0,
             cobo_mismatch: 0,
@@ -416,6 +422,7 @@ impl RunDecoder {
 
     /// 自分の EOS を送り終えた。run 状態(EOS 集合・入力 seq 検証・自前 seq)を再武装する。
     pub fn eos_sent(&mut self) {
+        self.eos_out += 1;
         info!(
             run_number = self.run_number,
             "decoder: own EndOfStream sent — rearming for the next run"
@@ -499,6 +506,12 @@ impl RunDecoder {
         self.eos_in
     }
 
+    /// 自分の EOS を送り終えた回数(TODO/033-C)。停止シーケンスの `eos_complete` 判定の
+    /// 3 点目 —— これが 0 のままなら run のバリアは root-sink に届いていない。
+    pub fn eos_out(&self) -> u64 {
+        self.eos_out
+    }
+
     pub fn batches_abandoned(&self) -> u64 {
         self.batches_abandoned
     }
@@ -537,6 +550,7 @@ impl RunDecoder {
             "heartbeats_in": self.heartbeats_in,
             "heartbeats_out": self.heartbeats_out,
             "heartbeats_abandoned": self.heartbeats_abandoned,
+            "eos_out": self.eos_out,
             "eos_abandoned": self.eos_abandoned,
             "batches_abandoned": self.batches_abandoned,
             "cobo_mismatch": self.cobo_mismatch,
@@ -1622,6 +1636,37 @@ mod tests {
         assert_eq!(m["heartbeats_in"].as_u64(), Some(0), "受信カウンタとは独立");
     }
 
+    /// TODO/033-C: **最後のホップ**(decoder → root-sink)の観測点。`eos_in` が揃っても
+    /// 自分の EOS を送れていなければ run のバリアは root-sink に届いていない ——
+    /// controller の `eos_complete` はこの `eos_out` を 3 点目に読む。
+    /// `eos_abandoned` と対であること(送れた / 打ち切った のどちらかが必ず立つ)も固定する。
+    #[test]
+    fn eos_out_counts_only_the_decoders_own_sent_eos() {
+        let mut c = core(4, &[0, 1]);
+        assert_eq!(c.eos_out(), 0, "起点は 0");
+
+        // 上流 EOS を 2 本受けただけでは **まだ送っていない**(ここが 033-C の穴)。
+        c.handle_eos(0, 4);
+        assert_eq!(c.handle_eos(1, 4), Emit::FlushAndEndOfStream);
+        assert_eq!(c.eos_in(), 2);
+        assert_eq!(c.eos_out(), 0, "受けただけでは eos_out は進まない");
+        assert_eq!(c.metrics_json()["eos_out"].as_u64(), Some(0));
+
+        c.eos_sent();
+        assert_eq!(c.eos_out(), 1);
+        assert_eq!(c.metrics_json()["eos_out"].as_u64(), Some(1));
+        assert_eq!(
+            c.metrics_json()["eos_abandoned"].as_u64(),
+            Some(0),
+            "送れたのだから打ち切りは 0"
+        );
+
+        // 打ち切り経路は `eos_out` を進めない(対の関係)。
+        c.eos_abandoned();
+        assert_eq!(c.eos_out(), 1, "abandon で eos_out は進まない");
+        assert_eq!(c.metrics_json()["eos_abandoned"].as_u64(), Some(1));
+    }
+
     #[test]
     fn metrics_json_carries_every_counter_of_the_ticket() {
         let mut c = core(1, &[0]);
@@ -1644,6 +1689,7 @@ mod tests {
             "heartbeats_in",
             "heartbeats_out",
             "heartbeats_abandoned",
+            "eos_out",
             "eos_abandoned",
             "batches_abandoned",
             "cobo_mismatch",

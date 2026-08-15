@@ -49,6 +49,8 @@
 - UI の未使用 lazy チャンク(jsroot geom の three addons 2.38 MB)
 - vcobo-daq の SIGINT graceful 化(041 発見⑤ — 厳密には挙動追加なので小粒扱い。
   窓で相乗りするか個別に切るかはレビュー時に判断)
+- `status_timeout` が停止経路で未使用な件(033 発見⑤ — `ZmqTransport::command` は常に
+  `command_timeout`。タイムアウト設定の意味の整理。挙動に触るなら SPEC 確認込み)
 
 ## 対象外(裁定済み)
 

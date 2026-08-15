@@ -17,6 +17,11 @@
 //       接続してすぐ close する案は使えない —— receiver は `Ok(0)` を run 境界と解釈して
 //       EOS を送るので run が空で閉じてしまう。よって「張らない」を選ぶ。
 //       **既定は従来どおり張る**ので、016/017 の listen-before-start 負性テストは不変。
+//   (e) **043**: `getStatus` の error フラグを実 ECC の set/clear 規則どおりに持つ
+//       (規則と一次資料の行番号は ecc_core.hpp の「set / clear 規則」ブロック)。
+//       要点だけ再掲: 遷移が渡ったら NO_ERR に消え、その後の副作用が失敗したら**その相の
+//       コード**が立って state は動かない。遷移が無い(Ignored/Denied)ときは触らない。
+//       getStatus では消えない。
 //
 // このプロセスは制御プレーンの模擬だけを行う。GET のビルドは要らない(Ice のみ)。
 
@@ -136,7 +141,7 @@ class FakeEcc : public get::rc::StateMachine {
 
     const std::vector<ecc::Link> links = ecc::parse_data_link_set(data_link_set_);
     if (links.empty()) {
-      state_ = ecc::State::Ready;  // 遷移を巻き戻す
+      fail_transition(ecc::State::Ready, ecc::Error::WhenStart);
       throw mdaq::utl::CmdException("Could not establish data link. no DataLink in DataLinkSet");
     }
     // --no-data-link: DataLinkSet の中身は検査するが TCP は張らない(冒頭 (d) の理由)。
@@ -153,7 +158,7 @@ class FakeEcc : public get::rc::StateMachine {
       const int fd = connect_with_timeout(l.router_ip, l.router_port, why);
       if (fd < 0) {
         for (const int f : opened) ::close(f);
-        state_ = ecc::State::Ready;  // start は成立しなかった
+        fail_transition(ecc::State::Ready, ecc::Error::WhenStart);  // start は成立しなかった
         std::fprintf(stderr, "fake_ecc: data link failed for %s: %s\n", l.sender.c_str(),
                      why.c_str());
         throw mdaq::utl::CmdException("Could not establish data link. " + why);
@@ -196,8 +201,10 @@ class FakeEcc : public get::rc::StateMachine {
   }
   void getStatus(get::rc::Status& s, const Ice::Current&) override {
     std::lock_guard<std::mutex> lk(mu_);
+    // 読むだけ。**フラグは消さない**(実 ECC も smStatus を読むだけ —— BackEnd.cpp:321-327 /
+    // GetEccImpl.cpp:468-473)。次の遷移が渡るまで残り続ける。
     s.s = to_ice(state_);
-    s.e = get::rc::Error::NoErr;
+    s.e = to_ice(error_);
   }
   std::string getDataLinks(const Ice::Current&) override {
     std::lock_guard<std::mutex> lk(mu_);
@@ -230,8 +237,21 @@ class FakeEcc : public get::rc::StateMachine {
                    action, ecc::to_string(state_));
       return result;
     }
+    // **043**: `resetErrorFlag` は全遷移の**1 番目のアクション**(BackEnd.cpp:249-290)。
+    // 遷移を渡り始めた時点で消えるので、副作用より先にここで消す。遷移が無かった
+    // (Ignored / Denied)ときはアクションが 1 つも走らないので**触らない**。
+    error_ = ecc::Error::NoErr;
     state_ = next;
     return result;
+  }
+
+  // 遷移のアクションが失敗したときの後始末(実 ECC の CATCH_SM_EXCEPTIONS →
+  // handleStateMachineException、BackEnd.cpp:74-99 / 329-333)。フラグにその相のコードを
+  // 立て、**state は遷移前へ戻す** —— 実 ECC は `currentState_ = targetState()`
+  // (dhsm/Engine.cpp:298)に到達しないまま抜けるので、状態は元のままになる。
+  void fail_transition(ecc::State back_to, ecc::Error code) {
+    state_ = back_to;
+    error_ = code;
   }
   mdaq::utl::CmdException invalid(const char* action) const {
     return mdaq::utl::CmdException("invalid transition: " + std::string(action) + " in state " +
@@ -241,6 +261,23 @@ class FakeEcc : public get::rc::StateMachine {
     for (const int fd : links_) ::close(fd);
     links_.clear();
   }
+  static get::rc::Error to_ice(ecc::Error e) {
+    switch (e) {
+      case ecc::Error::NoErr: return get::rc::Error::NoErr;
+      case ecc::Error::WhenDescribe: return get::rc::Error::WhenDescribe;
+      case ecc::Error::WhenPrepare: return get::rc::Error::WhenPrepare;
+      case ecc::Error::WhenConfigure: return get::rc::Error::WhenConfigure;
+      case ecc::Error::WhenStart: return get::rc::Error::WhenStart;
+      case ecc::Error::WhenStop: return get::rc::Error::WhenStop;
+      case ecc::Error::WhenPause: return get::rc::Error::WhenPause;
+      case ecc::Error::WhenResume: return get::rc::Error::WhenResume;
+      case ecc::Error::WhenBreakup: return get::rc::Error::WhenBreakup;
+      case ecc::Error::WhenReset: return get::rc::Error::WhenReset;
+      // Unknown は .ice の enum に無い(この fake は Unknown を作らない)。
+      default: return get::rc::Error::NoErr;
+    }
+  }
+
   static get::rc::State to_ice(ecc::State s) {
     switch (s) {
       case ecc::State::Off: return get::rc::State::Off;
@@ -258,6 +295,8 @@ class FakeEcc : public get::rc::StateMachine {
 
   std::mutex mu_;
   ecc::State state_ = ecc::State::Off;
+  // 実 ECC の初期値も NO_ERR(BackEnd::BackEnd()、BackEnd.cpp:132)。
+  ecc::Error error_ = ecc::Error::NoErr;
   std::string config_id_;
   std::string data_link_set_;
   std::vector<int> links_;  // start() で張った(そして黙って保持する)接続

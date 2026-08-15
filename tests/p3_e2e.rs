@@ -785,6 +785,9 @@ impl Topology {
             ecc_endpoint: bridge.banner.clone(),
             router_ip: None,
             eos_timeout: options.eos_timeout,
+            // TODO/033-E で新設(SPEC §1.3 v1.12)。ここは production の既定のまま
+            // = 実運用と同じ停止の畳み方でシナリオを回す。
+            eos_quiesce: Duration::from_millis(tpcdaq::config::DEFAULT_CONTROLLER_EOS_QUIESCE_MS),
             eos_poll: Duration::from_millis(100),
             command_timeout: Duration::from_secs(5),
             ecc_timeout: Duration::from_secs(30),

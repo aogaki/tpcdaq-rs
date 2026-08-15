@@ -7,7 +7,9 @@
 //                "config_id":"...", "links":[{"sender":"CoBo[0]","router_ip":"...",
 //                "router_port":46005,"type":"TCP"}, ...]}
 // * レスポンス: {"ok":bool,"state":"Off|Idle|Described|Prepared|Ready|Running|Paused|Unknown",
-//                "error":"..."}
+//                "error":"...","ecc_error":"NO_ERR|WHEN_DESCRIBE|...|Unknown"}
+//   `error` は**輸送・ブリッジ層**のエラー、`ecc_error` は **GET の error フラグ**(043、
+//   SPEC §8.2 v1.14)。前者は 043 で意味も値も変えていない。
 // * **never throw**: Ice の例外は全部 Result 化。ECC 不達 = {"ok":false,"state":"Unknown"}。
 // * REP は 1 スレッド逐次(コマンドは人間スケール)。**必ず 1 リクエスト 1 レスポンス**を返す
 //   —— 返さないと REQ 側が永久に待つ。
@@ -66,6 +68,32 @@ ecc::State map_state(get::rc::State s) {
   }
 }
 
+// GetEcc.ice:56-60 の enum → 我々のミラー(ecc_core.hpp)。
+// 対応は GetEccImpl.cpp:431-464(SM::Error → Ice enum)の裏返しで 1 対 1。
+ecc::Error map_error(get::rc::Error e) {
+  switch (e) {
+    case get::rc::Error::NoErr: return ecc::Error::NoErr;
+    case get::rc::Error::WhenDescribe: return ecc::Error::WhenDescribe;
+    case get::rc::Error::WhenPrepare: return ecc::Error::WhenPrepare;
+    case get::rc::Error::WhenConfigure: return ecc::Error::WhenConfigure;
+    case get::rc::Error::WhenStart: return ecc::Error::WhenStart;
+    case get::rc::Error::WhenStop: return ecc::Error::WhenStop;
+    case get::rc::Error::WhenPause: return ecc::Error::WhenPause;
+    case get::rc::Error::WhenResume: return ecc::Error::WhenResume;
+    case get::rc::Error::WhenBreakup: return ecc::Error::WhenBreakup;
+    case get::rc::Error::WhenReset: return ecc::Error::WhenReset;
+    // 知らない値を `NO_ERR` に丸めない(「エラー無し」と嘘をつく方が悪い)。
+    default: return ecc::Error::Unknown;
+  }
+}
+
+// 1 回の getStatus で取れる ECC の申告(state と error は**別の軸**。041 D-1 の
+// `IDLE / WHEN_DESCRIBE` のように、状態が正常でもフラグが立っていることがある)。
+struct Observed {
+  ecc::State state = ecc::State::Unknown;
+  ecc::Error error = ecc::Error::Unknown;
+};
+
 class EccClient {
  public:
   explicit EccClient(std::string proxy_str) : proxy_str_(std::move(proxy_str)) {}
@@ -120,22 +148,23 @@ class EccClient {
     return run([](get::rc::StateMachinePrx& p) { p.reset(); });
   }
 
-  // 取得できなければ out = Unknown + ok=false(§8.2「ECC 不達 = state Unknown」)。
-  Result status(ecc::State& out) {
-    out = ecc::State::Unknown;
-    ecc::State& o = out;
+  // 取得できなければ out = {Unknown, Unknown} + ok=false(§8.2「ECC 不達 = state Unknown」)。
+  Result status(Observed& out) {
+    out = Observed{};
+    Observed& o = out;
     return run([&](get::rc::StateMachinePrx& p) {
       get::rc::Status st;
       p.getStatus(st);
-      o = map_state(st.s);
+      o.state = map_state(st.s);
+      o.error = map_error(st.e);
     });
   }
 
   // 応答に載せる状態(取得失敗は Unknown。理由は直前の操作の error が語る)。
-  ecc::State state() {
-    ecc::State s = ecc::State::Unknown;
-    status(s);
-    return s;
+  Observed observe() {
+    Observed o;
+    status(o);
+    return o;
   }
 
  private:
@@ -215,22 +244,23 @@ std::string handle(EccClient& ecc, const std::string& request_json) {
   if (!req.valid) {
     // 壊れたリクエストでも ECC の状態は返す(状態が見えないと運用が止まる)。
     std::fprintf(stderr, "ecc_bridge: rejected request: %s\n", req.error.c_str());
-    return ecc::make_response(false, ecc.state(), req.error);
+    const Observed o = ecc.observe();
+    return ecc::make_response(false, o.state, req.error, o.error);
   }
   // status は「状態が取れたか」がそのまま ok(ECC 不達なら ok=false + Unknown)。
-  ecc::State st = ecc::State::Unknown;
   if (req.action == "status") {
-    const Result r = ecc.status(st);
-    std::fprintf(stderr, "ecc_bridge: status -> ok=%d state=%s %s\n", r.ok ? 1 : 0,
-                 ecc::to_string(st), r.error.c_str());
-    return ecc::make_response(r.ok, st, r.error);
+    Observed o;
+    const Result r = ecc.status(o);
+    std::fprintf(stderr, "ecc_bridge: status -> ok=%d state=%s ecc_error=%s %s\n", r.ok ? 1 : 0,
+                 ecc::to_string(o.state), ecc::to_string(o.error), r.error.c_str());
+    return ecc::make_response(r.ok, o.state, r.error, o.error);
   }
 
   const Result r = dispatch(ecc, req);
-  st = ecc.state();
-  std::fprintf(stderr, "ecc_bridge: %s -> ok=%d state=%s %s\n", req.action.c_str(), r.ok ? 1 : 0,
-               ecc::to_string(st), r.error.c_str());
-  return ecc::make_response(r.ok, st, r.error);
+  const Observed o = ecc.observe();
+  std::fprintf(stderr, "ecc_bridge: %s -> ok=%d state=%s ecc_error=%s %s\n", req.action.c_str(),
+               r.ok ? 1 : 0, ecc::to_string(o.state), ecc::to_string(o.error), r.error.c_str());
+  return ecc::make_response(r.ok, o.state, r.error, o.error);
 }
 
 }  // namespace

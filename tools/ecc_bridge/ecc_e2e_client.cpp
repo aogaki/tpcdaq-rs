@@ -4,6 +4,8 @@
 //
 //   status(Off) → start(順序違反 = エラー) → describe → prepare
 //   → configure(誰も listen していないポート) → **start = "Could not establish data link"**
+//     (= GET の error フラグが `WHEN_START` に立ち、state は Ready のまま残る。043)
+//   → status を 2 回読んでも消えない / 遷移の無い reset でも消えない / breakup で消える
 //   → 受信ポートを listen → configure(その実ポート) → start = 成功 + **実際に繋がってくる**
 //   → 走行中は 1 バイトも来ない(データ送出は replay の仕事)
 //   → stop(= EOF)→ breakup → reset → 壊れた JSON でもブリッジは死なない
@@ -70,9 +72,14 @@ class Req {
   void* sock_ = nullptr;
 };
 
-// レスポンス(SPEC §8.2)の 3 フィールドを機械照合する。
+// レスポンス(SPEC §8.2 v1.14)の 4 フィールドを機械照合する。
+//
+// `want_ecc_error` は **GET の error フラグ**の期待値(043)。全呼び出しで指定する ——
+// フラグは「立ったまま残る」ことが本体なので、見ていない箇所があると set/clear の
+// 取り違えを取り逃がす。
 void expect(const std::string& what, const std::string& reply, bool want_ok,
-            const char* want_state, const char* want_error_substring = nullptr) {
+            const char* want_state, const char* want_ecc_error,
+            const char* want_error_substring = nullptr) {
   jsonmin::Value v;
   std::string err;
   if (!jsonmin::parse(reply, v, err)) {
@@ -84,10 +91,19 @@ void expect(const std::string& what, const std::string& reply, bool want_ok,
   const jsonmin::Value* ok = v.find("ok");
   const jsonmin::Value* state = v.find("state");
   const jsonmin::Value* error = v.find("error");
-  if (ok == nullptr || state == nullptr || error == nullptr) {
-    std::printf("FAIL %s: reply misses ok/state/error [%s]\n", what.c_str(), reply.c_str());
+  const jsonmin::Value* ecc_error = v.find("ecc_error");
+  if (ok == nullptr || state == nullptr || error == nullptr || ecc_error == nullptr) {
+    std::printf("FAIL %s: reply misses ok/state/error/ecc_error [%s]\n", what.c_str(),
+                reply.c_str());
     ++tpccheck::g_fail;
     return;
+  }
+  if (ecc_error->str != want_ecc_error) {
+    std::printf("FAIL %s: got ecc_error=%s (want %s) [%s]\n", what.c_str(),
+                ecc_error->str.c_str(), want_ecc_error, reply.c_str());
+    ++tpccheck::g_fail;
+  } else {
+    ++tpccheck::g_pass;
   }
   if (ok->boolean != want_ok || state->str != want_state) {
     std::printf("FAIL %s: got ok=%d state=%s error=%s (want ok=%d state=%s)\n", what.c_str(),
@@ -177,27 +193,49 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // 0. 初期状態(fake-ECC は Off から始まる)
-  expect("status(initial)", req.call("{\"action\":\"status\"}"), true, "Off");
+  // 0. 初期状態(fake-ECC は Off から始まる。error フラグの初期値は NO_ERR —— 実 ECC も
+  //    BackEnd::BackEnd() で NO_ERR、BackEnd.cpp:132)
+  expect("status(initial)", req.call("{\"action\":\"status\"}"), true, "Off", "NO_ERR");
 
-  // 1. 順序違反: describe もせずに start —— ECC がエラーを返し、状態は動かない
-  expect("start before describe", req.call("{\"action\":\"start\"}"), false, "Off",
+  // 1. 順序違反: describe もせずに start —— ECC がエラーを返し、状態は動かない。
+  //    実 ECC ではこれは「遷移が無い」= Ignored でアクションが 1 つも走らないので、
+  //    **error フラグは触られない**(NO_ERR のまま)。
+  expect("start before describe", req.call("{\"action\":\"start\"}"), false, "Off", "NO_ERR",
          "invalid transition");
 
   // 2. 正順で Ready まで(listen していないポートを指す DataLinkSet)
   expect("describe", req.call("{\"action\":\"describe\",\"config_id\":\"e2e\"}"), true,
-         "Described");
-  expect("prepare", req.call("{\"action\":\"prepare\",\"config_id\":\"e2e\"}"), true, "Prepared");
+         "Described", "NO_ERR");
+  expect("prepare", req.call("{\"action\":\"prepare\",\"config_id\":\"e2e\"}"), true, "Prepared",
+         "NO_ERR");
 
   int closed_port = 0;
   const int probe = listen_ephemeral(closed_port);
   CHECK(probe >= 0);
   if (probe >= 0) ::close(probe);  // ポート番号だけ借りて即座に閉じる = 誰も listen していない
-  expect("configure(no listener)", req.call(configure_request(closed_port)), true, "Ready");
+  expect("configure(no listener)", req.call(configure_request(closed_port)), true, "Ready",
+         "NO_ERR");
 
-  // 3. **listen-before-start の負性テスト**(SPEC §8.3)
+  // 3. **listen-before-start の負性テスト**(SPEC §8.3)+ **error フラグの set**(043)。
+  //    遷移のアクション(データリンク確立)が失敗 → CATCH_SM_EXCEPTIONS(SM::WHEN_START)が
+  //    フラグを立て(BackEnd.cpp:1052 / 329-333)、state は渡り切らないので Ready のまま
+  //    (dhsm/Engine.cpp:298 に到達しない)。041 D-1 の `IDLE / WHEN_DESCRIBE` と同じ形。
   expect("start without listener", req.call("{\"action\":\"start\"}"), false, "Ready",
-         "Could not establish data link");
+         "WHEN_START", "Could not establish data link");
+
+  // 3b. **フラグは残る**(043 の眼目 —— これが見えないと 041 D-1 の再来)。
+  //     getStatus は smStatus を読むだけでフラグを消さない(BackEnd.cpp:321-327)。
+  //     何度読んでも消えないことまで見る。
+  expect("status(after failed start)", req.call("{\"action\":\"status\"}"), true, "Ready",
+         "WHEN_START");
+  expect("status(read twice)", req.call("{\"action\":\"status\"}"), true, "Ready", "WHEN_START");
+
+  // 3c. **遷移が無ければフラグは消えない**。`Ready` からの reset は EV_UNDO が無いので
+  //     Ignored = アクションが 1 つも走らない → resetErrorFlag(BackEnd.cpp:249-290 の
+  //     1 番目のアクション)も走らない。ok=true(無音)で state も動かないのに、
+  //     フラグだけは WHEN_START のまま残る。
+  expect("reset(ignored, keeps the flag)", req.call("{\"action\":\"reset\"}"), true, "Ready",
+         "WHEN_START");
 
   // 4. 受信ポートを用意してから configure → start
   int listen_port = 0;
@@ -208,9 +246,13 @@ int main(int argc, char** argv) {
   // 直前の configure 失敗で ECC は Active(Ready)に居る。**実 ECC の configure は
   // `ST_PREPARED` からしか効かない**(BackEnd.cpp:955-962 のガード。それ以外は黙ってスキップ)
   // ので、張り替えの前に breakup で Prepared へ戻す(SPEC v1.12 §1.3 / TODO/036)。
-  expect("breakup(before re-configure)", req.call("{\"action\":\"breakup\"}"), true, "Prepared");
-  expect("configure(with listener)", req.call(configure_request(listen_port)), true, "Ready");
-  expect("start", req.call("{\"action\":\"start\"}"), true, "Running");
+  // **error フラグの clear**(043): breakup は Ready から遷移が**ある**ので渡り、
+  // その 1 番目のアクション resetErrorFlag が WHEN_START を消す(BackEnd.cpp:268-270)。
+  expect("breakup(clears the flag)", req.call("{\"action\":\"breakup\"}"), true, "Prepared",
+         "NO_ERR");
+  expect("configure(with listener)", req.call(configure_request(listen_port)), true, "Ready",
+         "NO_ERR");
+  expect("start", req.call("{\"action\":\"start\"}"), true, "Running", "NO_ERR");
 
   // CoBo(fake-ECC)が実際に繋いで来たか —— data link の実在確認。
   CHECK(readable(server, 2000));
@@ -221,7 +263,7 @@ int main(int argc, char** argv) {
   CHECK(!readable(conn, 200));
 
   // 5. stop → 接続が閉じる(受信側から見ると EOF = run 境界)
-  expect("stop", req.call("{\"action\":\"stop\"}"), true, "Ready");
+  expect("stop", req.call("{\"action\":\"stop\"}"), true, "Ready", "NO_ERR");
   CHECK(readable(conn, 2000));
   char scratch[16];
   const ssize_t n = ::recv(conn, scratch, sizeof(scratch), 0);
@@ -230,17 +272,20 @@ int main(int argc, char** argv) {
   ::close(server);
 
   // 6. 残りの遷移
-  expect("breakup", req.call("{\"action\":\"breakup\"}"), true, "Prepared");
+  expect("breakup", req.call("{\"action\":\"breakup\"}"), true, "Prepared", "NO_ERR");
   // 実 ECC の reset は `EV_UNDO` = **1 段戻す**(BackEnd.cpp:250-270)。Prepared → Idle は 2 段。
-  expect("reset(1)", req.call("{\"action\":\"reset\"}"), true, "Described");
-  expect("reset(2)", req.call("{\"action\":\"reset\"}"), true, "Idle");
+  expect("reset(1)", req.call("{\"action\":\"reset\"}"), true, "Described", "NO_ERR");
+  expect("reset(2)", req.call("{\"action\":\"reset\"}"), true, "Idle", "NO_ERR");
 
-  // 7. 壊れた入力でブリッジは死なない(状態は返る、次のリクエストも通る)
-  expect("malformed json", req.call("{\"action\":"), false, "Idle", "parse error");
-  expect("unknown action", req.call("{\"action\":\"launch\"}"), false, "Idle", "unknown action");
+  // 7. 壊れた入力でブリッジは死なない(状態は返る、次のリクエストも通る)。
+  //    リクエストが ECC に届いてすらいないので `ecc_error` は ECC の現況(NO_ERR)を映す ——
+  //    輸送層の `error` と GET の error フラグが**別軸**であることの現れ。
+  expect("malformed json", req.call("{\"action\":"), false, "Idle", "NO_ERR", "parse error");
+  expect("unknown action", req.call("{\"action\":\"launch\"}"), false, "Idle", "NO_ERR",
+         "unknown action");
   expect("configure without links", req.call("{\"action\":\"configure\"}"), false, "Idle",
-         "links");
-  expect("status(final)", req.call("{\"action\":\"status\"}"), true, "Idle");
+         "NO_ERR", "links");
+  expect("status(final)", req.call("{\"action\":\"status\"}"), true, "Idle", "NO_ERR");
 
   return tpccheck::report("ecc_e2e");
 }

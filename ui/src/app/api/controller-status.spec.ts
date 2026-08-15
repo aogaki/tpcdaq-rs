@@ -131,6 +131,18 @@ describe('ecc(ecc-bridge 無しの開発機で赤い嘘を出さない)', () => 
     expect(eccTone(false, 'Unknown')).toBe('unknown');
     expect(eccTone(true, 'Running')).toBe('ok');
   });
+
+  // 043: controller が `ecc.ecc_error`(GET の error フラグ)を素通しで載せるようになった。
+  // **この UI はまだ表示しない**(表示は P4)—— ここで見るのは「知らないキーが増えても
+  // 既存の見え方が 1 つも変わらない」ことだけ。パーサが未知キーを無視する作りである証拠。
+  it('知らないキー ecc_error が増えても既存の表示は変わらない(表示は P4)', () => {
+    const raw = {
+      ...(LIVE as Record<string, unknown>),
+      ecc: { ok: true, state: 'Idle', error: '', ecc_error: 'WHEN_DESCRIBE' },
+    };
+    const ecc = parseControllerStatus(raw)?.ecc;
+    expect(ecc).toEqual({ state: 'Idle', label: 'Idle', tone: 'ok', error: '' });
+  });
 });
 
 describe('壊れた応答', () => {

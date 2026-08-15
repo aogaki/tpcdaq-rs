@@ -33,8 +33,16 @@ pub const DEFAULT_CONTROLLER_REST_LISTEN: &str = "0.0.0.0:8080";
 /// controller のログ投稿 PULL bind の既定(SPEC §3.2「controller ログ投稿 PULL bind = 47005」)。
 pub const DEFAULT_CONTROLLER_LOG_PULL_BIND: &str = "tcp://*:47005";
 
-/// EOS 伝播待ちの既定タイムアウト(秒、SPEC §1.3「EOF が 5 秒来なければ強制 EOS」)。
+/// EOS 伝播待ちの既定タイムアウト(秒、SPEC §1.3。**ハード上限**)。
 pub const DEFAULT_CONTROLLER_EOS_TIMEOUT_S: u64 = 5;
+
+/// 受信静止(quiesce)判定の既定(ms、SPEC §1.3 v1.12 / TODO/033 論点 2′)。
+///
+/// 実機の `ecc stop` はデータリンクを close しないので EOF は来ない ——
+/// 「EOF を `eos_timeout` 待つ」段は**毎停止まるごと空振り**する。代わりに
+/// 「全 receiver の受信バイト数がこの時間だけ不変」= 在飛データを飲み切った、と読んで
+/// 強制 EOS へ進む。LAN の在飛は ms 級なので 500 ms は 10 倍以上のマージン。
+pub const DEFAULT_CONTROLLER_EOS_QUIESCE_MS: u64 = 500;
 
 /// decoder の Batch source_id(SPEC §3.2 の source_id 表)。
 pub const DECODER_SOURCE_ID: u32 = 100;
@@ -336,8 +344,10 @@ pub struct ControllerConfig {
     pub config_id: ConfigIds,
     /// ログ投稿 PULL の bind(SPEC §2.3 LogPost / §3.2)。
     pub log_pull_bind: String,
-    /// EOS 伝播待ちのタイムアウト(秒、SPEC §1.3)。
+    /// EOS 伝播待ちのタイムアウト(秒、SPEC §1.3)。**両段のハード上限**。
     pub eos_timeout_s: u64,
+    /// 停止第一段の受信静止(quiesce)判定時間(ms、SPEC §1.3 v1.12)。省略可(既定 500)。
+    pub eos_quiesce_ms: u64,
     /// Web UI 静的ファイルの根。`None` = 配信しない(SPEC §8.1、UI は後波)。
     pub ui_dir: Option<PathBuf>,
     /// controller → graw-writer のコマンド REQ 接続先。
@@ -444,6 +454,9 @@ struct RawController {
     log_pull_bind: Option<String>,
     #[serde(default)]
     eos_timeout_s: Option<u64>,
+    // ---- 033 で追記(省略可)----
+    #[serde(default)]
+    eos_quiesce_ms: Option<u64>,
     #[serde(default)]
     ui_dir: Option<PathBuf>,
     #[serde(default)]
@@ -606,6 +619,10 @@ fn resolve(raw: RawConfig) -> Config {
             .controller
             .eos_timeout_s
             .unwrap_or(DEFAULT_CONTROLLER_EOS_TIMEOUT_S),
+        eos_quiesce_ms: raw
+            .controller
+            .eos_quiesce_ms
+            .unwrap_or(DEFAULT_CONTROLLER_EOS_QUIESCE_MS),
         ui_dir: raw.controller.ui_dir,
         graw_writer_command: raw
             .controller
@@ -1763,6 +1780,8 @@ ws_listen = "0.0.0.0:9000"
 
         assert_eq!(config.controller.log_pull_bind, "tcp://*:47005");
         assert_eq!(config.controller.eos_timeout_s, 5);
+        // 033-E: 新設キー。省略時は 500 ms(SPEC §1.3 v1.12)。
+        assert_eq!(config.controller.eos_quiesce_ms, 500);
         assert_eq!(config.controller.ui_dir, None);
         assert_eq!(
             config.controller.graw_writer_command,
@@ -1792,6 +1811,7 @@ ecc_proxy = "Ecc:tcp -h 10.0.0.2 -p 46002"
 config_id = "elitpc"
 log_pull_bind = "tcp://*:47105"
 eos_timeout_s = 9
+eos_quiesce_ms = 750
 ui_dir = "/srv/tpcdaq-ui"
 graw_writer_command = "tcp://10.0.0.3:47100"
 decoder_command = "tcp://10.0.0.4:47101"
@@ -1804,6 +1824,8 @@ router_ip = "10.0.0.1"
 
         assert_eq!(config.controller.log_pull_bind, "tcp://*:47105");
         assert_eq!(config.controller.eos_timeout_s, 9);
+        // 非対称値(eos_timeout_s = 9 s と取り違えたら落ちる)。
+        assert_eq!(config.controller.eos_quiesce_ms, 750);
         assert_eq!(
             config.controller.ui_dir,
             Some(PathBuf::from("/srv/tpcdaq-ui"))

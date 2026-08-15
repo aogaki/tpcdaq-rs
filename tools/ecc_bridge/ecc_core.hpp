@@ -1,6 +1,7 @@
 // ecc_core.hpp — ecc-bridge の **Ice 非依存**な核(SPEC §8.2)。
 //
 //   * State と文字列の対応(Off/Idle/Described/Prepared/Ready/Running/Paused/Unknown)
+//   * Error(GET の error フラグ)と文字列の対応 + その set/clear 規則(043、SPEC §8.2 v1.14)
 //   * DataLinkSet XML の生成(**実機の罠を仕様として固定**: DataSender id = "CoBo[k]" 形式、
 //     flowType = 大文字 "TCP")
 //   * JSON リクエストの parse とレスポンスの生成(never throw)
@@ -48,6 +49,88 @@ inline State state_from_string(const std::string& s) {
   if (s == "Paused") return State::Paused;
   return State::Unknown;
 }
+
+// get::rc::Error のミラー + Unknown(= 我々が状態を取れなかった。実 ECC の enum には無い)。
+//
+// 一次資料(reference/20190315_patched):
+//   GetBench/src/get/rc/SM.h:58-70          … enum Error の全 10 値(NO_ERR .. WHEN_RESET)
+//   GetBench/src/get/GetEcc.ice:56-60       … ワイヤ上の綴り(NoErr, WhenDescribe, ...)
+//   GetBench/src/get/GetEccImpl.cpp:431-464 … SM::Error → Ice enum の変換(1 対 1)
+//
+// **文字列は SM.h 側の綴り(UPPER_SNAKE)を出す** —— SPEC §8.2 v1.14 が `NO_ERR` /
+// `WHEN_DESCRIBE` と書いており、実 ECC 自身のログもこの綴り(rc/SM.cpp:73-108 の operator<<)。
+// オペレータが ECC のログと突き合わせる文字列なので、Ice 側の綴りに寄せない。
+enum class Error {
+  NoErr,
+  WhenDescribe,
+  WhenPrepare,
+  WhenConfigure,
+  WhenStart,
+  WhenStop,
+  WhenPause,
+  WhenResume,
+  WhenBreakup,
+  WhenReset,
+  Unknown,
+};
+
+inline const char* to_string(Error e) {
+  switch (e) {
+    case Error::NoErr: return "NO_ERR";
+    case Error::WhenDescribe: return "WHEN_DESCRIBE";
+    case Error::WhenPrepare: return "WHEN_PREPARE";
+    case Error::WhenConfigure: return "WHEN_CONFIGURE";
+    case Error::WhenStart: return "WHEN_START";
+    case Error::WhenStop: return "WHEN_STOP";
+    case Error::WhenPause: return "WHEN_PAUSE";
+    case Error::WhenResume: return "WHEN_RESUME";
+    case Error::WhenBreakup: return "WHEN_BREAKUP";
+    case Error::WhenReset: return "WHEN_RESET";
+    // 状態が取れていない(ECC 不達 / getStatus 失敗)。`NO_ERR` と**言い切らない** ——
+    // 「ECC はエラー無しと申告した」と「聞けていない」は別物である(CLAUDE.md: silent failure 禁止)。
+    default: return "Unknown";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 実 ECC の error フラグの **set / clear 規則**(043。一次資料を行番号で示す。
+// テストダブルのコメントではなく reference/20190315_patched のソースが根拠)
+//
+//   初期値 : `BackEnd::BackEnd()`(rc/BackEnd.cpp:132)が `smErrorFlag = SM::NO_ERR`。
+//
+//   clear  : `BackEnd::resetErrorFlag()`(rc/BackEnd.cpp:1146-1149、NO_ERR を代入)が
+//            **11 本の遷移すべての 1 番目のアクション**として登録されている
+//            (rc/BackEnd.cpp:249-290)。つまり「遷移を渡り始めた瞬間」に消える。
+//            逆に、その状態にその遷移が**無い**場合は dhsm が `Ignored` を返して
+//            アクションを 1 つも実行しない(StateMachine/src/dhsm/Engine.cpp:338-353)ので
+//            **フラグは残る**。`BackEnd::configure` の `ST_PREPARED` ガード
+//            (rc/BackEnd.cpp:955-962)も同様 —— engine.step すら呼ばれないので残る。
+//
+//   set    : `BackEnd::handleStateMachineException()`(rc/BackEnd.cpp:329-333)が
+//            `smErrorFlag = errorCode` してから SM::Exception を投げる。呼ぶのは
+//            `CATCH_SM_EXCEPTIONS`(rc/BackEnd.cpp:74-99)で、各 on* ハンドラの末尾に
+//            **その相のコード**で置かれている:
+//              onDescribe   :808  WHEN_DESCRIBE     onPrepare   :918  WHEN_PREPARE
+//              onUnDescribe :940  WHEN_RESET        onConfigure :1025 WHEN_CONFIGURE
+//              onStart      :1052 WHEN_START        onStop      :1080 WHEN_STOP
+//              onPause      :1101 WHEN_PAUSE        onResume    :1121 WHEN_RESUME
+//              onBreakup    :1143 WHEN_BREAKUP
+//
+//   状態   : 失敗しても **state は動かない**。SM::Exception は std::exception を継承しない
+//            (rc/SM.h:92-96 —— `struct Exception : public Status`)ので dhsm の
+//            `catch (const std::exception&)`(Engine.cpp:361)に掛からず halt もされず、
+//            `sm.currentState_ = transition.targetState()`(Engine.cpp:298)に**到達しないまま**
+//            step() の外へ抜ける。→ 041 D-1 で実測した `IDLE / WHEN_DESCRIBE` はこの形。
+//
+//   読出し : `getStatus` は `smStatus()`(rc/BackEnd.cpp:321-327)を読むだけで**消さない**
+//            (GetEccImpl.cpp:468-473)。フラグは次の遷移が渡るまで残り続ける。
+//
+// 帰結(fake_ecc / 我々のダブルが従うべき形):
+//   遷移が渡った(Applied)     → まず NO_ERR にする。その後の副作用が失敗したら相のコードを立て、
+//                                state は元へ戻す(渡り切っていないから)。
+//   遷移が無い(Ignored/Denied)→ フラグに**触らない**。
+//   status を読む               → フラグに**触らない**。
+// ---------------------------------------------------------------------------
 
 // DataLinkSet の 1 本。CoBo 毎に 1 本(SPEC §8.2)。
 struct Link {
@@ -270,14 +353,24 @@ inline Request parse_request(const std::string& json) {
   return r;
 }
 
-// レスポンス(SPEC §8.2)。3 キーを**常に**出す(Rust 側の契約を単純にする)。
-inline std::string make_response(bool ok, State s, const std::string& error) {
+// レスポンス(SPEC §8.2)。4 キーを**常に**出す(Rust 側の契約を単純にする)。
+//
+// `error`   = **輸送・ブリッジ層**のエラー文字列(Ice 例外 / CmdException の本文 / リクエスト不正)。
+//             043 で意味も値も変えていない。
+// `ecc_error` = **GET の error フラグ**(`NO_ERR`/`WHEN_DESCRIBE`/… — 上の set/clear 規則)。
+//             SPEC §8.2 v1.14 は `{"action":"status"}` の応答について定めているが、
+//             ここでは**全 action の応答に**載せる —— bridge はどの action の後にも
+//             getStatus を打つので追加コストが無く、失敗した describe の応答でそのまま
+//             `WHEN_DESCRIBE` が読めるほうが運用で嬉しい。既存 3 キーは不変(後方互換)。
+inline std::string make_response(bool ok, State s, const std::string& error, Error ecc_error) {
   std::string out = "{\"ok\":";
   out += ok ? "true" : "false";
   out += ",\"state\":\"";
   out += to_string(s);
   out += "\",\"error\":\"";
   out += jsonmin::escape(error);
+  out += "\",\"ecc_error\":\"";
+  out += to_string(ecc_error);
   out += "\"}";
   return out;
 }

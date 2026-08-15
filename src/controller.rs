@@ -171,7 +171,11 @@ pub struct ControllerParams {
     pub ecc_endpoint: String,
     /// DataLinkSet の `router_ip`。`None` なら receiver の実 bind アドレスから導く。
     pub router_ip: Option<String>,
+    /// EOS 待ちの**ハード上限**(両段。SPEC §1.3)。
     pub eos_timeout: Duration,
+    /// 停止第一段の受信静止(quiesce)判定時間(SPEC §1.3 v1.12、TODO/033-E)。
+    /// 全 receiver の受信バイト数がこの時間だけ不変なら在飛データを飲み切ったとみなす。
+    pub eos_quiesce: Duration,
     pub eos_poll: Duration,
     pub command_timeout: Duration,
     pub ecc_timeout: Duration,
@@ -227,6 +231,7 @@ impl ControllerParams {
             ecc_endpoint: config.controller.ecc_command.clone(),
             router_ip: config.controller.router_ip.clone(),
             eos_timeout: Duration::from_secs(config.controller.eos_timeout_s),
+            eos_quiesce: Duration::from_millis(config.controller.eos_quiesce_ms),
             eos_poll: DEFAULT_EOS_POLL,
             command_timeout: DEFAULT_COMMAND_TIMEOUT,
             ecc_timeout: DEFAULT_ECC_TIMEOUT,
@@ -264,14 +269,27 @@ impl ControllerParams {
 // ecc-bridge の応答(SPEC §8.2)
 // ---------------------------------------------------------------------
 
-/// ecc-bridge の 3 フィールド応答。`state` は `Off/Idle/Described/Prepared/Ready/Running/
+/// ecc-bridge の 4 フィールド応答。`state` は `Off/Idle/Described/Prepared/Ready/Running/
 /// Paused/Unknown`(ECC 不達は `Unknown`)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EccReply {
     pub ok: bool,
     pub state: String,
+    /// **輸送・ブリッジ層**のエラー文字列(Ice 例外 / ECC の CmdException 本文 /
+    /// リクエスト不正)。043 で意味も値も変えていない。
     #[serde(default)]
     pub error: String,
+    /// **GET の error フラグ**(`NO_ERR`/`WHEN_DESCRIBE`/…、SPEC §8.2 v1.14 = TODO/043)。
+    ///
+    /// `state` とは**別の軸**である —— 実 ECC は describe に失敗しても state は `Idle` の
+    /// ままで、フラグにだけ `WHEN_DESCRIBE` を抱える(041 D-1 実測。仕組みは
+    /// `tools/ecc_bridge/ecc_core.hpp` の set/clear 規則ブロック)。controller はこれを
+    /// **解釈せず素通しする**(表示は P4)。
+    ///
+    /// `#[serde(default)]`: このフィールドを知らない古い ecc-bridge が相手でも
+    /// 応答の parse は落とさない(その場合は空文字 = 「載っていなかった」)。
+    #[serde(default)]
+    pub ecc_error: String,
 }
 
 // ---------------------------------------------------------------------
@@ -822,9 +840,12 @@ impl<'a> Sequencer<'a> {
             }
         };
 
-        // 2. EOS 伝播待ち。中止は待たずに即・強制する(v1.6)。
+        // 2. EOS 伝播待ち(第一段)。中止は待たずに即・強制する(v1.6)。
+        //    正常停止は「自然 EOS の完了」**または**「全 receiver の受信静止」の早い方まで
+        //    (SPEC §1.3 v1.12 / TODO/033-E)。実機では EOF が構造的に来ないので、
+        //    静止検出が無いとここは毎停止 eos_timeout をまるごと空振りする。
         let mut eos_closed = match mode {
-            StopMode::Normal => self.wait_for_eos(&mut notes),
+            StopMode::Normal => self.wait_for_eos_or_quiesce(&mut notes),
             StopMode::Abort(_) => false,
         };
         let forced_eos = !eos_closed;
@@ -890,9 +911,124 @@ impl<'a> Sequencer<'a> {
         }
     }
 
+    /// 停止**第一段**の待ち(SPEC §1.3 v1.12、TODO/033-E)。
+    ///
+    /// 「自然 EOS の完了」**または**「全 receiver の受信静止」の早い方で返る:
+    ///
+    /// * `true` … 自然 EOS がチェーンを流れ切った(EOF 由来 = リプレイ・breakup 先行)。
+    ///   呼び手は強制 EOS へ進まない。
+    /// * `false` … 静止を検出した(実機の通常経路)か、ハード上限 `eos_timeout` に達した。
+    ///   呼び手は receiver `Stop` で EOS を注入する。
+    ///
+    /// 静止 = 全 receiver の受信バイト数が `eos_quiesce` のあいだ 1 バイトも増えないこと。
+    /// `ecc stop` の flush 済み在飛データを**飲み切ってから**畳むための待ちであり、
+    /// 「即・強制 EOS」にしない理由そのもの(ロスレス規約の一部)。
+    fn wait_for_eos_or_quiesce(&mut self, notes: &mut Vec<String>) -> bool {
+        let params = self.params;
+        let mut waited = Duration::ZERO;
+        // 直前サンプルと、それが何も動かないまま続いた時間。
+        let mut previous: Option<Vec<Option<u64>>> = None;
+        let mut still = Duration::ZERO;
+        // 一度不達だった receiver(以後は問い合わせない —— 下記 `receiver_bytes` 参照)。
+        let mut gone: Vec<String> = Vec::new();
+        loop {
+            if self.eos_complete(notes) {
+                return true;
+            }
+            let sample = self.receiver_bytes(&mut gone, notes);
+            match (&previous, &sample) {
+                // 1 サンプル分(= eos_poll)だけ何も動かなかった。
+                (Some(before), Some(now)) if before == now => still += params.eos_poll,
+                // 変化した / 判定できない / 最初のサンプル → 静止の計測をやり直す。
+                _ => still = Duration::ZERO,
+            }
+            previous = sample;
+            if still >= params.eos_quiesce {
+                info!(
+                    quiesce_ms = params.eos_quiesce.as_millis(),
+                    waited_ms = waited.as_millis(),
+                    "receivers are quiet — draining is done, forcing EOS now (SPEC §1.3 v1.12)"
+                );
+                return false;
+            }
+            if waited >= params.eos_timeout {
+                let note = format!(
+                    "EOS did not propagate within {} ms",
+                    params.eos_timeout.as_millis()
+                );
+                warn!("{note}");
+                push_once(notes, note);
+                return false;
+            }
+            self.transport.sleep(params.eos_poll);
+            waited += params.eos_poll;
+        }
+    }
+
+    /// 全 receiver の受信バイト数(`components` の receiver だけ、順序どおり)。
+    ///
+    /// * 要素 `None` … その receiver が**不達**。drain できない相手を待っても無意味なので
+    ///   「静止」として扱う(不達そのものは第二段の `Stop` 不達で可視になる)。
+    /// * 戻り値 `None` … 到達できたのに `bytes` が読めない receiver が居る。静止を
+    ///   判定する材料が無いので**静止とみなさず**ハード上限に委ねる(尻尾を落とさない側に倒す)。
+    ///   欠落は note に出す(silent failure を作らない)。
+    ///
+    /// `gone` は「一度不達だった receiver」の名前。**2 度目からは問い合わせない** ——
+    /// 不達の REQ は毎回 `command_timeout`(既定 5 s)を丸ごと燃やすので、poll 毎に
+    /// 撃ち直すと静止判定そのものが分単位に化ける(033-D の F1 で実測 55 s)。
+    /// 静止扱いは変わらないので判定結果には影響しない。
+    fn receiver_bytes(
+        &mut self,
+        gone: &mut Vec<String>,
+        notes: &mut Vec<String>,
+    ) -> Option<Vec<Option<u64>>> {
+        let params = self.params;
+        let mut out = Vec::new();
+        for component in params.components.iter() {
+            if !matches!(component.kind, ComponentKind::Receiver { .. }) {
+                continue;
+            }
+            if gone.iter().any(|name| name == &component.name) {
+                out.push(None);
+                continue;
+            }
+            match self
+                .transport
+                .command(&component.endpoint, &Command::GetStatus)
+            {
+                Err(e) => {
+                    push_once(notes, format!("{}: GetStatus failed: {e}", component.name));
+                    gone.push(component.name.clone());
+                    out.push(None);
+                }
+                Ok(response) => {
+                    let bytes = response
+                        .metrics
+                        .as_ref()
+                        .and_then(|m| m.get("bytes"))
+                        .and_then(Value::as_u64);
+                    match bytes {
+                        Some(bytes) => out.push(Some(bytes)),
+                        None => {
+                            push_once(
+                                notes,
+                                format!("{}: GetStatus metrics has no bytes", component.name),
+                            );
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
     /// EOS がチェーンを流れ切る(= root-sink が run をクローズできる)まで待つ。
     /// root-sink は REP を持たないので、**graw-writer / decoder の `GetStatus`** で代理観測する
     /// (SPEC §1.3 の「GetStatus と時間で監視」)。
+    ///
+    /// 強制 EOS の**後**の第二段はこちら —— 静止で切り上げてよいのは第一段だけで、
+    /// ここは「EOS が実際に流れ切ったか」しか答えにならない(SPEC §1.3 v1.12 終端条項)。
     fn wait_for_eos(&mut self, notes: &mut Vec<String>) -> bool {
         let params = self.params;
         let mut waited = Duration::ZERO;
@@ -914,18 +1050,23 @@ impl<'a> Sequencer<'a> {
         }
     }
 
-    /// EOS 到達の判定(2 点とも満たすこと):
+    /// EOS 到達の判定(3 点とも満たすこと):
     /// - decoder: `eos_in` が上流 CoBo 数に達した(全 receiver の EOS を受け取った)
+    /// - decoder: `eos_out >= 1`(**自分の EOS を送り終えた** = TODO/033-C)
     /// - graw-writer: `files_open == 0`(全期待ソースの EOS 受領で全ファイルを閉じた、SPEC §7)
+    ///
+    /// 3 点目が要る理由: root-sink が run を閉じられるのは **decoder の EOS が届いたとき**
+    /// であり、`eos_in` は「decoder が受けた」までしか言っていない。root-sink が停滞して
+    /// PUSH の HWM が埋まっていると decoder は EOS を送れずに居るので、2 点判定では
+    /// 「EOS 未達なのに reason=normal」になり得た(033 併発見)。
     fn eos_complete(&mut self, notes: &mut Vec<String>) -> bool {
         let params = self.params;
         let expected_eos = params.cobos.len() as u64;
         for component in params.components.iter() {
-            let key = match component.kind {
-                ComponentKind::Decoder => "eos_in",
-                ComponentKind::GrawWriter => "files_open",
-                ComponentKind::Receiver { .. } => continue,
-            };
+            // receiver は EOS の**作り手**なので観測点にしない(SPEC §1.3)。
+            if matches!(component.kind, ComponentKind::Receiver { .. }) {
+                continue;
+            }
             let response = match self
                 .transport
                 .command(&component.endpoint, &Command::GetStatus)
@@ -936,22 +1077,31 @@ impl<'a> Sequencer<'a> {
                     return false;
                 }
             };
-            let value = response
-                .metrics
-                .as_ref()
-                .and_then(|m| m.get(key))
-                .and_then(Value::as_u64);
-            let done = match (component.kind, value) {
-                (ComponentKind::Decoder, Some(eos_in)) => eos_in >= expected_eos,
-                (ComponentKind::GrawWriter, Some(open)) => open == 0,
-                (_, None) => {
+            let read = |key: &'static str, notes: &mut Vec<String>| -> Option<u64> {
+                let value = response
+                    .metrics
+                    .as_ref()
+                    .and_then(|m| m.get(key))
+                    .and_then(Value::as_u64);
+                if value.is_none() {
                     push_once(
                         notes,
                         format!("{}: GetStatus metrics has no {key}", component.name),
                     );
-                    false
                 }
-                _ => false,
+                value
+            };
+            let done = match component.kind {
+                ComponentKind::Decoder => {
+                    let eos_in = read("eos_in", notes);
+                    let eos_out = read("eos_out", notes);
+                    match (eos_in, eos_out) {
+                        (Some(eos_in), Some(eos_out)) => eos_in >= expected_eos && eos_out >= 1,
+                        _ => false,
+                    }
+                }
+                ComponentKind::GrawWriter => matches!(read("files_open", notes), Some(0)),
+                ComponentKind::Receiver { .. } => continue,
             };
             if !done {
                 return false;
@@ -1498,9 +1648,18 @@ async fn get_status(State(controller): State<Arc<Controller>>) -> Reply {
                 .map(ComponentStatus::to_json)
                 .collect()
         };
+        // `ecc_error` は **GET の error フラグ**をそのまま載せるだけ(SPEC §8.2 v1.14 =
+        // TODO/043)。controller は解釈も加工もしない —— 表示の判断は UI(P4)の仕事。
+        // ecc-bridge に届かなかったときは `state` と同じく `Unknown`: 「聞けていない」を
+        // 「ECC がエラー無しと申告した(NO_ERR)」に化けさせない。
         let ecc = match transport.ecc(&json!({"action": "status"})) {
-            Ok(reply) => json!({"ok": reply.ok, "state": reply.state, "error": reply.error}),
-            Err(e) => json!({"ok": false, "state": "Unknown", "error": e}),
+            Ok(reply) => json!({
+                "ok": reply.ok,
+                "state": reply.state,
+                "error": reply.error,
+                "ecc_error": reply.ecc_error,
+            }),
+            Err(e) => json!({"ok": false, "state": "Unknown", "error": e, "ecc_error": "Unknown"}),
         };
         let run_state = lock(&controller.run);
         let operator = lock(&controller.session)
@@ -1951,6 +2110,11 @@ fn stop_run_blocking(controller: &Controller, operator: &str, active: Option<Act
         duration_s,
         ok: report.ok,
         reason: report.reason.clone(),
+        // 033-A: 停止の顛末は **run_stop(唯一の run 台帳)** にも載せる。ここに無いと
+        // audit 行と突き合わせないと「どう閉じたか / 閉じ損ねたか」が読めない
+        // (SPEC §9.2 v1.12。041 でこの不履行が実 run で確認された)。
+        forced_eos: report.forced_eos,
+        eos_closed: report.eos_closed,
         counters: report.counters.clone(),
         files: report.files.clone(),
     });
@@ -2325,13 +2489,29 @@ mod tests {
         ecc_fail: Vec<String>,
         /// この ECC が今いる状態(036)。[`ecc_transition`] で**実 ECC と同じように**動く。
         ecc_state: String,
+        /// この ECC が抱えている error フラグ(043)。**state とは別の軸**。
+        /// clear 規則も実機どおり: 遷移が渡ったときだけ `NO_ERR` に戻り、遷移が無い
+        /// (`Ignored`)ときは触られない(`tools/ecc_bridge/ecc_core.hpp` の規則ブロック、
+        /// 出典 `GetBench/src/get/rc/BackEnd.cpp:249-290` / `:1146-1149`)。
+        ecc_error: String,
         /// 「受けたのに無音で何もしない」action(036)。実 ECC の未定義遷移は例外も出さず
         /// `Ignored`(`StateMachine/src/dhsm/Engine.cpp:334-352`)なので、歩き戻しが
         /// 空振りする経路を**わざと**作れるようにしておく。
         ecc_ignores: Vec<String>,
         /// EOS 完了を「N 回目の GetStatus 以降」にする(時間経過の模擬)。
+        /// **数えるのは decoder / graw-writer への GetStatus だけ**(receiver への
+        /// 静止観測は EOS の進み方とは無関係なので数に入れない — 033-E)。
         eos_after_polls: Option<usize>,
         eos_polls: usize,
+        /// receiver 名(静止観測の相手を kind で判別するため)。
+        receivers: BTreeSet<String>,
+        /// receiver 名 → 受信バイト数の進み方(033-E)。GetStatus 1 回につきこの分だけ増える。
+        /// 未登録 = `0` = 静止(実機の stop 後の姿)。
+        bytes_steps: BTreeMap<String, u64>,
+        /// receiver 名 → GetStatus 回数(`bytes` の値を作るのに使う)。
+        receiver_polls: BTreeMap<String, u64>,
+        /// この名前のコンポーネントは**不達**(REQ タイムアウト相当の `Err`)。
+        unreachable: Vec<String>,
         slept: Duration,
     }
 
@@ -2339,17 +2519,25 @@ mod tests {
         fn new(params: &ControllerParams) -> Self {
             let mut names = BTreeMap::new();
             let mut metrics = BTreeMap::new();
+            let mut receivers = BTreeSet::new();
             for (i, component) in params.components.iter().enumerate() {
                 names.insert(component.endpoint.clone(), component.name.clone());
                 let value = match component.kind {
                     // 非対称な値(取り違え検出用)。
-                    ComponentKind::Receiver { cobo_id } => json!({
-                        "router_port": 46100 + cobo_id,
-                        "bind_address": format!("0.0.0.0:{}", 46100 + cobo_id),
-                        "frames": 3000 + i,
-                        "overflow_frames": 0,
-                    }),
-                    ComponentKind::Decoder => json!({"eos_in": 0, "malformed": 7}),
+                    ComponentKind::Receiver { cobo_id } => {
+                        receivers.insert(component.name.clone());
+                        json!({
+                            "router_port": 46100 + cobo_id,
+                            "bind_address": format!("0.0.0.0:{}", 46100 + cobo_id),
+                            "frames": 3000 + i,
+                            "overflow_frames": 0,
+                            // 033-E: 実 receiver の metrics と同じ形(receiver.rs `json()`)。
+                            "bytes": 0,
+                        })
+                    }
+                    // 033-C: `eos_out` も **decoder の実 metrics と同じ形**で持つ
+                    // (最後のホップの観測点。無ければ controller は判定を保留する)。
+                    ComponentKind::Decoder => json!({"eos_in": 0, "eos_out": 0, "malformed": 7}),
                     ComponentKind::GrawWriter => json!({
                         "files_open": 1,
                         "files": [{"path": "run0001/CoBo0_AsAd0_ts_0000.graw", "bytes": 30_108_672u64}],
@@ -2366,9 +2554,15 @@ mod tests {
                 ecc_requests: Vec::new(),
                 ecc_fail: Vec::new(),
                 ecc_state: "Idle".to_string(),
+                // 実 ECC の初期値も NO_ERR(`BackEnd::BackEnd()`、BackEnd.cpp:132)。
+                ecc_error: "NO_ERR".to_string(),
                 ecc_ignores: Vec::new(),
                 eos_after_polls: None,
                 eos_polls: 0,
+                receivers,
+                bytes_steps: BTreeMap::new(),
+                receiver_polls: BTreeMap::new(),
+                unreachable: Vec::new(),
                 slept: Duration::ZERO,
             }
         }
@@ -2376,6 +2570,38 @@ mod tests {
         /// EOS は最初から流れ切っている(正常停止で強制 EOS に落ちない)。
         fn with_eos_closed(mut self) -> Self {
             self.eos_after_polls = Some(0);
+            self
+        }
+
+        /// 033-E: 全 receiver がまだ受信し続けている(GetStatus 1 回につき `step` バイト増える)。
+        /// 静止しないので第一段はハード上限 `eos_timeout` まで待つ。
+        fn receivers_still_receiving(mut self, step: u64) -> Self {
+            for name in self.receivers.iter() {
+                self.bytes_steps.insert(name.clone(), step);
+            }
+            self
+        }
+
+        /// 033-E: **この receiver だけ**受信を続けている(他は静止)。
+        fn receiver_still_receiving(mut self, component: &str, step: u64) -> Self {
+            self.bytes_steps.insert(component.to_string(), step);
+            self
+        }
+
+        /// 033-E: この receiver の metrics から `bytes` を落とす(静止を判定する材料が無い形)。
+        fn without_receiver_bytes(mut self, component: &str) -> Self {
+            if let Some(value) = self.metrics.get_mut(component) {
+                if let Some(map) = value.as_object_mut() {
+                    map.remove("bytes");
+                }
+            }
+            self
+        }
+
+        /// このコンポーネントは**不達**(接続拒否も REQ タイムアウトも controller から見れば
+        /// 同じ `Err` —— 033 論点 3)。
+        fn unreachable(mut self, component: &str) -> Self {
+            self.unreachable.push(component.to_string());
             self
         }
 
@@ -2405,6 +2631,13 @@ mod tests {
         /// 036: この action を**受けるが無音で何もしない** ECC にする(実 ECC の `Ignored`)。
         fn ecc_ignores(mut self, action: &str) -> Self {
             self.ecc_ignores.push(action.to_string());
+            self
+        }
+
+        /// 043: ECC が既に error フラグを抱えているところから始める
+        /// (例 041 D-1 の「describe に失敗した直後」= `Idle` + `WHEN_DESCRIBE`)。
+        fn ecc_error_flag(mut self, flag: &str) -> Self {
+            self.ecc_error = flag.to_string();
             self
         }
 
@@ -2496,9 +2729,24 @@ mod tests {
             let name = self.name_of(endpoint);
             let action = action_name(command);
             self.calls.push(Call::new(&name, &action));
+            if self.unreachable.contains(&name) {
+                return Err(format!("mock: {name} is unreachable"));
+            }
 
             let mut metrics = self.metrics.get(&name).cloned().unwrap_or(Value::Null);
-            if matches!(command, Command::GetStatus) {
+            if matches!(command, Command::GetStatus) && self.receivers.contains(&name) {
+                // 033-E: 受信バイト数の進み方(step == 0 = 静止)。
+                // **EOS の進み方(`eos_polls`)には数えない** —— 静止観測は別軸。
+                let polls = self.receiver_polls.entry(name.clone()).or_insert(0);
+                *polls += 1;
+                let polls = *polls;
+                let step = self.bytes_steps.get(&name).copied().unwrap_or(0);
+                if let Some(map) = metrics.as_object_mut() {
+                    if map.contains_key("bytes") {
+                        map.insert("bytes".to_string(), json!(step * polls));
+                    }
+                }
+            } else if matches!(command, Command::GetStatus) {
                 // EOS の進み方を模擬する: 規定回数の GetStatus を過ぎたら「閉じた」形にする。
                 self.eos_polls += 1;
                 let closed = self
@@ -2508,6 +2756,9 @@ mod tests {
                     if let Some(map) = metrics.as_object_mut() {
                         if map.contains_key("eos_in") {
                             map.insert("eos_in".to_string(), json!(9));
+                        }
+                        if map.contains_key("eos_out") {
+                            map.insert("eos_out".to_string(), json!(1));
                         }
                         if map.contains_key("files_open") {
                             map.insert("files_open".to_string(), json!(0));
@@ -2543,15 +2794,21 @@ mod tests {
             self.calls.push(Call::new("ecc", &action));
             self.ecc_requests.push(request.clone());
             if self.ecc_fail.contains(&action) {
+                // 断られた = 遷移が渡っていない → error フラグには**触らない**(043)。
                 return Ok(EccReply {
                     ok: false,
                     state: self.ecc_state.clone(),
                     error: format!("mock refuses {action}"),
+                    ecc_error: self.ecc_error.clone(),
                 });
             }
             if !self.ecc_ignores.contains(&action) {
                 if let Some(next) = ecc_transition(&self.ecc_state, &action) {
                     self.ecc_state = next.to_string();
+                    // 043: `resetErrorFlag` は**全遷移の 1 番目のアクション**
+                    // (BackEnd.cpp:249-290 / :1146-1149)。遷移が渡ったときだけ消える ——
+                    // 遷移が無い(`Ignored`)ときはアクションが 1 つも走らないので残る。
+                    self.ecc_error = "NO_ERR".to_string();
                 }
             }
             // 実 ECC は未定義遷移でもエラーを返さない(無音)ので **ok は常に true**。
@@ -2559,6 +2816,7 @@ mod tests {
                 ok: true,
                 state: self.ecc_state.clone(),
                 error: String::new(),
+                ecc_error: self.ecc_error.clone(),
             })
         }
 
@@ -2610,6 +2868,7 @@ mod tests {
             ecc_endpoint: "inproc://ecc".to_string(),
             router_ip: None,
             eos_timeout: Duration::from_secs(5),
+            eos_quiesce: Duration::from_millis(500),
             eos_poll: Duration::from_millis(200),
             command_timeout: Duration::from_secs(1),
             ecc_timeout: Duration::from_secs(1),
@@ -2850,6 +3109,74 @@ mod tests {
             mock.commands(),
             vec![Call::new("ecc", "status"), Call::new("ecc", "breakup")]
         );
+    }
+
+    // -----------------------------------------------------------------
+    // ECC の error フラグ(043、SPEC §8.2 v1.14)
+    // -----------------------------------------------------------------
+
+    /// ecc-bridge の応答は `ecc_error` を運ぶ。**古いブリッジ(このキーを出さない)相手でも
+    /// parse を落とさない**(`#[serde(default)]`)—— 応答が読めなくなると状態そのものが
+    /// 見えなくなり、フラグを可視化するはずの 043 が逆に運用を止めてしまう。
+    #[test]
+    fn an_ecc_reply_carries_the_error_flag_and_tolerates_an_older_bridge() {
+        // 041 D-1 の実測そのもの: state は正常(Idle)なのにフラグだけ立っている。
+        let reply: EccReply = serde_json::from_str(
+            r#"{"ok":true,"state":"Idle","error":"","ecc_error":"WHEN_DESCRIBE"}"#,
+        )
+        .unwrap();
+        assert!(reply.ok);
+        assert_eq!(reply.state, "Idle");
+        assert_eq!(reply.error, "");
+        assert_eq!(reply.ecc_error, "WHEN_DESCRIBE");
+
+        // 輸送層の `error` と GET の error フラグは**別の軸**(片方が他方を上書きしない)。
+        let both: EccReply = serde_json::from_str(
+            r#"{"ok":false,"state":"Ready","error":"Could not establish data link. refused",
+                "ecc_error":"WHEN_START"}"#,
+        )
+        .unwrap();
+        assert_eq!(both.error, "Could not establish data link. refused");
+        assert_eq!(both.ecc_error, "WHEN_START");
+
+        // `ecc_error` を知らない ecc-bridge = 空文字(「載っていなかった」)。
+        let old: EccReply =
+            serde_json::from_str(r#"{"ok":true,"state":"Idle","error":""}"#).unwrap();
+        assert_eq!(old.ecc_error, "");
+    }
+
+    /// **フラグの clear 規則**(043)を [`MockTransport`] が実機どおりに持つこと。
+    ///
+    /// 出典 `GetBench/src/get/rc/BackEnd.cpp:249-290`(`resetErrorFlag` が全遷移の
+    /// **1 番目のアクション**)/ `:1146-1149`。遷移が**無い**状態で叩くと dhsm は
+    /// `Ignored` を返してアクションを 1 つも実行しない(`dhsm/Engine.cpp:338-353`)ので
+    /// **フラグは残る**。ダブルをここで甘くする(status や無音 action で消す)と、
+    /// 041 D-1 の「見えないまま残るフラグ」を再現できなくなる。
+    #[test]
+    fn the_ecc_error_flag_survives_a_silent_action_and_clears_only_on_a_transition() {
+        let params = params_with(&[0]);
+        // 前の describe が失敗した直後の ECC(state は Idle のまま、フラグだけ立っている)。
+        let mut mock = MockTransport::new(&params)
+            .ecc_in("Idle")
+            .ecc_error_flag("WHEN_DESCRIBE");
+
+        // status は観測 —— 何度読んでも消えない。
+        for _ in 0..2 {
+            let reply = mock.ecc(&json!({"action": "status"})).unwrap();
+            assert_eq!(reply.state, "Idle");
+            assert_eq!(reply.ecc_error, "WHEN_DESCRIBE");
+        }
+
+        // `Idle` からの reset は EV_UNDO が無い = 無音(`Ignored`)。状態もフラグも動かない。
+        let reply = mock.ecc(&json!({"action": "reset"})).unwrap();
+        assert!(reply.ok, "実 ECC は無音なので ok は true のまま");
+        assert_eq!(reply.state, "Idle");
+        assert_eq!(reply.ecc_error, "WHEN_DESCRIBE", "遷移が無ければ消えない");
+
+        // describe は `Idle` から遷移が**ある** → 渡り始めた時点で `NO_ERR` に消える。
+        let reply = mock.ecc(&json!({"action": "describe"})).unwrap();
+        assert_eq!(reply.state, "Described");
+        assert_eq!(reply.ecc_error, "NO_ERR");
     }
 
     /// ECC の状態が**取れなければ** run を始めない(見えない ECC の上に run を建てない)。
@@ -3195,8 +3522,12 @@ mod tests {
         );
     }
 
-    /// **強制 EOS 分岐**: EOS が来ないまま `eos_timeout` を超えたら receiver へ Stop を撃つ。
+    /// **強制 EOS 分岐(ハード上限)**: EOS も来ず、receiver も**受信し続けている**
+    /// (= 静止しない)ままなら、第一段は `eos_timeout` まで待ってから強制 EOS を撃つ。
     /// 撃った receiver へは畳む段で Stop を撃ち直さない(Reset だけ)。
+    ///
+    /// 033-E で前提を明示化: 受信が止まらないので **quiesce では切り上がらない**
+    /// (静止で切り上がる姿は `stop_forces_eos_as_soon_as_the_receivers_go_quiet`)。
     #[test]
     fn stop_forces_eos_through_the_receivers_after_the_timeout() {
         let params = params_with(&[0]);
@@ -3204,7 +3535,8 @@ mod tests {
         // 最初の待ちは「即時判定 1 回 + 200 ms 毎に 25 回(= eos_timeout 5 s)」= 26 回で
         // 諦める。27 回目(= 強制 EOS 直後の判定)で閉じる形にすると、眠った合計時間は
         // ちょうど eos_timeout になる。
-        let mut mock = MockTransport::new(&params);
+        // (receiver への静止観測はこの数に入らない —— MockTransport の `eos_polls` 参照。)
+        let mut mock = MockTransport::new(&params).receivers_still_receiving(4096);
         mock.eos_after_polls = Some(26);
         let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
 
@@ -3224,6 +3556,132 @@ mod tests {
             vec!["Stop", "Reset"],
             "強制 EOS の Stop を二重に撃たない"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // 停止第一段の受信静止検出(SPEC §1.3 v1.12 / TODO/033-E)
+    // -----------------------------------------------------------------
+
+    /// **静止検出**: 実機の停止経路(EOF が来ない)で、receiver の受信バイト数が
+    /// `eos_quiesce` = 500 ms のあいだ不変になったら、`eos_timeout` を待たずに強制 EOS へ。
+    ///
+    /// 手計算(eos_poll = 200 ms、eos_quiesce = 500 ms):
+    /// 1 サンプル目は比較相手が無いので静止 0 ms → sleep(200)→ 2 サンプル目で 200 ms →
+    /// sleep(200)→ 3 サンプル目で 400 ms → sleep(200)→ 4 サンプル目で 600 ms ≥ 500 ms。
+    /// よって**眠るのは 3 回 = 600 ms**(従来の 5 000 ms から 1/8 以下)。
+    #[test]
+    fn stop_forces_eos_as_soon_as_the_receivers_go_quiet() {
+        let params = params_with(&[0]);
+        // bytes_step = 0(既定)= 受信が止まっている。EOS は自然には来ない。
+        let mut mock = MockTransport::new(&params);
+        mock.eos_after_polls = Some(4); // 強制 EOS の後だけ閉じる
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert!(report.forced_eos, "静止したら強制 EOS へ進む");
+        assert!(report.eos_closed, "強制 EOS の後は閉じる");
+        assert_eq!(report.reason, "normal");
+        assert_eq!(
+            mock.slept,
+            Duration::from_millis(600),
+            "静止検出なのに eos_timeout を待っている"
+        );
+        assert!(
+            mock.slept < params.eos_timeout,
+            "ハード上限より早く畳めていない"
+        );
+        // 静止は「畳む口実」であって異常ではない —— note は 1 つも増えない。
+        assert!(report.notes.is_empty(), "{:?}", report.notes);
+    }
+
+    /// 自然 EOS が静止より**先**に成立したら強制しない(早い方で進む、の片側)。
+    #[test]
+    fn a_natural_eos_wins_over_the_quiesce_detection() {
+        let params = params_with(&[0]);
+        // 受信は止まっている(静止条件は 600 ms で成立する)が、EOS は 1 回目で成立。
+        let mut mock = MockTransport::new(&params).with_eos_closed();
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert!(!report.forced_eos, "自然 EOS が先なら注入しない");
+        assert_eq!(mock.slept, Duration::ZERO, "1 回も眠らない");
+        assert_eq!(report.reason, "normal");
+    }
+
+    /// **不達の receiver は静止扱い**(drain できない相手を待っても無意味)。
+    /// 不達そのものは第二段の `Stop` 不達として note に出る = silent にしない。
+    #[test]
+    fn an_unreachable_receiver_counts_as_quiet() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).unreachable("receiver0");
+        mock.eos_after_polls = Some(4);
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert!(report.forced_eos);
+        assert_eq!(
+            mock.slept,
+            Duration::from_millis(600),
+            "不達を「まだ受信中」と読んでハード上限まで待っている"
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("receiver0") && n.contains("unreachable")),
+            "不達を silent にしている: {:?}",
+            report.notes
+        );
+        // **不達へ撃ち直さない**: 静止判定の間に GetStatus を送るのは 1 回だけ
+        // (不達の REQ は毎回 command_timeout を丸ごと燃やす —— F1 で 55 s を実測した)。
+        // 残りは強制 EOS の Stop 1 回 + 畳む段の Stop / Reset。
+        let receiver_status_polls = mock
+            .calls
+            .iter()
+            .filter(|c| c.component == "receiver0" && c.action == "GetStatus")
+            .count();
+        assert_eq!(
+            receiver_status_polls, 2,
+            "静止判定で 1 回 + run_stop の材料集め(collect_status)で 1 回のはず: {:?}",
+            mock.calls
+        );
+    }
+
+    /// `bytes` を報告しない receiver が居たら**静止と判定しない**(尻尾を落とさない側に倒し、
+    /// ハード上限に委ねる)。欠落は note に出す。
+    #[test]
+    fn a_receiver_without_a_bytes_metric_never_looks_quiet() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).without_receiver_bytes("receiver0");
+        mock.eos_after_polls = Some(26); // ハード上限の後に閉じる
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert_eq!(
+            mock.slept, params.eos_timeout,
+            "判定材料が無いのに静止として切り上げている"
+        );
+        assert!(report.forced_eos);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("GetStatus metrics has no bytes")),
+            "欠落を silent にしている: {:?}",
+            report.notes
+        );
+    }
+
+    /// 2 CoBo: **1 台でも受信が続いていれば静止ではない**(全 receiver 不変が条件)。
+    /// receiver0 は静止、receiver1 だけがまだ受信している —— 非対称な形。
+    #[test]
+    fn quiesce_needs_every_receiver_to_be_quiet() {
+        let params = params_with(&[0, 1]);
+        let mut mock = MockTransport::new(&params).receiver_still_receiving("receiver1", 1);
+        mock.eos_after_polls = Some(26);
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert_eq!(
+            mock.slept, params.eos_timeout,
+            "受信が続いているのに静止として切り上げている"
+        );
+        assert!(report.forced_eos);
     }
 
     /// **中止経路**(SPEC §1.3 v1.6): 待たずに強制 EOS。**run がクローズする前に
@@ -3294,6 +3752,86 @@ mod tests {
         assert_eq!(report.reason, "abort:ecc-stop-failed");
     }
 
+    /// **033-C(併発見の穴)**: 上流 EOS は全部届き(`eos_in` 充足)graw-writer も
+    /// 全ファイルを閉じたが、**decoder が自分の EOS を送れていない**(`eos_out == 0` ——
+    /// root-sink 停滞 + PUSH HWM 満杯)状態。
+    ///
+    /// 2 点判定の頃はこれを「EOS 完了」と読んで **reason=normal** を書いてしまえた。
+    /// 3 点目が入った今は完了と読まず、強制 EOS → それでも届かず `error:eos-timeout`。
+    #[test]
+    fn eos_is_not_complete_while_the_decoder_has_not_sent_its_own_eos() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params);
+        // 非対称: eos_in は期待(1 CoBo)を**超えて**満たし、files_open も 0。
+        // 足りないのは eos_out だけ。
+        mock.metrics.insert(
+            "decoder".to_string(),
+            json!({"eos_in": 3, "eos_out": 0, "malformed": 0}),
+        );
+        mock.metrics.insert(
+            "graw-writer".to_string(),
+            json!({"files_open": 0, "files": []}),
+        );
+
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert!(
+            !report.eos_closed,
+            "decoder が EOS を送っていないのに閉じたことにしている"
+        );
+        assert!(report.forced_eos, "完了でないなら強制 EOS へ進む");
+        assert_eq!(report.reason, "error:eos-timeout");
+        assert!(!report.ok);
+    }
+
+    /// 同じ状況で `eos_out` が 1 になれば(= 最後のホップが通れば)正常停止として閉じる。
+    /// 上の負性テストと対にして「3 点目だけが違い」であることを固定する。
+    #[test]
+    fn eos_is_complete_once_the_decoder_reports_its_own_eos_out() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params);
+        mock.metrics.insert(
+            "decoder".to_string(),
+            json!({"eos_in": 3, "eos_out": 1, "malformed": 0}),
+        );
+        mock.metrics.insert(
+            "graw-writer".to_string(),
+            json!({"files_open": 0, "files": []}),
+        );
+
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert!(report.eos_closed);
+        assert!(!report.forced_eos);
+        assert_eq!(report.reason, "normal");
+    }
+
+    /// `eos_out` を持たない decoder(= 古い metrics)を「完了」と読まない。
+    /// 欠落は **note に出す**(silent failure を作らない — CLAUDE.md)。
+    #[test]
+    fn a_decoder_without_eos_out_is_never_read_as_complete() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params);
+        mock.metrics
+            .insert("decoder".to_string(), json!({"eos_in": 3}));
+        mock.metrics.insert(
+            "graw-writer".to_string(),
+            json!({"files_open": 0, "files": []}),
+        );
+
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert!(!report.eos_closed);
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("GetStatus metrics has no eos_out")),
+            "欠落を silent にしている: {:?}",
+            report.notes
+        );
+    }
+
     /// EOS が強制しても流れ切らなければ `error:eos-timeout`(silent にしない)。
     #[test]
     fn stop_reports_an_error_when_eos_never_propagates() {
@@ -3329,8 +3867,10 @@ mod tests {
             "receiver1".to_string(),
             json!({"frames": 3849, "overflow_frames": 5, "router_port": 46101}),
         );
-        mock.metrics
-            .insert("decoder".to_string(), json!({"eos_in": 9, "malformed": 4}));
+        mock.metrics.insert(
+            "decoder".to_string(),
+            json!({"eos_in": 9, "eos_out": 1, "malformed": 4}),
+        );
         mock.metrics.insert(
             "graw-writer".to_string(),
             json!({

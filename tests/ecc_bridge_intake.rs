@@ -99,7 +99,7 @@ fn req_socket(endpoint: &str) -> zmq::Socket {
     sock
 }
 
-/// レスポンスの 3 フィールド(SPEC §8.2)を機械照合する。
+/// レスポンスの 4 フィールド(SPEC §8.2 v1.14)を機械照合する。
 fn assert_reply(reply: &Value, want_ok: bool, want_state: &str) {
     assert_eq!(reply["ok"], Value::Bool(want_ok), "ok mismatch: {reply}");
     assert_eq!(
@@ -110,6 +110,12 @@ fn assert_reply(reply: &Value, want_ok: bool, want_state: &str) {
     assert!(
         reply["error"].is_string(),
         "error must always be present: {reply}"
+    );
+    // 043: `ecc_error`(GET の error フラグ)も**常に**載る。値の照合は
+    // [`assert_ecc_error`] で個別に —— ここでは「欠けていない」ことだけ見る。
+    assert!(
+        reply["ecc_error"].is_string() && !reply["ecc_error"].as_str().unwrap().is_empty(),
+        "ecc_error must always be present: {reply}"
     );
     if want_ok {
         assert_eq!(
@@ -123,6 +129,16 @@ fn assert_reply(reply: &Value, want_ok: bool, want_state: &str) {
             "failed reply must say why: {reply}"
         );
     }
+}
+
+/// GET の error フラグ(`NO_ERR`/`WHEN_START`/…)を照合する(043、SPEC §8.2 v1.14)。
+/// 綴りは実 ECC の `SM::Error`(`GetBench/src/get/rc/SM.h:58-70`)そのもの。
+fn assert_ecc_error(reply: &Value, want: &str) {
+    assert_eq!(
+        reply["ecc_error"],
+        Value::String(want.into()),
+        "ecc_error mismatch: {reply}"
+    );
 }
 
 /// fake-ECC → ecc_bridge を上げ、controller が使う一連の JSON を Rust から流す。
@@ -143,8 +159,11 @@ fn bridge_speaks_the_json_contract_controller_expects() {
 
     let sock = req_socket(&bridge.banner);
 
-    // 初期状態(fake-ECC は Off から)
-    assert_reply(&call(&sock, r#"{"action":"status"}"#), true, "Off");
+    // 初期状態(fake-ECC は Off から。error フラグの初期値は NO_ERR —— 実 ECC の
+    // `BackEnd::BackEnd()` も NO_ERR、`GetBench/src/get/rc/BackEnd.cpp:132`)
+    let initial = call(&sock, r#"{"action":"status"}"#);
+    assert_reply(&initial, true, "Off");
+    assert_ecc_error(&initial, "NO_ERR");
 
     // describe → prepare
     assert_reply(
@@ -178,6 +197,22 @@ fn bridge_speaks_the_json_contract_controller_expects() {
         error.contains("Could not establish data link"),
         "expected the real ECC wording, got {error:?}"
     );
+    // **043: error フラグの set**。遷移のアクションが失敗すると `WHEN_START` が立ち、
+    // **state は動かない**(`CATCH_SM_EXCEPTIONS(SM::WHEN_START)` = BackEnd.cpp:1052 →
+    // handleStateMachineException :329-333。state が残る理由は SM::Exception が
+    // std::exception を継承しないこと — rc/SM.h:92-96 / dhsm/Engine.cpp:298・361)。
+    // 041 D-1 で実測した `IDLE / WHEN_DESCRIBE` と同じ形である。
+    assert_ecc_error(&failed, "WHEN_START");
+
+    // フラグは**読んでも消えない**(getStatus は smStatus を読むだけ、BackEnd.cpp:321-327)。
+    let after = call(&sock, r#"{"action":"status"}"#);
+    assert_reply(&after, true, "Ready");
+    assert_ecc_error(&after, "WHEN_START");
+    // 遷移が**無い** action(`Ready` からの reset)は無音 = アクションが 1 つも走らないので
+    // `resetErrorFlag`(全遷移の 1 番目、BackEnd.cpp:249-290)も走らず、フラグは残る。
+    let ignored = call(&sock, r#"{"action":"reset"}"#);
+    assert_reply(&ignored, true, "Ready");
+    assert_ecc_error(&ignored, "WHEN_START");
 
     // listen してから configure → start は通り、CoBo 役が実際に繋いで来る。
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
@@ -185,7 +220,11 @@ fn bridge_speaks_the_json_contract_controller_expects() {
     // 直前の configure 失敗で ECC は Active(Ready)。**実 ECC の configure は `ST_PREPARED`
     // からしか効かない**(黙ってスキップ)ので、張り替えの前に breakup で Prepared へ戻す
     // (SPEC v1.12 §1.3 / TODO/036)。
-    assert_reply(&call(&sock, r#"{"action":"breakup"}"#), true, "Prepared");
+    // **043: error フラグの clear**。breakup は `Ready` から EV_BREAK が**ある**ので遷移が
+    // 渡り、1 番目のアクション `resetErrorFlag`(BackEnd.cpp:268-270 / :1146-1149)が消す。
+    let cleared = call(&sock, r#"{"action":"breakup"}"#);
+    assert_reply(&cleared, true, "Prepared");
+    assert_ecc_error(&cleared, "NO_ERR");
     assert_reply(&call(&sock, &configure(port)), true, "Ready");
     assert_reply(&call(&sock, r#"{"action":"start"}"#), true, "Running");
     let (conn, _) = listener.accept().expect("fake CoBo connects after start");
@@ -228,6 +267,9 @@ fn unreachable_ecc_answers_unknown_instead_of_dying() {
     for request in [r#"{"action":"status"}"#, r#"{"action":"describe"}"#] {
         let reply = call(&sock, request);
         assert_reply(&reply, false, "Unknown");
+        // 043: 状態を聞けていないので error フラグも `Unknown`。**`NO_ERR` と言い切らない** ——
+        // 「ECC がエラー無しと申告した」と「ECC に届いていない」は別物である。
+        assert_ecc_error(&reply, "Unknown");
     }
     // 落ちずに応答し続ける。
     assert_reply(&call(&sock, r#"{"action":"status"}"#), false, "Unknown");
