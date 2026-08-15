@@ -47,6 +47,12 @@ ICE_LIBS   := -L$(ICE_PREFIX)/lib -lIce
 
 HEADERS := ecc_core.hpp json_min.hpp check.hpp
 
+# 049: ECC 状態機械の **共有 golden 遷移表**。Rust 側(src/controller.rs の
+# `the_ecc_state_machine_matches_the_shared_golden_table`)が読むのと**同じ 1 ファイル**を
+# test_ecc_bridge にも渡す —— 片側だけの修正(ドリフト)を落とすのが目的なので、
+# ここを別ファイルに向けたらテストの意味が消える。
+ECC_TRANSITIONS ?= ../../tests/fixtures/ecc_transitions.txt
+
 .PHONY: all test e2e clean ice-skip
 
 ifeq ($(ICE_OK),yes)
@@ -100,7 +106,7 @@ test_ecc_bridge: test_ecc_bridge.cpp $(HEADERS)
 
 # --- テスト ----------------------------------------------------------------
 test: test_ecc_bridge
-	./test_ecc_bridge
+	./test_ecc_bridge $(ECC_TRANSITIONS)
 
 ifeq ($(ICE_OK),yes)
 e2e: all

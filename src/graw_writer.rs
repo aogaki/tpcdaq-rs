@@ -98,6 +98,11 @@ pub enum WriteError {
         #[source]
         source: std::io::Error,
     },
+    /// 到達不能のはずの内部不整合(直前に挿入したはずのエントリが無い等)。
+    /// 以前は `.expect()` = panic だった。ロスレス保存系で panic すると Mutex 毒 →
+    /// run の残り全損になるので、**数えて報告**に変える(TODO/046-B)。
+    #[error("internal invariant violated: {what}")]
+    Internal { what: &'static str },
 }
 
 // ---------------------------------------------------------------------
@@ -497,6 +502,22 @@ impl RunWriter {
         self.run_dir().join("ctrl")
     }
 
+    /// 到達不能のはずの内部不整合を **数えて報告** する(TODO/046-B)。
+    ///
+    /// 以前は `.expect()` = panic だった。保存系で panic すると `RunWriter` の Mutex が毒され、
+    /// その run の残り全部が書けなくなる(= ロスレス契約の最悪の破れ方)。IO 失敗と同じ
+    /// `write_errors` / `errored` の経路に乗せて、消費停止 + Error 状態で表に出す。
+    /// カウンタの種類は増やさない(`metrics_json` の形は不変)。
+    fn internal_error(&mut self, key: FileKey, what: &'static str) -> WriteError {
+        self.write_errors += 1;
+        self.errored = true;
+        error!(
+            cobo = key.cobo(), asad = ?key.asad(), what,
+            "graw-writer: internal invariant violated — counted and reported instead of panicking"
+        );
+        WriteError::Internal { what }
+    }
+
     /// run ディレクトリは当該 run の最初のフレーム到着時に遅延作成する(SPEC §7)。
     fn ensure_run_dir(&mut self) -> Result<(), WriteError> {
         if self.run_dir_created {
@@ -553,17 +574,15 @@ impl RunWriter {
         }
 
         let write_result = {
-            let entry = self
-                .files
-                .get_mut(&key)
-                .expect("create_file just ensured the entry exists");
+            let Some(entry) = self.files.get_mut(&key) else {
+                return Err(self.internal_error(key, "no entry right after create_file"));
+            };
             entry.file.write_all(frame)
         };
 
-        let entry = self
-            .files
-            .get_mut(&key)
-            .expect("entry still present after write_all");
+        let Some(entry) = self.files.get_mut(&key) else {
+            return Err(self.internal_error(key, "entry vanished during write_all"));
+        };
         match write_result {
             Ok(()) => {
                 entry.cur_bytes += frame.len() as u64;
@@ -597,7 +616,9 @@ impl RunWriter {
     /// 同じ — 直後に run が終わると空ファイルが残るのも実機と同一)。フレームは決して分割しない。
     fn rotate(&mut self, key: FileKey) -> Result<(), WriteError> {
         let (ts, path_for_err, flush_result) = {
-            let entry = self.files.get_mut(&key).expect("rotate: file must exist");
+            let Some(entry) = self.files.get_mut(&key) else {
+                return Err(self.internal_error(key, "rotate: file must exist"));
+            };
             let path_for_err = entry.path.clone();
             let flush_result = entry
                 .file
@@ -618,7 +639,9 @@ impl RunWriter {
             });
         }
 
-        let finished = self.files.remove(&key).expect("just flushed above");
+        let Some(finished) = self.files.remove(&key) else {
+            return Err(self.internal_error(key, "rotate: entry vanished after flush"));
+        };
         let next_idx = finished.idx + 1;
         self.closed_files.push(finished.report(true));
         self.open_new_file(key, ts, next_idx)
@@ -931,19 +954,7 @@ impl Handler {
 
     /// listen-before-start と同じ理屈: Arm で PULL を bind しておく(SPEC §7)。
     fn do_arm(&mut self) -> Result<(), String> {
-        let socket = self
-            .context
-            .socket(zmq::PULL)
-            .map_err(|e| format!("cannot create PULL socket: {e}"))?;
-        zmq_helper::apply_pull_hwm(&socket).map_err(|e| format!("cannot set PULL HWM: {e}"))?;
-        socket
-            .bind(&self.params.pull_bind)
-            .map_err(|e| format!("bind {} failed: {e}", self.params.pull_bind))?;
-        let endpoint = match socket.get_last_endpoint() {
-            Ok(Ok(endpoint)) => endpoint,
-            Ok(Err(raw)) => return Err(format!("last_endpoint is not utf-8: {raw:?}")),
-            Err(e) => return Err(format!("cannot read last_endpoint: {e}")),
-        };
+        let (socket, endpoint) = zmq_helper::bind_pull(&self.context, &self.params.pull_bind)?;
         info!(%endpoint, "graw-writer: armed — PULL bound (SPEC §7)");
         self.bind_address = Some(endpoint);
         self.pull_socket = Some(socket);

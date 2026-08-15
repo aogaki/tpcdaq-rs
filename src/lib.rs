@@ -1,6 +1,9 @@
 //! tpcdaq — GET ベース TPC DAQ の Rust コンポーネント群(共有ライブラリ)。
 //! 正本: docs/SPEC_ja.md。
 
+/// bin 共通のプロセス起動・終了ボイラープレート(tracing 初期化・SIGINT)。TODO/047-A。
+pub mod bin_support;
+
 /// 設定スキーマ(TOML)の読込・検証。SPEC §3。
 pub mod config;
 

@@ -13,6 +13,8 @@
 #include "ecc_core.hpp"
 #include "json_min.hpp"
 
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -370,7 +372,123 @@ void test_state_machine_rejects_out_of_order() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. 最小 JSON パーサ(ecc_core が乗っている土台)
+// 6. 共有 golden 遷移表とのパリティ(049)
+//
+// ECC の状態機械は **意図的に 2 実装**ある(036 の事故に由来する負荷分散された防御。
+// 044 で「統一しない」と裁定済み)。残るリスクは**将来の片側だけの修正によるドリフト**
+// なので、`tests/fixtures/ecc_transitions.txt` の golden 表を **Rust 側
+// (src/controller.rs の同名テスト)と同じ 1 ファイルから**読み、全 64 行を照合する。
+//
+// 表の各列の意味と、この C++ 実装への対応はファイル冒頭のヘッダに書いてある。
+// **表と実装が食い違ったら、表を直す前に一次資料(reference/20190315_patched/GetBench/
+// src/get/rc/BackEnd.cpp)を見ること** —— 意味論の正本はこの上の ecc_core.hpp の
+// 2 つのコメントブロック(048-C)であって、表ではない。
+// ---------------------------------------------------------------------------
+
+void test_golden_transition_table(const std::string& path) {
+  std::ifstream in(path);
+  if (!in) {
+    // **黙って skip しない**(CLAUDE.md: silent failure を作らない)。表が読めない =
+    // パリティを検証できていない、であって「異常なし」ではない。
+    std::printf("FAIL cannot open golden table [%s]\n", path.c_str());
+    std::printf("  (make test は ../../tests/fixtures/ecc_transitions.txt を渡す。"
+                "別 cwd から動かすなら引数で場所を渡すこと)\n");
+    CHECK(false);
+    return;
+  }
+
+  int lineno = 0;
+  int rows = 0;
+  std::string raw;
+  while (std::getline(in, raw)) {
+    ++lineno;
+    const std::size_t hash = raw.find('#');
+    if (hash != std::string::npos) raw.erase(hash);
+
+    std::istringstream ls(raw);
+    std::string state, action, outcome, flag, extra;
+    if (!(ls >> state >> action >> outcome >> flag)) {
+      if (!state.empty()) {  // 空行 / コメントだけの行は読み飛ばす。中途半端な行は落とす。
+        std::printf("FAIL %s:%d  4 列でない\n", path.c_str(), lineno);
+        CHECK(false);
+      }
+      continue;
+    }
+    if (ls >> extra) {
+      std::printf("FAIL %s:%d  余分な列 [%s]\n", path.c_str(), lineno, extra.c_str());
+      CHECK(false);
+      continue;
+    }
+
+    // state_from_string は知らない綴りを黙って Unknown に落とすので、往復で綴りを確かめる
+    // (表の typo が「Unknown 行が 1 本増えた」に化けない)。
+    const State from = ecc::state_from_string(state);
+    if (state != ecc::to_string(from)) {
+      std::printf("FAIL %s:%d  未知の state [%s]\n", path.c_str(), lineno, state.c_str());
+      CHECK(false);
+      continue;
+    }
+
+    ecc::Step want_step = ecc::Step::Applied;
+    State want_next = from;
+    bool want_err_empty = true;
+    if (outcome.rfind("Applied:", 0) == 0) {
+      const std::string next_name = outcome.substr(8);
+      want_next = ecc::state_from_string(next_name);
+      if (next_name != ecc::to_string(want_next)) {
+        std::printf("FAIL %s:%d  未知の次状態 [%s]\n", path.c_str(), lineno, next_name.c_str());
+        CHECK(false);
+        continue;
+      }
+    } else if (outcome == "Ignored") {
+      want_step = ecc::Step::Ignored;
+    } else if (outcome == "Denied") {
+      want_step = ecc::Step::Denied;
+      want_err_empty = false;  // Denied だけは理由が出る(実機より辛くしてある 1 点)
+    } else if (outcome == "Observed") {
+      // status は next_state では Applied を返すが state は動かない(観測であって遷移でない)。
+      want_step = ecc::Step::Applied;
+    } else {
+      std::printf("FAIL %s:%d  未知の outcome [%s]\n", path.c_str(), lineno, outcome.c_str());
+      CHECK(false);
+      continue;
+    }
+    if (flag != "clear" && flag != "keep") {
+      std::printf("FAIL %s:%d  未知の error_flag [%s]\n", path.c_str(), lineno, flag.c_str());
+      CHECK(false);
+      continue;
+    }
+
+    State next = State::Unknown;
+    std::string err;
+    const ecc::Step step = ecc::next_state(from, action, next, err);
+
+    // error フラグが消えるのは fake_ecc::step() が Applied を受けたときだけ
+    // (fake_ecc.cpp:236-240)。`status` は getStatus に降りて step() を通らないので
+    // 触られない(fake_ecc.cpp:202-208)。
+    const bool clears = (action != "status") && (step == ecc::Step::Applied);
+
+    const bool ok_step = (step == want_step);
+    const bool ok_next = (next == want_next);
+    const bool ok_err = (err.empty() == want_err_empty);
+    const bool ok_flag = (clears == (flag == "clear"));
+    if (!(ok_step && ok_next && ok_err && ok_flag)) {
+      std::printf("  (row %s:%d  %s %s -> want %s/%s, got next=%s err=[%s])\n", path.c_str(),
+                  lineno, state.c_str(), action.c_str(), outcome.c_str(), flag.c_str(),
+                  ecc::to_string(next), err.c_str());
+    }
+    CHECK(ok_step);
+    CHECK(ok_next);
+    CHECK(ok_err);
+    CHECK(ok_flag);
+    ++rows;
+  }
+  // 表が空 / 半分しか読めていないのに green になるのを防ぐ(8 state × 8 action)。
+  CHECK_EQ(rows, 64);
+}
+
+// ---------------------------------------------------------------------------
+// 7. 最小 JSON パーサ(ecc_core が乗っている土台)
 // ---------------------------------------------------------------------------
 
 void test_json_min() {
@@ -413,7 +531,11 @@ void test_json_min() {
 
 }  // namespace
 
-int main() {
+// 049: golden 遷移表の場所。既定は Makefile の `test` ターゲットが渡す相対パスと同じ
+// (この Makefile のあるディレクトリから素で ./test_ecc_bridge しても動く)。
+int main(int argc, char** argv) {
+  const std::string table = (argc > 1) ? argv[1] : "../../tests/fixtures/ecc_transitions.txt";
+
   test_data_link_set_single_cobo();
   test_data_link_set_two_cobo();
   test_data_link_set_escapes_attributes();
@@ -430,6 +552,7 @@ int main() {
   test_reset_walks_back_one_step_at_a_time();
   test_configure_is_silently_skipped_outside_prepared();
   test_state_machine_rejects_out_of_order();
+  test_golden_transition_table(table);
   test_json_min();
   return tpccheck::report("test_ecc_bridge");
 }

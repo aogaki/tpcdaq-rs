@@ -14,10 +14,11 @@ run 一周がフルスタックで回る。前波は
   Angular で 9 ヒスト + イベント表示 + 波形 + ログブック。Run 制御は完成形レイアウト + 全 disabled)。
 - **run 制御の実機ハードニング完了**: **032**(receiver 単一リンク + silent stall の可視化)/
   **034**(連続 run)/ **036**(実 ECC の `reset` = `EV_UNDO` への対応 + テストダブルの実機準拠化)。
-- **リポ全体ゲート: 430 passed / 0 failed / 1 ignored**(042 +13、043 +2、033 +13 ほか)。
-  C++ 側 `test_ecc_bridge 200` / `ecc_e2e 52` / root_sink 各テスト green +
-  **vcobo 161**(92+57+6+6)。clippy -D warnings クリーン。UI 適合 127 tests green。
+- **リポ全体ゲート: 432 passed / 0 failed / 1 ignored**。C++ 側 `test_ecc_bridge 457`
+  (パリティ表 +257)/ `ecc_e2e 52` / root_sink 各テスト green + **vcobo 155+**(92+57+6)。
+  clippy -D warnings クリーン。UI 適合 127 tests green、**dist 4.9 MB**(旧 7.8)。
 - **run/stop 所要 1.3 s**(033-E 静止検出。旧 5.6 s)。run/start ≈ 7 s(実 ECC 支配)。
+  **decode 26% 短縮**(045)。production の panic 起点ゼロ(046)。
 - **仮想 zCoBo スタック稼働**(2026-08-15): 実 ECC(実験と同一版)+ `tools/vcobo/` で
   検出器なしに run 一周が本番経路で回る。正本 = docs/VIRTUAL_ZCOBO_ja.md v1.2、
   レシピ = reference/_spike/demo/。
@@ -33,9 +34,11 @@ run 一周がフルスタックで回る。前波は
 2. ~~033~~ **完了(2026-08-15)** — run_stop 2 フィールド / eos_out 3 点判定 / 異常系 E2E
    F0-F2 / **quiesce 検出で run/stop 5.6 s → 1.3 s**。不達 receiver の停止分単位化の穴も
    発見・修正。ゲート **430 passed**。archive 済み。
-3. **[044_refactor_window.md](044_refactor_window.md)** — **窓が開いた(033 完了)**。
-   次アクション = Fable の横断品質レビュー → ワークリスト追記 → 045〜起票。
-   **P4 起票前に必ず実施**。タイミング方針・凍結ルールはチケット本文が正。
+3. ~~044 リファクタ窓~~ **完了(2026-08-15、045〜049 全 5 テーマ)**: decode 26% 短縮 /
+   production panic 起点ゼロ / dist −2.9 MB / 5 bin 共通化 + vcobo SIGINT /
+   **ECC 遷移表パリティテスト(64 組全一致、034 事故ケースの red 確認済み)**。
+   見送り裁定(controller 分割 = P4 見積もり後 / E2E ハーネス = 031 移管)は
+   [archive/044](archive/044_refactor_window.md) が正。**次 = P4 UI 実配線の起票(Fable)**。
 4. **P4 Run 制御 UI 実配線チケット群の起票**(Fable — 044 の後)。
 5. **[031_load_harness.md](031_load_harness.md)** — 負荷ハーネス。**044 の後に実走**
    (soak は実機に持っていく最終形で行う — 044 の裁定)。vcobo-daq の全速モードがソースに
@@ -152,8 +155,9 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 ## 完了ユニット台帳
 
-000〜043 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
-すべて各 md の「結果」節が正。**未完は 031 と 044(窓・開放中)のみ**)。
-直近(2026-08-15): **038〜042** 仮想 zCoBo トラック(スパイク → フルウォーク → vcobo-daq →
-統合デモ → ConfigId 3 相化)/ **043** ecc_error 可視化 / **033** 異常系セマンティクス
-(quiesce 停止 1.3 s 化 + 異常系 E2E)。前日(2026-08-14): 027〜037。
+000〜049 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
+すべて各 md の「結果」節が正。**未完は 031 のみ**)。
+直近(2026-08-15): **038〜042** 仮想 zCoBo トラック / **043** ecc_error 可視化 /
+**033** 異常系セマンティクス(quiesce 停止 1.3 s 化)/ **044〜049 リファクタ窓**
+(decode 高速化・panic ゼロ化・プロセス衛生・UI 衛生・ECC パリティテスト)。
+前日(2026-08-14): 027〜037。

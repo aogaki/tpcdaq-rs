@@ -11,20 +11,16 @@
 use std::process::ExitCode;
 
 use tokio::sync::broadcast;
+use tpcdaq::bin_support::{init_tracing, spawn_sigint};
 use tpcdaq::config;
 use tpcdaq::controller::{run_controller, ControllerParams};
-use tracing::{error, info};
-use tracing_subscriber::EnvFilter;
+use tracing::error;
 
 const USAGE: &str = "usage: controller --config <config.toml>";
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    init_tracing();
 
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let args = match parse_args(&raw) {
@@ -46,16 +42,7 @@ async fn main() -> ExitCode {
     let params = ControllerParams::from_config(&config);
 
     let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-    tokio::spawn(async move {
-        match tokio::signal::ctrl_c().await {
-            Ok(()) => {
-                info!("SIGINT — shutting down");
-                let _ = shutdown_tx.send(());
-            }
-            // 待てないなら黙って諦めるのではなく残す(kill での停止は依然可能)。
-            Err(e) => error!(error = %e, "cannot listen for SIGINT"),
-        }
-    });
+    spawn_sigint(shutdown_tx);
 
     match run_controller(params, shutdown_rx, None).await {
         Ok(()) => ExitCode::SUCCESS,

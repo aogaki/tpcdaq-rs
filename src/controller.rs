@@ -3179,6 +3179,71 @@ mod tests {
         assert_eq!(reply.ecc_error, "NO_ERR");
     }
 
+    // -----------------------------------------------------------------
+    // 共有 golden 遷移表とのパリティ(049)
+    // -----------------------------------------------------------------
+
+    /// ECC の状態機械は **意図的に 2 実装**ある(036 の事故に由来する負荷分散された防御。
+    /// 044 で「統一しない」と裁定済み)。残るリスクは**将来の片側だけの修正によるドリフト**
+    /// なので、`tests/fixtures/ecc_transitions.txt` の golden 表を **C++ 側
+    /// (`tools/ecc_bridge/test_ecc_bridge.cpp` の同名テスト)と同じ 1 ファイルから**読み、
+    /// 全 64 行(8 state × 8 action)を照合する。
+    ///
+    /// 表の各列の意味と、この Rust 実装への対応はファイル冒頭のヘッダに書いてある。
+    /// **表と実装が食い違ったら、表を直す前に一次資料**(`reference/20190315_patched/
+    /// GetBench/src/get/rc/BackEnd.cpp`)**を見ること** —— 意味論の正本は
+    /// `tools/ecc_bridge/ecc_core.hpp` の 2 つのコメントブロック(048-C)。
+    #[test]
+    fn the_ecc_state_machine_matches_the_shared_golden_table() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/ecc_transitions.txt");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let params = params_with(&[0]);
+        // 「フラグに触らない」を検出するための番兵。`NO_ERR` と区別でき、かつ**実在の値**
+        // (041 D-1 で実測した「describe に失敗した直後」の姿)を使う。
+        const SENTINEL: &str = "WHEN_DESCRIBE";
+
+        let mut rows = 0;
+        for (index, raw) in text.lines().enumerate() {
+            let line = raw.split('#').next().unwrap_or("").trim();
+            if line.is_empty() {
+                continue;
+            }
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            let at = format!("{}:{}", path.display(), index + 1);
+            assert_eq!(cols.len(), 4, "{at}: 4 列でない: {raw}");
+            let (state, action, outcome, flag) = (cols[0], cols[1], cols[2], cols[3]);
+            let at = format!("{at} [{state} {action}]");
+
+            // outcome → 「遷移が渡ったか」と「渡った先」。`Ignored` / `Denied` / `Observed`
+            // は Rust 側ではすべて「遷移が無い」= `None` に畳まれる(表のヘッダ参照)。
+            let applied = outcome.strip_prefix("Applied:");
+            assert!(
+                applied.is_some() || matches!(outcome, "Ignored" | "Denied" | "Observed"),
+                "{at}: 未知の outcome: {outcome}"
+            );
+
+            // (1) 遷移表そのもの。
+            assert_eq!(ecc_transition(state, action), applied, "{at}: 遷移表");
+
+            // (2) 状態と error フラグの**実際の見え方**(`MockTransport::ecc` の応答)。
+            let mut mock = MockTransport::new(&params)
+                .ecc_in(state)
+                .ecc_error_flag(SENTINEL);
+            let reply = mock.ecc(&json!({"action": action})).unwrap();
+            assert_eq!(reply.state, applied.unwrap_or(state), "{at}: 次状態");
+            let want_flag = match flag {
+                "clear" => "NO_ERR",
+                "keep" => SENTINEL,
+                other => panic!("{at}: 未知の error_flag: {other}"),
+            };
+            assert_eq!(reply.ecc_error, want_flag, "{at}: error フラグ");
+            rows += 1;
+        }
+        // 表が空 / 半分しか読めていないのに green になるのを防ぐ(8 state × 8 action)。
+        assert_eq!(rows, 64, "golden 表の行数");
+    }
+
     /// ECC の状態が**取れなければ** run を始めない(見えない ECC の上に run を建てない)。
     /// コンポーネントには 1 コマンドも出ない。
     #[test]

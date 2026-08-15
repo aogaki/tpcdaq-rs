@@ -7,7 +7,7 @@
 //!
 //! フレームレイアウトの正 = C++ 版 tpcdaq(`src/decode/cobo_decoder.cpp`)。
 
-use crate::msg::{items_to_bytes, pack_item, Fragment};
+use crate::msg::{pack_item, Fragment};
 use serde_bytes::ByteBuf;
 
 /// プライマリヘッダを読める最小バイト数(metaType~revision)。
@@ -144,13 +144,14 @@ impl Decoder {
             *c = read_uint(&frame[off..off + 2], little) as u16;
         }
 
-        let Some(words) = decode_items(frame_type, &frame[item_start..items_end], little) else {
+        let Some(item_bytes) = decode_items(frame_type, &frame[item_start..items_end], little)
+        else {
             self.malformed += 1;
             return None;
         };
 
         self.frames += 1;
-        self.items += words.len() as u64;
+        self.items += item_bytes.len() as u64 / 4;
 
         Some(Fragment {
             event_idx,
@@ -164,7 +165,7 @@ impl Decoder {
             mult,
             window_out,
             last_cell,
-            items: ByteBuf::from(items_to_bytes(&words)),
+            items: ByteBuf::from(item_bytes),
         })
     }
 
@@ -189,16 +190,19 @@ impl Decoder {
     }
 }
 
-/// item バイト列(`item_start..items_end` 済み切り出し)を [`pack_item`] 済み u32 列へ展開する。
+/// item バイト列(`item_start..items_end` 済み切り出し)を [`pack_item`] 済みの LE u32 連結
+/// バイト列へ直接展開する(TODO/045 — 中間 `Vec<u32>` を経由してからの再確保 + 全コピーを
+/// 廃止し、`Fragment::items` が最終的に持つ形へ一発で書く)。出力は
+/// [`crate::msg::items_to_bytes`] の結果と完全同一(LE u32 連結)。
 /// パック時の範囲エラー(理論上到達しない — bit マスクで既に幅を保証済み)も `None` で拾い、
 /// 呼び出し側が malformed として計上できるようにする(panic しない)。
-fn decode_items(frame_type: u16, item_bytes: &[u8], little: bool) -> Option<Vec<u32>> {
+fn decode_items(frame_type: u16, item_bytes: &[u8], little: bool) -> Option<Vec<u8>> {
     let item_count = if frame_type == 1 {
         item_bytes.len() / 4
     } else {
         item_bytes.len() / 2
     };
-    let mut words = Vec::with_capacity(item_count);
+    let mut out = Vec::with_capacity(item_count * 4);
 
     if frame_type == 1 {
         // partial(2018): 4B item に aget/chan/bucket/ADC が明示。
@@ -208,7 +212,7 @@ fn decode_items(frame_type: u16, item_bytes: &[u8], little: bool) -> Option<Vec<
             let chan = ((w >> 23) & 0x7F) as u8;
             let bucket = ((w >> 14) & 0x1FF) as u16;
             let adc = (w & 0xFFF) as u16;
-            words.push(pack_item(aget, chan, bucket, adc).ok()?);
+            out.extend_from_slice(&pack_item(aget, chan, bucket, adc).ok()?.to_le_bytes());
         }
     } else {
         // compact(2025): 2B item = aget(bit14,2) + ADC(bit0,12)。ch/bucket は AGET 毎
@@ -226,11 +230,11 @@ fn decode_items(frame_type: u16, item_bytes: &[u8], little: bool) -> Option<Vec<
             let chan = chan_cur[aget] as u8;
             let bucket = buck_cur[aget];
             let adc = w & 0xFFF;
-            words.push(pack_item(aget as u8, chan, bucket, adc).ok()?);
+            out.extend_from_slice(&pack_item(aget as u8, chan, bucket, adc).ok()?.to_le_bytes());
             chan_cur[aget] += 1;
         }
     }
-    Some(words)
+    Some(out)
 }
 
 /// `bytes` をエンディアン `little` に従って符号なし整数として読む(1–8 バイト)。

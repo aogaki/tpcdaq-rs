@@ -159,23 +159,32 @@ pub struct Geometry {
     unmapped_hits: AtomicU64,
 }
 
+/// 範囲外・未記載を [`Geometry::lookup_ref`] が返すための実体。
+static UNMAPPED: ChannelRole = ChannelRole::Unmapped;
+
 impl Geometry {
-    /// `(cobo, asad, aget, raw_ch)` から役割を引く。範囲外・未記載はいずれも
-    /// `Unmapped` を返し、`unmapped_hits` を加算する(silent にしない可視化フック)。
-    pub fn lookup(&self, cobo: u32, asad: u32, aget: u32, raw_ch: u32) -> ChannelRole {
+    /// [`Self::lookup`] の借用版。ホットパス(monitor の per-sample 引き)はこちらを使う
+    /// —— `Aux { name: String }` を持つジオメトリでは `clone` が per-sample malloc になるため。
+    pub fn lookup_ref(&self, cobo: u32, asad: u32, aget: u32, raw_ch: u32) -> &ChannelRole {
         match self.index_of(cobo, asad, aget, raw_ch) {
             Some(i) => {
-                let role = self.channels[i].clone();
-                if role == ChannelRole::Unmapped {
+                let role = &self.channels[i];
+                if *role == ChannelRole::Unmapped {
                     self.unmapped_hits.fetch_add(1, Ordering::Relaxed);
                 }
                 role
             }
             None => {
                 self.unmapped_hits.fetch_add(1, Ordering::Relaxed);
-                ChannelRole::Unmapped
+                &UNMAPPED
             }
         }
+    }
+
+    /// `(cobo, asad, aget, raw_ch)` から役割を引く。範囲外・未記載はいずれも
+    /// `Unmapped` を返し、`unmapped_hits` を加算する(silent にしない可視化フック)。
+    pub fn lookup(&self, cobo: u32, asad: u32, aget: u32, raw_ch: u32) -> ChannelRole {
+        self.lookup_ref(cobo, asad, aget, raw_ch).clone()
     }
 
     /// `lookup` が `Unmapped` を返した累計回数。呼び出し側が周期的に読んで

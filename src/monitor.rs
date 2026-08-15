@@ -593,10 +593,11 @@ impl DisplayConverter {
             &mut self.logged_misaligned,
         ) {
             let item = crate::msg::unpack_item(word);
-            let role = self
-                .geometry
-                .lookup(cobo, asad, u32::from(item.aget), u32::from(item.chan));
-            let ChannelRole::Strip { plane, strip, .. } = role else {
+            // 参照で引く(`Aux { name: String }` の clone を per-sample で起こさない)。
+            let role =
+                self.geometry
+                    .lookup_ref(cobo, asad, u32::from(item.aget), u32::from(item.chan));
+            let &ChannelRole::Strip { plane, strip, .. } = role else {
                 continue; // FPN / Aux / Unmapped は表示グリッドに入れない
             };
             let p = plane as usize;

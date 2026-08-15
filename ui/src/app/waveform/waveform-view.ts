@@ -26,6 +26,7 @@ import { DisplayControls } from '../display/display-controls';
 import type { WaveformsMessage } from '../ws/wire';
 import { WsClientService } from '../ws/ws-client';
 import { DisplayClock } from '../display/display-clock';
+import { observeResize } from '../display/resize-observer';
 import { type EChartsInstance, loadECharts } from './echarts-loader';
 import {
   type WaveformPlot,
@@ -105,7 +106,6 @@ export class WaveformView implements OnDestroy {
 
   private readonly host = viewChild<ElementRef<HTMLElement>>('chart');
   private chart: EChartsInstance | null = null;
-  private observer: ResizeObserver | null = null;
   private busy = false;
   private defaultsApplied = false;
 
@@ -129,19 +129,15 @@ export class WaveformView implements OnDestroy {
       void this.render(untracked(this.message), selection, mode);
     });
 
-    effect(() => {
-      const host = this.host()?.nativeElement;
-      if (!host || this.observer) return;
-      this.observer = new ResizeObserver(() => this.chart?.resize());
-      this.observer.observe(host);
-    });
+    observeResize(
+      () => this.host()?.nativeElement,
+      () => this.chart?.resize(),
+    );
   }
 
   ngOnDestroy(): void {
     // 離脱したら購読を戻す(帯域制御 — §10.3)。
     this.ws.setWaveforms(false);
-    this.observer?.disconnect();
-    this.observer = null;
     this.chart?.dispose();
     this.chart = null;
   }

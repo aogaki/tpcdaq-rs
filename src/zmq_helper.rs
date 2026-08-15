@@ -80,6 +80,31 @@ pub fn apply_pull_hwm(socket: &zmq::Socket) -> zmq::Result<()> {
     socket.set_rcvhwm(DEFAULT_HWM)
 }
 
+/// listen-before-start 用の PULL bind(SPEC §1.3)。
+///
+/// 「PULL を作る → 既定 HWM を設定 → bind → 解決済みエンドポイントを読む」の 4 手順は
+/// decoder と graw-writer の `do_arm` で完全に同一だった(TODO/046-D)。順序が命
+/// (HWM は bind 前でないと効かない)なので 1 箇所に畳む。ポート 0 の解決結果を
+/// 呼び手へ返すため、socket と `last_endpoint` を組で返す。ログは呼び手の担当
+/// (コンポーネント名と SPEC 節番号が異なるため)。
+///
+/// エラーは `String`(呼び手の `do_arm` がそのまま返す形)。
+pub fn bind_pull(context: &zmq::Context, endpoint: &str) -> Result<(zmq::Socket, String), String> {
+    let socket = context
+        .socket(zmq::PULL)
+        .map_err(|e| format!("cannot create PULL socket: {e}"))?;
+    apply_pull_hwm(&socket).map_err(|e| format!("cannot set PULL HWM: {e}"))?;
+    socket
+        .bind(endpoint)
+        .map_err(|e| format!("bind {endpoint} failed: {e}"))?;
+    let resolved = match socket.get_last_endpoint() {
+        Ok(Ok(resolved)) => resolved,
+        Ok(Err(raw)) => return Err(format!("last_endpoint is not utf-8: {raw:?}")),
+        Err(e) => return Err(format!("cannot read last_endpoint: {e}")),
+    };
+    Ok((socket, resolved))
+}
+
 /// PUB(モニタ配信)に既定の有限 HWM を設定する。満杯なら **落とす**(SPEC §1.4-4)。
 /// 落とした数は呼び手が数えて可視化すること(silent にしない — CLAUDE.md)。
 pub fn apply_pub_hwm(socket: &zmq::Socket) -> zmq::Result<()> {

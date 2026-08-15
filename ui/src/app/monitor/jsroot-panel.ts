@@ -21,6 +21,7 @@ import {
 } from '@angular/core';
 
 import { DisplayClock } from '../display/display-clock';
+import { observeResize } from '../display/resize-observer';
 import { loadJsroot } from './jsroot-loader';
 import { type PanelMessage, type PanelSpec, buildPanelObject, panelDrawOption } from './root-histo';
 
@@ -141,7 +142,6 @@ export class JsrootPanel implements OnDestroy {
   private readonly plot = viewChild<ElementRef<HTMLElement>>('plot');
   private readonly clock = inject(DisplayClock);
   private busy = false;
-  private observer: ResizeObserver | null = null;
 
   constructor() {
     effect(() => {
@@ -152,20 +152,14 @@ export class JsrootPanel implements OnDestroy {
       void this.render(untracked(this.message), log);
     });
 
-    effect(() => {
-      const host = this.plot()?.nativeElement;
-      if (!host || this.observer) return;
-      // パネルの大きさが変わったら描き直す(JSROOT の SVG は固定サイズで作られる)。
-      this.observer = new ResizeObserver(() => {
-        void this.render(untracked(this.message), untracked(this.log));
-      });
-      this.observer.observe(host);
-    });
+    // パネルの大きさが変わったら描き直す(JSROOT の SVG は固定サイズで作られる)。
+    observeResize(
+      () => this.plot()?.nativeElement,
+      () => void this.render(untracked(this.message), untracked(this.log)),
+    );
   }
 
   ngOnDestroy(): void {
-    this.observer?.disconnect();
-    this.observer = null;
     const host = this.plot()?.nativeElement;
     if (host) void loadJsroot().then((jsroot) => jsroot.cleanup(host));
   }

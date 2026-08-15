@@ -685,7 +685,8 @@ fn validate_monitor(monitor: &MonitorConfig) -> Result<(), ConfigError> {
 /// `receiver_commands` を手書きで上書きしたとき本数がずれていると、controller は
 /// 一部の receiver に永久に到達できないまま起動してしまう(= 静かな配線ミス)。
 /// `eos_timeout_s = 0` は「EOS を一切待たずに必ず強制 EOS」になり、SPEC §1.3 の
-/// 停止シーケンスが意味を失うので拒否する。
+/// 停止シーケンスが意味を失うので拒否する。`eos_quiesce_ms = 0` も同様に
+/// 「受信静止を一切待たずに即・強制 EOS」= 033 裁定が不採用とした挙動なので拒否する。
 fn validate_controller(
     controller: &ControllerConfig,
     cobo_count: usize,
@@ -699,6 +700,11 @@ fn validate_controller(
     if controller.eos_timeout_s == 0 {
         return Err(ConfigError::InvalidController(
             "eos_timeout_s must be greater than 0".to_string(),
+        ));
+    }
+    if controller.eos_quiesce_ms == 0 {
+        return Err(ConfigError::InvalidController(
+            "eos_quiesce_ms must be greater than 0".to_string(),
         ));
     }
     Ok(())
@@ -1868,6 +1874,22 @@ router_ip = "10.0.0.1"
             &geometry,
             "[controller]\npassphrase = \"p\"\necc_proxy = \"x\"\nconfig_id = \"c\"\n\
              eos_timeout_s = 0\n",
+        );
+        let err = parse(&toml_str).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidController(_)), "{err}");
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// `eos_quiesce_ms = 0` は「静止を一切待たずに即・強制 EOS」= 033 裁定が明示的に
+    /// 不採用とした挙動。`eos_timeout_s = 0` と同じく起動時に拒否する(TODO/046-C)。
+    #[test]
+    fn controller_eos_quiesce_zero_is_rejected() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = toml_with_controller_section(
+            &geometry,
+            "[controller]\npassphrase = \"p\"\necc_proxy = \"x\"\nconfig_id = \"c\"\n\
+             eos_quiesce_ms = 0\n",
         );
         let err = parse(&toml_str).unwrap_err();
         assert!(matches!(err, ConfigError::InvalidController(_)), "{err}");

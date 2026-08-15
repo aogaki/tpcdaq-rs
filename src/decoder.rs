@@ -1049,19 +1049,7 @@ impl Handler {
 
     /// listen-before-start と同じ理屈: Arm で PULL を bind しておく(SPEC §1.3)。
     fn do_arm(&mut self) -> Result<(), String> {
-        let socket = self
-            .context
-            .socket(zmq::PULL)
-            .map_err(|e| format!("cannot create PULL socket: {e}"))?;
-        zmq_helper::apply_pull_hwm(&socket).map_err(|e| format!("cannot set PULL HWM: {e}"))?;
-        socket
-            .bind(&self.params.pull_bind)
-            .map_err(|e| format!("bind {} failed: {e}", self.params.pull_bind))?;
-        let endpoint = match socket.get_last_endpoint() {
-            Ok(Ok(endpoint)) => endpoint,
-            Ok(Err(raw)) => return Err(format!("last_endpoint is not utf-8: {raw:?}")),
-            Err(e) => return Err(format!("cannot read last_endpoint: {e}")),
-        };
+        let (socket, endpoint) = zmq_helper::bind_pull(&self.context, &self.params.pull_bind)?;
         info!(%endpoint, "decoder: armed — PULL bound (SPEC §3.2)");
         self.bind_address = Some(endpoint);
         self.pull_socket = Some(socket);

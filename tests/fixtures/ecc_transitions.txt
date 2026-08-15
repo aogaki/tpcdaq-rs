@@ -1,0 +1,138 @@
+# ecc_transitions.txt — ECC 状態機械の **golden 遷移表**(TODO/049)
+#
+# ECC の状態機械は **意図的に 2 実装**ある(036 の事故 = 甘い Rust ダブルが実バグを green で
+# 通した、に由来する負荷分散された防御。044 で「統一しない」と裁定済み):
+#
+#   Rust : src/controller.rs  `MockTransport::ecc_transition` + `MockTransport::ecc` の
+#          error フラグ規則
+#   C++  : tools/ecc_bridge/ecc_core.hpp `ecc::next_state` + fake_ecc.cpp の error フラグ規則
+#
+# このファイルは**両者が読む唯一の表**であり、片側だけの修正(ドリフト)を CI で落とすためだけに
+# ある。**ここは仕様の正本ではない** —— 意味論と一次資料(BackEnd.cpp の行番号)の正本は
+# `tools/ecc_bridge/ecc_core.hpp` の 2 つのコメントブロック(048-C で一元化済み):
+#   * error フラグの set/clear 規則ブロック(`// 実 ECC の error フラグの **set / clear 規則**`)
+#   * 状態遷移表ブロック(`// fake-ECC の状態遷移表`)
+# 表と実装が食い違ったら、**表を直す前に一次資料 reference/20190315_patched/GetBench/src/get/rc/
+# BackEnd.cpp を見ること**(最終審級はそこ。テストダブルのコメントではない)。
+#
+# ---------------------------------------------------------------------------
+# 形式: 空白区切りの 4 列。`#` 以降はコメント、空行は無視。
+#
+#   <state> <action> <outcome> <error_flag>
+#
+#   state      Off | Idle | Described | Prepared | Ready | Running | Paused | Unknown
+#   action     describe | prepare | configure | start | stop | breakup | reset | status
+#              (= ecc_core.hpp `is_known_action` の 8 個 = SPEC §8.2 の列挙)
+#   outcome    Applied:<次状態>  遷移が渡った(state が動く)
+#              Ignored           その状態にその遷移が**無い** = 実 ECC は完全な無音
+#              Denied            テストダブル固有の厳しさ(実機は Ignored。ecc_core.hpp の
+#                                「実機より辛くしてある 1 点」)。state は動かない
+#              Observed          status = 観測であって遷移ではない。state も flag も動かない
+#   error_flag clear  遷移を渡り始めた時点で NO_ERR に戻る
+#              keep   フラグに**触らない**(前の相のコードが残り続ける)
+#
+# 各実装への対応(この 2 段落が「同じ表を両側が読んでいる」ことの定義):
+#
+#   Rust  `ecc_transition(state, action)`:
+#           Applied:X                  → Some("X")
+#           Ignored / Denied / Observed → None(Rust ダブルに Denied の概念は無い。
+#                                        どれも「state が動かない」に畳まれる)
+#         `MockTransport::ecc()` の応答: state = 上の結果、`ecc_error` は
+#           clear → "NO_ERR" / keep → 呼ぶ前のフラグがそのまま残る。
+#
+#   C++   `ecc::next_state(from, action, to, err)`:
+#           Applied:X → Step::Applied  かつ to == X
+#           Ignored   → Step::Ignored  かつ to == from かつ err 空(無音)
+#           Denied    → Step::Denied   かつ to == from かつ err 非空
+#           Observed  → Step::Applied  かつ to == from かつ err 空
+#                       (status は `next_state` では Applied を返すが、fake_ecc は
+#                        getStatus を `step()` に通さない(fake_ecc.cpp:202-208)ので
+#                        フラグは触られない = keep。ここが Rust 側の None と
+#                        **表現だけ**違う唯一の箇所)
+#         error フラグ: 消えるのは `fake_ecc::step()` が Applied を受けたときだけ
+#           (fake_ecc.cpp:236-240)。
+#
+# 網羅: 8 state × 8 action = 64 行(過不足なく全組)。
+# ---------------------------------------------------------------------------
+
+# state      action     outcome            error_flag
+
+# --- Off: 我々が付けた「ECC 未初期化」状態(実 ECC の enum には無い。fake の初期値)
+Off          describe   Applied:Described  clear
+Off          prepare    Denied             keep
+Off          configure  Ignored            keep
+Off          start      Denied             keep
+Off          stop       Denied             keep
+Off          breakup    Ignored            keep
+Off          reset      Ignored            keep
+Off          status     Observed           keep
+
+# --- Idle: 実 ECC の初期状態(EV_DESCRIBE だけが定義されている)
+Idle         describe   Applied:Described  clear
+Idle         prepare    Denied             keep
+Idle         configure  Ignored            keep
+Idle         start      Denied             keep
+Idle         stop       Denied             keep
+Idle         breakup    Ignored            keep
+Idle         reset      Ignored            keep
+Idle         status     Observed           keep
+
+# --- Described: describe の撃ち直しを受ける(017 から。実機より甘くはならない側)
+Described    describe   Applied:Described  clear
+Described    prepare    Applied:Prepared   clear
+Described    configure  Ignored            keep
+Described    start      Denied             keep
+Described    stop       Denied             keep
+Described    breakup    Ignored            keep
+Described    reset      Applied:Idle       clear
+Described    status     Observed           keep
+
+# --- Prepared: EV_CONFIGURE が定義されている唯一の状態(ST_PREPARED ガード)
+Prepared     describe   Denied             keep
+Prepared     prepare    Applied:Prepared   clear
+Prepared     configure  Applied:Ready      clear
+Prepared     start      Denied             keep
+Prepared     stop       Denied             keep
+Prepared     breakup    Ignored            keep
+Prepared     reset      Applied:Described  clear
+Prepared     status     Observed           keep
+
+# --- Ready: ST_ACTIVE の初期部分状態。**reset は無音**(034 の事故の再現点)
+Ready        describe   Denied             keep
+Ready        prepare    Denied             keep
+Ready        configure  Ignored            keep
+Ready        start      Applied:Running    clear
+Ready        stop       Denied             keep
+Ready        breakup    Applied:Prepared   clear
+Ready        reset      Ignored            keep
+Ready        status     Observed           keep
+
+# --- Running: ST_ACTIVE
+Running      describe   Denied             keep
+Running      prepare    Denied             keep
+Running      configure  Ignored            keep
+Running      start      Denied             keep
+Running      stop       Applied:Ready      clear
+Running      breakup    Applied:Prepared   clear
+Running      reset      Ignored            keep
+Running      status     Observed           keep
+
+# --- Paused: ST_ACTIVE(EV_STOP は Paused からも定義されている)
+Paused       describe   Denied             keep
+Paused       prepare    Denied             keep
+Paused       configure  Ignored            keep
+Paused       start      Denied             keep
+Paused       stop       Applied:Ready      clear
+Paused       breakup    Applied:Prepared   clear
+Paused       reset      Ignored            keep
+Paused       status     Observed           keep
+
+# --- Unknown: 状態が取れていない(ECC 不達 / getStatus 失敗)。どの遷移も定義が無い
+Unknown      describe   Denied             keep
+Unknown      prepare    Denied             keep
+Unknown      configure  Ignored            keep
+Unknown      start      Denied             keep
+Unknown      stop       Denied             keep
+Unknown      breakup    Ignored            keep
+Unknown      reset      Ignored            keep
+Unknown      status     Observed           keep

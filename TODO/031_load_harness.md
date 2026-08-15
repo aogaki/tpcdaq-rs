@@ -79,3 +79,16 @@
   (既存テスト無改変)。スモーク green(env あり)。
 - 結果節: §12-5 / §12-6 それぞれに ✔/✘ + 実測(run 数・総転送量・全カウンタ・RSS
   推移と判定式・burst 達成スループット・実行環境と日付)。
+
+---
+
+## 追記(2026-08-15 Fable — 044 レビューからの移管)
+
+- **E2E ハーネス共通化を本ユニットに織り込む**: p3_e2e.rs ↔ p3_error_paths.rs に
+  **834 行の逐語一致**(Proc / http / E2eEnv / free_port / Sink / Topology / scratch_dir /
+  wait_for_file / read_logbook 等 — comm -12 実測)。本ユニットが 3 番目の利用者になるため、
+  ここで `tests/common/` へ抽出してから負荷ハーネスを書く(rule of three)。
+  注意: Sink/SinkLog は 2 ファイルで型が違う(スーパーセット署名で吸収、無理に潰さない)/
+  http は controller_* 側と意味差あり(read timeout・パース失敗時の型)— 同一ペアのみ共有。
+  受け入れ = 既存 E2E の assert・件数不変で全 green(044 の「テスト資産」条件)。
+- 負荷ソースは **vcobo-daq の全速モード**(040)が使える(グラフ化・計測の要件は本文どおり)。

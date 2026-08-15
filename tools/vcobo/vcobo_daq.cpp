@@ -16,10 +16,12 @@
 // 混ぜると無言 SIGSEGV(docs §4.1)。Makefile の ICE_HOME を参照。
 #include <Ice/Ice.h>
 
+#include <chrono>
 #include <csignal>
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "get/cobo/CtrlNode.h"
@@ -34,6 +36,12 @@ namespace {
 using vcobo::log_error;
 using vcobo::log_info;
 using vcobo::log_warn;
+
+// SIGINT/SIGTERM graceful 化(TODO/047-B)。既存イディオムの移植
+// (tools/ecc_bridge/ecc_bridge.cpp:38-39 / fake_ecc.cpp:55-56,377)。
+// ハンドラは g_stop を立てるだけ —— Ice API はここから呼ばない。
+volatile std::sig_atomic_t g_stop = 0;
+void on_signal(int) { g_stop = 1; }
 
 /// レジスタモデルと、それを守る 1 本の mutex。Ice のディスパッチは複数スレッドから来る。
 struct NodeState {
@@ -514,6 +522,9 @@ int main(int argc, char* argv[]) {
     }
   }
 
+  std::signal(SIGINT, on_signal);
+  std::signal(SIGTERM, on_signal);
+
   if (!graw_override.empty()) cfg.graw_files = graw_override;
   if (!have_config && graw_override.empty()) {
     log_error("no --config and no --graw: nothing to replay");
@@ -572,7 +583,7 @@ int main(int argc, char* argv[]) {
     log_info("vcobo_daq ready: HwNode/AlarmService on " + ctrl_ep + ", DaqCtrlNode on " + daq_ep +
              " (CoBo[" + std::to_string(cfg.cobo_id) + "], " + std::to_string(cfg.asad_count) +
              " AsAd)");
-    ic->waitForShutdown();
+    while (g_stop == 0) std::this_thread::sleep_for(std::chrono::milliseconds(50));
   } catch (const Ice::Exception& e) {
     std::ostringstream os;
     os << e;

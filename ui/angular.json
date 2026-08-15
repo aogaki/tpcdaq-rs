@@ -37,7 +37,9 @@
               "tmp",
               "xhr2",
               "mathjax",
-              "@oneidentity/zstd-js"
+              "@oneidentity/zstd-js",
+              "three",
+              "three/addons"
             ]
           },
           "configurations": {

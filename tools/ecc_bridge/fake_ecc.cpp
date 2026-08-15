@@ -212,17 +212,13 @@ class FakeEcc : public get::rc::StateMachine {
   }
 
  private:
-  // ecc_core の遷移表で状態を進める(036)。
-  //
-  //   Applied … 遷移した(呼び手は副作用を実行してよい)
-  //   Ignored … 実 ECC と同じく**無音**。状態も副作用も動かさない。**呼び手には ok を返す**
-  //             ので、controller から見て「何も起きなかったのに成功」= 一番危ない現れ方に
-  //             なる。ここを黙って通すのが実機準拠であり、我々の歩き戻しはこれを
-  //             「状態が動かなかった」ことで検出する(src/controller.rs)。
-  //   Denied  … 順序違反。CmdException(実機より辛い側 —— ecc_core.hpp の注記参照)
-  //
-  // Ignored は**この fake のログには出す**(ダブルの中まで無音にすると、テストが落ちた
-  // ときに原因が判らない)。ログは Ice の外なので controller からは見えない。
+  // ecc_core の遷移表(実 ECC の SM、一次資料の行番号込み)で状態を進める(036)。
+  // Applied/Ignored/Denied の出典・意味は ecc_core.hpp の遷移表コメントを見よ
+  // (048 でここから一元化)。ここでは呼び出し箇所固有の事実だけ:
+  //   Ignored でも**呼び手には ok を返す**(実機準拠)。controller はこれを
+  //   「状態が動かなかった」ことで検出する(src/controller.rs の歩き戻し)。
+  //   Ignored は**この fake のログには出す**(実機は完全な無音。ログは Ice の外なので
+  //   controller からは見えない — テストが落ちたときの原因追跡用)。
   ecc::Step step(const char* action) {
     ecc::State next = ecc::State::Unknown;
     std::string err;
@@ -237,18 +233,16 @@ class FakeEcc : public get::rc::StateMachine {
                    action, ecc::to_string(state_));
       return result;
     }
-    // **043**: `resetErrorFlag` は全遷移の**1 番目のアクション**(BackEnd.cpp:249-290)。
-    // 遷移を渡り始めた時点で消えるので、副作用より先にここで消す。遷移が無かった
-    // (Ignored / Denied)ときはアクションが 1 つも走らないので**触らない**。
+    // エラーフラグの set/clear 規則の出典は ecc_core.hpp の規則ブロックを見よ(043)。
+    // ここは clear 側の実装箇所 —— 副作用より先に、遷移を渡り始めた時点で消す。
     error_ = ecc::Error::NoErr;
     state_ = next;
     return result;
   }
 
-  // 遷移のアクションが失敗したときの後始末(実 ECC の CATCH_SM_EXCEPTIONS →
-  // handleStateMachineException、BackEnd.cpp:74-99 / 329-333)。フラグにその相のコードを
-  // 立て、**state は遷移前へ戻す** —— 実 ECC は `currentState_ = targetState()`
-  // (dhsm/Engine.cpp:298)に到達しないまま抜けるので、状態は元のままになる。
+  // 遷移のアクションが失敗したときの後始末。set 規則・state 巻き戻しの出典は
+  // ecc_core.hpp の規則ブロックを見よ(043)。ここはその実装箇所 —— フラグにその相の
+  // コードを立て、state を渡り始める前へ戻す。
   void fail_transition(ecc::State back_to, ecc::Error code) {
     state_ = back_to;
     error_ = code;
