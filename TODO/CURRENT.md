@@ -23,16 +23,22 @@ run 一周がフルスタックで回る。前波は
 - 実装の正本 = **docs/SPEC_ja.md v1.14**。モデル使い分け・完了時ルール = CLAUDE.md。
 - 公開リポ: https://github.com/aogaki/tpcdaq-rs(実データ・FW・実 .dat は reference/ = .gitignore)。
 
-## 次にやること(次セッションの入口)
+## 次にやること(次セッションの入口 — 順序は 044 で裁定済み・ユーザー合意 2026-08-15)
 
-1. **[033_error_path_semantics.md](033_error_path_semantics.md)** — **裁定済み・SPEC v1.12 適用済み・
-   036 完了で着手条件が揃った = すぐ発注可**(implementer/Opus)。発注書 A(`run_stop` に
-   `forced_eos`/`eos_closed`)/ C(decoder `eos_out` カウンタ)/ D(異常系 E2E 3 本 =
-   `tests/p3_error_paths.rs`)/ E(受信静止検出 `eos_quiesce_ms` 既定 500 ms)。
-2. **[031_load_harness.md](031_load_harness.md)** — 負荷ハーネス(§12-5 24h / §12-6 10 分)。
-   **034/036 で連続 run が回るようになったので前提は外れた**。**ELI-NP 実機テスト前必須**
-   (旧「Warsaw 前必須」から前倒し)。**24 h 実走はマシン占有なのでユーザー合意が要る**。
-3. **デモ改良トラック(継続、テスト計画より先 — 2026-08-14 ユーザー)**: 当面はデモの
+**043 → 033 → 044(リファクタ窓)→ P4 UI 実配線 → 031 soak → ELI-NP** の順。
+
+1. **[043_ecc_error_surfacing.md](043_ecc_error_surfacing.md)** — READY(SPEC v1.14 適用済み。
+   P4 の前提)。
+2. **[033_error_path_semantics.md](033_error_path_semantics.md)** — READY(裁定済み +
+   2026-08-15 追記あり: v1.14 の `forced_eos:false` 意味論を A に織り込む。041 の実測
+   logbook が照合材料)。発注書 A/C/D/E。**run 経路コアの最後の計画変更**。
+3. **[044_refactor_window.md](044_refactor_window.md)** — リファクタ窓(BLOCKED、033 完了で
+   開く。**P4 起票前に必ず実施**。タイミング方針・進め方・凍結ルールはチケット本文が正)。
+4. **P4 Run 制御 UI 実配線チケット群の起票**(Fable — 044 の後)。
+5. **[031_load_harness.md](031_load_harness.md)** — 負荷ハーネス。**044 の後に実走**
+   (soak は実機に持っていく最終形で行う — 044 の裁定)。vcobo-daq の全速モードがソースに
+   使える。**24 h 実走はマシン占有なのでユーザー合意が要る**。
+6. **デモ改良トラック(継続、テスト計画より先 — 2026-08-14 ユーザー)**: 当面はデモの
    完成度を延々と上げる。目玉候補 = **graw ファイルをデータソースとする仮想 zCoBo**
    (getHwServer ではなく**板ごと偽る** — 2026-08-14 ユーザー用語確定)。制御面
    (getHwServer Ice 面)+ データ面(configure でリンク確立 / start でフレーム送出 /
@@ -55,12 +61,13 @@ run 一周がフルスタックで回る。前波は
    **[043_ecc_error_surfacing.md](043_ecc_error_surfacing.md) 起票(READY、P4 の前提)**+
    033 に追記(A 未実装の実測確認 + v1.14 織り込み指示)。
    **次の起票対象 = P4 Run 制御 UI 実配線チケット群**(disabled 解除 — 041 完了で前提成立)。
-4. **ELI-NP 実機テスト(1 CoBo mini TPC、徹底的に)** — **Warsaw より先(2026-08-14 裁定)**。
+7. **ELI-NP 実機テスト(1 CoBo mini TPC、徹底的に)** — **Warsaw より先(2026-08-14 裁定)。
+   直前はコード凍結(044 の裁定)**。
    実 CoBo・実 ECC 相手の確認項目は **032/036 の結果節に機械確認手段つきで書いてある**
    (`extra_connections` / `peer` / audit の `ecc_walk_back` / run/start 所要と
    `ecc_timeout` 60 s の余裕)— これらは ELI-NP で先行クローズする。
    **テスト計画の起票はデモ改良が一段落してから**(2026-08-14 ユーザー)。
-5. **P5 Warsaw 展開** = docs/WARSAW_PLAN_ja.md — **完全後回し**。実機受け入れ試験・残確認
+8. **P5 Warsaw 展開** = docs/WARSAW_PLAN_ja.md — **完全後回し**。実機受け入れ試験・残確認
    (WARSAW_PLAN の工学項目)は ELI-NP テスト完了後。Warsaw 固有で残るのは
    旧 ROOT 互換 / grawToEventTPC 実機互換 / zCoBo リンク本数 / 先方 LAN 条件。
 
