@@ -138,6 +138,17 @@ function shapeRunStart(raw: Raw): Shaped {
   const cobos = arr(raw, 'cobos');
   const fragments = arr(raw, 'expected_fragments');
   const comment = str(raw, 'comment');
+  // v1.13(TODO/042): 3 相(describe/prepare/configure)が非同値のときだけ `config_ids` が
+  // 載る。同値なら省略(nullable 規律)なので、無いときは従来どおり `config_id` 一本で出す。
+  const configIds = obj(raw, 'config_ids');
+
+  const configFields: LogbookField[] = configIds
+    ? [
+        { label: 'config (describe)', value: str(configIds, 'describe') ?? '—' },
+        { label: 'config (prepare)', value: str(configIds, 'prepare') ?? '—' },
+        { label: 'config (configure)', value: str(configIds, 'configure') ?? '—' },
+      ]
+    : [{ label: 'config', value: str(raw, 'config_id') ?? '—' }];
 
   const details: LogbookDetail[] = [];
   const sha = geometry ? str(geometry, 'sha256') : null;
@@ -165,7 +176,7 @@ function shapeRunStart(raw: Raw): Shaped {
     body: comment && comment.length > 0 ? comment : null,
     fields: [
       { label: 'operator', value: str(raw, 'operator') ?? '—' },
-      { label: 'config', value: str(raw, 'config_id') ?? '—' },
+      ...configFields,
       { label: 'geometry', value: geometry ? (str(geometry, 'path') ?? '—') : '—' },
     ],
     details,
@@ -176,6 +187,12 @@ function shapeRunStop(raw: Raw): Shaped {
   const ok = raw['ok'] !== false;
   const counters = obj(raw, 'counters');
   const files = arr(raw, 'files');
+  // v1.12/v1.14(TODO/033, 051): 欠落(旧行)は無印。値があるときだけ、それぞれの意味で出す —
+  // `eos_closed:false` = 明確な異常(severity を上げる)/ `forced_eos:false` = 警告
+  // (v1.14 注記: 実機 TCP flow では forced_eos:true が常態なので、false は
+  // 「stop 前にリンクが死んだ」ことの強い印)。
+  const eosClosed = boolFlag(raw, 'eos_closed');
+  const forcedEos = boolFlag(raw, 'forced_eos');
 
   const details: LogbookDetail[] = [];
   if (counters) {
@@ -204,16 +221,45 @@ function shapeRunStop(raw: Raw): Shaped {
   }
 
   const duration = num(raw, 'duration_s');
+  const fields: LogbookField[] = [
+    { label: 'reason', value: str(raw, 'reason') ?? '—' },
+    { label: 'duration', value: duration === null ? '—' : `${duration} s` },
+  ];
+  // eos_closed:false = 明確な異常。severity を 'error' へ引き上げる(ok=false の場合と同じ扱い)。
+  if (eosClosed === false) {
+    fields.push({
+      label: 'eos_closed',
+      value: 'false — EOS がチェーンを流れ切っていません(異常)',
+    });
+  }
+  // forced_eos:false = 警告。すでに error なら格上げしない(error が上位)。
+  if (forcedEos === false) {
+    fields.push({
+      label: 'forced_eos',
+      value: 'false — stop 前にリンクが死んだ可能性があります',
+    });
+  }
+
+  let severity: LogbookSeverity = ok ? 'normal' : 'error';
+  if (eosClosed === false) severity = 'error';
+  else if (forcedEos === false && severity === 'normal') severity = 'attention';
+
   return {
     title: `run ${runLabel(raw)} 停止(${ok ? '正常' : '異常'})`,
-    severity: ok ? 'normal' : 'error',
+    severity,
     body: null,
-    fields: [
-      { label: 'reason', value: str(raw, 'reason') ?? '—' },
-      { label: 'duration', value: duration === null ? '—' : `${duration} s` },
-    ],
+    fields,
     details,
   };
+}
+
+/**
+ * 三値の bool フラグ(欠落は「記録なし」であって `false` ではない — 033-A の意味論)。
+ * v1.12 より前の行は `forced_eos`/`eos_closed` を持たない。
+ */
+function boolFlag(raw: Raw, key: string): boolean | null {
+  const value = raw[key];
+  return typeof value === 'boolean' ? value : null;
 }
 
 /** cobo id は数として並べる(文字列キーの辞書順で "10" が "2" より前に来ないように)。 */

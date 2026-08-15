@@ -1,33 +1,68 @@
 /**
- * SPEC §8.1 の操作一覧と **全 disabled**(ユーザー決定 2026-08-13、029 発注書)。
+ * SPEC §8.1 の操作一覧(表)と、050-C の **disabled 規則**。
  *
- * ここでの受け入れは 2 つ:
- * ① 既定では**すべての操作が disabled**(モック・仮バックエンドを作らない)。
- * ② 有効化が**フラグ 1 つ**で済む(P4 の配線時に `RUN_CONTROL_ENABLED` だけを触る)。
+ * 表(endpoint / body / destructive)は 029 のまま**無変更**。変わったのは
+ * 「押せるかどうか」の部分だけ —— 029 は「フラグ由来で常に disabled」、
+ * 050 は「配線済み + 最小限の規則」。
  */
 import {
   RUN_ACTIONS,
   RUN_ACTION_GROUPS,
   RUN_CONTROL_ENABLED,
+  type RunControlUiState,
   isRunActionDisabled,
 } from './run-actions';
 
-describe('ユーザー決定 — Run 制御は完成形レイアウト + 全 disabled', () => {
-  it('フラグは false で出荷する', () => {
-    expect(RUN_CONTROL_ENABLED).toBe(false);
+/** 何も持っていない状態(配線は有効)。テストはここから 1 項目ずつ動かす。 */
+const IDLE: RunControlUiState = {
+  enabled: true,
+  hasToken: false,
+  runActive: false,
+  busy: false,
+};
+
+const endpointsDisabledIn = (state: RunControlUiState): string[] =>
+  RUN_ACTIONS.filter((action) => isRunActionDisabled(action, state)).map((a) => a.endpoint);
+
+describe('050 — 配線の切替点は 1 定数', () => {
+  it('050 で配線したので出荷値は true', () => {
+    expect(RUN_CONTROL_ENABLED).toBe(true);
   });
 
-  it('既定ではすべての操作が disabled', () => {
-    expect(RUN_ACTIONS.length).toBeGreaterThan(0);
-    for (const action of RUN_ACTIONS) {
-      expect(isRunActionDisabled(action)).toBe(true);
+  it('フラグを false に戻せば 029 の出荷形(全 disabled)に戻る', () => {
+    const off: RunControlUiState = { ...IDLE, enabled: false, hasToken: true };
+    expect(endpointsDisabledIn(off)).toEqual(RUN_ACTIONS.map((a) => a.endpoint));
+  });
+});
+
+describe('050-C — disabled 規則は最小限', () => {
+  it('token 無し: Acquire だけ押せる(token を得る唯一の入口)', () => {
+    expect(endpointsDisabledIn(IDLE)).toEqual(
+      RUN_ACTIONS.map((a) => a.endpoint).filter((e) => e !== '/api/control/acquire'),
+    );
+  });
+
+  it('token 有り + run 無し: 12 個すべて押せる', () => {
+    expect(endpointsDisabledIn({ ...IDLE, hasToken: true })).toEqual([]);
+  });
+
+  it('run 実行中: start 系(run/start, run/next)だけ disabled、run/stop は有効', () => {
+    const running: RunControlUiState = { ...IDLE, hasToken: true, runActive: true };
+    expect(endpointsDisabledIn(running)).toEqual(['/api/run/start', '/api/run/next']);
+  });
+
+  it('ECC 段階操作は run 中でも押せる(先回りガードを作らない = KISS)', () => {
+    const running: RunControlUiState = { ...IDLE, hasToken: true, runActive: true };
+    const ecc = RUN_ACTIONS.filter((a) => a.endpoint.startsWith('/api/ecc/'));
+    expect(ecc).toHaveLength(7);
+    for (const action of ecc) {
+      expect(isRunActionDisabled(action, running)).toBe(false);
     }
   });
 
-  it('フラグ 1 つで全部 enabled に変わる(P4 の配線点はここだけ)', () => {
-    for (const action of RUN_ACTIONS) {
-      expect(isRunActionDisabled(action, true)).toBe(false);
-    }
+  it('送信中(run/start は ≈7 s)はすべて disabled = 二重送信できない', () => {
+    const busy: RunControlUiState = { ...IDLE, hasToken: true, busy: true };
+    expect(endpointsDisabledIn(busy)).toEqual(RUN_ACTIONS.map((a) => a.endpoint));
   });
 });
 

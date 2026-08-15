@@ -132,16 +132,50 @@ describe('ecc(ecc-bridge 無しの開発機で赤い嘘を出さない)', () => 
     expect(eccTone(true, 'Running')).toBe('ok');
   });
 
-  // 043: controller が `ecc.ecc_error`(GET の error フラグ)を素通しで載せるようになった。
-  // **この UI はまだ表示しない**(表示は P4)—— ここで見るのは「知らないキーが増えても
-  // 既存の見え方が 1 つも変わらない」ことだけ。パーサが未知キーを無視する作りである証拠。
-  it('知らないキー ecc_error が増えても既存の表示は変わらない(表示は P4)', () => {
-    const raw = {
-      ...(LIVE as Record<string, unknown>),
-      ecc: { ok: true, state: 'Idle', error: '', ecc_error: 'WHEN_DESCRIBE' },
-    };
-    const ecc = parseControllerStatus(raw)?.ecc;
-    expect(ecc).toEqual({ state: 'Idle', label: 'Idle', tone: 'ok', error: '' });
+  // 051(043 が残した種): `ecc.ecc_error`(GET の error フラグ、SPEC §8.2 v1.14)を表示する。
+  // 見せるのは「異常フラグが立っているとき」だけ —— `NO_ERR` と欠落は「エラー無し」であって
+  // 「フラグを知らない」ではないので、どちらも `null`(= 出さない)に畳む。
+  describe('ecc_error(SPEC §8.2 v1.14、TODO/051)', () => {
+    it('値あり(NO_ERR 以外)は素通しで出す', () => {
+      const raw = {
+        ...(LIVE as Record<string, unknown>),
+        ecc: { ok: true, state: 'Idle', error: '', ecc_error: 'WHEN_DESCRIBE' },
+      };
+      const ecc = parseControllerStatus(raw)?.ecc;
+      expect(ecc).toEqual({
+        state: 'Idle',
+        label: 'Idle',
+        tone: 'ok',
+        error: '',
+        eccError: 'WHEN_DESCRIBE',
+      });
+    });
+
+    it('NO_ERR は「エラー無し」— 出さない', () => {
+      const raw = {
+        ...(LIVE as Record<string, unknown>),
+        ecc: { ok: true, state: 'Ready', error: '', ecc_error: 'NO_ERR' },
+      };
+      expect(parseControllerStatus(raw)?.ecc.eccError).toBeNull();
+    });
+
+    it('なし(古い ecc-bridge・キー自体が無い)も出さない', () => {
+      const raw = {
+        ...(LIVE as Record<string, unknown>),
+        ecc: { ok: true, state: 'Ready', error: '' },
+      };
+      expect(parseControllerStatus(raw)?.ecc.eccError).toBeNull();
+    });
+
+    it('ecc-bridge 不達(state:"Unknown")は既存の不達表示に一本化し、二重に出さない', () => {
+      // controller は不達時 `ecc_error: "Unknown"` を注入する(GET が申告した実フラグではなく
+      // 不達センチネル)。既に `state`/`tone`/`label` が「不明」を表しているので、ここでは null。
+      const raw = {
+        ...(LIVE as Record<string, unknown>),
+        ecc: { ok: false, state: 'Unknown', error: 'no reply', ecc_error: 'Unknown' },
+      };
+      expect(parseControllerStatus(raw)?.ecc.eccError).toBeNull();
+    });
   });
 });
 

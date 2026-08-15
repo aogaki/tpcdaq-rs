@@ -62,7 +62,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, oneshot};
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::{error, info, warn};
 
 use crate::command::{Command, CommandResponse, ComponentState, RunConfig};
@@ -2373,7 +2373,12 @@ pub fn router(controller: Arc<Controller>) -> Router {
     if let Some(dir) = ui_dir {
         // UI は後波(P3)。ここは枠だけ — 設定に ui_dir が無ければ配信しない。
         info!(dir = %dir.display(), "serving the web UI from disk");
-        app = app.fallback_service(ServeDir::new(dir));
+        // 052: クライアントルート(`/run` 等)への直リンク・リロードが 404 にならないよう、
+        // 実在しないパスは index.html へ fallback する(tower-http の SPA 定型)。
+        // `/api/...` と WS は上の `.route(...)` で先に確定するので、この fallback は
+        // 静的側(未マッチのパス)にしか効かない。
+        let index = dir.join("index.html");
+        app = app.fallback_service(ServeDir::new(dir).fallback(ServeFile::new(index)));
     }
     app.with_state(controller)
 }
@@ -4176,5 +4181,121 @@ config_id = "default"
         assert_eq!(&ts[4..5], "-");
         assert_eq!(&ts[10..11], "T");
         assert_eq!(&ts[19..20], ".");
+    }
+
+    // -----------------------------------------------------------------
+    // SPA index.html fallback(052 — `/run` 等の直リンク・リロードが 404 にならない)
+    // -----------------------------------------------------------------
+
+    /// テスト用 `ui_dir`: index.html(SPA シェル)と実在の静的ファイルを 1 本置く。
+    /// 中身は用途ごとに別の文字列にして、どの応答が返ったかを文字列比較だけで判別する。
+    fn spa_ui_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tpcdaq-spa-ui-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.html"), "<html>052 SPA shell</html>").unwrap();
+        std::fs::write(dir.join("app.js"), "console.log('052 real static file');").unwrap();
+        dir
+    }
+
+    /// `params`(`ui_dir` 込み)で実際に REST を listen する controller を立てる。
+    /// 到達不能コンポーネント / ecc-bridge への `GetStatus` を速く諦めさせるため、
+    /// タイムアウト系は短く上書きしておく(呼び手が `params_with` の既定 1 s のままにしない)。
+    async fn spawn_spa_test_server(mut params: ControllerParams, tag: &str) -> SocketAddr {
+        params.rest_listen = "127.0.0.1:0".to_string();
+        params.output_root =
+            std::env::temp_dir().join(format!("tpcdaq-spa-out-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&params.output_root);
+        params.command_timeout = Duration::from_millis(50);
+        params.ecc_timeout = Duration::from_millis(50);
+        params.status_timeout = Duration::from_millis(50);
+        let controller = Arc::new(Controller::new(params).unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router(controller)).await;
+        });
+        addr
+    }
+
+    /// 1 リクエスト = 1 接続の手書き HTTP GET。ボディはそのまま返す
+    /// (index.html の中身をそのまま照合したいので JSON にはパースしない —
+    /// `tests/controller_integration.rs` の `http` ヘルパーとの違いはそこだけ)。
+    fn spa_http_get(addr: SocketAddr, path: &str) -> (u16, String) {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+
+        let request =
+            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).unwrap();
+        let text = String::from_utf8_lossy(&raw).to_string();
+        let status: u16 = text
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("no status line in {text:?}"));
+        let body = text
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body.to_string())
+            .unwrap_or_default();
+        (status, body)
+    }
+
+    /// 発注書 052 の完了条件①: 実在しないパス(クライアントルート直リンクの模擬)への
+    /// GET が 200 + index.html の内容で返る。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_path_falls_back_to_index_html() {
+        let dir = spa_ui_dir("unknown-path");
+        let mut params = params_with(&[]);
+        params.ui_dir = Some(dir.clone());
+        let addr = spawn_spa_test_server(params, "unknown-path").await;
+
+        let (status, body) = spa_http_get(addr, "/run");
+        assert_eq!(status, 200);
+        assert_eq!(body, "<html>052 SPA shell</html>");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 発注書 052 の完了条件②: `/api/...` 経路は fallback に食われず従来どおり動く
+    /// (index.html の中身ではなく、本来の JSON ハンドラの応答が返る)。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spa_fallback_does_not_shadow_api_routes() {
+        let dir = spa_ui_dir("api-untouched");
+        let mut params = params_with(&[]);
+        params.ui_dir = Some(dir.clone());
+        let addr = spawn_spa_test_server(params, "api-untouched").await;
+
+        let (status, body) = spa_http_get(addr, "/api/status");
+        assert_eq!(status, 200);
+        assert_ne!(body, "<html>052 SPA shell</html>");
+        assert!(
+            body.contains("\"phase\""),
+            "/api/status は本来の JSON のはず: {body}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 発注書 052 の完了条件③: 実在する静的ファイルは従来どおり自分自身の内容で返る
+    /// (index.html へ吸われない)。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn existing_static_file_is_served_unchanged() {
+        let dir = spa_ui_dir("real-file");
+        let mut params = params_with(&[]);
+        params.ui_dir = Some(dir.clone());
+        let addr = spawn_spa_test_server(params, "real-file").await;
+
+        let (status, body) = spa_http_get(addr, "/app.js");
+        assert_eq!(status, 200);
+        assert_eq!(body, "console.log('052 real static file');");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

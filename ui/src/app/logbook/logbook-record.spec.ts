@@ -103,6 +103,27 @@ describe('run_start(SPEC §9.2)', () => {
   });
 });
 
+describe('run_start の config_ids(SPEC §9.2 v1.13、TODO/042・051)', () => {
+  it('なし(3 相同値。RUN_START フィクスチャそのもの)は従来どおり config 一本', () => {
+    const entry = parsed(RUN_START);
+    expect(field(entry, 'config')).toBe('default');
+    expect(entry.fields.find((f) => f.label.startsWith('config ('))).toBeUndefined();
+  });
+
+  // 出典: src/logbook.rs `run_start_carries_config_ids_when_the_phases_differ`
+  // (= sample_run_start_per_phase。3 値は非対称: describe/prepare/configure が全部違う)。
+  it('値あり(3 相非同値)は config 一本の代わりに 3 相を出す', () => {
+    const raw = JSON.parse(
+      '{"ts":"2026-08-12T15:04:05.123+03:00","seq":1042,"type":"run_start","actor":"controller","run":57,"config_id":"pulser","config_ids":{"describe":"zCobo-ZC706","prepare":"prep-xcfg","configure":"pulser"},"geometry":{"path":"config/geometry_mini_eTPC.dat","sha256":"ab12"},"cobos":[{"id":0,"listen":"0.0.0.0:46005"}],"operator":"aogaki","comment":"gas test","expected_fragments":[[0,0]]}',
+    ) as unknown;
+    const entry = parsed(raw);
+    expect(entry.fields.find((f) => f.label === 'config')).toBeUndefined();
+    expect(field(entry, 'config (describe)')).toBe('zCobo-ZC706');
+    expect(field(entry, 'config (prepare)')).toBe('prep-xcfg');
+    expect(field(entry, 'config (configure)')).toBe('pulser');
+  });
+});
+
 describe('run_stop(SPEC §9.2 — ok=false を目立たせる / counters の null は 0 ではない)', () => {
   it('ok=true は通常表示', () => {
     const entry = parsed(RUN_STOP);
@@ -144,6 +165,75 @@ describe('run_stop(SPEC §9.2 — ok=false を目立たせる / counters の nul
       'run58/CoBo0_AsAd0_ts_0000.graw — 30,108,672 B',
       'run58/run58.root — 1,234,567 B',
     ]);
+  });
+
+  it('旧行(フィールド欠落 = RUN_STOP フィクスチャそのもの)は無印 — 記録なし ≠ false', () => {
+    // RUN_STOP は forced_eos/eos_closed を持たない(v1.12 より前の形)。033-A の意味論どおり
+    // 「記録が無い」を「観測値 false」に化けさせてはいけない。
+    const entry = parsed(RUN_STOP);
+    expect(entry.fields.map((f) => f.label)).toEqual(['reason', 'duration']);
+    expect(entry.severity).toBe('normal');
+  });
+});
+
+describe('run_stop の forced_eos / eos_closed(SPEC §9.2 v1.12/v1.14、TODO/033・051)', () => {
+  /** src/logbook.rs `run_stop_matches_a_hand_assembled_oracle`(033-A 後の golden。両方 true)。 */
+  const BOTH_TRUE = JSON.parse(
+    '{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","forced_eos":true,"eos_closed":true,"counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}',
+  ) as unknown;
+
+  it('両方 true(常態)は無印(強調も警告も出さない)', () => {
+    const entry = parsed(BOTH_TRUE);
+    expect(entry.fields.map((f) => f.label)).toEqual(['reason', 'duration']);
+    expect(entry.severity).toBe('normal');
+  });
+
+  // 出典: src/logbook.rs `run_stop_keeps_forced_eos_and_eos_closed_independent`
+  // (= reference/_spike/demo/out/logbook_D2_saved.jsonl の実測。041 D-2、run 中に vcobo を
+  // SIGKILL。OS の正常 FIN で自然 EOF になるので reason は "normal" のまま —— それでも
+  // forced_eos:false は「stop 前にリンクが死んだ」ことの唯一の痕跡)。
+  it('forced_eos:false(eos_closed は true)は警告として出す。severity は attention', () => {
+    const raw = {
+      ...(BOTH_TRUE as Record<string, unknown>),
+      run: 1,
+      duration_s: 27.040875875,
+      ok: true,
+      reason: 'normal',
+      forced_eos: false,
+      eos_closed: true,
+    };
+    const entry = parsed(raw);
+    expect(entry.severity).toBe('attention');
+    expect(field(entry, 'forced_eos')).toBe('false — stop 前にリンクが死んだ可能性があります');
+    expect(entry.fields.find((f) => f.label === 'eos_closed')).toBeUndefined();
+  });
+
+  it('eos_closed:false は明確な異常として severity を error に引き上げる', () => {
+    const raw = {
+      ...(BOTH_TRUE as Record<string, unknown>),
+      ok: false,
+      reason: 'error:eos-timeout',
+      forced_eos: true,
+      eos_closed: false,
+    };
+    const entry = parsed(raw);
+    expect(entry.severity).toBe('error');
+    expect(field(entry, 'eos_closed')).toBe('false — EOS がチェーンを流れ切っていません(異常)');
+    expect(entry.fields.find((f) => f.label === 'forced_eos')).toBeUndefined();
+  });
+
+  it('eos_closed:false と forced_eos:false が両方揃っても error が勝つ(格下げしない)', () => {
+    const raw = {
+      ...(BOTH_TRUE as Record<string, unknown>),
+      ok: false,
+      reason: 'error:eos-timeout',
+      forced_eos: false,
+      eos_closed: false,
+    };
+    const entry = parsed(raw);
+    expect(entry.severity).toBe('error');
+    expect(field(entry, 'eos_closed')).toContain('異常');
+    expect(field(entry, 'forced_eos')).toContain('リンクが死んだ');
   });
 });
 

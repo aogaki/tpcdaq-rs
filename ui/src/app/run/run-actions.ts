@@ -1,20 +1,19 @@
 /**
- * SPEC §8.1 の run 制御操作の**完成形レイアウト**の表(純データ)。
+ * SPEC §8.1 の run 制御操作の表(純データ)+ ボタンの有効/無効の規則(純ロジック)。
  *
- * # ユーザー決定(2026-08-13、変更不可)
+ * # 経緯
  *
- * **ボタン類は完成形レイアウトを置き、全部 disabled**。モック関数・仮バックエンドを作らない。
- * したがってこのモジュールは「どんなボタンがどこに並ぶか」だけを持ち、**REST を呼ぶコードは
- * 1 行も無い**(P4 で配線する)。`GET /api/status` とログブックだけは閲覧系なので呼んでよい
- * —— そちらは `api/controller-api.ts`。
+ * 029(ユーザー決定 2026-08-13)では**完成形レイアウトを置いて全部 disabled**にした
+ * (モック関数・仮バックエンドを作らない)。**050 で実配線**したので `RUN_CONTROL_ENABLED`
+ * は `true`。表そのもの(endpoint / body / destructive)は 029 のまま**無変更** ——
+ * controller の実装(`src/controller.rs` のハンドラ)と一致していることは
+ * `api/run-control-api.spec.ts` が機械照合する。
  *
- * # 有効化
- *
- * P4 では `RUN_CONTROL_ENABLED` を `true` にし、`run-view` の `submit()` に REST 呼び出しを
- * 足すだけで済むようにしてある(**切替点はこの 1 定数**)。
+ * このモジュールは今も **REST を呼ばない**(呼ぶのは `api/run-control-api.ts`)。
  */
 
-export const RUN_CONTROL_ENABLED = false;
+/** 050 で実配線済み。**切替点はこの 1 定数**(false に戻せば操作は全 disabled に戻る)。 */
+export const RUN_CONTROL_ENABLED = true;
 
 export interface RunAction {
   /** ボタンの文言。 */
@@ -116,11 +115,45 @@ export const RUN_ACTIONS: readonly RunAction[] = RUN_ACTION_GROUPS.flatMap(
   (group) => group.actions,
 );
 
+/** ボタンの有効/無効を決めるのに要る画面の状態(050-C)。 */
+export interface RunControlUiState {
+  /** 配線が有効か(既定 = `RUN_CONTROL_ENABLED`)。 */
+  readonly enabled: boolean;
+  /** 操作権の token を持っているか。 */
+  readonly hasToken: boolean;
+  /** `GET /api/status` の `run` が非 null(= run 実行中)。 */
+  readonly runActive: boolean;
+  /** 送信中の要求があるか(二重送信防止。run/start は ≈7 s かかる)。 */
+  readonly busy: boolean;
+}
+
+/** 何も持っていない・何も起きていない状態(テストと初期表示の起点)。 */
+export const INITIAL_UI_STATE: RunControlUiState = {
+  enabled: RUN_CONTROL_ENABLED,
+  hasToken: false,
+  runActive: false,
+  busy: false,
+};
+
 /**
- * ボタンを押せるか。**既定はフラグ由来で常に disabled**。
- * `enabled` を引数に出してあるのは、テストが「フラグ 1 つで切り替わる」ことを
- * 確かめられるようにするため(実画面は既定値を使う)。
+ * ボタンを押せるか。**規則は最小限**(050-C):
+ *
+ * 1. 配線が無効 → 全 disabled(029 の出荷形に戻る)。
+ * 2. 送信中 → 全 disabled(二重送信と操作の交差を防ぐ)。
+ * 3. Acquire は常に押せる(token を得る唯一の入口。横取りは仕様どおり常に可 — §8.1)。
+ * 4. token 無し → 他は全 disabled。
+ * 5. run 実行中 → `run/start` と `run/next` を disabled(stop は有効)。
+ *
+ * **ECC 段階操作は ECC の state で先回りガードしない**(KISS)。実 ECC は不正な順序に
+ * Ignored/Denied を返す(036/049 で確認済み)ので、結果のエラー表示で十分。
  */
-export function isRunActionDisabled(_action: RunAction, enabled = RUN_CONTROL_ENABLED): boolean {
-  return !enabled;
+export function isRunActionDisabled(action: RunAction, state: RunControlUiState): boolean {
+  if (!state.enabled) return true;
+  if (state.busy) return true;
+  if (action.endpoint === '/api/control/acquire') return false;
+  if (!state.hasToken) return true;
+  if (state.runActive) {
+    return action.endpoint === '/api/run/start' || action.endpoint === '/api/run/next';
+  }
+  return false;
 }

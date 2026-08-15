@@ -69,6 +69,20 @@ h3 {
   color: var(--tpc-error);
 }
 
+.banner.ok {
+  border-color: var(--tpc-ok);
+}
+
+.banner .err {
+  color: var(--tpc-error);
+  word-break: break-word;
+}
+
+.token .held {
+  color: var(--tpc-ok);
+  font-style: normal;
+}
+
 .chip {
   border: 1px solid var(--mat-sys-outline-variant);
   border-radius: 999px;
@@ -122,6 +136,12 @@ h3 {
 
 .tone-error {
   color: var(--tpc-error);
+}
+
+/* ecc_error(SPEC §8.2 v1.14): GET 自身が抱えているエラーフラグ。NO_ERR 以外だけ来る。 */
+.eccflag {
+  margin-left: 0.5rem;
+  color: var(--tpc-warn);
 }
 
 .eccerror {

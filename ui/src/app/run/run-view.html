@@ -1,12 +1,42 @@
 <div class="run">
-  <!-- ユーザー決定を画面にも書く(なぜ押せないのかがその場で分かるように) -->
-  <p class="banner info">
-    <strong>Run 制御はレイアウトのみ</strong> — {{ actionCount }} 個の操作はすべて
-    <em>disabled</em> です(ユーザー決定 2026-08-13: モック関数・仮バックエンドを作らない)。 REST
-    の配線は P4。有効化は <code>run-actions.ts</code> の <code>RUN_CONTROL_ENABLED</code> を
-    <code>true</code> にする 1 箇所だけです(現在 <code>{{ enabled }}</code
-    >)。閲覧系の <code>GET /api/status</code> は実際に叩いています。
-  </p>
+  <!-- なぜ押せない/押せるのかがその場で分かるように -->
+  @if (!enabled) {
+    <p class="banner info">
+      <strong>Run 制御はレイアウトのみ</strong> — {{ actionCount }} 個の操作はすべて
+      <em>disabled</em> です(<code>run-actions.ts</code> の <code>RUN_CONTROL_ENABLED</code> が
+      <code>false</code>)。
+    </p>
+  } @else if (!hasToken()) {
+    <p class="banner info">
+      <strong>操作権がありません</strong> — 下の「操作権」で operator と passphrase を入れて
+      <em>Acquire</em>
+      してください。取得するまで Acquire 以外は disabled です(SPEC
+      §8.1)。取得は常に横取り可で、横取りは監査ログに残ります。
+    </p>
+  }
+
+  <!-- 直近の操作の結果。失敗は controller の error 文字列を**そのまま**出す -->
+  @if (lastAction(); as result) {
+    <p class="banner" [class.ok]="result.ok" [class.error]="!result.ok">
+      <strong>{{ result.label }}</strong>
+      <span class="mono"> POST {{ result.endpoint }}</span>
+      @if (result.status > 0) {
+        <span class="mono"> → HTTP {{ result.status }}</span>
+      } @else {
+        <span> → 送っていません</span>
+      }
+      <span> ({{ result.at }})</span>
+      @if (result.error; as error) {
+        <br /><span class="err">{{ error }}</span>
+      }
+      @if (result.summary) {
+        <br /><span class="mono">{{ result.summary }}</span>
+      }
+      @for (note of result.notes; track $index) {
+        <br /><span class="note">note: {{ note }}</span>
+      }
+    </p>
+  }
 
   <!-- ① 現在の状態(GET /api/status = 閲覧系・認証なし) -->
   <section class="card">
@@ -50,12 +80,21 @@
         </div>
         <div class="fact">
           <span class="label">ECC</span>
-          <span class="value" [class]="'tone-' + view.ecc.tone">
+          <span
+            class="value"
+            [class]="'tone-' + view.ecc.tone"
+            [attr.title]="view.ecc.state === 'Off' ? eccOffHint : null"
+          >
             {{ view.ecc.label }}
             @if (view.ecc.tone === 'unknown') {
               <span class="hint">(ecc-bridge に届いていない = 停止中でも異常でもない)</span>
             }
           </span>
+          @if (view.ecc.eccError; as flag) {
+            <span class="hint eccflag" [title]="'GET の error フラグ(SPEC §8.2)'">
+              error: {{ flag }}
+            </span>
+          }
         </div>
         @if (view.logPosts; as posts) {
           <div class="fact">
@@ -139,7 +178,41 @@
               autocomplete="off"
             />
           </label>
-          <span class="token">token: <em>未取得</em>(P4 で配線)</span>
+          <span class="token">
+            token:
+            @if (tokenHint(); as hint) {
+              <em class="held">取得済み {{ hint }}</em>
+            } @else {
+              <em>未取得</em>
+            }
+            @if (preempted(); as previous) {
+              <span class="note">({{ previous }} から横取りしました)</span>
+            }
+          </span>
+        </div>
+      }
+
+      @if (group.id === 'run') {
+        <div class="tokenform">
+          <label>
+            comment(run/start の任意)
+            <input
+              type="text"
+              [value]="comment()"
+              (input)="setComment($event)"
+              autocomplete="off"
+            />
+          </label>
+          <label>
+            next_run(run/next の正整数)
+            <input
+              type="text"
+              inputmode="numeric"
+              [value]="nextRun()"
+              (input)="setNextRun($event)"
+              autocomplete="off"
+            />
+          </label>
         </div>
       }
 
@@ -153,7 +226,7 @@
               (click)="activate(action)"
               [title]="action.note"
             >
-              {{ action.label }}
+              {{ buttonLabel(action) }}
             </button>
             <span class="endpoint mono">POST {{ action.endpoint }} {{ action.body }}</span>
             <span class="note">{{ action.note }}</span>
@@ -163,11 +236,7 @@
     </section>
   }
 
-  @if (notWired(); as message) {
-    <p class="banner info">{{ message }}</p>
-  }
-
-  <!-- 破壊的操作の確認(SPEC §11 の確認パターン。ガワだけ — 実行しても何も送らない) -->
+  <!-- 破壊的操作の確認(SPEC §11)。「実行する」を押すまで何も送らない -->
   <dialog #confirmDialog class="confirm" (cancel)="closeConfirm()">
     @if (pending(); as action) {
       <h3>{{ action.label }} を実行しますか?</h3>

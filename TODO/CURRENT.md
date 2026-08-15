@@ -39,7 +39,12 @@ run 一周がフルスタックで回る。前波は
    **ECC 遷移表パリティテスト(64 組全一致、034 事故ケースの red 確認済み)**。
    見送り裁定(controller 分割 = P4 見積もり後 / E2E ハーネス = 031 移管)は
    [archive/044](archive/044_refactor_window.md) が正。**次 = P4 UI 実配線の起票(Fable)**。
-4. **P4 Run 制御 UI 実配線チケット群の起票**(Fable — 044 の後)。
+4. ~~P4~~ **完了(2026-08-15、050/051/052)**: **Run 制御 UI 実配線**(disabled 解除・
+   token/横取り・確認ダイアログ・実スタック smoke 合格)+ **表示強化**(ecc_error /
+   forced_eos·eos_closed の三値表示 / config_ids)+ **SPA fallback**(直リンク 404 解消)。
+   C3 = controller 分割は見送り確定(P4 の controller 追加は 052 の fallback 125 行のみ)。
+   **ブラウザ受け入れデモの手順 = [archive/050](archive/050_run_control_wiring.md) 結果節**
+   (UI ビルド → start_demo.sh(ui_dir 自動)→ http://127.0.0.1:8080/ → 操作列 ①〜⑧)。
 5. **[031_load_harness.md](031_load_harness.md)** — 負荷ハーネス。**044 の後に実走**
    (soak は実機に持っていく最終形で行う — 044 の裁定)。vcobo-daq の全速モードがソースに
    使える。**24 h 実走はマシン占有なのでユーザー合意が要る**。
@@ -133,15 +138,10 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 - **Warsaw 確認**: TPCReco 再配布許諾(020 — third_party/tpcreco 昇格の条件)/
   PROPOSAL v0.5 反映判断。
 - **物理屋向け資料・デモは UI + ファイルデータソース完成まで待つ**(ユーザー決定)。
-- 小粒フォローアップ(次に該当ファイルを触るユニットへ相乗り): **`eos_quiesce_ms = 0` の
-  拒否 validation**(033 裁定③ — 0 は不採用挙動「即・強制 EOS」になる。`eos_timeout_s = 0`
-  拒否の前例に整合させる。テスト 1 本付き)/ vcobo-daq の SIGINT
-  graceful 化(041 発見⑤ — 現状 stop_demo.sh が SIGKILL で対処、実害なし)/
-  geometry.rs の参照アクセサ
-  (Aux ch の per-sample String 確保解消 — 026 申し送り)/ poisoned 時 metrics を
-  `PoisonError::into_inner` で読む(023 申し送り。032 では実施済み)/
-  **SPA deep link 404**(`ui_dir` = ServeDir 直配り。Rust 側変更が要る)/
-  UI の未使用 lazy チャンク(jsroot geom の three addons 2.38 MB)。
+- 小粒フォローアップ: **2026-08-15 の 044 窓 + P4 でほぼ完済** — geometry 参照アクセサ(046)/
+  quiesce=0 拒否(046)/ vcobo SIGINT(047)/ UI lazy チャンク(048)/ SPA deep link 404(052)。
+  残: poisoned 時 metrics の `PoisonError::into_inner`(023 申し送り — 032 実施済み分以外の
+  箇所が残っていれば。次に該当ファイルを触るユニットで確認)。
 - **delila-rs への申し送り**: pop_for 競合 → issue 化済み
   https://github.com/ELI-NP/delila-rs/issues/26 / ZMQ fair-queue 飢餓(013)も要点検。
 
@@ -155,9 +155,9 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 ## 完了ユニット台帳
 
-000〜049 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
+000〜052 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
 すべて各 md の「結果」節が正。**未完は 031 のみ**)。
 直近(2026-08-15): **038〜042** 仮想 zCoBo トラック / **043** ecc_error 可視化 /
-**033** 異常系セマンティクス(quiesce 停止 1.3 s 化)/ **044〜049 リファクタ窓**
-(decode 高速化・panic ゼロ化・プロセス衛生・UI 衛生・ECC パリティテスト)。
+**033** 異常系セマンティクス(quiesce 停止 1.3 s 化)/ **044〜049 リファクタ窓** /
+**050〜052 P4**(Run 制御 UI 実配線 + 表示強化 + SPA fallback)。
 前日(2026-08-14): 027〜037。

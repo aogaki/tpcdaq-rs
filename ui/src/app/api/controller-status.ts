@@ -18,6 +18,11 @@ export interface EccView {
   readonly label: string;
   readonly tone: EccTone;
   readonly error: string | null;
+  /**
+   * GET の error フラグ(SPEC §8.2 v1.14、TODO/043/051)。**`NO_ERR`(=正常)と欠落は
+   * 出さない** —— 見せる価値があるのは異常フラグが立っているときだけ。
+   */
+  readonly eccError: string | null;
 }
 
 export interface ComponentView {
@@ -83,6 +88,16 @@ export function eccTone(ok: boolean, state: string): EccTone {
   return ok ? 'ok' : 'error';
 }
 
+/**
+ * GET の error フラグ(SPEC §8.2 v1.14)を「表示に値するときだけ」返す。
+ * `NO_ERR`(正常)・空文字・欠落(古い ecc-bridge)は `null`(= 出さない)。
+ */
+function eccErrorFlag(raw: Raw): string | null {
+  const value = str(raw, 'ecc_error');
+  if (value === null || value === '' || value === 'NO_ERR') return null;
+  return value;
+}
+
 function parseEcc(raw: unknown): EccView {
   const source = isObject(raw) ? raw : {};
   const state = str(source, 'state') ?? 'Unknown';
@@ -91,6 +106,10 @@ function parseEcc(raw: unknown): EccView {
     label: state === 'Unknown' ? UNKNOWN_LABEL : state,
     tone: eccTone(source['ok'] === true, state),
     error: str(source, 'error'),
+    // `state: "Unknown"`(ブリッジ不達)のとき controller が注入する `ecc_error: "Unknown"`
+    // は GET が申告した実フラグではなく不達センチネル(SPEC §8.2 v1.14)。既存の不達表示
+    // (`不明` ラベル + tone `unknown`)に一本化し、ここでは二重に出さない。
+    eccError: state === 'Unknown' ? null : eccErrorFlag(source),
   };
 }
 
