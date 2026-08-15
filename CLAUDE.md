@@ -35,7 +35,9 @@
 
 Rust 2021 + tokio + ZMQ + serde 系(delila-rs に揃える。確定は仕様書)。
 UI: Angular + Angular Material + ECharts(delila-rs operator UI と同一スタック)。
-C++ サテライト(tools/): ROOT(root-sink)、ZeroC Ice 3.6.3(ecc-bridge、**encoding 1.1 固定**)。
+C++ サテライト(tools/): ROOT(root-sink)、ZeroC Ice(ecc-bridge、**encoding 1.1 固定**。
+ローカル実態は Ice 3.8 系 — 旧「3.6.3」表記は 2026-08-14 訂正。実 ECC ローカルビルドは
+3.7 keg(unlinked)で共存、docs/VIRTUAL_ZCOBO_ja.md §4.1)。
 
 ## Design Principles (Priority Order)
 
@@ -50,7 +52,7 @@ C++ サテライト(tools/): ROOT(root-sink)、ZeroC Ice 3.6.3(ecc-bridge、**en
 - **複数 CoBo 前提** — receiver は CoBo 毎。生 graw は **AsAd 毎ファイル・実機 DataRouter 命名に完全一致**(`CoBo{K}_AsAd{A}_{TS}_{idx:04}.graw`、バイト一致 append。mini = 1、**ELITPC = 1 論理 CoBo × 4 AsAd = 4**(2 枚の zCoBo を 1 CoBo として扱う — 実データ 2026-08-13 確認、SPEC v1.7)。run 番号管理はログブック・ROOT 側 — 2026-08-13 決定、SPEC v1.1)。ビルド後のイベントデータは run 毎に単一 ROOT ファイル(**全 CoBo/AsAd マージが理想形**)。イベントビルダは ELITPC(4 AsAd マージ)で必須。多 CoBo 能力は設計として維持(合成 2-CoBo フィクスチャでテスト)。
 - **frameType 1(2018 形式、実データ照合なし・合成のみ)/ 2(compact rev 5, blkSize256/big-endian — 実機は 2022 時点で既にこれ。SPEC v1.7)両対応**。
 - **listen-before-start** — `ecc start` 前に受信ポートを listen。
-- **実機プロトコル既知の罠**: DataSender id は `CoBo[0]` 形式・flowType は大文字 `TCP`。Ice は encoding 1.1。
+- **実機プロトコル既知の罠**: DataSender id は `CoBo[0]` 形式・flowType は大文字 `TCP`。Ice encoding は**レッグで違う**: ecc-bridge→ECC = 1.1、**ECC→ハードノード = 1.0**(ECC がプロキシに `-e 1.0` を焼き込む — docs/VIRTUAL_ZCOBO_ja.md §4.2、2026-08-14 確定)。
 - **oxyroot でヒストを書かない** — TH1/TH2 型が存在しない(2026-08-12 ソース+実コンパイルで実証)。ヒストの ROOT 化は常に C++ 側(root-sink)。
 - **実データ検証** — graw_replay で実 .graw をリプレイ(検出器不要)。実 .graw はローカルのみ(環境変数パスの任意回帰)。**リポには合成フィクスチャのみ**。
 - **内部データをリポに入れない**(将来の公開を容易に): 実 .graw、FW、実ジオメトリ .dat、機器マニュアル PDF、コラボ内部情報。GET 由来コード(CeCILL)を持ち込む場合は `third_party/` に隔離しライセンス表示。
@@ -88,15 +90,23 @@ C++ サテライト(tools/): ROOT(root-sink)、ZeroC Ice 3.6.3(ecc-bridge、**en
   エンコーダ・フィクスチャ)、調査系サブエージェント(Agent の `model` 指定を忘れない)。
 - **委譲パターン**: implementer エージェント + `model` 指定で並列実行、Fable はオーケストレーションと
   **完了時の一括レビュー(diff + テスト出力)のみ**。途中で張り付かない。
-- **主対話モデルが Opus のセッションでも同じ体制(2026-08-14 決定)**: 週制限等で主モデルが
-  Fable でないときも、この使い分けを**そのまま適用**する。主モデル(Opus)が Fable の役割
-  (オーケストレーション・発注書の起票と精度上げ・完了時一括レビュー)を代行し、実装は
-  従来どおり implementer サブエージェント + `model` 指定(工学判断が残る = Opus、発注書と
-  テストで縛れる = Sonnet)で出す。**主コンテキストで実装を抱え込まない**。仕様改訂・
-  フェーズ境界の批判的レビューなど Fable 級の仕事は、急ぎでなければ Fable セッション再開まで
-  保留してよい。
+- **主対話モデルが Opus のセッションでも同じ体制(2026-08-14 決定、運用細目は同日 037)**:
+  週制限等で主モデルが Fable でないときも、この使い分けを**そのまま適用**する。主モデル(Opus)が
+  Fable の役割(オーケストレーション・発注書の起票と精度上げ・完了時一括レビュー)を代行し、
+  実装は従来どおり implementer サブエージェント + `model` 指定(工学判断が残る = Opus、発注書と
+  テストで縛れる = Sonnet)で出す。**主コンテキストで実装を抱え込まない**。
+  - **Fable キュー(CURRENT.md「Fable 待ち」節)**: Opus セッション中に出た設計判断・SPEC 疑義・
+    レビュー依頼はキューに積み、Fable セッション 1 回で**まとめて消化**する(細切れに使わない)。
+    Opus は SPEC の diff 案まで作ってよいが、**確定は Fable**。
+  - **スポット Fable(Agent `model: "fable"`)**: 入力を自己完結にパッケージできる仕事
+    (典型: フェーズ境界レビュー = diff + テスト出力 + 関係 SPEC 節)に限り、Opus 主対話のまま
+    Fable サブエージェントへ一発投げしてよい。サブエージェントは会話文脈を持たないので、
+    オープンエンドな設計対話には使わない — そちらは Fable セッション(キュー消化)まで保留。
+  - **滞空時間の緩和**: Fable が常駐しない間は設計の誤りが長生きしやすい。フェーズを小さく保ち、
+    Fable レビューを「完成後」でなく**フェーズ境界ごと**に必ず入れる。
 - **エスカレーション規則**: 同一テストで 2 連続失敗 / borrow checker 堂々巡り / 修正が SPEC に
-  触れそう → 一段上げる。下位モデルの失敗が続いたらまず**チケットの不備を疑う**(修正は Fable の仕事)。
+  触れそう → 一段上げる。下位モデルの失敗が続いたらまず**チケットの不備を疑う**。チケット修正は
+  主対話(Opus)が一次対応し、それでも割れる / SPEC の解釈に踏み込む場合は **Fable キュー行き**。
 
 ## やらないこと
 

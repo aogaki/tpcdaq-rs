@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.12(2026-08-14 — 実装の正本)**
+- **status**: **v1.14(2026-08-15 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -90,6 +90,27 @@
   `forced_eos=true` が常態で、**異常の印は `eos_closed=false` のみ**)+ reason の `"abort:..."` を明文化。
   ⑤**§1.4-6 receiver 単一リンク規約**(先勝ち + 余分接続は即 close + `extra_connections` /
   0 バイト接続は EOS を構成しない)+ **§12-13** + **§13-7 に P5 の機械確認手段**を追記(TODO/032)。
+  / **v1.13(2026-08-15)ECC ConfigId の 3 相化(TODO/038 レーン A の発見、docs/VIRTUAL_ZCOBO_ja.md
+  §6-R9 裁定)**: 実 ECC の ConfigId は **describe / prepare / configure の 3 組**で、実運用は
+  別名を使う(実例: `describe=zCobo-ZC706, configure=pulser`。ECC の設定リポジトリは
+  `describe-<id>.xcfg` / `configure-<id>.xcfg` / `hardwareDescription_<id>.xcfg` のフラット
+  ディレクトリで、**prepare の読み込み実装も `configure-` プレフィクスを読む**)。
+  ①§3.1 controller 設定の `config_id` を「文字列(3 相同値の略記)または
+  `{describe, prepare, configure}` テーブル」の両対応に ②§8.1 run シーケンスは相ごとの id を
+  ecc-bridge へ渡す(ecc-bridge JSON は元よりアクション毎 `config_id` — 変更なし)
+  ③§9.2 run_start に **非同値時のみ** `config_ids` オブジェクトを追加(nullable 規律に整合)。
+  あわせて §3.1 設定例の `ecc_proxy` の identity を実 servant id **`Ecc`** に訂正
+  (`GetEcc` は stale — 038 実測。fake_ecc は元より正しい)。実装は TODO/042。
+  / **v1.14(2026-08-15)統合デモ(TODO/041 — 実 ECC + vcobo-daq での run 実走)の発見 2 点**:
+  ①**§8.2 ecc-bridge の status 応答に `ecc_error` を追加**(GET の error フィールド =
+  `NO_ERR`/`WHEN_DESCRIBE`/… を運ぶ。実測: describe 失敗後の実 ECC は `IDLE/WHEN_DESCRIBE` を
+  抱えるが、現行 status は state しか返さず UI から不可視。実装は TODO/043)。
+  ②**§9.2 run_stop の意味論に注記追加**: 実機 TCP flow では `forced_eos:true` が常態
+  (§1.3 — stop はリンクを閉じない)であるため、**`forced_eos:false` は「stop より前に
+  データリンクが死んだ」ことの強い印**(D-2 実測: CoBo 突然死 = OS の正常 FIN → 自然 EOF →
+  run が normal として閉じ、他に痕跡が残らない)。「唯一の異常の印は `eos_closed:false`」の
+  記述を「`eos_closed:false` に加え、`forced_eos:false` も要注意の印」に改める
+  (033-A の実装に織り込む — TODO/033 に追記済み)。
 - **正本性**: 本書が実装の正本。PROPOSAL v0.4 と食い違う場合は本書が勝つ(差分は §14 に列挙。
   PROPOSAL v0.5 への反映は Warsaw フィードバックと併せて判断 — 未実施)。
 - **入力**: PROPOSAL_ja.md v0.4 / delila-rs 実装調査 / C++ 版 tpcdaq 実装調査 /
@@ -402,8 +423,9 @@ ws_listen = "0.0.0.0:9000"
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"               # 操作権取得時の共有パスフレーズ(事故防止であり認証ではない)
-ecc_proxy = "GetEcc:tcp -h 127.0.0.1 -p 46002"
-config_id = "default"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"  # servant identity は "Ecc"(v1.13 訂正)
+config_id = "default"                        # 略記 = 3 相同値。相ごとに変える場合(v1.13):
+# config_id = { describe = "zCobo-ZC706", prepare = "pulser", configure = "pulser" }
 ```
 
 ELITPC(2 CoBo)は `[[cobo]]` を 2 ブロック書くだけ(`id = 0/1`、`listen` ポートを分ける)。
@@ -763,6 +785,14 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
   薄いプロセス。状態: `Off/Idle/Described/Prepared/Ready/Running/Paused/Unknown`。
 - リクエスト `{"action": "configure", "config_id": "...", "links": [{"sender": "CoBo[0]",
   "router_ip": "...", "router_port": 46005, "type": "TCP"}, ...]}` → `{"ok", "state", "error"}`。
+  `config_id` は**元よりアクション毎** — controller が §3.1 の設定から**当該相の id** を渡す
+  (v1.13。describe/prepare/configure で別名の実運用に対応。ecc-bridge 側は変更なし)。
+- **status 応答の `ecc_error`(v1.14 追加、実装 = TODO/043)**: `{"action":"status"}` の応答に
+  **GET の error フィールド**(`NO_ERR`/`WHEN_DESCRIBE`/`WHEN_PREPARE`/…)を `ecc_error` として
+  追加する。既存の `error` は輸送・ブリッジ層のエラー文字列のままで意味を変えない。
+  controller `/api/status` はこれを素通しで載せる(UI 表示は P4)。
+  根拠: 実 ECC は失敗後に state と別のエラーフラグを抱える(例: `IDLE / WHEN_DESCRIBE`)が、
+  現行 status では UI から不可視(041 D-1 実測)。
 - DataLinkSet XML は links から生成(CoBo 毎に DataLink 1 本)。**実機の罠を仕様として固定**:
   DataSender id は `CoBo[k]` 形式、flowType は大文字 `TCP`、Ice encoding 1.1 固定。
   router_port は receiver が**実際に bind したポート**を controller が Arm 応答から取って渡す。
@@ -790,8 +820,8 @@ fake-ECC servant(C++ 版のテストハーネス)相手の e2e を CI に置く(
 
 | type | 追加フィールド |
 |---|---|
-| `run_start` | `run`, `config_id`, `geometry: {path, sha256}`, `cobos: [{id, listen}]`, `operator`, `comment`, `expected_fragments`(期待 (cobo,asad) 集合) |
-| `run_stop` | `run`, `duration_s`, `ok: bool`, `reason`(**"normal" / "error:eos-timeout" / "abort:<原因>"** — abort は停止開始時点の起因。EOS の顛末は次の 2 フィールドが持ち、reason には合成しない)、**`forced_eos: bool`**(EOS を receiver `Stop` で注入したか。**実機 TCP flow では通常 true**(§1.3 v1.12 — stop はデータリンクを close しない)。EOF 由来の自然 EOS のみ false)、**`eos_closed: bool`**(EOS がチェーンを流れ切ったことを観測できたか。**false が唯一の異常の印**であり、reason が abort でも eos-timeout の事実はここで読める)(v1.12 追加)、`counters: {events_built, events_incomplete, late_fragments, frames: {cobo: n}, overflow_frames, malformed}`(**v1.10: 各項目は nullable — null = 「その時点で取得不能」であり 0 と混同しない**。root-sink が REP を持たない間、events_built/events_incomplete/late_fragments は null。取れる分は GetStatus 実測)、`files: [{path, bytes}]`(graw 群 + root + monitor.root 実績) |
+| `run_start` | `run`, `config_id`(3 相同値ならその文字列。非同値なら configure 相の id)、**`config_ids`(v1.13 追加、非同値時のみ**: `{describe, prepare, configure}`。同値時は省略 — nullable 規律)、`geometry: {path, sha256}`, `cobos: [{id, listen}]`, `operator`, `comment`, `expected_fragments`(期待 (cobo,asad) 集合) |
+| `run_stop` | `run`, `duration_s`, `ok: bool`, `reason`(**"normal" / "error:eos-timeout" / "abort:<原因>"** — abort は停止開始時点の起因。EOS の顛末は次の 2 フィールドが持ち、reason には合成しない)、**`forced_eos: bool`**(EOS を receiver `Stop` で注入したか。**実機 TCP flow では通常 true**(§1.3 v1.12 — stop はデータリンクを close しない)。EOF 由来の自然 EOS のみ false)、**`eos_closed: bool`**(EOS がチェーンを流れ切ったことを観測できたか。**false は異常の印**であり、reason が abort でも eos-timeout の事実はここで読める)(v1.12 追加。**v1.14 注記**: 実機 TCP flow では `forced_eos:true` が常態なので、**`forced_eos:false` は「stop 前にリンクが死んだ」ことの強い印** — CoBo 突然死は OS の正常 FIN により自然 EOF として normal クローズし、他に痕跡が残らない(041 D-2 実測)。リーダ・UI は `eos_closed:false` と並んで `forced_eos:false` にも注意を向けること)、`counters: {events_built, events_incomplete, late_fragments, frames: {cobo: n}, overflow_frames, malformed}`(**v1.10: 各項目は nullable — null = 「その時点で取得不能」であり 0 と混同しない**。root-sink が REP を持たない間、events_built/events_incomplete/late_fragments は null。取れる分は GetStatus 実測)、`files: [{path, bytes}]`(graw 群 + root + monitor.root 実績) |
 | `audit` | `action`(REST エンドポイント名), `params`(要約), `operator`, `ok`, `error` |
 | `comment` | `author`, `text`(自由記述、R11) |
 | `psu` | `device`, `channel`, `event`("TRIP"/"ON"/"OFF"/"VSET"/...), `values: {vmon, imon, vset}`(P6 で詳細化) |

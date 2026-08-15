@@ -354,3 +354,16 @@ receiver を Stop すると尻尾を落とす(絶対ルール違反)。裁定は
   Regression(exit 3)経路とは交差しない — 034 レビュー時にこの前提を確認すること。
 - 032 の S4(stop 後 breakup せず同一リンクで次 run)が将来採用された場合、F0 の「リンク保持 →
   Stop で close」意味論に影響し得る — その時は 032 裁定の再訪と併せて本 E2E も見直す。
+
+---
+
+## 追記(2026-08-15 Fable — 041 統合デモの実測を受けて)
+
+- **041 で「A 未実装」が実 run で確認された**: `forced_eos`/`eos_closed` は現状 audit と
+  REST 応答にのみ載り、`run_stop` レコードに無い(SPEC §9.2 不履行の実測確認)。
+  実装時の照合材料 = `reference/_spike/demo/out/logbook_*_saved.jsonl`(正常 run 3 本 +
+  CoBo 突然死 1 本の実物)。
+- **SPEC v1.14 §9.2 の注記を A の実装・文言に織り込むこと**: 実機 TCP flow では
+  `forced_eos:true` が常態のため、**`forced_eos:false` は「stop 前にリンクが死んだ」強い印**
+  (041 D-2: CoBo SIGKILL = OS の正常 FIN → 自然 EOF → reason:"normal" で閉じ、他に痕跡なし)。
+  「唯一の異常の印は eos_closed:false」という v1.12 期の文言は v1.14 で改訂済み。
