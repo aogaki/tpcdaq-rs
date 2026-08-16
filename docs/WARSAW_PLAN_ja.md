@@ -136,8 +136,8 @@ ZS は不要になる、がユーザー裁定。Unfolding で信号が峻険に�
 
 | 項目 | 成立性 | 既存資産 | 我々の仕事 | Warsaw の宿題 |
 |---|---|---|---|---|
-| Unfolding(strip 毎の生信号復元) | ○(逆問題として定式化) | **TPCReco `StripResponseCalculator`** = 順方向応答(拡散 σ + AGET peaking time + 隣接応答、MC digitizer が使用)。**逆畳み込み自体は TPCReco に無い** | 応答の逆フィルタ設計 + ROOT プロダクトへの追加(または表示ビュー) | 応答パラメータ(σ_xy/σ_z/peaking time)の実測値合意 |
-| ゲイン正規化(strip 毎) | ○(greenfield) | TPCReco に**無い**。FW 側に AsAd pulser 較正ランプ + configure-pulser.xcfg あり | 較正 run 手順(既存 run 制御で可)+ ゲイン表生成ツール + 適用(ROOT プロダクト/表示) | **外部パルサー注入ツールの所在と手順**(2026-08-16 ユーザー: ペデスタルランは実施済みだが外部パルサー注入は未実施。ボードに接続して注入するツールが Warsaw 大にあるはず — Mikolaj に確認) |
+| Unfolding(strip 毎の生信号復元) | ○(逆問題として定式化) | **TPCReco `StripResponseCalculator`** = 順方向応答(拡散 σ + AGET peaking time + 隣接応答、MC digitizer が使用)。**逆畳み込み自体は TPCReco に無い** | 応答の逆フィルタ設計 + ROOT プロダクトへの追加(または表示ビュー) | ~~実測値合意~~ **解消(2026-08-16): 応答は Mikolaj がストリップとガスの特性から構築済み** — 残タスクは値/応答ファイルの受領のみ |
+| ゲイン正規化(strip 毎) | ○(greenfield) | TPCReco に**無い**。FW 側に AsAd pulser 較正ランプ + configure-pulser.xcfg あり | 較正 run 手順(既存 run 制御で可)+ ゲイン表生成ツール + 適用(ROOT プロダクト/表示) | ~~外部パルサーツールの所在~~ **解消(2026-08-16): ツールは無いようなので内製で行く(ユーザー裁定)** — FW 内蔵の AsAd generator 較正ランプ(configure-pulser.xcfg 系)で較正 run を実施する方針。手順設計は我々のチケット |
 | ゼロサプレッション | ○(FW 対応済み・設定のみ) | zCoBo FW に pipeCtrl bit + AsAd 毎閾値デバイス。現行設定は disabled・閾値 600 種入れ済み | frameType 1 の実データ初検証 / FPN 閾値 0 運用 | 閾値の物理判断 / オフラインのペデスタル戦略(ZS 済みデータでは従来計算が成立しない) |
 
 **トレードオフ(記録)**: ZS は閾値以下(ベースライン・裾)を不可逆に捨て、Unfolding は
