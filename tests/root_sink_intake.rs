@@ -37,6 +37,9 @@ use tpcdaq::zmq_helper;
 
 /// root-sink の期待ソース(SPEC §3.2: decoder = 100)。
 const DECODER_SOURCE_ID: u32 = 100;
+/// PEventTPC を書くのに要るジオメトリ。**合成フィクスチャ**でよい —— ここの持ち場は
+/// 取り込み配線であって chargeMap の値ではない(値の照合は tests/elitpc_pevent_e2e.rs)。
+const GEOMETRY: &str = "tests/fixtures/geometry_mini_reduced.dat";
 const RUN_NUMBER: u32 = 7;
 
 /// C++ 側の終了コード表(root_sink.cxx と対)。
@@ -808,13 +811,13 @@ fn writes_a_run_root_file_and_finalizes_it() {
         return;
     };
     let out_root = scratch_dir("finalize");
-    // v1.8: このテストは GDataFrame 出力(entries == fragments)の回帰なので
-    // テスト専用モードを明示する(既定は PEventTPC — SPEC §6.4 v1.8 / TODO/020)。
+    // mini(期待集合 = {(0,0)})なので **1 フラグメント = 1 イベント = 1 エントリ** ——
+    // v1.17 で GDataFrame モードが消えても entries_written = 5 は変わらない。
     let (mut child, endpoint) = spawn_sink_raw_with_retry(
         &bin,
         &[
-            "--format",
-            "gdataframe",
+            "--geometry",
+            GEOMETRY,
             "--output-root",
             &out_root.to_string_lossy(),
         ],
@@ -977,7 +980,8 @@ fn wait_for_file(path: &Path, timeout: Duration) -> bool {
 }
 
 /// P1 オラクル(SPEC §12-1): 実 .graw 1 本 = 108 イベント / 15,040,512 items。
-/// mini は 1 CoBo × 1 AsAd なので **1 イベント = 1 フレーム = TTree 1 エントリ**。
+/// mini は 1 CoBo × 1 AsAd なので **1 イベント = 1 フレーム = TTree 1 エントリ**
+/// (v1.17 で出力が PEventTPC のみになっても、この 108 は変わらない)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_graw_replayed_end_to_end_writes_108_entries() {
     let Some(bin) = sink_bin() else {
@@ -993,12 +997,11 @@ async fn real_graw_replayed_end_to_end_writes_108_entries() {
     let ctx = zmq::Context::new();
 
     // --- root_sink(本物のプロセス)を先に上げる。listen-before-start と同じ理屈 ---
-    // v1.8: mini 実データオラクル(entries=108、GDataFrame)の回帰なのでテスト専用モード。
     let (mut sink, sink_ep) = spawn_sink_raw_with_retry(
         &bin,
         &[
-            "--format",
-            "gdataframe",
+            "--geometry",
+            GEOMETRY,
             "--output-root",
             &out_root.to_string_lossy(),
             "--expect",
@@ -1108,7 +1111,8 @@ async fn real_graw_replayed_end_to_end_writes_108_entries() {
     assert_eq!(count(&counts, "events_incomplete"), 0, "counts={counts}");
     assert_eq!(count(&counts, "late_fragments"), 0, "counts={counts}");
     assert_eq!(count(&counts, "runs"), 1, "counts={counts}");
-    // **1 エントリ = 1 CoBo フレーム**(SPEC §6.4)
+    // **1 エントリ = 1 ビルド済みイベント**(SPEC §6.4 v1.8)。mini は 1 イベント =
+    // 1 フレームなので、フレーム数と同じ 108 になる。
     assert_eq!(count(&counts, "entries_written"), 108, "counts={counts}");
     assert_eq!(count(&counts, "items_out_of_range"), 0, "counts={counts}");
     assert_eq!(counts["fatal"], "", "counts={counts}");

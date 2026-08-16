@@ -1,35 +1,35 @@
-//! P2 出口の全経路照合(TODO/012、SPEC §12-2/§12-3/§12-4 + §6.3 v1.3)。
+//! P2 出口の全経路照合(TODO/012、SPEC §12-4 + §6.3 v1.3)。
 //!
 //! ここまでの完成品(005 graw_replay / 006 receiver / 007 graw-writer / 009 decoder /
-//! 010 event builder / 011 GDataFrame TTree)を**実トポロジーで配線するだけ**のテスト。
+//! 010 event builder / 011→020 PEventTPC TTree)を**実トポロジーで配線するだけ**のテスト。
 //! 新しい production コードは 1 行も足さない —— 足したくなったら統合で見つけた本物のバグ。
 //!
-//! * **E2E-A**: 単一ソース全経路。graw_replay → receiver → {graw-writer, decoder} 同時、
-//!   decoder → root_sink。graw バイト一致(§12-2)+ run 毎単一 ROOT + entries=108 +
-//!   **実機オラクル .root との TTree 全値一致**(§12-3、`compare_gdataframe`)。
 //! * **E2E-B**: 2 ソースビルド(§12-4)。実 .graw と、その **coboIdx を 0→1 に書き換えた
 //!   合成コピー**(テスト側で生成、リポには置かない)を並走リプレイ →
 //!   receiver ×2 → decoder(期待 {0,1})→ root_sink(`--expect 0:0,1:0`)。
-//!   全イベント complete / incomplete=0 / eventIdx 昇順 / CoBo 毎 108 / entries=216。
-//!   さらに**同じ入力で 2 回走らせて 2 本の run.root が完全一致**(= SPEC v1.3 の
-//!   「イベント内 (cobo,asad) 昇順」が効いている証明。`--strict-order`)。
+//!   全イベント complete / incomplete=0 / eventIdx 昇順 / CoBo 毎 109 フレーム受信 /
+//!   entries=108(1 エントリ = 1 ビルド済みイベント)。さらに**同じ入力で 2 回走らせて
+//!   2 本の run.root が全イベント全 key 一致**(= SPEC v1.3 の「イベント内 (cobo,asad)
+//!   昇順」が効いている証明。`compare_pevent`)。
 //!
-//! **env が 3 つ揃ったときだけ走る**(実 .graw / 実機 .root はリポに入れない、C++ ビルドを
+//! **v1.17(TODO/054)で E2E-A を退役させた**: あれは §12-3 の**旧 GDataFrame オラクル**
+//! (実機 .root と TTree 全値比較)で、SPEC v1.17 がその行ごと撤去した(削除条件 =
+//! PEventTPC 実データオラクルの成立は 021 の `compared 3852 events, 0 differences` で満了)。
+//! 現行の §12-3 は `tests/elitpc_pevent_e2e.rs` が担う。§12-2(graw バイト一致)は
+//! `tests/root_sink_intake.rs` と graw-writer 側の試験が持っている。
+//!
+//! **env が 2 つ揃ったときだけ走る**(実 .graw はリポに入れない、C++ ビルドを
 //! cargo test の前提にしない —— CLAUDE.md):
 //!
 //! ```text
 //! make -C tools/root_sink && make -C tools/root_sink compare
 //! TPCDAQ_ROOT_SINK_BIN=$PWD/tools/root_sink/root_sink \
 //! TPCDAQ_REAL_GRAW=$HOME/TPC/CoBo_2025-09-01T08_51_06.203_0000.graw \
-//! TPCDAQ_REAL_ROOT=$HOME/TPC/CoBo_2025-09-01T08_51_06.203_0000.root \
 //!   cargo test --test p2_e2e -- --nocapture
 //! ```
-//!
-//! `TPCDAQ_REAL_ROOT` は**読み取り専用**として扱う(開くのは `TFile::Open(..., "READ")` のみ)。
 
 #![allow(clippy::unwrap_used)]
 
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -41,7 +41,6 @@ use tpcdaq::command::{Command, CommandResponse, ComponentState, RunConfig};
 use tpcdaq::decode::peek_asad;
 use tpcdaq::decoder::{run_decoder, DecoderParams};
 use tpcdaq::framer::Framer;
-use tpcdaq::graw_writer::{run_graw_writer, GrawWriterParams};
 use tpcdaq::msg::{Message, RawFrames};
 use tpcdaq::receiver::{run_receiver, ReceiverParams};
 use tpcdaq::zmq_helper;
@@ -69,8 +68,8 @@ const REPLAY_RATE_MBPS: f64 = 224.0;
 // env ゲート
 // ---------------------------------------------------------------------------
 
-/// 3 つの env が揃っていれば `(root_sink, 実 .graw, 実機 .root)`。欠けたら skip 理由を印字。
-fn e2e_env() -> Option<(PathBuf, PathBuf, PathBuf)> {
+/// 2 つの env が揃っていれば `(root_sink, 実 .graw)`。欠けたら skip 理由を印字。
+fn e2e_env() -> Option<(PathBuf, PathBuf)> {
     let Some(bin) = std::env::var_os("TPCDAQ_ROOT_SINK_BIN").map(PathBuf::from) else {
         eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN が未設定(make -C tools/root_sink)");
         return None;
@@ -79,17 +78,13 @@ fn e2e_env() -> Option<(PathBuf, PathBuf, PathBuf)> {
         eprintln!("SKIP: TPCDAQ_REAL_GRAW が未設定(実 .graw はローカルのみ)");
         return None;
     };
-    let Some(oracle) = std::env::var_os("TPCDAQ_REAL_ROOT").map(PathBuf::from) else {
-        eprintln!("SKIP: TPCDAQ_REAL_ROOT が未設定(§12-3 の実機オラクル)");
-        return None;
-    };
-    Some((bin, graw, oracle))
+    Some((bin, graw))
 }
 
-/// `compare_gdataframe`(root_sink と同じディレクトリ)。無ければ**落とす** ——
-/// §12-3 の照合こそがこのテストの目的なので、黙って skip しては意味がない。
+/// `compare_pevent`(root_sink と同じディレクトリ)。無ければ**落とす** ——
+/// 決定性の照合こそがこのテストの目的なので、黙って skip しては意味がない。
 fn comparator(sink_bin: &Path) -> PathBuf {
-    let path = sink_bin.with_file_name("compare_gdataframe");
+    let path = sink_bin.with_file_name("compare_pevent");
     assert!(
         path.is_file(),
         "{} が無い。`make -C tools/root_sink compare` でビルドすること",
@@ -97,6 +92,14 @@ fn comparator(sink_bin: &Path) -> PathBuf {
     );
     path
 }
+
+/// 2 ソースビルドに要る合成ジオメトリ((cobo 0, asad 0) と (cobo 1, asad 0) を含む)。
+/// このテストの持ち場はビルダの決定性であって chargeMap の物理値ではない。
+const GEOMETRY_2COBO: &str = "tests/fixtures/geometry_2cobo_fake.dat";
+
+/// 2 回の走行で `EventInfo::runId` を揃えるための固定値(既定は run を開いた壁時計 ——
+/// それだと 2 本の run.root が runId だけで差分になる)。
+const FIXED_RUN_ID: &str = "20260101000000";
 
 // ---------------------------------------------------------------------------
 // プロセス操作(tests/root_sink_intake.rs の流儀をそのまま)
@@ -222,25 +225,6 @@ async fn stop(endpoint: &str, who: &str) {
     );
 }
 
-async fn poll_until(
-    endpoint: &str,
-    timeout: Duration,
-    mut pred: impl FnMut(&CommandResponse) -> bool,
-) -> CommandResponse {
-    let start = Instant::now();
-    loop {
-        let resp = rpc(endpoint, &Command::GetStatus).await;
-        if pred(&resp) {
-            return resp;
-        }
-        assert!(
-            start.elapsed() <= timeout,
-            "condition not satisfied within {timeout:?}; last response = {resp:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // ファイル小道具
 // ---------------------------------------------------------------------------
@@ -274,29 +258,6 @@ fn names_starting_with(dir: &Path, prefix: &str) -> Vec<String> {
         .collect();
     out.sort();
     out
-}
-
-/// `bytes` を MFM フレームへ分割し、frameType 1/2(= asadIdx を持つ)の列と、それ以外
-/// (非 AsAd 制御フレーム)の列に分ける。SPEC §12-2 v1.2「全出力の合計 = 入力の完全ロスレス分割」の
-/// オラクル側。`tests/graw_writer_real_graw.rs` と同じ計算(独立に書いた検算ではなく同一手続き)。
-fn split_by_asad(bytes: &[u8]) -> (Vec<u8>, Vec<u8>, usize, usize) {
-    let mut framer = Framer::new();
-    let mut asad_column = Vec::with_capacity(bytes.len());
-    let mut ctrl_column = Vec::new();
-    let (mut asad_frames, mut ctrl_frames) = (0usize, 0usize);
-    for chunk in bytes.chunks(8192) {
-        framer.push(chunk);
-        while let Some(frame) = framer.next() {
-            if peek_asad(frame).is_some() {
-                asad_column.extend_from_slice(frame);
-                asad_frames += 1;
-            } else {
-                ctrl_column.extend_from_slice(frame);
-                ctrl_frames += 1;
-            }
-        }
-    }
-    (asad_column, ctrl_column, asad_frames, ctrl_frames)
 }
 
 /// 実 .graw を framer で切り、**各フレームのヘッダ 26 バイト目(coboIdx)を `to` に書き換えた**
@@ -335,321 +296,34 @@ fn rewrite_cobo_id(source: &Path, dest: &Path, to: u8) -> (u64, usize, usize) {
 }
 
 // ---------------------------------------------------------------------------
-// compare_gdataframe の呼び出しと要約のパース
+// compare_pevent の呼び出し
 // ---------------------------------------------------------------------------
 
-/// `compare_gdataframe` が片側について印字する 1 行の要約("A: ..." / "B: ...")。
-#[derive(Debug, Default)]
-struct SideSummary {
-    entries: u64,
-    keys: u64,
-    channels: u64,
-    samples: u64,
-    event_idx_nondecreasing: bool,
-    /// coboIdx → その CoBo のエントリ数。
-    cobo_entries: BTreeMap<u32, u64>,
-}
-
-fn parse_side(line: &str) -> SideSummary {
-    let mut s = SideSummary::default();
-    for token in line.split_whitespace() {
-        let Some((key, value)) = token.split_once('=') else {
-            continue;
-        };
-        match key {
-            "entries" => s.entries = value.parse().expect("entries"),
-            "keys" => s.keys = value.parse().expect("keys"),
-            "channels" => s.channels = value.parse().expect("channels"),
-            "samples" => s.samples = value.parse().expect("samples"),
-            "event_idx_nondecreasing" => s.event_idx_nondecreasing = value == "yes",
-            "cobo_entries" => {
-                for pair in value.split(',').filter(|p| !p.is_empty()) {
-                    let (cobo, n) = pair.split_once(':').expect("cobo:count");
-                    s.cobo_entries
-                        .insert(cobo.parse().expect("cobo"), n.parse().expect("count"));
-                }
-            }
-            _ => {}
-        }
-    }
-    s
-}
-
-/// 比較器を走らせ、(A 側要約, B 側要約) を返す。**exit 0 でなければ落とす**。
-fn compare_roots(tool: &Path, a: &Path, b: &Path, extra: &[&str]) -> (SideSummary, SideSummary) {
+/// 比較器を走らせ、突き合わせたイベント数を返す。**exit 0 でなければ落とす**
+/// (`compare_pevent` は差分 0 のときだけ 0 で抜ける)。
+fn compare_pevent_roots(tool: &Path, a: &Path, b: &Path) -> u64 {
     let out = ProcessCommand::new(tool)
         .arg(a)
         .arg(b)
-        .args(extra)
         .output()
         .unwrap_or_else(|e| panic!("spawn {}: {e}", tool.display()));
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-    eprintln!("--- compare_gdataframe {:?} ---\n{stdout}", extra);
+    eprintln!("--- compare_pevent ---\n{stdout}");
     assert!(
         out.status.success(),
-        "compare_gdataframe が一致しなかった({:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        "compare_pevent が一致しなかった({:?})\nstdout:\n{stdout}\nstderr:\n{stderr}",
         out.status
     );
-    let side = |tag: &str| {
-        parse_side(
-            stdout
-                .lines()
-                .find(|l| l.starts_with(tag))
-                .unwrap_or_else(|| panic!("{tag} の要約行が無い:\n{stdout}")),
-        )
-    };
-    (side("A: "), side("B: "))
-}
-
-// ===========================================================================
-// E2E-A — 単一ソース全経路 + 実機オラクルとの TTree 一致(§12-2 / §12-3)
-// ===========================================================================
-
-/// P1/P2 オラクル(SPEC §12-1/2/3、この実ファイル固有の実測値):
-///   入力 30,108,684 B = AsAd 30,108,672 B(108 フレーム)+ ctrl 12 B(frameType 7 ×1)
-///   → TTree 108 エントリ(1 エントリ = 1 CoBo フレーム、SPEC §6.4)
-///   → 実機 .root(同一 run の変換物)と全ヘッダ・全サンプル値が一致
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn e2e_a_single_source_matches_the_graw_bytes_and_the_real_root_oracle() {
-    let Some((sink_bin, graw, oracle)) = e2e_env() else {
-        return;
-    };
-    let tool = comparator(&sink_bin);
-    const RUN: u32 = 12;
-
-    let source = std::fs::read(&graw).unwrap_or_else(|e| panic!("read {}: {e}", graw.display()));
-    let scratch = scratch_dir("a");
-    let graw_out = scratch.join("graw");
-    let root_out = scratch.join("root");
-    std::fs::create_dir_all(&graw_out).unwrap();
-    std::fs::create_dir_all(&root_out).unwrap();
-
-    // --- 1. root_sink(本物のプロセス)。listen-before-start と同じ理屈で最初に上げる ---
-    let sink_ep = free_endpoint();
-    let mut sink = spawn_sink(
-        &sink_bin,
-        &sink_ep,
-        // v1.8: §12-3 の旧オラクル(GDataFrame、mini 実機 .root と全値比較)の回帰なので
-        // テスト専用モードを明示(既定は PEventTPC — SPEC §6.4 v1.8 / TODO/020)。
-        &[
-            "--format",
-            "gdataframe",
-            "--output-root",
-            &root_out.to_string_lossy(),
-            "--expect",
-            "0:0",
-        ],
-    );
-    let sink_pid = sink.id();
-    std::thread::sleep(Duration::from_millis(300)); // bind が済むまで
-
-    // --- 2. graw-writer(007)---
-    let gw_params = GrawWriterParams {
-        pull_bind: "tcp://127.0.0.1:0".to_string(),
-        command_listen: "tcp://127.0.0.1:0".to_string(),
-        output_root: graw_out.clone(),
-        max_file_bytes: tpcdaq::config::DEFAULT_GRAW_WRITER_MAX_FILE_BYTES,
-        flush_interval_ms: 200,
-        expected_sources: vec![0],
-    };
-    let (gw_shutdown_tx, gw_shutdown_rx) = broadcast::channel(1);
-    let (gw_ep_tx, gw_ep_rx) = oneshot::channel();
-    let gw_task = tokio::spawn(run_graw_writer(gw_params, gw_shutdown_rx, Some(gw_ep_tx)));
-    let gw_cmd_ep = gw_ep_rx.await.expect("graw-writer command endpoint");
-    let gw_bind = configure_arm_start(&gw_cmd_ep, RUN, "p2 e2e-a").await;
-
-    // --- 3. decoder(009)。PUSH 先は root_sink ---
-    let decoder_params = DecoderParams {
-        pull_bind: "tcp://127.0.0.1:0".to_string(),
-        push_connect: sink_ep.clone(),
-        command_listen: "tcp://127.0.0.1:0".to_string(),
-        batch_max_bytes: tpcdaq::config::DEFAULT_BATCH_MAX_BYTES,
-        batch_max_ms: tpcdaq::config::DEFAULT_BATCH_MAX_MS,
-        heartbeat_ms: tpcdaq::config::DEFAULT_HEARTBEAT_MS,
-        send_timeout_ms: tpcdaq::config::DEFAULT_DECODER_SEND_TIMEOUT_MS,
-        workers: 1,
-        expected_sources: vec![0],
-    };
-    let (dec_shutdown_tx, dec_shutdown_rx) = broadcast::channel(1);
-    let (dec_ep_tx, dec_ep_rx) = oneshot::channel();
-    let dec_task = tokio::spawn(run_decoder(
-        decoder_params,
-        dec_shutdown_rx,
-        Some(dec_ep_tx),
-    ));
-    let dec_cmd_ep = dec_ep_rx.await.expect("decoder command endpoint");
-    let dec_bind = configure_arm_start(&dec_cmd_ep, RUN, "p2 e2e-a").await;
-
-    // --- 4. receiver(006)。**graw-writer と decoder の両方へ**同時に流す(実トポロジー)---
-    let recv_params = ReceiverParams {
-        cobo_id: 0,
-        listen: "127.0.0.1:0".to_string(),
-        command_listen: "tcp://127.0.0.1:0".to_string(),
-        graw_writer_endpoint: gw_bind,
-        decoder_endpoint: dec_bind,
-        batch_max_bytes: tpcdaq::config::DEFAULT_BATCH_MAX_BYTES,
-        batch_max_ms: tpcdaq::config::DEFAULT_BATCH_MAX_MS,
-        queue_frames: tpcdaq::config::DEFAULT_QUEUE_FRAMES,
-        heartbeat_ms: tpcdaq::config::DEFAULT_HEARTBEAT_MS,
-        hwm: zmq_helper::DEFAULT_HWM,
-    };
-    let (recv_shutdown_tx, recv_shutdown_rx) = broadcast::channel(1);
-    let (recv_ep_tx, recv_ep_rx) = oneshot::channel();
-    let recv_task = tokio::spawn(run_receiver(
-        recv_params,
-        recv_shutdown_rx,
-        Some(recv_ep_tx),
-    ));
-    let recv_cmd_ep = recv_ep_rx.await.expect("receiver command endpoint");
-    let data_addr = configure_arm_start(&recv_cmd_ep, RUN, "p2 e2e-a").await;
-
-    // --- 5. graw_replay(全速、ペーシングなし) ---
-    let started_at = Instant::now();
-    let status = ProcessCommand::new(env!("CARGO_BIN_EXE_graw_replay"))
-        .arg(&data_addr)
-        .arg(&graw)
-        .status()
-        .expect("spawn graw_replay");
-    assert!(status.success(), "graw_replay failed: {status:?}");
-
-    // --- 6. EOS 確認 —— graw-writer は全ファイル close、root_sink は rename 完了 ---
-    let gw_done = poll_until(&gw_cmd_ep, Duration::from_secs(60), |r| {
-        let m = r.metrics.as_ref();
-        m.and_then(|m| m["files_open"].as_u64()) == Some(0)
-            && m.and_then(|m| m["files_closed"].as_u64()) == Some(2)
-    })
-    .await;
-    let run_dir = root_out.join(format!("run{RUN:04}"));
-    let run_file = run_dir.join(format!("run{RUN:04}.root"));
-    assert!(
-        wait_for_file(&run_file, Duration::from_secs(60)),
-        "{} が 60 s 以内に出来なかった(dir={:?})",
-        run_file.display(),
-        names_starting_with(&run_dir, "")
-    );
-    let elapsed = started_at.elapsed();
-
-    // --- 7. EOS 確認後に Stop(SPEC §1.3)---
-    stop(&recv_cmd_ep, "receiver").await;
-    stop(&dec_cmd_ep, "decoder").await;
-    stop(&gw_cmd_ep, "graw-writer").await;
-
-    // --- 8. §12-2 生 graw バイト一致(007 実測の再現)---
-    let files = gw_done.metrics.as_ref().unwrap()["files"]
-        .as_array()
-        .unwrap();
-    assert_eq!(
-        files.len(),
-        2,
-        "1 AsAd + ctrl 1(SPEC §7/§12-2 v1.2): {files:?}"
-    );
-    let pick = |asad_present: bool| -> PathBuf {
-        PathBuf::from(
-            files
-                .iter()
-                .find(|f| f["asad"].is_null() != asad_present)
-                .unwrap_or_else(|| panic!("no matching file in {files:?}"))["path"]
-                .as_str()
-                .unwrap(),
-        )
-    };
-    let actual_asad = std::fs::read(pick(true)).unwrap();
-    let actual_ctrl = std::fs::read(pick(false)).unwrap();
-    let (expected_asad, expected_ctrl, asad_frames, ctrl_frames) = split_by_asad(&source);
-    assert!(
-        actual_asad == expected_asad,
-        "AsAd 出力のバイト内容が不一致"
-    );
-    assert!(
-        actual_ctrl == expected_ctrl,
-        "ctrl 出力のバイト内容が不一致"
-    );
-    assert_eq!(
-        actual_asad.len() + actual_ctrl.len(),
-        source.len(),
-        "AsAd + ctrl の合計が入力と不一致(ロスレス分割が崩れている)"
-    );
-    // この実ファイル固有のオラクル(2026-08-13、SPEC §12-2)
-    assert_eq!(source.len(), 30_108_684, "入力バイト数オラクル");
-    assert_eq!(actual_asad.len(), 30_108_672, "AsAd 出力バイト数オラクル");
-    assert_eq!(actual_ctrl.len(), 12, "ctrl 出力バイト数オラクル");
-    assert_eq!(asad_frames, 108, "AsAd フレーム数オラクル");
-    assert_eq!(ctrl_frames, 1, "ctrl フレーム数オラクル(frameType 7 ×1)");
-
-    // --- 9. root_sink を畳んでカウンタを読む ---
-    send_term(sink_pid);
-    let sink_status = wait_for_exit(&mut sink, Duration::from_secs(30));
-    assert!(sink_status.success(), "root_sink: {sink_status:?}");
-    let counts = read_counts(&mut sink);
-    assert_eq!(count(&counts, "fragments"), 108, "counts={counts}");
-    assert_eq!(count(&counts, "items"), 15_040_512, "counts={counts}");
-    assert_eq!(count(&counts, "events_complete"), 108, "counts={counts}");
-    assert_eq!(count(&counts, "events_incomplete"), 0, "counts={counts}");
-    assert_eq!(count(&counts, "late_fragments"), 0, "counts={counts}");
-    assert_eq!(count(&counts, "entries_written"), 108, "counts={counts}");
-    assert_eq!(count(&counts, "items_out_of_range"), 0, "counts={counts}");
-    assert_eq!(counts["fatal"], "", "counts={counts}");
-    // run 毎単一 ROOT(SPEC §6.5)
-    let root_files = counts["root_files"].as_array().expect("root_files");
-    assert_eq!(root_files.len(), 1, "run 1 本 = ROOT 1 本: {counts}");
-    assert_eq!(root_files[0]["entries"].as_u64(), Some(108));
-    assert!(
-        names_starting_with(&run_dir, "run_inprogress_").is_empty(),
-        "inprogress が残っている: {:?}",
-        names_starting_with(&run_dir, "run_inprogress_")
-    );
-    assert_eq!(
-        names_starting_with(&run_dir, "run").len(),
-        1,
-        "run ディレクトリに ROOT が 1 本だけ: {:?}",
-        names_starting_with(&run_dir, "")
-    );
-
-    // --- 10. §12-3 実機オラクルとの TTree 全値一致 ---
-    //
-    // **明示した許容差だけを許す**(暗黙のホワイトリスト禁止 — TODO/012 §1):
-    //   fDataSource  : 我々は 0 固定(SPEC §6.4)。実機オラクルは生ヘッダ由来の 1。
-    //   fHitPatterns : 我々は未充填(SPEC §6.4「C++ 版同様 — 生 graw がバックストップ」)。
-    // チャンネルは (aget, chan) キーで突き合わせる(並びは我々 = aget 昇順 /
-    // 本家 = chan 昇順で異なる。SPEC §6.4 が順序比較を禁じている)。
-    let (ours, theirs) = compare_roots(
-        &tool,
-        &run_file,
-        &oracle,
-        &[
-            "--ignore-field",
-            "fDataSource",
-            "--ignore-field",
-            "fHitPatterns",
-        ],
-    );
-    assert_eq!(ours.entries, 108, "我々の TTree エントリ数");
-    assert_eq!(theirs.entries, 108, "実機オラクルの TTree エントリ数");
-    assert_eq!(ours.samples, 15_040_512, "我々のサンプル総数");
-    assert_eq!(theirs.samples, 15_040_512, "実機オラクルのサンプル総数");
-    assert_eq!(ours.channels, 29_376, "108 フレーム × 272 ch");
-    assert_eq!(ours.channels, theirs.channels);
-    assert!(ours.event_idx_nondecreasing, "我々の出力は eventIdx 昇順");
-
-    eprintln!(
-        "E2E-A: {:.3} s / graw {} B = AsAd {} B + ctrl {} B / TTree {} entries / \
-         root_sink counters: {counts}",
-        elapsed.as_secs_f64(),
-        source.len(),
-        actual_asad.len(),
-        actual_ctrl.len(),
-        ours.entries,
-    );
-
-    // --- 後片付け ---
-    let _ = recv_shutdown_tx.send(());
-    let _ = tokio::time::timeout(Duration::from_secs(5), recv_task).await;
-    let _ = dec_shutdown_tx.send(());
-    let _ = tokio::time::timeout(Duration::from_secs(5), dec_task).await;
-    let _ = gw_shutdown_tx.send(());
-    let _ = tokio::time::timeout(Duration::from_secs(5), gw_task).await;
-    let _ = std::fs::remove_dir_all(&scratch);
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with("compared "))
+        .unwrap_or_else(|| panic!("要約行 \"compared ...\" が無い:\n{stdout}"));
+    line.split_whitespace()
+        .nth(1)
+        .expect("compared <N> events")
+        .parse()
+        .expect("compared count")
 }
 
 // ===========================================================================
@@ -675,11 +349,13 @@ async fn run_two_source_build(
     let mut sink = spawn_sink(
         sink_bin,
         &sink_ep,
-        // v1.8: 2 ソースビルドの決定性比較も GDataFrame 出力前提(--strict-order)なので
-        // テスト専用モードを明示。
+        // **--run-id は固定**: 2 回の走行を compare_pevent で突き合わせるので、
+        // run を開いた壁時計由来の runId が違うと EventInfo だけで差分になる。
         &[
-            "--format",
-            "gdataframe",
+            "--geometry",
+            GEOMETRY_2COBO,
+            "--run-id",
+            FIXED_RUN_ID,
             "--output-root",
             &out_root.to_string_lossy(),
             "--expect",
@@ -834,12 +510,13 @@ async fn run_two_source_build(
 
 /// §12-4 のオラクル(2 ソース = 実 .graw + coboIdx を 1 に書き換えた合成コピー):
 ///   events_complete = 108(全イベント complete)/ incomplete = 0
-///   TTree entries = 216 = 108 イベント × 2 フラグメント
-///   CoBo 毎フレーム数 = 108 / 108
-/// 加えて **2 回走らせて完全一致**(SPEC v1.3 の決定的順序)。
+///   フラグメント = 216 = 108 イベント × 2 CoBo
+///   **TTree entries = 108**(1 エントリ = 1 ビルド済みイベント、SPEC §6.4 v1.8)
+///   receiver 毎の受信フレーム数 = 109 / 109(108 データ + 制御 1)
+/// 加えて **2 回走らせて全イベント全 key 一致**(SPEC v1.3 の決定的順序)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn e2e_b_two_source_build_is_complete_ordered_and_deterministic() {
-    let Some((sink_bin, graw, _oracle)) = e2e_env() else {
+    let Some((sink_bin, graw)) = e2e_env() else {
         return;
     };
     // **dev / release の両方で走る**。以前は dev を skip していた: decoder が入力
@@ -895,7 +572,9 @@ async fn e2e_b_two_source_build_is_complete_ordered_and_deterministic() {
         "counts={counts1}"
     );
     assert_eq!(count(&counts1, "pending_events"), 0, "counts={counts1}");
-    assert_eq!(count(&counts1, "entries_written"), 216, "counts={counts1}");
+    // **1 エントリ = 1 ビルド済みイベント**(SPEC §6.4 v1.8)。2 フラグメントが 1 本に
+    // マージされるので、フラグメント 216 に対してエントリは 108。
+    assert_eq!(count(&counts1, "entries_written"), 108, "counts={counts1}");
     assert_eq!(counts1["fatal"], "", "counts={counts1}");
     // receiver の `frames` は**受け取った MFM フレーム全部**なので 108 データ + 1 制御 = 109。
     // 「CoBo 毎フレーム数一致」の本体(TTree 上で 108/108)は下の cobo_entries が見る。
@@ -906,7 +585,7 @@ async fn e2e_b_two_source_build_is_complete_ordered_and_deterministic() {
     );
     let files1 = counts1["root_files"].as_array().expect("root_files");
     assert_eq!(files1.len(), 1, "run 毎単一 ROOT: {counts1}");
-    assert_eq!(files1[0]["entries"].as_u64(), Some(216));
+    assert_eq!(files1[0]["entries"].as_u64(), Some(108));
 
     // --- 2 回目(同じ入力・同じ配線。決定性の相手)---
     let out2 = scratch.join("run2");
@@ -919,25 +598,17 @@ async fn e2e_b_two_source_build_is_complete_ordered_and_deterministic() {
         "p2 e2e-b pass 2",
     )
     .await;
-    assert_eq!(count(&counts2, "entries_written"), 216, "counts={counts2}");
+    assert_eq!(count(&counts2, "entries_written"), 108, "counts={counts2}");
     assert_eq!(count(&counts2, "events_complete"), 108, "counts={counts2}");
     assert_eq!(count(&counts2, "events_incomplete"), 0, "counts={counts2}");
     assert_eq!(frames2, [109, 109], "CoBo 毎受信フレーム数(2 回目)");
 
-    // --- 決定性: 2 本の run.root が**エントリ順まで含めて**完全一致(SPEC v1.3)---
-    let (a, b) = compare_roots(&tool, &file1, &file2, &["--strict-order"]);
-    for (tag, s) in [("1 回目", &a), ("2 回目", &b)] {
-        assert_eq!(s.entries, 216, "{tag}: TTree entries");
-        assert_eq!(s.keys, 216, "{tag}: (eventIdx,cobo,asad) キー数");
-        assert_eq!(s.samples, 2 * 15_040_512, "{tag}: サンプル総数");
-        assert_eq!(s.channels, 2 * 29_376, "{tag}: チャンネル総数");
-        assert!(s.event_idx_nondecreasing, "{tag}: eventIdx 昇順(SPEC §6.3)");
-        assert_eq!(
-            s.cobo_entries,
-            BTreeMap::from([(0u32, 108u64), (1u32, 108u64)]),
-            "{tag}: CoBo 毎フレーム数一致(TTree 実測)"
-        );
-    }
+    // --- 決定性: 2 本の run.root が**全イベント全 key**で一致(SPEC v1.3)---
+    //
+    // (cobo,asad) 昇順が効いていないと、2 CoBo の充填順が run 毎に揺れて chargeMap の
+    // 加算順が変わる —— 値が 1 bit でも違えば compare_pevent(許容差 0)が落ちる。
+    let compared = compare_pevent_roots(&tool, &file1, &file2);
+    assert_eq!(compared, 108, "突き合わせたイベント数");
 
     eprintln!(
         "E2E-B: pass1 {:.3} s / pass2 {:.3} s / 合成ソース {} B({} フレーム書き換え)\n\

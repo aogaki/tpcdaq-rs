@@ -849,13 +849,10 @@ fn monitor_root_is_written_within_ten_seconds_of_the_eos() {
         return;
     };
     let out_root = scratch_dir("r10");
-    // TTree 側は GDataFrame(1 エントリ = 1 フラグメント)—— 既存回帰と同じ形のまま、
-    // モニタ経路が保存側に干渉していないことを見る。
+    // TTree 側(PEventTPC)は本題ではない —— モニタ経路が保存側に干渉していないことを見る。
     let mut sink = Sink::spawn(
         &bin,
         &[
-            "--format",
-            "gdataframe",
             "--geometry",
             GEOMETRY,
             "--output-root",
@@ -914,8 +911,8 @@ fn monitor_root_is_written_within_ten_seconds_of_the_eos() {
     assert!(monitor_root.metadata().expect("stat").len() > 0);
 
     let counts = sink.terminate(Duration::from_secs(20));
-    // 1 エントリ = 1 フラグメント(SPEC §6.4 の GDataFrame 回帰)。モニタ経路が
-    // 保存側の数を 1 つも変えていないこと。
+    // 3 フラグメント = 3 イベント(1 fragment/event)なので entries も 3(§6.4 v1.17)。
+    // モニタ経路が保存側の数を 1 つも変えていないこと。
     assert_eq!(count(&counts, "fragments"), 3, "counts={counts}");
     assert_eq!(count(&counts, "entries_written"), 3, "counts={counts}");
     assert_eq!(count(&counts, "runs"), 1, "counts={counts}");
@@ -1072,8 +1069,6 @@ fn bench_storage_throughput_vs_snapshot_rate() {
     let mut sink = Sink::spawn(
         &bin,
         &[
-            "--format",
-            "gdataframe",
             "--geometry",
             GEOMETRY,
             "--output-root",

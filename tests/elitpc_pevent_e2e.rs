@@ -1,7 +1,7 @@
 //! ELITPC 同 run 実データ E2E(TODO/021、SPEC §12-3 v1.8 ③)。
 //!
 //! 実 ELITPC の graw 4 本組(1 論理 CoBo × 4 AsAd)を graw_replay の eventIdx マージ送出で
-//! フルチェーン(receiver → decoder → root_sink --format pevent)に通し、出来た run.root を
+//! フルチェーン(receiver → decoder → root_sink)に通し、出来た run.root を
 //! **同一 run を実機側 grawToEventTPC が変換した PEventTPC ファイル**と compare_pevent で
 //! 全イベント突き合わせる。これが「我々の出力 = 先方のオフライン変換出力」の最終照合。
 //!

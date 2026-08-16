@@ -1,23 +1,19 @@
-// test_pevent.cxx — PEventTPC 充填(pevent_fill.hpp)と PEventTPC 出力モードの
-//                   Recorder(root_recorder.hpp)の単体テスト(TODO/020)。
+// test_pevent.cxx — PEventTPC 充填(pevent_fill.hpp)と Recorder(root_recorder.hpp)の
+//                   単体テスト(TODO/020 → 054)。
 //
 // **`make test` からは外してある**(`make test-root`)—— ROOT + TPCReco クラスを
 // リンクする(SPEC §6.4 v1.8 のビルド時参照)。
 //
 // 試験方式は既存の流儀(素の CHECK + main、check.hpp)。やっていること:
 //
-//   1. 合成 GDataFrame → PEventTPC の chargeMap を**手計算オラクル**と全 key 照合
+//   1. 合成 Fragment → PEventTPC の chargeMap を**手計算オラクル**と全 key 照合
 //      (strip 射影 / FPN リオーダ / signal 窓 / ペデスタル数値 / `+=` 加算)。
+//      **v1.17(054)で Filler は OwnedFragment を直読する** —— GDataFrame 中間表現は撤去。
 //   2. Recorder で書いた .root を**同プロセスで開き直して**、TPCReco `EventSourceROOT`
 //      が期待する形(ツリー `TPCData` / ブランチ `Event` / myChargeArray 無効)と
 //      streamer(version + checksum)を機械照合する。
 //   3. env `TPCDAQ_REAL_PEVENT` があれば**実機 grawToEventTPC 出力**の streamer /
 //      ツリー / ブランチ / pedestalSubtracted と突き合わせる(未設定なら SKIP を印字)。
-//
-// **GET クラスの地雷**(third_party/get は無改変): `GDataFrame` の TClonesArray は
-// static 共有(fgChannels/fgSamples)で `~GDataFrame()` がそれを **delete する**。
-// 同時に 2 個生かしてはいけない —— 充填テストの GDataFrame を**畳んでから** Recorder
-// (内部で GDataFrame を 1 個持つ)のテストに入る。main の scope 分けはそのため。
 
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -39,7 +35,6 @@
 #include <TStreamerInfo.h>
 #include <TTree.h>
 
-#include "GDataFrame.h"
 #include "TPCReco/PEventTPC.h"
 #include "check.hpp"
 #include "eb_core.hpp"
@@ -120,7 +115,7 @@ std::string scratch_dir(const char* tag) {
 }
 
 // 1 フラグメント分の OwnedFragment を作る。items は (aget, chan, bucket, adc) の
-// パック形式(SPEC §2.4 と root_recorder.hpp::fill が読む形)。
+// パック形式(SPEC §2.4 と pevent_fill.hpp::Filler が読む形)。
 struct Item {
   uint32_t aget;
   uint32_t chan;  // **raw** チャンネル 0–67
@@ -198,20 +193,6 @@ std::vector<Item> synthetic_items() {
   };
 }
 
-// 上の items を GDataFrame に詰める(Recorder が OwnedFragment からやることと同じ形)。
-void load_frame(GET::GDataFrame& frame, uint8_t cobo, uint8_t asad, uint32_t event_idx,
-                uint64_t event_time, const std::vector<Item>& items) {
-  frame.Clear();
-  frame.fHeader.fCoboIdx = cobo;
-  frame.fHeader.fAsadIdx = asad;
-  frame.fHeader.fEventIdx = event_idx;
-  frame.fHeader.fEventTime = event_time;
-  for (const Item& it : items) {
-    frame.AddSample(static_cast<UShort_t>(it.aget), static_cast<UShort_t>(it.chan),
-                    static_cast<UShort_t>(it.bucket), static_cast<UShort_t>(it.adc));
-  }
-}
-
 // テスト用の窓(手計算できる幅にする)。既定(5/25/5/506)は別テストで見る。
 tpcpevent::FillConfig tiny_windows(bool remove_pedestal) {
   tpcpevent::FillConfig cfg;
@@ -231,14 +212,13 @@ tpcpevent::FillConfig tiny_windows(bool remove_pedestal) {
 //   U1 cell2–5 = 100,110,120,130 / U2 cell3–5 = 200,210,220
 //   V1 cell4,5 = 500,505         / V2 cell2 = 300, cell4 = 310
 //   AUX(raw 4)・FPN・W1(cell 6 = 窓外)は 1 つも入らない → 全 11 key。
-void test_fill_without_pedestal(GET::GDataFrame& frame) {
+void test_fill_without_pedestal() {
   const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
   tpcpevent::Filler filler(geo, tiny_windows(/*remove_pedestal=*/false));
-  load_frame(frame, 0, 0, 42, 123456789, synthetic_items());
 
   PEventTPC ev;
   ev.Clear();
-  filler.add_frame(frame, ev);
+  filler.add_fragment(make_fragment(42, 0, 0, 123456789, synthetic_items()), ev);
 
   CHECK_EQ(ev.GetChargeMap().size(), 11);
   CHECK_D(charge_at(ev, 0, 0, 1, 2), 100.0);
@@ -295,14 +275,13 @@ void test_fill_without_pedestal(GET::GDataFrame& frame) {
 //     オフセット = (300 − 0) / 1 = **300.0**
 //     cell2: 300 − (300 + 0) = **0.0**
 //     cell4: 310 − (300 + 6) = **+10.0 − 6.0 = 4.0**
-void test_fill_with_pedestal(GET::GDataFrame& frame) {
+void test_fill_with_pedestal() {
   const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
   tpcpevent::Filler filler(geo, tiny_windows(/*remove_pedestal=*/true));
-  load_frame(frame, 0, 0, 42, 123456789, synthetic_items());
 
   PEventTPC ev;
   ev.Clear();
-  filler.add_frame(frame, ev);
+  filler.add_fragment(make_fragment(42, 0, 0, 123456789, synthetic_items()), ev);
 
   CHECK_EQ(ev.GetChargeMap().size(), 11);
   CHECK_D(charge_at(ev, 0, 0, 1, 2), -0.5);
@@ -321,16 +300,14 @@ void test_fill_with_pedestal(GET::GDataFrame& frame) {
 // ペデスタルは **(cobo,asad) フレーム毎にリセット**(イベント内で完結・run 状態なし)。
 // 同じフレームを 2 回食わせたら、値は「2 倍」になる(`+=` 加算)だけで、
 // ペデスタルの計算そのものは 1 回目と同じでなければならない。
-void test_pedestal_is_reset_per_frame(GET::GDataFrame& frame) {
+void test_pedestal_is_reset_per_frame() {
   const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
   tpcpevent::Filler filler(geo, tiny_windows(/*remove_pedestal=*/true));
 
   PEventTPC ev;
   ev.Clear();
-  load_frame(frame, 0, 0, 42, 1, synthetic_items());
-  filler.add_frame(frame, ev);
-  load_frame(frame, 0, 0, 42, 1, synthetic_items());
-  filler.add_frame(frame, ev);
+  filler.add_fragment(make_fragment(42, 0, 0, 1, synthetic_items()), ev);
+  filler.add_fragment(make_fragment(42, 0, 0, 1, synthetic_items()), ev);
 
   // key 集合は変わらず、値だけ 2 倍(AddValByStrip は **+=**)。
   CHECK_EQ(ev.GetChargeMap().size(), 11);
@@ -344,7 +321,7 @@ void test_pedestal_is_reset_per_frame(GET::GDataFrame& frame) {
 // ---------------------------------------------------------------------------
 //
 // cell 4 = 落ちる / 5 = 入る / 506 = 入る / 507 = 落ちる(SPEC §6.4 の既定値)。
-void test_default_signal_window_bounds(GET::GDataFrame& frame) {
+void test_default_signal_window_bounds() {
   const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
   tpcpevent::FillConfig cfg;  // 既定 = 5 / 25 / 5 / 506
   cfg.remove_pedestal = false;
@@ -355,11 +332,12 @@ void test_default_signal_window_bounds(GET::GDataFrame& frame) {
   tpcpevent::Filler filler(geo, cfg);
 
   // AGET0 raw 0 = U strip 1 に 4 点だけ置く(非対称値)。
-  load_frame(frame, 0, 0, 1, 1,
-             {{0, 0, 4, 111}, {0, 0, 5, 222}, {0, 0, 506, 333}, {0, 0, 507, 444}});
   PEventTPC ev;
   ev.Clear();
-  filler.add_frame(frame, ev);
+  filler.add_fragment(
+      make_fragment(1, 0, 0, 1,
+                    {{0, 0, 4, 111}, {0, 0, 5, 222}, {0, 0, 506, 333}, {0, 0, 507, 444}}),
+      ev);
 
   CHECK_EQ(ev.GetChargeMap().size(), 2);
   CHECK(!has_key(ev, 0, 0, 1, 4));
@@ -374,7 +352,7 @@ void test_default_signal_window_bounds(GET::GDataFrame& frame) {
 //
 // 手組みの .dat: AGET0 信号 ch0 と AGET1 信号 ch0 を **同じ** U section 0 strip 1 に
 // 割り当てる(実機では 1 本の strip が複数チャンネルに跨がる配線がありうる)。
-void test_same_strip_accumulates(GET::GDataFrame& frame) {
+void test_same_strip_accumulates() {
   const char* dat =
       "U\t0\t1\t0\t0\t0\t0\t0.0\t0.0\t10\n"
       "U\t0\t1\t0\t0\t1\t0\t0.0\t0.0\t10\n";
@@ -382,10 +360,9 @@ void test_same_strip_accumulates(GET::GDataFrame& frame) {
   tpcpevent::Filler filler(geo, tiny_windows(/*remove_pedestal=*/false));
 
   // 同じ cell 3 に別々の値を置く: 40 + 2 = 42。
-  load_frame(frame, 0, 0, 1, 1, {{0, 0, 3, 40}, {1, 0, 3, 2}});
   PEventTPC ev;
   ev.Clear();
-  filler.add_frame(frame, ev);
+  filler.add_fragment(make_fragment(1, 0, 0, 1, {{0, 0, 3, 40}, {1, 0, 3, 2}}), ev);
 
   CHECK_EQ(ev.GetChargeMap().size(), 1);
   CHECK_D(charge_at(ev, 0, 0, 1, 3), 42.0);
@@ -398,17 +375,17 @@ void test_same_strip_accumulates(GET::GDataFrame& frame) {
 // `PEventTPC::myChargeArray[3][3][256][512]` は strip 番号 0–255 しか持てない
 // (`AddValByStrip` は chargeMap と配列の**両方**に書く)。ELITPC の 1–1024 は
 // この配列をはみ出す —— 黙って UB を踏まず、落として数える(CLAUDE.md)。
-void test_strip_number_beyond_array_is_dropped(GET::GDataFrame& frame) {
+void test_strip_number_beyond_array_is_dropped() {
   const char* dat =
       "U\t0\t255\t0\t0\t0\t0\t0.0\t0.0\t10\n"   // 収まる(境界の内側)
       "U\t0\t256\t0\t0\t0\t1\t0.0\t0.0\t10\n";  // 収まらない(境界のすぐ外)
   const tpcgeo::Geometry geo = tpcgeo::parse(dat);
   tpcpevent::Filler filler(geo, tiny_windows(/*remove_pedestal=*/false));
 
-  load_frame(frame, 0, 0, 1, 1, {{0, 0, 3, 11}, {0, 1, 3, 22}, {0, 1, 4, 33}});
   PEventTPC ev;
   ev.Clear();
-  filler.add_frame(frame, ev);
+  filler.add_fragment(make_fragment(1, 0, 0, 1, {{0, 0, 3, 11}, {0, 1, 3, 22}, {0, 1, 4, 33}}),
+                      ev);
 
   CHECK_EQ(ev.GetChargeMap().size(), 1);
   CHECK_D(charge_at(ev, 0, 0, 255, 3), 11.0);
@@ -419,14 +396,14 @@ void test_strip_number_beyond_array_is_dropped(GET::GDataFrame& frame) {
 // ---------------------------------------------------------------------------
 // 7. ジオメトリに無い (cobo,asad) のフレームは丸ごと捨てて数える
 // ---------------------------------------------------------------------------
-void test_frame_outside_geometry(GET::GDataFrame& frame) {
+void test_frame_outside_geometry() {
   const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);  // cobo 0 / asad 0 のみ
   tpcpevent::Filler filler(geo, tiny_windows(/*remove_pedestal=*/false));
 
-  load_frame(frame, 0, 3, 1, 1, {{0, 0, 3, 40}});  // asad=3 は .dat に無い
   PEventTPC ev;
   ev.Clear();
-  filler.add_frame(frame, ev);
+  // asad=3 は .dat に無い
+  filler.add_fragment(make_fragment(1, 0, 3, 1, {{0, 0, 3, 40}}), ev);
 
   CHECK_EQ(ev.GetChargeMap().size(), 0);
   CHECK_EQ(filler.frames_outside_geometry(), 1);
@@ -555,7 +532,6 @@ void test_recorder_writes_tpcdata_tree() {
   {
     rootsink::RecorderConfig cfg;
     cfg.output_root = dir;
-    cfg.format = rootsink::OutputFormat::PEvent;
     cfg.geometry = &geo;
     cfg.fill = tiny_windows(/*remove_pedestal=*/true);
     rootsink::Recorder rec(cfg);
@@ -584,7 +560,7 @@ void test_recorder_writes_tpcdata_tree() {
     CHECK_EQ(rec.duplicate_event_ids(), 1);
     CHECK(rec.fatal_reason() == nullptr);
     rec.close_run(7, 0);
-  }  // ここで Recorder(と内部の GDataFrame)を畳んでから読み戻す
+  }  // ここで Recorder を畳んでから読み戻す
 
   const std::string path = dir + "/run0007/run0007.root";
   CHECK(rootsink::path_exists(path));
@@ -660,9 +636,6 @@ void test_recorder_writes_tpcdata_tree() {
   remove_tree(dir);
 }
 
-// gdataframe モード(テスト専用の旧出力)が残っていること —— §12-3 の旧オラクル回帰は
-// これに乗っている。中身の全値照合は test_recorder.cxx の担当なので、ここでは
-// **ツリー名が切り替わる**ことだけ見る。
 // --run-id(TODO/021): 指定時は EventInfo.runId がその値になる(実データ照合と
 // P4 controller 経路の受け口)。未指定(0)は壁時計由来 — こちらは
 // test_recorder_writes_tpcdata_tree が「今日の日付の桁」であることまでは縛らず、
@@ -675,7 +648,6 @@ void test_recorder_run_id_override() {
   {
     rootsink::RecorderConfig cfg;
     cfg.output_root = dir;
-    cfg.format = rootsink::OutputFormat::PEvent;
     cfg.geometry = &geo;
     cfg.fill = tiny_windows(/*remove_pedestal=*/false);
     cfg.run_id_override = kOverride;
@@ -699,20 +671,21 @@ void test_recorder_run_id_override() {
 
 // TODO/053: **1 イベント書く毎にメモリが増え続けない**。
 //
-// 実欠陥(031 soak が捕獲、053-A で計測特定): `GDataFrame::Clear()` が呼ぶ
-// `TClonesArray::Clear()` は**デストラクタを呼ばない**。次フレームの `AddChannel()` は
-// 同じスロットへ placement new するので、`GDataChannel` が所有する `TRefArray fSamples`
-// の内部配列が毎フレーム迷子になる —— 実機 mini(272 ch × 512 サンプル)で
-// **0.55 MB/イベント**の純増。Recorder が `Delete()` してから `Clear()` することで解く。
+// 元の実欠陥(031 soak が捕獲、053-A で計測特定)は GDataFrame 中間表現の側にあった:
+// `GDataFrame::Clear()` が呼ぶ `TClonesArray::Clear()` はデストラクタを呼ばず、次フレームの
+// `AddChannel()` が同じスロットへ placement new するので、`GDataChannel` が所有する
+// `TRefArray fSamples` の内部配列が毎フレーム迷子になっていた(実機 mini で 0.55 MB/event)。
+// **054 で GDataFrame 中間表現ごと撤去した**ので原因クラス自体が消えたが、この試験は
+// 「Filler の作業マス + ROOT のバスケットが per-event に伸びない」ことの回帰として残す。
 //
 // 判定は `getrusage` の**ピーク RSS**(高々増える一方の値)。実機と同じ 139,264 items の
 // フレームを流し、ウォームアップ後の増分を見る:
-//   * 欠陥あり = 200 イベント × 0.55 MB = **110 MiB 増**(実測 +109〜115 MiB)
-//   * 修正後   = ROOT のバスケット等だけ = **数 MiB**(実測 +0〜4 MiB)
+//   * 旧欠陥あり = 200 イベント × 0.55 MB = **110 MiB 増**(実測 +109〜115 MiB)
+//   * 撤去後     = ROOT のバスケット等だけ = **数 MiB**(実測 +0〜4 MiB)
 // しきい値 32 MiB はこの 2 群のちょうど中間より低い側に置いてある(片側 3 倍以上の余裕)。
 //
 // ジオメトリは reduced フィクスチャ(strip が数本だけ)—— 出力を小さく保ちつつ
-// `build_frame` は実機と同じ全チャンネル分を回す(漏れは build_frame 側にある)。
+// Filler は実機と同じ全チャンネル分を回す。
 long peak_rss_kib() {
   struct rusage ru;
   if (::getrusage(RUSAGE_SELF, &ru) != 0) return 0;
@@ -744,7 +717,6 @@ void test_frame_buffers_do_not_grow_per_event() {
 
   rootsink::RecorderConfig cfg;
   cfg.output_root = dir;
-  cfg.format = rootsink::OutputFormat::PEvent;
   cfg.geometry = &geo;
   cfg.fill = tiny_windows(/*remove_pedestal=*/true);
   rootsink::Recorder rec(cfg);
@@ -777,34 +749,6 @@ void test_frame_buffers_do_not_grow_per_event() {
   }
   CHECK(growth_kib <= kMaxGrowthKib);
   rec.close_run(53, 0);
-}
-
-void test_recorder_gdataframe_mode_still_writes_old_tree() {
-  const std::string dir = scratch_dir("gdf");
-  {
-    rootsink::RecorderConfig cfg;
-    cfg.output_root = dir;
-    cfg.format = rootsink::OutputFormat::GDataFrame;
-    rootsink::Recorder rec(cfg);
-    rootsink::BuiltEvent ev;
-    ev.run_number = 8;
-    ev.event_idx = 1;
-    ev.fragments.push_back(make_fragment(1, 0, 0, 5, {{0, 0, 3, 40}, {0, 1, 3, 2}}));
-    rec.write(ev, 0);
-    CHECK_EQ(rec.entries_written(), 1);
-    rec.close_run(8, 0);
-  }
-  const std::string path = dir + "/run0008/run0008.root";
-  CHECK(rootsink::path_exists(path));
-  TFile* f = TFile::Open(path.c_str(), "READ");
-  CHECK(f != nullptr && !f->IsZombie());
-  if (f != nullptr && !f->IsZombie()) {
-    CHECK(f->Get("tree") != nullptr);
-    CHECK(f->Get("TPCData") == nullptr);
-    f->Close();
-  }
-  delete f;
-  remove_tree(dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -880,24 +824,18 @@ void test_real_pevent_structure() {
 int main() {
   gROOT->SetBatch(kTRUE);
 
-  // **GDataFrame は同時に 1 個だけ**(ヘッダ冒頭の地雷)。充填テストはこの scope で
-  // 済ませ、Recorder(内部で 1 個持つ)のテストはこの後に回す。
-  {
-    GET::GDataFrame frame;
-    test_fill_without_pedestal(frame);
-    test_fill_with_pedestal(frame);
-    test_pedestal_is_reset_per_frame(frame);
-    test_default_signal_window_bounds(frame);
-    test_same_strip_accumulates(frame);
-    test_strip_number_beyond_array_is_dropped(frame);
-    test_frame_outside_geometry(frame);
-  }
+  test_fill_without_pedestal();
+  test_fill_with_pedestal();
+  test_pedestal_is_reset_per_frame();
+  test_default_signal_window_bounds();
+  test_same_strip_accumulates();
+  test_strip_number_beyond_array_is_dropped();
+  test_frame_outside_geometry();
   test_run_id_from_tm();
   test_fill_config_validation();
   test_recorder_writes_tpcdata_tree();
   test_recorder_run_id_override();
   test_frame_buffers_do_not_grow_per_event();
-  test_recorder_gdataframe_mode_still_writes_old_tree();
   test_real_pevent_structure();
 
   return tpccheck::report("test_pevent");

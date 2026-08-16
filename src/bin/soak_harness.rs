@@ -1789,11 +1789,25 @@ fn mean_window(x_s: &[f64], y: &[f64], from: f64, to: f64) -> f64 {
     }
 }
 
+/// **絶対値フロア**(TODO/053 未決④ → 054 で実装)。上昇幅がこれ未満なら合格扱いにする。
+///
+/// 相対 5% だけで判定すると、**もともと小さいプロセス**(graw_replay の数十 MiB、
+/// controller や monitor の 30〜60 MiB)では数 MiB のアロケータの揺れ・ページの遅延
+/// コミットが 5% を超えて「上昇トレンド」に見える。リークとして意味を持つのは
+/// 「長時間で効いてくる量」なので、そこに床を敷く。
+///
+/// 32 MiB の根拠: 053 が捕獲した実欠陥は **0.55 MB/event** = 100 Hz で 3.3 GiB/min
+/// (12 h soak なら TiB 級)。一方 031 の合格走行(8.4 h)の実測増分は
+/// **後半 4.2 h で +56 KiB**。両群は 3 桁以上離れているので、その間のどこに床を置いても
+/// 判定は変わらない。test_pevent の per-event メモリ試験と同じ 32 MiB に揃えてある。
+const RSS_ABSOLUTE_FLOOR_KIB: f64 = 32.0 * 1024.0;
+
 /// SPEC §12-5 v1.15 の RSS 単調性判定。
 ///
 /// 「走行後半の半分」で **後半の最初の窓の平均 ×1.05 ≥ 最後の窓の平均** を要求する
 /// (v1.11 の「後半 12 h の最終 1 h 平均 ≤ 後半開始 1 h 平均 +5%」を、走行長 H に対して
 /// 後半 = [H/2, H]、窓幅 = H/12 と一般化したもの。12 h 走なら窓 = 1 h で原式に一致する)。
+/// **加えて**、上昇幅が `RSS_ABSOLUTE_FLOOR_KIB` 未満なら合格とする(054)。
 struct RssVerdict {
     process: String,
     first_window: f64,
@@ -1819,7 +1833,8 @@ fn rss_verdicts(
             let first_window = mean_window(&x, &y, half, half + window);
             let last_window = mean_window(&x, &y, duration_s - window, f64::INFINITY);
             let ok = !(first_window.is_finite() && last_window.is_finite())
-                || last_window <= first_window * 1.05;
+                || last_window <= first_window * 1.05
+                || last_window - first_window < RSS_ABSOLUTE_FLOOR_KIB;
             RssVerdict {
                 process: name.clone(),
                 first_window,
@@ -1918,7 +1933,8 @@ fn report(
     let _ = writeln!(
         out,
         "\n-- RSS 単調性(SPEC §12-5 v1.15: 後半 [H/2,H] の先頭窓 ×1.05 ≥ 末尾窓、窓 = H/12。\
-         H = 実測 {span:.0} s)--"
+         H = 実測 {span:.0} s。上昇幅 < {floor:.0} MiB は合格扱い = 054)--",
+        floor = RSS_ABSOLUTE_FLOOR_KIB / 1024.0
     );
     for v in rss_verdicts(names, &samples, &elapsed, span) {
         let _ = writeln!(
@@ -1951,4 +1967,84 @@ fn report(
 
     let _ = writeln!(out, "\n-- root_sink 終了 JSON --\n{}", shutdown.sink_counts);
     out
+}
+
+// ---------------------------------------------------------------------------
+// テスト(RSS 単調性判定のみ。走行そのものは実測が試験)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `elapsed` 秒に対して `rss_kib_<name>` が `f(t)` の CSV サンプル列を作る。
+    fn samples_of(name: &str, elapsed: &[f64], values: &[f64]) -> (Vec<Sample>, Vec<f64>) {
+        assert_eq!(elapsed.len(), values.len());
+        let column = format!("rss_kib_{name}");
+        let samples = values
+            .iter()
+            .map(|v| Sample::from([(column.clone(), *v)]))
+            .collect();
+        (samples, elapsed.to_vec())
+    }
+
+    /// 60 点 = 30 分走行を 30 s 間隔でサンプリングした形(実際の soak と同じ密度)。
+    fn thirty_minutes() -> Vec<f64> {
+        (0..60).map(|i| i as f64 * 30.0).collect()
+    }
+
+    /// 平坦なら合格(既存の相対判定がそのまま効く)。
+    #[test]
+    fn flat_rss_passes() {
+        let x = thirty_minutes();
+        let y: Vec<f64> = x.iter().map(|_| 500_000.0).collect();
+        let (samples, elapsed) = samples_of("sink", &x, &y);
+        let v = rss_verdicts(&["sink".into()], &samples, &elapsed, 1770.0);
+        assert!(v[0].ok, "平坦な RSS が落ちてはいけない");
+    }
+
+    /// 相対 5% は超えるが**上昇幅が 32 MiB 未満**なら合格(054 の絶対値フロア)。
+    ///
+    /// 手計算の出典: 小さいプロセスの想定として後半先頭窓 60,000 KiB(≈ 58.6 MiB)。
+    /// 末尾窓を 70,000 KiB(≈ 68.4 MiB)にすると
+    ///   相対: 70,000 > 60,000 × 1.05 = 63,000 → **旧判定は不合格**
+    ///   絶対: 70,000 − 60,000 = 10,000 KiB = 9.8 MiB < 32 MiB → **フロアで合格**
+    #[test]
+    fn small_absolute_rise_passes_by_the_floor() {
+        let x = thirty_minutes();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|t| if *t < 1200.0 { 60_000.0 } else { 70_000.0 })
+            .collect();
+        let (samples, elapsed) = samples_of("monitor", &x, &y);
+        let v = &rss_verdicts(&["monitor".into()], &samples, &elapsed, 1770.0)[0];
+        assert!(
+            v.last_window > v.first_window * 1.05,
+            "この入力は相対判定では落ちるはず(first={} last={})",
+            v.first_window,
+            v.last_window
+        );
+        assert!(
+            v.ok,
+            "上昇幅 {} KiB は 32 MiB 未満なので合格扱い",
+            v.last_window - v.first_window
+        );
+    }
+
+    /// 32 MiB を超える上昇は従来どおり不合格(フロアが実欠陥を隠さないこと)。
+    ///
+    /// 手計算の出典: 053 が捕獲した実欠陥は 0.55 MB/event。ここでは後半先頭窓
+    /// 600,000 KiB → 末尾窓 700,000 KiB(+100,000 KiB = 97.7 MiB > 32 MiB、
+    /// かつ 700,000 > 600,000 × 1.05 = 630,000)。
+    #[test]
+    fn large_rise_still_fails() {
+        let x = thirty_minutes();
+        let y: Vec<f64> = x
+            .iter()
+            .map(|t| if *t < 1200.0 { 600_000.0 } else { 700_000.0 })
+            .collect();
+        let (samples, elapsed) = samples_of("sink", &x, &y);
+        let v = &rss_verdicts(&["sink".into()], &samples, &elapsed, 1770.0);
+        assert!(!v[0].ok, "97.7 MiB の上昇は見逃してはいけない");
+    }
 }

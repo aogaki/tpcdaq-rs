@@ -1,5 +1,5 @@
 // root_sink.cxx — root-sink 取り込み骨格(TODO/008)+ イベントビルダ(TODO/010)
-//                 + GDataFrame TTree 書き出し(TODO/011)。
+//                 + PEventTPC TTree 書き出し(TODO/011 → 020 → 054)。
 //
 // 配線(SPEC §6.2 のロスレス化チェックリスト 1–3・8 の実装点):
 //
@@ -235,7 +235,7 @@ void print_counts_json(const Counts& c, const char* fatal) {
   rootsink::Recorder* rec = g_recorder.load(std::memory_order_acquire);
   const uint64_t entries_written = (rec != nullptr) ? rec->entries_written() : 0;
   const uint64_t items_out_of_range = (rec != nullptr) ? rec->items_out_of_range() : 0;
-  // PEventTPC 出力の可視化カウンタ(TODO/020)。GDataFrame モードでは 0 のまま。
+  // PEventTPC 出力の可視化カウンタ(TODO/020)。
   const uint64_t duplicate_event_ids = (rec != nullptr) ? rec->duplicate_event_ids() : 0;
   const uint64_t channels_without_strip = (rec != nullptr) ? rec->channels_without_strip() : 0;
   const uint64_t charge_keys_out_of_range =
@@ -312,10 +312,12 @@ struct Options {
   std::string output_root = ".";
   uint64_t max_root_bytes = rootsink::kDefaultMaxRootBytes;
   int root_compression = rootsink::kDefaultCompression;  // TODO/014
+  // --root-imt(TODO/054-B): ROOT のバスケット圧縮を並列化するスレッド数。
+  // 0 = 無効。既定 4 は隔離プローブで頭打ちになった本数(実測 -6.3% ms/event)。
+  int root_imt = rootsink::kDefaultImtThreads;
   bool no_root = false;
-  // PEventTPC 出力(TODO/020、SPEC §6.4 v1.8)
-  rootsink::OutputFormat format = rootsink::OutputFormat::PEvent;
-  std::string geometry;  // --geometry(PEvent モードでは必須)
+  // PEventTPC 出力(TODO/020、SPEC §6.4 v1.8 / v1.17)
+  std::string geometry;  // --geometry(TTree を書くなら必須)
   tpcpevent::FillConfig fill;
   // --run-id(TODO/021): EventInfo.runId の上書き。0 = run を開いた時刻から生成(既定)。
   // 実データ照合(同 run の grawToEventTPC 出力と比較)と、P4 で controller が正式な
@@ -331,8 +333,9 @@ void usage(const char* argv0) {
   std::printf(
       "usage: %s [--bind ENDPOINT] [--rcvhwm N] [--queue N] [--throttle-ms N]\n"
       "       [--expect COBO:ASAD[,COBO:ASAD...]] [--build-timeout-ms N]\n"
-      "       [--output-root DIR] [--max-root-bytes N] [--root-compression N] [--no-root]\n"
-      "       [--format pevent|gdataframe] [--geometry FILE.dat] [--pedestal-remove 0|1]\n"
+      "       [--output-root DIR] [--max-root-bytes N] [--root-compression N]\n"
+      "       [--root-imt N] [--no-root]\n"
+      "       [--geometry FILE.dat] [--pedestal-remove 0|1]\n"
       "       [--min-pedestal-cell N] [--max-pedestal-cell N]\n"
       "       [--min-signal-cell N] [--max-signal-cell N]\n"
       "       [--pub ENDPOINT] [--snapshot-hz N] [--event-publish-hz N]\n"
@@ -354,12 +357,10 @@ void usage(const char* argv0) {
       "                    ROOT TFile compression settings, non-negative\n"
       "                    (default %d = ZLIB-1, readable by all ROOT eras;\n"
       "                    e.g. 505 = ZSTD-5, requires ROOT 6.20+)\n"
+      "  --root-imt N      compress ROOT baskets with N threads, 0 = off\n"
+      "                    (default %d; measured -6%% ms/event, saturates at 4)\n"
       "  --no-root         do not write a TTree, only count (fast path for tests)\n"
-      "  --format FORMAT   pevent (default) writes PEventTPC events the way TPCReco's\n"
-      "                    grawToEventTPC does (tree TPCData, one entry per built\n"
-      "                    event); gdataframe writes the pre-v1.8 GDataFrame tree\n"
-      "                    (one entry per fragment, kept for regression tests only)\n"
-      "  --geometry FILE   TPCReco geometry .dat, REQUIRED for --format pevent\n"
+      "  --geometry FILE   TPCReco geometry .dat, REQUIRED unless --no-root\n"
       "  --pedestal-remove 0|1\n"
       "                    subtract the per-event pedestal (default 1)\n"
       "  --min-pedestal-cell N / --max-pedestal-cell N\n"
@@ -380,7 +381,8 @@ void usage(const char* argv0) {
       "name (an unfinalized run must not masquerade as a complete one).\n",
       argv0, kDefaultBind, kDefaultRcvHwm, kDefaultQueue,
       rootsink::kDefaultBuildTimeoutMs, rootsink::kDefaultMaxRootBytes,
-      rootsink::kDefaultCompression, tpcpevent::kDefaultMinPedestalCell,
+      rootsink::kDefaultCompression, rootsink::kDefaultImtThreads,
+      tpcpevent::kDefaultMinPedestalCell,
       tpcpevent::kDefaultMaxPedestalCell, tpcpevent::kDefaultMinSignalCell,
       tpcpevent::kDefaultMaxSignalCell, kDefaultPubBind, kDefaultSnapshotHz,
       kDefaultEventPublishHz);
@@ -478,19 +480,10 @@ Options parse_args(int argc, char** argv) {
     } else if (a == "--root-compression" && has_value) {
       opt.root_compression =
           static_cast<int>(parse_nonnegative("--root-compression", argv[++i]));
+    } else if (a == "--root-imt" && has_value) {
+      opt.root_imt = static_cast<int>(parse_nonnegative("--root-imt", argv[++i]));
     } else if (a == "--no-root") {
       opt.no_root = true;
-    } else if (a == "--format" && has_value) {
-      const std::string v = argv[++i];
-      if (v == "pevent") {
-        opt.format = rootsink::OutputFormat::PEvent;
-      } else if (v == "gdataframe") {
-        opt.format = rootsink::OutputFormat::GDataFrame;
-      } else {
-        std::fprintf(stderr, "root_sink: --format expects pevent|gdataframe, got '%s'\n",
-                     v.c_str());
-        std::exit(kExitUsage);
-      }
     } else if (a == "--geometry" && has_value) {
       opt.geometry = argv[++i];
     } else if (a == "--pedestal-remove" && has_value) {
@@ -529,9 +522,9 @@ Options parse_args(int argc, char** argv) {
     }
   }
   // 半端な設定で走らない(SPEC §3.2「設定パースエラーは起動失敗」)。
-  if (!opt.no_root && opt.format == rootsink::OutputFormat::PEvent && opt.geometry.empty()) {
+  if (!opt.no_root && opt.geometry.empty()) {
     std::fprintf(stderr,
-                 "root_sink: --format pevent needs --geometry FILE.dat "
+                 "root_sink: the PEventTPC TTree needs --geometry FILE.dat "
                  "(strip projection is impossible without it)\n");
     std::exit(kExitUsage);
   }
@@ -732,18 +725,9 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
                          late->fragment.run_number, late->fragment.event_idx,
                          late->fragment.cobo, late->fragment.asad, late->emitted_upto);
           }
-          // **PEventTPC(既定)では TTree に書かない**(SPEC §6.3 v1.8): eventId は
-          // 一回きりで書き切る形式なので、emit 済みイベントへの遅延分は
-          // late_fragments として数えるだけ(データ自体は生 graw に必ず在る)。
-          // GDataFrame モード(テスト専用)は従来どおり 1 フラグメント = 1 エントリで追記。
-          if (rec != nullptr && opt.format == rootsink::OutputFormat::GDataFrame) {
-            RecordItem item;
-            item.kind = RecordItem::Kind::Event;
-            item.event.run_number = late->fragment.run_number;
-            item.event.event_idx = late->fragment.event_idx;
-            item.event.fragments.push_back(std::move(late->fragment));
-            rec->push(std::move(item));
-          }
+          // **TTree には書かない**(SPEC §6.3 v1.8): eventId は一回きりで書き切る
+          // 形式なので、emit 済みイベントへの遅延分は late_fragments として数える
+          // だけ(データ自体は生 graw に必ず在る)。
         }
         c.late_fragments = eb.late_fragments();
       }
@@ -1007,11 +991,17 @@ int main(int argc, char** argv) {
   if (!opt.no_root) {
     gROOT->SetBatch(kTRUE);
     ROOT::EnableThreadSafety();
+    // TODO/054-B: バスケット圧縮の並列化。**内容は変わらない**(§6.4 v1.17 の受け入れは
+    // PEventTPC の内容一致であって run.root のバイト一致ではない)。効きは限定的 ——
+    // splitlevel 2 では payload が `myChargeMap` 1 ブランチに集まるので、ブランチ間
+    // 並列化の余地が小さい(隔離プローブ実測: 17.13 → 16.06 ms/event、4 スレッドで頭打ち)。
+    if (opt.root_imt > 0) {
+      ROOT::EnableImplicitMT(static_cast<unsigned>(opt.root_imt));
+    }
     rootsink::RecorderConfig rcfg;
     rcfg.output_root = opt.output_root;
     rcfg.max_root_bytes = opt.max_root_bytes;
     rcfg.compression = opt.root_compression;
-    rcfg.format = opt.format;
     rcfg.geometry = geometry.get();
     rcfg.fill = opt.fill;
     rcfg.run_id_override = opt.run_id;
@@ -1058,21 +1048,15 @@ int main(int argc, char** argv) {
                opt.bind.c_str(), opt.rcvhwm, opt.queue, opt.throttle_ms);
   if (opt.no_root) {
     std::fprintf(stderr, "root_sink: --no-root: counting only, no TTree is written\n");
-  } else if (opt.format == rootsink::OutputFormat::PEvent) {
-    std::fprintf(stderr,
-                 "root_sink: writing PEventTPC TTree \"%s\" under %s (max-root-bytes=%" PRIu64
-                 " compression=%d pedestal_remove=%d pedestal_cells=%d..%d "
-                 "signal_cells=%d..%d)\n",
-                 rootsink::kPEventTreeName, opt.output_root.c_str(), opt.max_root_bytes,
-                 opt.root_compression, opt.fill.remove_pedestal ? 1 : 0,
-                 opt.fill.min_pedestal_cell, opt.fill.max_pedestal_cell,
-                 opt.fill.min_signal_cell, opt.fill.max_signal_cell);
   } else {
     std::fprintf(stderr,
-                 "root_sink: writing GDataFrame TTree \"%s\" under %s (max-root-bytes=%" PRIu64
-                 " compression=%d)\n",
-                 rootsink::kTreeName, opt.output_root.c_str(), opt.max_root_bytes,
-                 opt.root_compression);
+                 "root_sink: writing PEventTPC TTree \"%s\" under %s (max-root-bytes=%" PRIu64
+                 " compression=%d imt=%d pedestal_remove=%d pedestal_cells=%d..%d "
+                 "signal_cells=%d..%d)\n",
+                 rootsink::kPEventTreeName, opt.output_root.c_str(), opt.max_root_bytes,
+                 opt.root_compression, opt.root_imt, opt.fill.remove_pedestal ? 1 : 0,
+                 opt.fill.min_pedestal_cell, opt.fill.max_pedestal_cell,
+                 opt.fill.min_signal_cell, opt.fill.max_signal_cell);
   }
   // モニタ PUB の素性(TODO/022)。何を配るのかを黙って決めない —— CLAUDE.md。
   std::fprintf(stderr,

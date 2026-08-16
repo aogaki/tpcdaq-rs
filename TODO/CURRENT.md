@@ -1,6 +1,7 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-08-16(031 一晩 soak 合格 → 完了。残チケットは 054 のみ。前波は
+**最終更新: 2026-08-16(031 soak 合格 + 054 GDataFrame 撤去/性能 完了。
+次の入口 = 055 並列化のユーザー裁定。前波は
 [archive/CURRENT_2026-08-14_p2_p3wave.md](archive/CURRENT_2026-08-14_p2_p3wave.md))**
 
 ## いま(1 分で読める要約)
@@ -13,9 +14,12 @@
   Angular で 9 ヒスト + イベント表示 + 波形 + ログブック。Run 制御は完成形レイアウト + 全 disabled)。
 - **run 制御の実機ハードニング完了**: **032**(receiver 単一リンク + silent stall の可視化)/
   **034**(連続 run)/ **036**(実 ECC の `reset` = `EV_UNDO` への対応 + テストダブルの実機準拠化)。
-- **リポ全体ゲート: 432 passed / 0 failed / 1 ignored**。C++ 側 `test_ecc_bridge 457`
-  (パリティ表 +257)/ `ecc_e2e 52` / root_sink 各テスト green + **vcobo 155+**(92+57+6)。
-  clippy -D warnings クリーン。UI 適合 127 tests green、**dist 4.9 MB**(旧 7.8)。
+- **リポ全体ゲート: cargo 450 passed / 0 failed / 1 ignored**。C++ 側 `test_ecc_bridge 457`
+  (パリティ表 +257)/ `ecc_e2e 52` / root_sink 8 スイート green(recorder 101 / pevent 99 —
+  GDataFrame 撤去後)+ **vcobo 155+**(92+57+6)。clippy -D warnings クリーン。
+  UI 適合 171 tests green、**dist 4.9 MB**(旧 7.8)。
+- **root-sink は PEventTPC 1 形式のみ(v1.17)**: GDataFrame・third_party/get/ 全撤去(054)。
+  実稼働 41.5 events/s(mini)。**100 Hz は単スレッドでは届かない → 055 裁定待ち**。
 - **run/stop 所要 1.3 s**(033-E 静止検出。旧 5.6 s)。run/start ≈ 7 s(実 ECC 支配)。
   **decode 26% 短縮**(045)。production の panic 起点ゼロ(046)。
 - **仮想 zCoBo スタック稼働**(2026-08-15): 実 ECC(実験と同一版)+ `tools/vcobo/` で
@@ -51,13 +55,16 @@
    全 8 プロセス OK**(053 リーク修正の長時間実証: 後半 4.2 h で +56 KiB)。610,200 events /
    158 GiB。§12-5 フルレート持続 + **§12-6(672 Mbps burst)は未達 → 054 に移管**
    (原因 = root-sink 天井そのもの)。[archive/031](archive/031_load_harness.md) 結果節が正。
-6. **[054_root_sink_throughput.md](054_root_sink_throughput.md)** — READY・v2 改訂済み
-   (soak 終了済みなので発注可。**唯一の残チケット**。§12-6 再実測を受け入れに追加済み)。
-   **ユーザー裁定(2026-08-15):
-   GDataFrame は graw2root のもので全く不要 → SPEC v1.17 で全撤去を確定**(v1.8 の削除条件 =
-   PEventTPC オラクル成立は 021 で満了済み)。攻め手 = C) GDataFrame 撤去(15% +
-   third_party 縮小)→ A) map hint(29%)→ B) ImplicitMT(25%)。受け入れは 021 の
-   内容一致オラクル。100 Hz 未達ならその実測が並列化裁定の材料。
+6. ~~054~~ **完了(2026-08-16)— GDataFrame 全撤去 + IMT 採用、100 Hz は単スレッドでは
+   届かないことを実測確定**: 隔離 20.3 → 16.1 ms/event(−21%)、実稼働 32 → **41.5 events/s**
+   (+29%)。third_party/get/ ごと削除、テスト −1,276 行、021 オラクル
+   `3852 events, 0 differences` 無変更 green。A(map hint)は実測して棄却(libc++ で悪化 +
+   TPCReco 無改変では口が無い)。80 Mbps × 30 分 soak 合格。**ELITPC 実測 ≈10 /s = 10× 不足**。
+   [archive/054](archive/054_root_sink_throughput.md) 結果節が正。
+7. **[055_recorder_parallel_ruling.md](055_recorder_parallel_ruling.md) — DRAFT・
+   ユーザー裁定待ち(次の入口)**: ①ELI-NP 前に並列化するか(凍結時期)②並列化の形
+   (worker 毎 TTree = P1 / fill のみ並列 = P2)③保留②(EOS 予算)の扱い。
+   §12-6 再実測もここに移管。
 6. **デモ改良トラック(継続、テスト計画より先 — 2026-08-14 ユーザー)**: 当面はデモの
    完成度を延々と上げる。目玉候補 = **graw ファイルをデータソースとする仮想 zCoBo**
    (getHwServer ではなく**板ごと偽る** — 2026-08-14 ユーザー用語確定)。制御面
@@ -141,11 +148,13 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 ## 保留・確認事項
 
-- **SPEC 検討 2 件(053 の実測起因 — 次の Fable セッション or 054 後に裁定)**:
+- **SPEC 検討 2 件(053 の実測起因)**:
   ①有界キューの単位が「メッセージ個数」(decoder 8 MiB バッチ × queue/rcvhwm 1000 =
   最悪 8.9 GB×2 系統が正当な在庫。ELITPC 4 AsAd で効く — バイト建て上限 or 既定値変更の裁定)
   ②過負荷でバックログを抱えた stop は EOS 予算 5 s を超え `error:eos-timeout` になる
-  (§9.2 の意味論としてそれで正しいか)。
+  (§9.2 の意味論としてそれで正しいか)。**054 実測で②が定量化**: 224 Mbps では stop 時
+  在庫 ≈8,000 イベント → 吐き出し 100 s 超。②の裁定は **055 の並列化裁定と一体で**
+  (並列化で在庫が溜まらなくなれば消える可能性)。
 - **実 ECC の例外取りこぼし 2 箇所(043 発見 — 上流仕様なので改変しない。運用留意)**:
   `GetEccImpl::breakup` は失敗時 Ice **UnknownException**(SM::Exception を catch しない)/
   `onUnPrepare`(reset の Prepared→Described)は失敗時 dhsm が **halt** = 我々の map では
@@ -170,9 +179,9 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 ## 完了ユニット台帳
 
-000〜053 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
-すべて各 md の「結果」節が正。**残チケットは 054 のみ**)。
-直近(2026-08-16): **031** 一晩 soak 合格で完了。
+000〜054 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
+すべて各 md の「結果」節が正。**残は 055(DRAFT・裁定待ち)のみ**)。
+直近(2026-08-16): **031** 一晩 soak 合格 / **054** GDataFrame 全撤去 + IMT(+29%)。
 前日(2026-08-15): **038〜042** 仮想 zCoBo トラック / **043** ecc_error 可視化 /
 **033** 異常系セマンティクス(quiesce 停止 1.3 s 化)/ **044〜049 リファクタ窓** /
 **050〜052 P4**(Run 制御 UI 実配線 + 表示強化 + SPA fallback)/ **053** RSS リーク根治。
