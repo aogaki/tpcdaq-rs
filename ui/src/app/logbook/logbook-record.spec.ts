@@ -84,7 +84,7 @@ describe('run_start(SPEC §9.2)', () => {
   it('run 番号を見出しにし、operator / config / geometry を並べる', () => {
     const entry = parsed(RUN_START);
     expect(entry.kind).toBe('run_start');
-    expect(entry.title).toBe('run 57 開始');
+    expect(entry.title).toBe('run 57 started');
     expect(entry.severity).toBe('normal');
     expect(field(entry, 'operator')).toBe('aogaki');
     expect(field(entry, 'config')).toBe('default');
@@ -128,7 +128,7 @@ describe('run_stop(SPEC §9.2 — ok=false を目立たせる / counters の nul
   it('ok=true は通常表示', () => {
     const entry = parsed(RUN_STOP);
     expect(entry.kind).toBe('run_stop');
-    expect(entry.title).toBe('run 58 停止(正常)');
+    expect(entry.title).toBe('run 58 stopped (ok)');
     expect(entry.severity).toBe('normal');
     expect(field(entry, 'reason')).toBe('normal');
     expect(field(entry, 'duration')).toBe('12.5 s');
@@ -141,7 +141,7 @@ describe('run_stop(SPEC §9.2 — ok=false を目立たせる / counters の nul
       reason: 'error: eos timeout',
     };
     const entry = parsed(raw);
-    expect(entry.title).toBe('run 58 停止(異常)');
+    expect(entry.title).toBe('run 58 stopped (fault)');
     expect(entry.severity).toBe('error');
     expect(field(entry, 'reason')).toBe('error: eos timeout');
   });
@@ -150,9 +150,9 @@ describe('run_stop(SPEC §9.2 — ok=false を目立たせる / counters の nul
     // 出典: src/logbook.rs の golden。events_built/incomplete/late_fragments が null、
     // overflow_frames=3 / malformed=4、frames は cobo 0=3852 / 1=3849。
     expect(detail(parsed(RUN_STOP), 'counters')).toEqual([
-      'events_built = 取得不能 (null)',
-      'events_incomplete = 取得不能 (null)',
-      'late_fragments = 取得不能 (null)',
+      'events_built = unavailable (null)',
+      'events_incomplete = unavailable (null)',
+      'late_fragments = unavailable (null)',
       'frames cobo 0 = 3,852',
       'frames cobo 1 = 3,849',
       'overflow_frames = 3',
@@ -204,7 +204,7 @@ describe('run_stop の forced_eos / eos_closed(SPEC §9.2 v1.12/v1.14、TODO/033
     };
     const entry = parsed(raw);
     expect(entry.severity).toBe('attention');
-    expect(field(entry, 'forced_eos')).toBe('false — stop 前にリンクが死んだ可能性があります');
+    expect(field(entry, 'forced_eos')).toBe('false — the link may have died before stop');
     expect(entry.fields.find((f) => f.label === 'eos_closed')).toBeUndefined();
   });
 
@@ -218,7 +218,9 @@ describe('run_stop の forced_eos / eos_closed(SPEC §9.2 v1.12/v1.14、TODO/033
     };
     const entry = parsed(raw);
     expect(entry.severity).toBe('error');
-    expect(field(entry, 'eos_closed')).toBe('false — EOS がチェーンを流れ切っていません(異常)');
+    expect(field(entry, 'eos_closed')).toBe(
+      'false — EOS did not travel through the whole chain (fault)',
+    );
     expect(entry.fields.find((f) => f.label === 'forced_eos')).toBeUndefined();
   });
 
@@ -232,8 +234,8 @@ describe('run_stop の forced_eos / eos_closed(SPEC §9.2 v1.12/v1.14、TODO/033
     };
     const entry = parsed(raw);
     expect(entry.severity).toBe('error');
-    expect(field(entry, 'eos_closed')).toContain('異常');
-    expect(field(entry, 'forced_eos')).toContain('リンクが死んだ');
+    expect(field(entry, 'eos_closed')).toContain('fault');
+    expect(field(entry, 'forced_eos')).toContain('link may have died');
   });
 });
 
@@ -241,10 +243,10 @@ describe('audit(SPEC §9.2)', () => {
   it('action を見出しにし、失敗は error として出す', () => {
     const entry = parsed(AUDIT);
     expect(entry.kind).toBe('audit');
-    expect(entry.title).toBe('監査 — run/start');
+    expect(entry.title).toBe('audit — run/start');
     expect(entry.severity).toBe('error');
     expect(field(entry, 'operator')).toBe('aogaki');
-    expect(field(entry, '結果')).toBe('失敗');
+    expect(field(entry, 'result')).toBe('failed');
     expect(entry.body).toBe('listen-before-start violated');
   });
 
@@ -252,7 +254,7 @@ describe('audit(SPEC §9.2)', () => {
     const raw = { ...(AUDIT as Record<string, unknown>), ok: true, error: null };
     const entry = parsed(raw);
     expect(entry.severity).toBe('normal');
-    expect(field(entry, '結果')).toBe('成功');
+    expect(field(entry, 'result')).toBe('ok');
     expect(entry.body).toBeNull();
   });
 
@@ -265,7 +267,7 @@ describe('comment(R11)', () => {
   it('author を見出し、text を本文にする', () => {
     const entry = parsed(COMMENT);
     expect(entry.kind).toBe('comment');
-    expect(entry.title).toBe('コメント — aogaki');
+    expect(entry.title).toBe('comment — aogaki');
     expect(entry.body).toBe('beam tuned, 4 Hz');
     expect(entry.severity).toBe('normal');
   });
@@ -302,7 +304,7 @@ describe('前方互換 — 未知の type(P6 の psu 詳細化に備える)', ()
     expect(entry.kind).toBe('unknown');
     expect(entry.type).toBe('psu_v2');
     expect(entry.severity).toBe('attention');
-    expect(entry.title).toBe('未知のレコード種別: psu_v2');
+    expect(entry.title).toBe('unknown record type: psu_v2');
     expect(detail(entry, 'raw JSON')).toEqual([JSON.stringify(raw)]);
     expect(entry.seq).toBe(10);
   });
@@ -310,7 +312,7 @@ describe('前方互換 — 未知の type(P6 の psu 詳細化に備える)', ()
   it('type が無い行も unknown 扱いで残す', () => {
     const entry = parsed({ ts: '2026-08-12T18:00:04.000+03:00', seq: 11, actor: 'x' });
     expect(entry.kind).toBe('unknown');
-    expect(entry.title).toBe('未知のレコード種別: (type なし)');
+    expect(entry.title).toBe('unknown record type: (no type)');
   });
 });
 

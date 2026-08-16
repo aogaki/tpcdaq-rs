@@ -102,7 +102,7 @@ function arr(raw: Raw, key: string): unknown[] {
 /** 数値なら 3 桁区切り、`null` なら「取得不能」(0 と混同しない — SPEC v1.10 §9.2)。 */
 function counterValue(value: unknown): string {
   if (typeof value === 'number' && Number.isFinite(value)) return formatInt(value);
-  return '取得不能 (null)';
+  return 'unavailable (null)';
 }
 
 /** `350.2` → `"350.2"` / `350.0` → `"350"`(余計な桁を足さない)。 */
@@ -171,7 +171,7 @@ function shapeRunStart(raw: Raw): Shaped {
   }
 
   return {
-    title: `run ${runLabel(raw)} 開始`,
+    title: `run ${runLabel(raw)} started`,
     severity: 'normal',
     body: comment && comment.length > 0 ? comment : null,
     fields: [
@@ -229,14 +229,14 @@ function shapeRunStop(raw: Raw): Shaped {
   if (eosClosed === false) {
     fields.push({
       label: 'eos_closed',
-      value: 'false — EOS がチェーンを流れ切っていません(異常)',
+      value: 'false — EOS did not travel through the whole chain (fault)',
     });
   }
   // forced_eos:false = 警告。すでに error なら格上げしない(error が上位)。
   if (forcedEos === false) {
     fields.push({
       label: 'forced_eos',
-      value: 'false — stop 前にリンクが死んだ可能性があります',
+      value: 'false — the link may have died before stop',
     });
   }
 
@@ -245,7 +245,7 @@ function shapeRunStop(raw: Raw): Shaped {
   else if (forcedEos === false && severity === 'normal') severity = 'attention';
 
   return {
-    title: `run ${runLabel(raw)} 停止(${ok ? '正常' : '異常'})`,
+    title: `run ${runLabel(raw)} stopped (${ok ? 'ok' : 'fault'})`,
     severity,
     body: null,
     fields,
@@ -278,12 +278,12 @@ function shapeAudit(raw: Raw): Shaped {
     details.push({ label: 'params', lines: [JSON.stringify(raw['params'])] });
   }
   return {
-    title: `監査 — ${str(raw, 'action') ?? '(action なし)'}`,
+    title: `audit — ${str(raw, 'action') ?? '(no action)'}`,
     severity: ok ? 'normal' : 'error',
     body: ok ? null : error,
     fields: [
       { label: 'operator', value: str(raw, 'operator') ?? '—' },
-      { label: '結果', value: ok ? '成功' : '失敗' },
+      { label: 'result', value: ok ? 'ok' : 'failed' },
     ],
     details,
   };
@@ -291,7 +291,7 @@ function shapeAudit(raw: Raw): Shaped {
 
 function shapeComment(raw: Raw): Shaped {
   return {
-    title: `コメント — ${str(raw, 'author') ?? '(author なし)'}`,
+    title: `comment — ${str(raw, 'author') ?? '(no author)'}`,
     severity: 'normal',
     body: str(raw, 'text'),
     fields: [],
@@ -319,7 +319,7 @@ function shapePsu(raw: Raw): Shaped {
 
 function shapeUnknown(raw: Raw, type: string | null): Shaped {
   return {
-    title: `未知のレコード種別: ${type ?? '(type なし)'}`,
+    title: `unknown record type: ${type ?? '(no type)'}`,
     severity: 'attention',
     body: null,
     fields: [],
@@ -373,7 +373,7 @@ export function parseLogbookEntry(raw: unknown): LogbookEntry | null {
     date,
     time,
     kind,
-    type: type ?? '(type なし)',
+    type: type ?? '(no type)',
     actor: str(raw, 'actor') ?? '—',
     title: shaped.title,
     severity: shaped.severity,

@@ -1,6 +1,6 @@
 <div class="monitor">
   <app-display-controls>
-    <!-- R9: イベント ID はタブに関係なく常時見えるところに置く。 -->
+    <!-- R9: keep the event ID visible at all times, whichever tab is open. -->
     <span class="event" [class.none]="!hasEvent()">{{ eventLabel() }}</span>
     @if (hasEvent()) {
       <span class="flag" [class.bad]="incomplete()">
@@ -13,10 +13,11 @@
     <mat-tab label="Histograms (9)">
       <ng-template matTabContent>
         <p class="hint">
-          1D(Charge / ChargeMax)の x 軸は monitor から届いた範囲のまま固定(オートレンジなし)——
-          飽和天井 4095 が常に見える(SPEC §5.2)。2D(StripTime)は
-          <strong>縦 = strip / 横 = time bucket</strong> で、run 積算の Σ ADC マップ(生
-          ADC・減算なし)。 ビン数・strip 数はメッセージ由来。
+          The x axis of the 1D panels (Charge / ChargeMax) stays at the range sent by monitor (no
+          autorange) — the saturation ceiling at 4095 is always in view (SPEC §5.2). The 2D panels
+          (StripTime) are <strong>strip vertically / time bucket horizontally</strong>, a
+          run-cumulative Σ ADC map (raw ADC, no subtraction). Bin and strip counts come from the
+          message.
         </p>
         @for (group of rows; track group.row.key) {
           <section class="row">
@@ -34,10 +35,11 @@
     <mat-tab label="Event display">
       <ng-template matTabContent>
         <p class="hint">
-          最新の built event(`0x02 Uvw`)を面毎に
-          <strong>縦 = strip / 横 = time bucket</strong> で表示。 値は
-          <strong>生 ADC − ベースライン</strong>(strip 毎に先頭 25 cell の平均。負値はそのまま)——
-          <strong>表示だけの補正</strong>で、保存データもワイヤ(生 ADC)も変えていない。
+          The latest built event (`0x02 Uvw`), one panel per plane, with
+          <strong>strip vertically / time bucket horizontally</strong>. Values are
+          <strong>raw ADC − baseline</strong> (mean of the first 25 cells of each strip; negative
+          values kept as they are) — a <strong>display-only correction</strong>: neither the
+          recorded data nor the wire (raw ADC) is changed.
         </p>
         <section class="row">
           <div class="grid">

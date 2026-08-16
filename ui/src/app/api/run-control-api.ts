@@ -102,7 +102,7 @@ export function buildActionRequest(
   }
 
   if (token === null || token === '') {
-    return { ok: false, error: '操作権の token がありません(先に Acquire してください)。' };
+    return { ok: false, error: 'No control token (press Acquire first).' };
   }
 
   if (action.endpoint === '/api/run/start') {
@@ -113,7 +113,7 @@ export function buildActionRequest(
   if (action.endpoint === '/api/run/next') {
     const nextRun = parsePositiveInt(input.nextRun);
     if (nextRun === null) {
-      return { ok: false, error: `next_run は正の整数だけです(入力: "${input.nextRun}")。` };
+      return { ok: false, error: `next_run must be a positive integer (got "${input.nextRun}").` };
     }
     return { ok: true, path, body: { token, next_run: nextRun } };
   }
@@ -184,7 +184,7 @@ export class RunControlClient {
       const token = result.body?.['token'];
       if (typeof token !== 'string' || token === '') {
         // 200 なのに token が無い = 何が起きたか分からない。成功として飲み込まない。
-        return { ...result, ok: false, error: 'acquire の応答に token がありません' };
+        return { ...result, ok: false, error: 'The acquire response carries no token' };
       }
       this.setToken(token);
       const preempted = result.body?.['preempted'];
@@ -220,7 +220,7 @@ export class RunControlClient {
       return {
         ok: false,
         status: 0,
-        error: `POST ${url} に届きません: ${describeError(error)}`,
+        error: `POST ${url} did not get through: ${describeError(error)}`,
         notes: [],
         summary: '',
         body: null,
@@ -261,6 +261,6 @@ export class RunControlApiService extends RunControlClient {
 /** 表と実装のずれを見つけるためのヘルパ(テスト専用ではないが使うのはテスト)。 */
 export function actionByEndpoint(endpoint: string): RunAction {
   const action = RUN_ACTIONS.find((candidate) => candidate.endpoint === endpoint);
-  if (action === undefined) throw new Error(`表に無い endpoint: ${endpoint}`);
+  if (action === undefined) throw new Error(`endpoint not in the action table: ${endpoint}`);
   return action;
 }

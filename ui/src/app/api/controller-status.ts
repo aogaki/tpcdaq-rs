@@ -60,7 +60,7 @@ export interface StatusView {
 }
 
 /** 状態が取れていないことを表す表示文字列。 */
-export const UNKNOWN_LABEL = '不明';
+export const UNKNOWN_LABEL = 'unknown';
 
 type Raw = Record<string, unknown>;
 

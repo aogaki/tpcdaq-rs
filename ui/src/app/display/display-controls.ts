@@ -25,8 +25,8 @@ import { DISPLAY_INTERVALS_MS, DisplayClock } from './display-clock';
 
       <label class="interval">
         update
-        <!-- [value] を select 側に付けると option より先に評価されて先頭が選ばれてしまう
-             (= 画面と実際の値がずれる)。option 側の [selected] で選ぶ。 -->
+        <!-- [value] on the select is evaluated before the options, so the first entry wins
+             (screen and actual value drift apart). Select through [selected] on the option. -->
         <select (change)="onInterval($event)" aria-label="display update interval">
           @for (ms of intervals; track ms) {
             <option [value]="ms" [selected]="ms === clock.intervalMs()">{{ ms / 1000 }} s</option>
@@ -36,8 +36,9 @@ import { DISPLAY_INTERVALS_MS, DisplayClock } from './display-clock';
 
       @if (clock.frozen()) {
         <span class="note">
-          表示だけ止めています — <strong>DAQ / 保存 / 積算は動き続けています</strong>(Run Stop
-          ではありません)。飛ばした表示更新 {{ clock.suppressed() }} 回。
+          The display only is paused —
+          <strong>DAQ, recording and accumulation keep running</strong> (this is not a Run Stop).
+          Display updates skipped: {{ clock.suppressed() }}.
         </span>
       }
 

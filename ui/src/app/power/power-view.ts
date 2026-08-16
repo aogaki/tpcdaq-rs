@@ -13,18 +13,18 @@ import { RouterLink } from '@angular/router';
   template: `
     <div class="power">
       <section class="card">
-        <h2>Power(PSU)</h2>
+        <h2>Power (PSU)</h2>
         <p class="sub">
-          このビューは <strong>P6</strong> の範囲です。HV / LV の監視と操作(SPEC §9.2 の
-          <code>psu</code> レコード = <code>device</code> / <code>channel</code> /
+          This view belongs to <strong>P6</strong>. HV / LV monitoring and control (the
+          <code>psu</code> record of SPEC §9.2 = <code>device</code> / <code>channel</code> /
           <code>event</code> / <code>values{{ '{' }}vmon, imon, vset{{ '}' }}</code
-          >)はまだ 配線されていません。
+          >) is not wired up yet.
         </p>
         <p class="sub">
-          モックの値は出しません(ユーザー決定 2026-08-13)。PSU が
-          <code>LogPost</code>(SPEC §2.3)でログブックへ投稿を始めれば、
-          <a routerLink="/logbook">Logbook</a> に <code>psu</code>
-          として並びます —— TRIP は注意色で目立つようにしてあります。
+          No mock values are shown (user decision 2026-08-13). Once the PSU starts posting to the
+          logbook through <code>LogPost</code> (SPEC §2.3), the entries appear in
+          <a routerLink="/logbook">Logbook</a> as <code>psu</code>
+          — TRIP is highlighted in the attention colour.
         </p>
       </section>
     </div>

@@ -53,7 +53,7 @@ export function applyLogbookResponse(state: LogbookFeedState, raw: unknown): Log
   if (!isObject(raw) || !Array.isArray(raw['records'])) {
     return {
       ...state,
-      lastError: '応答に records 配列がありません(controller の返事が想定と違います)',
+      lastError: 'The response has no records array (the controller returned something unexpected)',
     };
   }
 

@@ -118,7 +118,7 @@ describe('RunView — 押す → 送る → 出す', () => {
     expect(button('Release').disabled).toBe(true);
     expect(button('Start run').disabled).toBe(true);
     expect(button('ECC describe').disabled).toBe(true);
-    expect(text()).toContain('操作権がありません');
+    expect(text()).toContain('No control token');
   });
 
   it('Acquire すると token を持ち、他のボタンが押せるようになる', async () => {
@@ -130,7 +130,7 @@ describe('RunView — 押す → 送る → 出す', () => {
     expect(calls[0].body).toEqual({ operator: '', passphrase: '' });
     expect(button('Start run').disabled).toBe(false);
     expect(button('Stop run').disabled).toBe(false);
-    expect(text()).toContain('取得済み');
+    expect(text()).toContain(`held ${TOKEN.slice(0, 6)}`);
   });
 
   it('run 実行中は Start run が disabled、Stop run は有効', async () => {
@@ -155,9 +155,9 @@ describe('RunView — 押す → 送る → 出す', () => {
 
     expect(calls).toHaveLength(0);
     expect(fixture.componentInstance.pending()?.endpoint).toBe('/api/run/stop');
-    expect(text()).toContain('Stop run を実行しますか?');
+    expect(text()).toContain('Execute Stop run?');
 
-    await click('実行する');
+    await click('Execute');
 
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe('/api/run/stop');
@@ -171,7 +171,7 @@ describe('RunView — 押す → 送る → 出す', () => {
     calls = [];
 
     await click('ECC reset');
-    await click('やめる');
+    await click('Cancel');
 
     expect(calls).toHaveLength(0);
     expect(fixture.componentInstance.pending()).toBeNull();
@@ -217,7 +217,7 @@ describe('RunView — 押す → 送る → 出す', () => {
     ];
 
     await click('Stop run');
-    await click('実行する');
+    await click('Execute');
 
     expect(text()).toContain('decoder: EndOfStream を 5 s 待って諦めた');
     expect(text()).toContain('graw-writer: 4 files');
@@ -235,7 +235,7 @@ describe('RunView — 押す → 送る → 出す', () => {
     await click('Set next run');
 
     expect(calls).toHaveLength(0);
-    expect(text()).toContain('next_run は正の整数だけです');
+    expect(text()).toContain('next_run must be a positive integer');
   });
 
   it('送信中は全ボタンが disabled(run/start は ≈7 s かかる — 041 実測)', async () => {
@@ -256,7 +256,7 @@ describe('RunView — 押す → 送る → 出す', () => {
     button('Start run').click();
     fixture.detectChanges();
 
-    expect(button('送信中…').disabled).toBe(true);
+    expect(button('sending…').disabled).toBe(true);
     expect(button('Stop run').disabled).toBe(true);
     expect(button('ECC describe').disabled).toBe(true);
 
@@ -334,7 +334,7 @@ describe('RunView — ecc_error / Off 注記(SPEC §8.2 v1.14、TODO/051)', () =
       ecc_error: 'Unknown',
     });
     await refresh();
-    expect(eccBadge().textContent).toContain('不明');
+    expect(eccBadge().textContent).toContain('unknown');
     // controller が不達時に注入する ecc_error:"Unknown" は GET の実フラグではない
     // (不達センチネル)。「不明」表示と別に "error: Unknown" を重ねて出さない。
     expect(text()).not.toContain('error: Unknown');
@@ -346,7 +346,7 @@ describe('RunView — ecc_error / Off 注記(SPEC §8.2 v1.14、TODO/051)', () =
     const badge = eccBadge();
     expect(badge.textContent?.trim()).toBe('Off');
     expect(badge.title).toBe(
-      'ECC 停止または halt — 実機では getEccServer の再起動が必要な場合あり',
+      'ECC stopped or halted — on real hardware getEccServer may need a restart',
     );
   });
 

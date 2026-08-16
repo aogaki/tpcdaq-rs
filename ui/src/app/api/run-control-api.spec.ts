@@ -338,7 +338,7 @@ describe('RunControlClient — token の保持と実際の送信', () => {
     const result = await client.execute(actionByEndpoint('/api/control/acquire'), FULL);
 
     expect(result.ok).toBe(false);
-    expect(result.error).toBe('acquire の応答に token がありません');
+    expect(result.error).toBe('The acquire response carries no token');
     expect(client.token()).toBeNull();
   });
 
@@ -366,7 +366,7 @@ describe('RunControlClient — token の保持と実際の送信', () => {
     expect(result.ok).toBe(false);
     expect(result.status).toBe(0);
     expect(result.error).toBe(
-      'POST http://127.0.0.1:8080/api/run/stop に届きません: Failed to fetch',
+      'POST http://127.0.0.1:8080/api/run/stop did not get through: Failed to fetch',
     );
   });
 

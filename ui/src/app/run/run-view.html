@@ -1,21 +1,20 @@
 <div class="run">
-  <!-- なぜ押せない/押せるのかがその場で分かるように -->
+  <!-- Say on the spot why a button can or cannot be pressed. -->
   @if (!enabled) {
     <p class="banner info">
-      <strong>Run 制御はレイアウトのみ</strong> — {{ actionCount }} 個の操作はすべて
-      <em>disabled</em> です(<code>run-actions.ts</code> の <code>RUN_CONTROL_ENABLED</code> が
-      <code>false</code>)。
+      <strong>Run control is layout only</strong> — all {{ actionCount }} actions are
+      <em>disabled</em> (<code>RUN_CONTROL_ENABLED</code> in <code>run-actions.ts</code> is
+      <code>false</code>).
     </p>
   } @else if (!hasToken()) {
     <p class="banner info">
-      <strong>操作権がありません</strong> — 下の「操作権」で operator と passphrase を入れて
-      <em>Acquire</em>
-      してください。取得するまで Acquire 以外は disabled です(SPEC
-      §8.1)。取得は常に横取り可で、横取りは監査ログに残ります。
+      <strong>No control token</strong> — enter operator and passphrase under “Control” below and
+      press <em>Acquire</em>. Everything except Acquire stays disabled until you hold the token
+      (SPEC §8.1). Acquire can always take over, and every takeover is kept in the audit log.
     </p>
   }
 
-  <!-- 直近の操作の結果。失敗は controller の error 文字列を**そのまま**出す -->
+  <!-- Result of the last action. On failure show the controller error string **verbatim**. -->
   @if (lastAction(); as result) {
     <p class="banner" [class.ok]="result.ok" [class.error]="!result.ok">
       <strong>{{ result.label }}</strong>
@@ -23,7 +22,7 @@
       @if (result.status > 0) {
         <span class="mono"> → HTTP {{ result.status }}</span>
       } @else {
-        <span> → 送っていません</span>
+        <span> → not sent</span>
       }
       <span> ({{ result.at }})</span>
       @if (result.error; as error) {
@@ -38,25 +37,26 @@
     </p>
   }
 
-  <!-- ① 現在の状態(GET /api/status = 閲覧系・認証なし) -->
+  <!-- (1) Current state (GET /api/status = read-only, no authentication). -->
   <section class="card">
     <header>
-      <h2>状態</h2>
-      <span class="chip">{{ pollSeconds }} s ポーリング</span>
+      <h2>Status</h2>
+      <span class="chip">{{ pollSeconds }} s polling</span>
       @if (lastOkAt(); as at) {
-        <span class="chip ok">最終取得 {{ at }}</span>
+        <span class="chip ok">last update {{ at }}</span>
       } @else {
-        <span class="chip unknown">まだ 1 度も取得できていません</span>
+        <span class="chip unknown">no successful update yet</span>
       }
       <span class="spacer"></span>
-      <button type="button" (click)="refresh()">今すぐ取得</button>
+      <button type="button" (click)="refresh()">Refresh now</button>
     </header>
 
     @if (statusError(); as error) {
       <p class="banner error">
-        <code>GET /api/status</code> を取得できません: {{ error }}(最終試行 {{ lastTryAt() }})。
-        <strong>controller(:8080)が動いていない可能性があります。</strong>
-        —— 下の値は表示しません(取れていないものを 0 や「正常」と書かないため)。
+        <code>GET /api/status</code> failed: {{ error }} (last try {{ lastTryAt() }}).
+        <strong>The controller (:8080) may not be running.</strong>
+        — The values below stay hidden: we never report 0 or “normal” for something we could not
+        read.
       </p>
     }
 
@@ -71,12 +71,12 @@
           @if (view.run; as run) {
             <span class="value">#{{ run.run }} · {{ run.elapsedS.toFixed(1) }} s</span>
           } @else {
-            <span class="value unknown">実行中の run はありません</span>
+            <span class="value unknown">No run in progress</span>
           }
         </div>
         <div class="fact">
-          <span class="label">操作権</span>
-          <span class="value">{{ view.operator ?? '誰も持っていません' }}</span>
+          <span class="label">control token</span>
+          <span class="value">{{ view.operator ?? 'held by no one' }}</span>
         </div>
         <div class="fact">
           <span class="label">ECC</span>
@@ -87,11 +87,11 @@
           >
             {{ view.ecc.label }}
             @if (view.ecc.tone === 'unknown') {
-              <span class="hint">(ecc-bridge に届いていない = 停止中でも異常でもない)</span>
+              <span class="hint">(not reaching ecc-bridge — neither stopped nor faulty)</span>
             }
           </span>
           @if (view.ecc.eccError; as flag) {
-            <span class="hint eccflag" [title]="'GET の error フラグ(SPEC §8.2)'">
+            <span class="hint eccflag" [title]="'GET error flag (SPEC §8.2)'">
               error: {{ flag }}
             </span>
           }
@@ -138,7 +138,7 @@
             </tr>
           } @empty {
             <tr>
-              <td colspan="5" class="unknown">コンポーネントの情報がありません</td>
+              <td colspan="5" class="unknown">No component information</td>
             </tr>
           }
         </tbody>
@@ -150,7 +150,7 @@
     }
   </section>
 
-  <!-- ② 操作一覧(完成形レイアウト・全 disabled)。操作権の群には token 取得 UI を同居させる -->
+  <!-- (2) The action table. The control group also hosts the token form. -->
   @for (group of groups; track group.id) {
     <section class="card">
       <header>
@@ -181,12 +181,12 @@
           <span class="token">
             token:
             @if (tokenHint(); as hint) {
-              <em class="held">取得済み {{ hint }}</em>
+              <em class="held">held {{ hint }}</em>
             } @else {
-              <em>未取得</em>
+              <em>not held</em>
             }
             @if (preempted(); as previous) {
-              <span class="note">({{ previous }} から横取りしました)</span>
+              <span class="note">(taken over from {{ previous }})</span>
             }
           </span>
         </div>
@@ -195,7 +195,7 @@
       @if (group.id === 'run') {
         <div class="tokenform">
           <label>
-            comment(run/start の任意)
+            comment (optional, for run/start)
             <input
               type="text"
               [value]="comment()"
@@ -204,7 +204,7 @@
             />
           </label>
           <label>
-            next_run(run/next の正整数)
+            next_run (positive integer, for run/next)
             <input
               type="text"
               inputmode="numeric"
@@ -236,16 +236,16 @@
     </section>
   }
 
-  <!-- 破壊的操作の確認(SPEC §11)。「実行する」を押すまで何も送らない -->
+  <!-- Confirmation for destructive actions (SPEC §11). Nothing is sent until "Execute". -->
   <dialog #confirmDialog class="confirm" (cancel)="closeConfirm()">
     @if (pending(); as action) {
-      <h3>{{ action.label }} を実行しますか?</h3>
+      <h3>Execute {{ action.label }}?</h3>
       <p class="what">{{ action.note }}</p>
       <p class="mono">POST {{ action.endpoint }} {{ action.body }}</p>
-      <p class="warn">この操作は取得中の run を止める / ECC の状態を壊す可能性があります。</p>
+      <p class="warn">This may stop a running acquisition or leave ECC in a broken state.</p>
       <div class="row">
-        <button type="button" (click)="closeConfirm()">やめる</button>
-        <button type="button" class="danger" (click)="confirm()">実行する</button>
+        <button type="button" (click)="closeConfirm()">Cancel</button>
+        <button type="button" class="danger" (click)="confirm()">Execute</button>
       </div>
     }
   </dialog>

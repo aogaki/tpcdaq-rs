@@ -37,41 +37,41 @@ export interface RunActionGroup {
 
 /** ECC の段階操作(R6: GET controller と同じ操作感で並べる)。すべて `{token}`。 */
 const ECC_STEPS: readonly { name: string; note: string; destructive: boolean }[] = [
-  { name: 'describe', note: 'ハードウェア記述を送る', destructive: false },
-  { name: 'prepare', note: 'AsAd / AGET を準備する', destructive: false },
-  { name: 'configure', note: 'DataLinkSet を渡して設定する', destructive: false },
-  { name: 'start', note: 'ECC 側の取得を開始する', destructive: false },
-  { name: 'stop', note: 'ECC 側の取得を止める', destructive: true },
-  { name: 'breakup', note: 'データリンクを解体する', destructive: true },
-  { name: 'reset', note: 'ECC を初期状態へ戻す', destructive: true },
+  { name: 'describe', note: 'Send the hardware description', destructive: false },
+  { name: 'prepare', note: 'Prepare AsAd / AGET', destructive: false },
+  { name: 'configure', note: 'Hand over the DataLinkSet and configure', destructive: false },
+  { name: 'start', note: 'Start acquisition on the ECC side', destructive: false },
+  { name: 'stop', note: 'Stop acquisition on the ECC side', destructive: true },
+  { name: 'breakup', note: 'Tear down the data links', destructive: true },
+  { name: 'reset', note: 'Bring ECC back to its initial state', destructive: true },
 ];
 
 export const RUN_ACTION_GROUPS: readonly RunActionGroup[] = [
   {
     id: 'control',
-    label: '操作権',
-    note: '操作権は常に 1 クライアント。取得は常に横取り可で、横取りは監査ログに残る(SPEC §8.1)。',
+    label: 'Control',
+    note: 'The control token is held by exactly one client. Acquire can always take it over, and every takeover is kept in the audit log (SPEC §8.1).',
     actions: [
       {
         label: 'Acquire',
         endpoint: '/api/control/acquire',
         body: '{operator, passphrase}',
         destructive: false,
-        note: '成功すると token が返る(以後の状態変更系に付ける)',
+        note: 'Returns a token on success (attach it to every state-changing call)',
       },
       {
         label: 'Release',
         endpoint: '/api/control/release',
         body: '{token}',
         destructive: false,
-        note: '操作権を手放す',
+        note: 'Release the control token',
       },
     ],
   },
   {
     id: 'run',
     label: 'Run',
-    note: 'SPEC §1.3 の run シーケンス。run 番号は controller が採番する(手動設定は next)。',
+    note: 'The run sequence of SPEC §1.3. Run numbers are assigned by the controller (set one by hand with next).',
     actions: [
       {
         label: 'Start run',
@@ -85,21 +85,21 @@ export const RUN_ACTION_GROUPS: readonly RunActionGroup[] = [
         endpoint: '/api/run/stop',
         body: '{token}',
         destructive: true,
-        note: 'ECC stop → EndOfStream 伝播 → ファイル確定 → run_stop を記録',
+        note: 'ECC stop → EndOfStream propagation → files finalized → run_stop recorded',
       },
       {
         label: 'Set next run',
         endpoint: '/api/run/next',
         body: '{token, next_run}',
         destructive: false,
-        note: '正整数のみ。run 実行中は拒否。次の start から有効',
+        note: 'Positive integers only. Rejected while a run is in progress. Takes effect at the next start',
       },
     ],
   },
   {
     id: 'ecc',
-    label: 'ECC 段階操作',
-    note: 'R6: GET controller と同じ操作感。通常の run では start/stop が自動で回すので、ここは復旧用。',
+    label: 'ECC step operations',
+    note: 'R6: the same feel as the GET controller. A normal run drives these automatically from start/stop, so this group is for recovery.',
     actions: ECC_STEPS.map((step) => ({
       label: `ECC ${step.name}`,
       endpoint: `/api/ecc/${step.name}`,

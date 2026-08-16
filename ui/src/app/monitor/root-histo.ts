@@ -94,7 +94,7 @@ export interface HistoRow {
 export const HISTO_ROWS: readonly HistoRow[] = [
   {
     key: 'StripTime',
-    label: 'StripTime — Σ ADC (run 積算。縦 = strip / 横 = time bucket)',
+    label: 'StripTime — Σ ADC (run cumulative; strip vertically / time bucket horizontally)',
     ids: [1, 2, 3],
     is2d: true,
     xTitle: 'time bucket',
@@ -102,7 +102,7 @@ export const HISTO_ROWS: readonly HistoRow[] = [
   },
   {
     key: 'Charge',
-    label: 'Charge — 全ストリップの波高',
+    label: 'Charge — pulse height of every strip',
     ids: [4, 5, 6],
     is2d: false,
     xTitle: 'pulse height (raw ADC)',
@@ -110,7 +110,7 @@ export const HISTO_ROWS: readonly HistoRow[] = [
   },
   {
     key: 'ChargeMax',
-    label: 'ChargeMax — イベント最大波高',
+    label: 'ChargeMax — largest pulse height per event',
     ids: [7, 8, 9],
     is2d: false,
     xTitle: 'pulse height (raw ADC)',

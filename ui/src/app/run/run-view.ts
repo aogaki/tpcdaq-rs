@@ -80,7 +80,7 @@ export class RunView implements OnDestroy {
    * dhsm が halt して、我々の map では `Off` に見える。実機では getEccServer の
    * 再起動が要ることがある —— ツールチップで伝える(状態そのものは変えない)。
    */
-  readonly eccOffHint = 'ECC 停止または halt — 実機では getEccServer の再起動が必要な場合あり';
+  readonly eccOffHint = 'ECC stopped or halted — on real hardware getEccServer may need a restart';
 
   /** 操作権(token はメモリ + sessionStorage。画面には頭だけ出す)。 */
   readonly hasToken = computed(() => this.control.token() !== null);
@@ -120,7 +120,7 @@ export class RunView implements OnDestroy {
 
   /** 送信中のボタンだけ文言を変える(押せないことが見えるように)。 */
   buttonLabel(action: RunAction): string {
-    return this.busy() === action.endpoint ? '送信中…' : action.label;
+    return this.busy() === action.endpoint ? 'sending…' : action.label;
   }
 
   setOperator(event: Event): void {
@@ -145,7 +145,9 @@ export class RunView implements OnDestroy {
       const raw = await this.api.getStatus();
       const view = parseControllerStatus(raw);
       if (!view) {
-        this.statusError.set('応答が想定の形ではありません(controller の返事を確認してください)');
+        this.statusError.set(
+          'The response is not in the expected shape (check what the controller returned)',
+        );
         return;
       }
       this.status.set(view);

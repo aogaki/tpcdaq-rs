@@ -18,36 +18,36 @@
   <span class="item"><span class="key">events</span>{{ format(eventsBuilt()) }}</span>
 
   @for (plane of saturation(); track plane.plane) {
-    <span class="item" matTooltip="SPEC §5.2 飽和率 = saturated / counted × 100">
+    <span class="item" matTooltip="SPEC §5.2 saturation = saturated / counted × 100">
       <span class="key">sat {{ plane.plane }}</span
       >{{ formatPercent(plane.percent) }}
     </span>
   }
 
-  <span class="item" matTooltip="root-sink → monitor の取りこぼし(PUB seq の飛び)">
+  <span class="item" matTooltip="root-sink → monitor drops (gaps in the PUB seq)">
     <span class="key">gaps</span>{{ format(monitorGaps()) }}
   </span>
-  <span class="item" matTooltip="monitor の live キューが落とした数(drop-oldest)">
+  <span class="item" matTooltip="Messages dropped by the monitor live queue (drop-oldest)">
     <span class="key">wsDropped</span>{{ format(wsDropped()) }}
   </span>
-  <span class="item" matTooltip="この monitor に繋がっている WS クライアント数">
+  <span class="item" matTooltip="WS clients connected to this monitor">
     <span class="key">clients</span>{{ format(clients()) }}
   </span>
   <span
     class="item"
     [class.bad]="counters().decodeErrors > 0"
-    matTooltip="UI 側でデコードできなかった WS フレーム数"
+    matTooltip="WS frames the UI could not decode"
   >
     <span class="key">decodeErrors</span>{{ counters().decodeErrors }}
   </span>
   <span
     class="item"
     [class.bad]="counters().jsonErrors + counters().unknownJsonTypes > 0"
-    matTooltip="JSON のパース失敗 / 未知 type(前方互換で無視した数)"
+    matTooltip="JSON parse failures / unknown types (ignored for forward compatibility)"
   >
     <span class="key">jsonErrors</span>{{ counters().jsonErrors }}/{{ counters().unknownJsonTypes }}
   </span>
-  <span class="item" matTooltip="自動再接続した回数">
+  <span class="item" matTooltip="Automatic reconnects so far">
     <span class="key">reconnects</span>{{ counters().reconnects }}
   </span>
 

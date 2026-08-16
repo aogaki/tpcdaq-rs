@@ -34,7 +34,10 @@ import { type PanelMessage, type PanelSpec, buildPanelObject, panelDrawOption } 
         <span class="shape">{{ shape() }}</span>
         <span class="spacer"></span>
         @if (skipped() > 0) {
-          <span class="skipped" title="前の描画が終わる前に次の刻みが来た回数(表示だけの間引き)">
+          <span
+            class="skipped"
+            title="Ticks that arrived before the previous draw finished (display-only decimation)"
+          >
             skipped {{ skipped() }}
           </span>
         }

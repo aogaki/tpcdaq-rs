@@ -1,7 +1,7 @@
 <div class="logbook">
-  <!-- 追記(R11: シフト全員が書ける。token は要らない) -->
+  <!-- Posting (R11: everyone on shift can write. No token needed) -->
   <section class="composer">
-    <h2>コメントを追記</h2>
+    <h2>Add a comment</h2>
     <div class="row">
       <label class="who">
         author
@@ -9,71 +9,68 @@
           type="text"
           [value]="author()"
           (input)="setAuthor($event)"
-          placeholder="自己申告(記録に残ります)"
+          placeholder="self-reported (kept in the record)"
           autocomplete="off"
         />
       </label>
       <button type="button" class="post" [disabled]="!canPost()" (click)="post()">
-        {{ posting() ? '送信中…' : '追記する' }}
+        {{ posting() ? 'posting…' : 'Post' }}
       </button>
     </div>
     <textarea
       rows="2"
       [value]="text()"
       (input)="setText($event)"
-      placeholder="例: beam tuned, 4 Hz"
+      placeholder="e.g. beam tuned, 4 Hz"
     ></textarea>
     @if (postError(); as error) {
-      <p class="issue">追記できませんでした: {{ error }}</p>
+      <p class="issue">Could not post the comment: {{ error }}</p>
     }
     @if (postedAt(); as at) {
-      <p class="ok">{{ at }} に追記しました。</p>
+      <p class="ok">Posted at {{ at }}.</p>
     }
   </section>
 
-  <!-- 取得の健全性(silent failure を作らない) -->
+  <!-- Health of the polling (never a silent failure) -->
   <section class="feedstate">
     <span class="chip">since_seq {{ sinceSeq() }}</span>
-    <span class="chip">{{ pollSeconds }} s ポーリング</span>
-    <span class="chip">{{ entries().length }} 件</span>
+    <span class="chip">{{ pollSeconds }} s polling</span>
+    <span class="chip">{{ entries().length }} entries</span>
     @if (lastOkAt(); as at) {
-      <span class="chip ok">最終取得 {{ at }}</span>
+      <span class="chip ok">last update {{ at }}</span>
     } @else {
-      <span class="chip unknown">まだ 1 度も取得できていません</span>
+      <span class="chip unknown">no successful update yet</span>
     }
     <span class="spacer"></span>
-    <button type="button" class="reload" (click)="refresh()">今すぐ取得</button>
+    <button type="button" class="reload" (click)="refresh()">Refresh now</button>
   </section>
 
   @if (lastError(); as error) {
     <p class="banner error">
-      ログブックを取得できません: {{ error }}(最終試行 {{ lastTryAt() }})—— controller
-      (:8080)が動いているか確認してください。<strong>下の一覧は最後に取れた時点のものです。</strong>
+      Cannot fetch the logbook: {{ error }} (last try {{ lastTryAt() }}) — check that the controller
+      (:8080) is running.
+      <strong>The list below is from the last successful fetch.</strong>
     </p>
   }
   @if (tailCorrupt()) {
     <p class="banner warn">
-      <strong>tail_corrupt</strong> — JSONL の最終行が壊れています(書き込み中断の痕跡、SPEC
-      §9.1)。その 1 行は表示されていません。
+      <strong>tail_corrupt</strong> — the last line of the JSONL is broken (the trace of an
+      interrupted write, SPEC §9.1). That one line is not shown.
     </p>
   }
   @if (unknownTypes() > 0) {
     <p class="banner warn">
-      未知のレコード種別を {{ unknownTypes() }} 件受け取りました(捨てずに生 JSON
-      で表示しています)。UI が仕様に追いついていない可能性があります。
+      Received {{ unknownTypes() }} records of an unknown type (shown as raw JSON instead of being
+      discarded). The UI may be behind the spec.
     </p>
   }
   @if (malformed() > 0) {
-    <p class="banner warn">
-      取り込めなかった行が {{ malformed() }} 件あります(`seq` が読めない行)。
-    </p>
+    <p class="banner warn">{{ malformed() }} lines could not be ingested (`seq` unreadable).</p>
   }
 
-  <!-- タイムライン(新しい順) -->
+  <!-- Timeline (newest first) -->
   @if (entries().length === 0) {
-    <p class="empty">
-      まだレコードがありません。run を開始するか、上のフォームからコメントを追記してください。
-    </p>
+    <p class="empty">No records yet. Start a run, or add a comment with the form above.</p>
   }
 
   <ol class="timeline">

@@ -61,13 +61,13 @@ export class StatusBar {
   readonly healthTooltip = computed(() => {
     switch (this.health()) {
       case 'offline':
-        return `monitor の WS(${this.ws.url()})に繋がっていない`;
+        return `Not connected to the monitor WS (${this.ws.url()})`;
       case 'waiting':
-        return '接続済み。最初の status を待っている';
+        return 'Connected. Waiting for the first status';
       case 'stale':
-        return 'WS は繋がっているが status が 3 秒以上来ない(root-sink 側が止まっている可能性)';
+        return 'WS is connected but no status for over 3 s (root-sink may have stopped)';
       case 'fresh':
-        return 'status を受信中';
+        return 'Receiving status';
     }
   });
 

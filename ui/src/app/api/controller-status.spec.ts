@@ -99,7 +99,7 @@ describe('components(未知と 0 を混同しない)', () => {
       name: 'receiver0',
       endpoint: 'tcp://127.0.0.1:47110',
       reachable: false,
-      state: '不明',
+      state: 'unknown',
       runNumber: null,
       error: 'no reply within 1000 ms',
     });
@@ -110,7 +110,7 @@ describe('ecc(ecc-bridge 無しの開発機で赤い嘘を出さない)', () => 
   it('state "Unknown" は「不明」と出し、理由も添える', () => {
     const ecc = parseControllerStatus(LIVE)?.ecc;
     expect(ecc?.state).toBe('Unknown');
-    expect(ecc?.label).toBe('不明');
+    expect(ecc?.label).toBe('unknown');
     expect(ecc?.tone).toBe('unknown');
     expect(ecc?.error).toContain('no reply within 1000 ms');
   });
@@ -188,9 +188,9 @@ describe('壊れた応答', () => {
 
   it('欄が欠けていても落ちない(未知は「不明」/ 空)', () => {
     const view = parseControllerStatus({});
-    expect(view?.phase).toBe('不明');
+    expect(view?.phase).toBe('unknown');
     expect(view?.components).toEqual([]);
-    expect(view?.ecc.label).toBe('不明');
+    expect(view?.ecc.label).toBe('unknown');
     expect(view?.logPosts).toBeNull();
   });
 });

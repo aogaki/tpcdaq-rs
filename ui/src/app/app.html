@@ -5,14 +5,16 @@
       mat-icon-button
       (click)="sidenav.toggle()"
       aria-label="Toggle navigation"
-      matTooltip="ナビゲーションの開閉"
+      matTooltip="Show or hide the navigation"
     >
       <mat-icon>menu</mat-icon>
     </button>
     <span class="brand">tpcdaq</span>
     <span class="subtitle">{{ subtitle() }}</span>
     <span class="spacer"></span>
-    <span class="endpoint" [matTooltip]="'接続先の出所: ' + endpointSource()">{{ wsUrl() }}</span>
+    <span class="endpoint" [matTooltip]="'Endpoint source: ' + endpointSource()">{{
+      wsUrl()
+    }}</span>
   </mat-toolbar>
 
   <mat-sidenav-container class="body" [hasBackdrop]="false">

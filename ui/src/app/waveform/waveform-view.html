@@ -9,8 +9,8 @@
   </app-display-controls>
 
   <div class="picks">
-    <!-- select 側に [value] を付けると option より先に評価されて先頭が選ばれてしまう
-         (= 画面と実際の値がずれる)。option 側の [selected] で選ぶ。 -->
+    <!-- [value] on the select is evaluated before the options, so the first entry wins
+         (screen and actual value drift apart). Select through [selected] on the option. -->
     <label>
       (cobo,asad)
       <select (change)="selectKey($event)">
@@ -81,7 +81,7 @@
     </span>
   </div>
 
-  <!-- 間引きの申告(silent 禁止)。実際に描いた結果からそのまま出す。 -->
+  <!-- Declare the decimation (never silent). Taken straight from what was actually drawn. -->
   <p class="decimation">
     @if (rendered(); as plot) {
       requested {{ plot.requestedSeries }} series · drawn {{ plot.series.length }}
