@@ -18,6 +18,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -68,9 +69,27 @@ struct GrawSet {
 };
 
 /// ファイル群を読み込んでフレームに索引する。1 本でも読めなければ false。
+///
+/// TODO/056: 複数ファイル(ELITPC の AsAd 毎 4 本)は **eventIdx 昇順にマージした送出順**
+/// に並べる。単純連結のままだと「AsAd0 全部 → AsAd1 全部 …」の順で流れ、イベントビルダが
+/// 全イベントで残り 3 フラグメントを待って timeout する。並べ替えるのは**送出順だけ**で、
+/// フレーム内のバイトには一切触らない。1 ファイルなら索引順のまま(mini 回帰は無変更)。
 inline bool load_graw_set(const std::vector<std::string>& paths, GrawSet& set, std::string& err) {
   set.bytes.clear();
   set.frames.clear();
+
+  // 4 × 1 GiB を読むので、vector の doubling による巨大な再確保を避けて先に確保する。
+  // (見積もれなければ確保しないだけ —— 挙動は変わらない)
+  size_t reserve_bytes = 0;
+  for (const std::string& path : paths) {
+    struct stat st;
+    if (::stat(path.c_str(), &st) == 0 && st.st_size > 0) reserve_bytes += size_t(st.st_size);
+  }
+  if (reserve_bytes > 0) set.bytes.reserve(reserve_bytes);
+
+  std::vector<std::vector<FrameSpan>> per_file;
+  per_file.reserve(paths.size());
+
   for (const std::string& path : paths) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) {
@@ -86,10 +105,9 @@ inline bool load_graw_set(const std::vector<std::string>& paths, GrawSet& set, s
     std::fclose(f);
 
     // ファイル単位で索引し、連結後の座標へ直す(ファイル境界を跨ぐフレームは無い)。
-    const std::vector<uint8_t> one(set.bytes.begin() + long(base), set.bytes.end());
     std::vector<FrameSpan> spans;
     size_t trailing = 0;
-    const bool clean = index_graw(one, spans, trailing);
+    const bool clean = index_graw(set.bytes.data() + base, set.bytes.size() - base, spans, trailing);
     if (!clean) {
       // 端数は送らない(バイト一致を壊さないため)。黙って捨てず必ず可視化する。
       log_warn("graw file '" + path + "' ends with " + std::to_string(trailing) +
@@ -100,13 +118,32 @@ inline bool load_graw_set(const std::vector<std::string>& paths, GrawSet& set, s
       err = "graw file '" + path + "' contains no complete MFM frame";
       return false;
     }
-    for (FrameSpan s : spans) {
-      s.offset += base;
-      set.frames.push_back(s);
-    }
+    for (FrameSpan& s : spans) s.offset += base;
     log_info("graw '" + path + "': " + std::to_string(spans.size()) + " frames, " +
              std::to_string(set.bytes.size() - base) + " bytes");
+    per_file.push_back(spans);
   }
+
+  set.frames = merge_by_event_idx(set.bytes, per_file);
+
+  // 送出順の素性を起動ログに出す(silent にしない)。
+  uint32_t ev_min = 0;
+  uint32_t ev_max = 0;
+  size_t data_frames = 0;
+  for (const FrameSpan& s : set.frames) {
+    uint32_t ev = 0;
+    if (!peek_event_idx(set.bytes.data() + s.offset, s.length, ev)) continue;
+    if (data_frames == 0 || ev < ev_min) ev_min = ev;
+    if (data_frames == 0 || ev > ev_max) ev_max = ev;
+    ++data_frames;
+  }
+  const std::string range =
+      data_frames == 0 ? std::string("none (no data frame)")
+                       : std::to_string(ev_min) + ".." + std::to_string(ev_max);
+  log_info("graw set: " + std::to_string(paths.size()) + " file(s), " +
+           std::to_string(set.frames.size()) + " frames (" + std::to_string(data_frames) +
+           " data), " + std::to_string(set.total_bytes()) + " bytes, eventIdx " + range +
+           (paths.size() > 1 ? " (merged by eventIdx)" : ""));
   return true;
 }
 

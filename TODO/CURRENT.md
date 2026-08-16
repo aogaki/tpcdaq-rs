@@ -62,9 +62,18 @@
    TPCReco 無改変では口が無い)。80 Mbps × 30 分 soak 合格。**ELITPC 実測 ≈10 /s = 10× 不足**。
    [archive/054](archive/054_root_sink_throughput.md) 結果節が正。
 7. **[055_recorder_parallel_ruling.md](055_recorder_parallel_ruling.md) — DRAFT・
-   ユーザー裁定待ち(次の入口)**: ①ELI-NP 前に並列化するか(凍結時期)②並列化の形
+   ユーザー裁定待ち**: ①ELI-NP 前に並列化するか(凍結時期)②並列化の形
    (worker 毎 TTree = P1 / fill のみ並列 = P2)③保留②(EOS 予算)の扱い。
-   §12-6 再実測もここに移管。
+   §12-6 再実測もここに移管。**追記済み(2026-08-16 ユーザー): 100 Hz は mini のみ、
+   ELITPC は流用(7 TB/日はストレージ的に端から無理)。M4 Pro 実測は実環境より有利 —
+   現地再計測 + マージン前提**。
+8. ~~056~~ **完了(2026-08-16)— ELITPC 構成デモ開通**: vcobo に eventIdx マージ
+   (テスト 92→148、実 4 本組 15,408 frames / eventIdx 0..3851)+ elitpc xcfg 3 点 +
+   `TPCDAQ_DEMO_PROFILE=elitpc` 切替。実測 304 events complete / late 0 / graw 4 本
+   sha256 一致 / mini 回帰無変更。[archive/056](archive/056_elitpc_demo_profile.md)。
+9. **[057_ecc_timeout_not_firing.md](057_ecc_timeout_not_firing.md) — OPEN(調査)**:
+   056 で実 ECC configure 261 s の間、controller の ECC REQ タイムアウト 60 s が
+   発火しなかった疑い。次セッションの候補。
 6. **デモ改良トラック(継続、テスト計画より先 — 2026-08-14 ユーザー)**: 当面はデモの
    完成度を延々と上げる。目玉候補 = **graw ファイルをデータソースとする仮想 zCoBo**
    (getHwServer ではなく**板ごと偽る** — 2026-08-14 ユーザー用語確定)。制御面

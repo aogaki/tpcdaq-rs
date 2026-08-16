@@ -331,25 +331,101 @@ struct FrameSpan {
   size_t length = 0;
 };
 
-/// バイト列をフレームに切り分ける。**バイトは 1 つも変換しない**。
+/// バイト列をフレームに切り分ける。**バイトは 1 つも変換しない**。オフセットは `data` 基準。
 /// 末尾に端数(不完全フレーム)が残ったら `trailing` に入れて false を返す
 /// (呼び出し側が警告する。黙って捨てない)。
-inline bool index_graw(const std::vector<uint8_t>& bytes, std::vector<FrameSpan>& out,
+inline bool index_graw(const uint8_t* data, size_t size, std::vector<FrameSpan>& out,
                        size_t& trailing) {
   out.clear();
   trailing = 0;
   size_t pos = 0;
-  while (pos + kPrimaryHeaderSize <= bytes.size()) {
-    const size_t len = graw_frame_size(&bytes[pos]);
-    if (len == 0 || pos + len > bytes.size()) break;
+  while (pos + kPrimaryHeaderSize <= size) {
+    const size_t len = graw_frame_size(data + pos);
+    if (len == 0 || pos + len > size) break;
     FrameSpan s;
     s.offset = pos;
     s.length = len;
     out.push_back(s);
     pos += len;
   }
-  trailing = bytes.size() - pos;
+  trailing = size - pos;
   return trailing == 0;
+}
+
+/// vector 版(1 GiB のファイルを一時 vector へ複製しないで済むよう、実体はポインタ版)。
+inline bool index_graw(const std::vector<uint8_t>& bytes, std::vector<FrameSpan>& out,
+                       size_t& trailing) {
+  return index_graw(bytes.data(), bytes.size(), out, trailing);
+}
+
+// ---------------------------------------------------------------------------
+// eventIdx マージ送出(TODO/056) —— src/bin/graw_replay.rs `mod merge` の移植
+// ---------------------------------------------------------------------------
+
+/// `p` から `n` バイトを符号なし整数として読む(エンディアン指定)。
+inline uint64_t read_header_uint(const uint8_t* p, size_t n, bool little) {
+  uint64_t v = 0;
+  if (little) {
+    for (size_t i = n; i-- > 0;) v = (v << 8) | uint64_t(p[i]);
+  } else {
+    for (size_t i = 0; i < n; ++i) v = (v << 8) | uint64_t(p[i]);
+  }
+  return v;
+}
+
+/// 共通 MFM ヘッダの eventIdx(offset 22..26)を覗き見る。src/decode.rs::peek_event_idx と
+/// **同じゲート**: 28 バイト未満 / frameType(offset 5..7)∉ {1,2} は false =「制御フレーム」。
+/// 制御フレームは eventIdx を持たないのでマージ順序に関与しない(遭遇時にそのまま流す)。
+inline bool peek_event_idx(const uint8_t* frame, size_t len, uint32_t& event_idx) {
+  if (len < 28) return false;
+  const bool little = (frame[0] & 0x80) != 0;
+  const uint64_t frame_type = read_header_uint(frame + 5, 2, little);
+  if (frame_type != 1 && frame_type != 2) return false;
+  event_idx = uint32_t(read_header_uint(frame + 22, 4, little));
+  return true;
+}
+
+/// ファイル毎のフレーム列(`per_file[i]` = i 番目のファイルのフレーム、ファイル内順)を
+/// **eventIdx 昇順に安定マージ**した送出順を返す。オフセットは `bytes` 基準の絶対座標。
+///
+/// 正本は `src/bin/graw_replay.rs` の `mod merge`(TODO/021)。規則は 3 つだけ:
+///   ①先頭が制御フレームのソースが最優先(複数あればファイル指定順の最小)
+///   ②データフレームは (eventIdx, ファイル指定順) の最小を選ぶ
+///   ③ソース内の順序は常に保存する(= 全体ソートではない k-way マージ)
+///
+/// **バイト列には一切触らない**(並べ替えるのは FrameSpan の順序だけ)。
+/// ELITPC の 4 AsAd(各 3,852 フレーム)でも比較回数は 4 × 15,408 なので線形探索で足りる。
+inline std::vector<FrameSpan> merge_by_event_idx(
+    const std::vector<uint8_t>& bytes, const std::vector<std::vector<FrameSpan>>& per_file) {
+  size_t total = 0;
+  for (const std::vector<FrameSpan>& f : per_file) total += f.size();
+
+  std::vector<size_t> cursor(per_file.size(), 0);
+  std::vector<FrameSpan> out;
+  out.reserve(total);
+
+  while (out.size() < total) {
+    const size_t none = per_file.size();
+    size_t pick = none;
+    uint32_t best_event = 0;
+    for (size_t i = 0; i < per_file.size(); ++i) {
+      if (cursor[i] >= per_file[i].size()) continue;
+      const FrameSpan& head = per_file[i][cursor[i]];
+      uint32_t event = 0;
+      if (!peek_event_idx(bytes.data() + head.offset, head.length, event)) {
+        pick = i;  // ①制御フレームは最優先。以降を見る必要はない。
+        break;
+      }
+      if (pick == none || event < best_event) {  // ②(eventIdx, ファイル順)の最小
+        pick = i;
+        best_event = event;
+      }
+    }
+    if (pick == none) break;  // 全ソース枯渇(total と一致するので通常は来ない)
+    out.push_back(per_file[pick][cursor[pick]]);
+    ++cursor[pick];
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@
 #include "vcobo_core.hpp"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "check.hpp"
@@ -296,6 +297,151 @@ void test_index_graw() {
 }
 
 // ---------------------------------------------------------------------------
+// 5b. eventIdx マージ送出(TODO/056)
+//
+// 正本 = src/bin/graw_replay.rs の `mod merge`(TODO/021 の複数ファイルマージ):
+//   ①制御フレーム(eventIdx を持たないフレーム)が先頭に居るソースを最優先で流す
+//     (複数あればファイル指定順の最小)
+//   ②データフレームは (eventIdx, ファイル指定順) の最小を選ぶ
+//   ③ソース内の順序は常に保存する(全体ソートではない k-way マージ)
+// ---------------------------------------------------------------------------
+
+/// `bytes` の `offset` から `n` バイトを big/little endian で書く(ヘッダ組み立て用)。
+void write_uint(std::vector<uint8_t>& bytes, size_t offset, uint64_t value, size_t n, bool little) {
+  for (size_t i = 0; i < n; ++i) {
+    const size_t at = little ? offset + i : offset + (n - 1 - i);
+    bytes[at] = uint8_t((value >> (8 * i)) & 0xFF);
+  }
+}
+
+/// データフレーム(frameType 1/2)を 1 本作る。frameType は bytes[5..7]、
+/// eventIdx は bytes[22..26](共通 MFM ヘッダ — src/decode.rs::peek_event_idx)。
+std::vector<uint8_t> make_data_frame(size_t total, bool little, uint16_t frame_type,
+                                     uint32_t event_idx, uint8_t fill) {
+  std::vector<uint8_t> f = make_frame(total, little, fill);
+  write_uint(f, 5, frame_type, 2, little);
+  write_uint(f, 22, event_idx, 4, little);
+  return f;
+}
+
+/// 複数「ファイル」を 1 本のバイト列に連結しつつ、ファイル毎のフレーム座標を覚えておく
+/// (load_graw_set が実際にやることのミニチュア)。
+struct MergeInput {
+  std::vector<uint8_t> bytes;
+  std::vector<std::vector<FrameSpan>> per_file;
+
+  void add_file(const std::vector<std::vector<uint8_t>>& frames) {
+    std::vector<FrameSpan> spans;
+    for (const std::vector<uint8_t>& f : frames) {
+      FrameSpan s;
+      s.offset = bytes.size();
+      s.length = f.size();
+      bytes.insert(bytes.end(), f.begin(), f.end());
+      spans.push_back(s);
+    }
+    per_file.push_back(spans);
+  }
+
+  /// 期待順序を (ファイル番号, ファイル内の索引) の列で照合する。
+  void check_order(const std::vector<FrameSpan>& got,
+                   const std::vector<std::pair<size_t, size_t>>& want) {
+    CHECK_EQ(got.size(), want.size());
+    if (got.size() != want.size()) return;
+    for (size_t i = 0; i < want.size(); ++i) {
+      const FrameSpan& expected = per_file[want[i].first][want[i].second];
+      CHECK_EQ(got[i].offset, expected.offset);
+      CHECK_EQ(got[i].length, expected.length);
+    }
+  }
+};
+
+void test_peek_event_idx() {
+  for (bool little : {false, true}) {
+    // frameType 2、eventIdx 0x01020304 → ヘッダ 22..26 からそのまま読める。
+    const std::vector<uint8_t> f = make_data_frame(256, little, 2, 0x01020304u, 0x5A);
+    uint32_t ev = 0;
+    CHECK(vcobo::peek_event_idx(f.data(), f.size(), ev));
+    CHECK_EQ(ev, 0x01020304u);
+  }
+
+  // frameType 1 も対象(2018 形式)。
+  const std::vector<uint8_t> t1 = make_data_frame(64, false, 1, 3851u, 0x11);
+  uint32_t ev = 0;
+  CHECK(vcobo::peek_event_idx(t1.data(), t1.size(), ev));
+  CHECK_EQ(ev, 3851u);
+
+  // frameType ∉ {1,2} は制御フレーム扱い(eventIdx を持たない)。
+  const std::vector<uint8_t> ctrl = make_data_frame(64, false, 7, 9u, 0x22);
+  ev = 0xFFFFFFFFu;
+  CHECK(!vcobo::peek_event_idx(ctrl.data(), ctrl.size(), ev));
+
+  // 28 バイト未満も制御フレーム扱い(graw_replay と同じゲート)。
+  const std::vector<uint8_t> tiny = make_frame(24, false, 0x33);
+  CHECK(!vcobo::peek_event_idx(tiny.data(), tiny.size(), ev));
+}
+
+void test_merge_single_file_keeps_the_original_order() {
+  // mini 回帰: 1 ファイルなら送出順は索引順のまま(バイト一致テストの土台)。
+  MergeInput in;
+  in.add_file({make_data_frame(256, false, 2, 0, 0x01), make_data_frame(512, false, 2, 1, 0x02),
+               make_data_frame(256, false, 2, 2, 0x03)});
+  const std::vector<FrameSpan> got = vcobo::merge_by_event_idx(in.bytes, in.per_file);
+  in.check_order(got, {{0, 0}, {0, 1}, {0, 2}});
+}
+
+void test_merge_interleaves_files_event_by_event() {
+  // 非対称: AsAd0 は 4 イベント、AsAd1 は先頭 2 イベントだけ(短いファイル)。
+  //   期待: (0,ev0) (1,ev0) (0,ev1) (1,ev1) (0,ev2) (0,ev3)
+  MergeInput in;
+  in.add_file({make_data_frame(256, false, 2, 0, 0xA0), make_data_frame(256, false, 2, 1, 0xA1),
+               make_data_frame(256, false, 2, 2, 0xA2), make_data_frame(256, false, 2, 3, 0xA3)});
+  in.add_file({make_data_frame(512, false, 2, 0, 0xB0), make_data_frame(512, false, 2, 1, 0xB1)});
+
+  const std::vector<FrameSpan> got = vcobo::merge_by_event_idx(in.bytes, in.per_file);
+  in.check_order(got, {{0, 0}, {1, 0}, {0, 1}, {1, 1}, {0, 2}, {0, 3}});
+}
+
+void test_merge_breaks_ties_by_file_argument_order() {
+  // 同じ eventIdx が 4 ファイルに 1 本ずつ。引数順(= AsAd 昇順で渡す)で並ぶ。
+  MergeInput in;
+  for (int a = 0; a < 4; ++a) {
+    in.add_file({make_data_frame(256, false, 2, 7, uint8_t(0xC0 + a))});
+  }
+  const std::vector<FrameSpan> got = vcobo::merge_by_event_idx(in.bytes, in.per_file);
+  in.check_order(got, {{0, 0}, {1, 0}, {2, 0}, {3, 0}});
+}
+
+void test_merge_gives_control_frames_priority_like_graw_replay() {
+  // graw_replay: 先頭に制御フレームが居るソースが最優先(データより先)。
+  //   file0 = [data ev0, data ev1]、file1 = [ctrl, data ev0]
+  //   → ctrl(file1) → data ev0(file0) → data ev0(file1) → data ev1(file0)
+  MergeInput in;
+  in.add_file({make_data_frame(256, false, 2, 0, 0xD0), make_data_frame(256, false, 2, 1, 0xD1)});
+  in.add_file({make_data_frame(256, false, 7, 0, 0xE0), make_data_frame(256, false, 2, 0, 0xE1)});
+
+  const std::vector<FrameSpan> got = vcobo::merge_by_event_idx(in.bytes, in.per_file);
+  in.check_order(got, {{1, 0}, {0, 0}, {1, 1}, {0, 1}});
+}
+
+void test_merge_preserves_source_order_when_event_idx_goes_backwards() {
+  // ④eventIdx 逆転入力でも「ソース内の順序」は必ず保存する(全体ソートはしない)。
+  //   file0 = [ev5, ev1]、file1 = [ev2, ev3]
+  //   先頭比較: (5,2) → 2、(5,3) → 3、file1 枯渇 → 5、1。= graw_replay と同じ結果。
+  MergeInput in;
+  in.add_file({make_data_frame(256, false, 2, 5, 0xF0), make_data_frame(256, false, 2, 1, 0xF1)});
+  in.add_file({make_data_frame(256, false, 2, 2, 0x70), make_data_frame(256, false, 2, 3, 0x71)});
+
+  const std::vector<FrameSpan> got = vcobo::merge_by_event_idx(in.bytes, in.per_file);
+  in.check_order(got, {{1, 0}, {1, 1}, {0, 0}, {0, 1}});
+}
+
+void test_merge_of_nothing_is_nothing() {
+  MergeInput in;
+  const std::vector<FrameSpan> got = vcobo::merge_by_event_idx(in.bytes, in.per_file);
+  CHECK_EQ(got.size(), 0u);
+}
+
+// ---------------------------------------------------------------------------
 // 6. 設定
 // ---------------------------------------------------------------------------
 void test_config_parse() {
@@ -369,6 +515,13 @@ int main() {
   test_device_map_is_sorted_and_complete();
   test_graw_frame_size();
   test_index_graw();
+  test_peek_event_idx();
+  test_merge_single_file_keeps_the_original_order();
+  test_merge_interleaves_files_event_by_event();
+  test_merge_breaks_ties_by_file_argument_order();
+  test_merge_gives_control_frames_priority_like_graw_replay();
+  test_merge_preserves_source_order_when_event_idx_goes_backwards();
+  test_merge_of_nothing_is_nothing();
   test_config_parse();
   test_asad_mask_check();
   return tpccheck::report("test_vcobo_core");
