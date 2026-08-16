@@ -45,9 +45,15 @@ run 一周がフルスタックで回る。前波は
    C3 = controller 分割は見送り確定(P4 の controller 追加は 052 の fallback 125 行のみ)。
    **ブラウザ受け入れデモの手順 = [archive/050](archive/050_run_control_wiring.md) 結果節**
    (UI ビルド → start_demo.sh(ui_dir 自動)→ http://127.0.0.1:8080/ → 操作列 ①〜⑧)。
-5. **[031_load_harness.md](031_load_harness.md)** — 負荷ハーネス。**044 の後に実走**
-   (soak は実機に持っていく最終形で行う — 044 の裁定)。vcobo-daq の全速モードがソースに
-   使える。**24 h 実走はマシン占有なのでユーザー合意が要る**。
+5. **[031_load_harness.md](031_load_harness.md)** — ハーネス完成(447→448 passed)。
+   サニティが root-sink の実欠陥 2 件を捕獲 → **053 完了**(リーク 1 行根治 =
+   585→2.0 KiB/event。天井 32 events/s は 054 に分離)。
+   **一晩 soak 実走中(2026-08-15 晩、45 Mbps × 12 h、`~/soak_0815/`。判定は明朝
+   `report.txt` — 小絶対値プロセスの単調性判定は過敏なので人裁定併用(053 未決④))**。
+   合格で 031 完了。
+6. **[054_root_sink_throughput.md](054_root_sink_throughput.md)** — READY(**soak と CPU
+   競合するため発注は soak 終了後**)。攻め手は hint 挿入 + ImplicitMT に限定、受け入れは
+   021 の内容一致オラクル。100 Hz 未達ならその実測が並列化裁定の材料。
 6. **デモ改良トラック(継続、テスト計画より先 — 2026-08-14 ユーザー)**: 当面はデモの
    完成度を延々と上げる。目玉候補 = **graw ファイルをデータソースとする仮想 zCoBo**
    (getHwServer ではなく**板ごと偽る** — 2026-08-14 ユーザー用語確定)。制御面
@@ -131,6 +137,11 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 ## 保留・確認事項
 
+- **SPEC 検討 2 件(053 の実測起因 — 次の Fable セッション or 054 後に裁定)**:
+  ①有界キューの単位が「メッセージ個数」(decoder 8 MiB バッチ × queue/rcvhwm 1000 =
+  最悪 8.9 GB×2 系統が正当な在庫。ELITPC 4 AsAd で効く — バイト建て上限 or 既定値変更の裁定)
+  ②過負荷でバックログを抱えた stop は EOS 予算 5 s を超え `error:eos-timeout` になる
+  (§9.2 の意味論としてそれで正しいか)。
 - **実 ECC の例外取りこぼし 2 箇所(043 発見 — 上流仕様なので改変しない。運用留意)**:
   `GetEccImpl::breakup` は失敗時 Ice **UnknownException**(SM::Exception を catch しない)/
   `onUnPrepare`(reset の Prepared→Described)は失敗時 dhsm が **halt** = 我々の map では

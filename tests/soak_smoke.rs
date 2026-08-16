@@ -28,8 +28,14 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 
 use common::{cleanup, e2e_env, scratch_dir, REAL_GRAW_BYTES, REAL_GRAW_EVENTS};
+
+/// 全通し配線は **固定ポート**(root-sink 47003/47004・controller 18080)を使うので、
+/// スタックを上げるテストは同時に走れない。同一テストバイナリ = 同一プロセスなので、
+/// 素の `Mutex` で直列化できる(`--test-threads=1` を呼び手に強要しない)。
+static STACK_LOCK: Mutex<()> = Mutex::new(());
 
 /// `soak_harness` が兄弟バイナリ(controller / receiver / …)を探す場所。
 /// `CARGO_BIN_EXE_*` は同じ target ディレクトリを指すので、その親を渡せばよい。
@@ -51,6 +57,7 @@ fn soak_harness_runs_two_runs_verifies_and_deletes_the_outputs() {
     let Some(env) = e2e_env("soak smoke") else {
         return;
     };
+    let _stack = STACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let scratch = scratch_dir("tpcdaq_soak_smoke", "two_runs");
     let out_dir = scratch.join("soak");
 
@@ -165,6 +172,112 @@ fn soak_harness_runs_two_runs_verifies_and_deletes_the_outputs() {
     assert!(
         report.contains("モニタ系 drop"),
         "レポートにモニタ系 drop が無い:\n{report}"
+    );
+
+    cleanup(&scratch);
+}
+
+/// SIGINT は **graceful**(TODO/053-D、一晩走行の運用要件)。
+///
+/// `--duration-h 1`(= 時間では終わらない)で走らせ、**run 1 本が合格した直後に**
+/// SIGINT を送る。期待するのは「その run を完走 → report を書く → exit 0」であって、
+/// 途中で切ることではない(切ると framer が途中で切れて全カウンタ 0 が壊れる)。
+#[test]
+fn soak_harness_sigint_finishes_the_current_run_and_reports() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    use std::sync::mpsc;
+
+    let Some(env) = e2e_env("soak sigint") else {
+        return;
+    };
+    let _stack = STACK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = scratch_dir("tpcdaq_soak_smoke", "sigint");
+    let out_dir = scratch.join("soak");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_soak_harness"))
+        .args([
+            "--mode",
+            "soak",
+            "--run-minutes",
+            "0.02",
+            // 時間でも run 本数でも終わらせない —— 終わらせるのは SIGINT だけ。
+            "--duration-h",
+            "1",
+            "--metrics-interval-s",
+            "2",
+        ])
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg("--bin-dir")
+        .arg(bin_dir())
+        .env("TPCDAQ_ROOT_SINK_BIN", &env.root_sink)
+        .env("TPCDAQ_ECC_BRIDGE_BIN", &env.ecc_bridge)
+        .env("TPCDAQ_FAKE_ECC_BIN", &env.fake_ecc)
+        .env("TPCDAQ_REAL_GRAW", &env.graw)
+        .env("TPCDAQ_REAL_GEOMETRY_MINI", &env.geometry)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn soak_harness");
+
+    // run 1 の合格行が出るまで待つ(sleep で当てにいかない)。
+    let child_stderr = child.stderr.take().expect("stderr is piped");
+    let (tx, rx) = mpsc::channel();
+    let pump = std::thread::spawn(move || {
+        let mut all = String::new();
+        for line in BufReader::new(child_stderr).lines().map_while(Result::ok) {
+            if line.contains("run 1 合格") {
+                let _ = tx.send(());
+            }
+            all.push_str(&line);
+            all.push('\n');
+        }
+        all
+    });
+    if rx
+        .recv_timeout(std::time::Duration::from_secs(300))
+        .is_err()
+    {
+        let _ = child.kill();
+        panic!(
+            "run 1 の合格行が出ないまま終わった:\n{}",
+            pump.join().unwrap_or_default()
+        );
+    }
+
+    let status = Command::new("kill")
+        .arg("-INT")
+        .arg(child.id().to_string())
+        .status()
+        .expect("kill -INT");
+    assert!(status.success(), "kill -INT が失敗した: {status:?}");
+
+    let output = child.wait_with_output().expect("wait soak_harness");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = pump.join().expect("stderr pump");
+    eprintln!("---- soak_harness stderr ----\n{stderr}");
+
+    // ① 正常終了(異常停止ではない)
+    assert!(
+        output.status.success(),
+        "SIGINT 後に非 0 で終わった: {:?}\n--- stdout ---\n{stdout}",
+        output.status
+    );
+    // ② 現 run は完走している = run 1 本が照合に合格して数えられている
+    assert!(
+        stdout.contains("run 数 = 1"),
+        "完走した run がレポートに出ていない:\n{stdout}"
+    );
+    // ③ 打ち切りの事実がレポートに残る(silent に短く終わらせない)
+    let report = std::fs::read_to_string(out_dir.join("report.txt")).expect("read report.txt");
+    assert!(
+        report.contains("SIGINT で打ち切り"),
+        "レポートに SIGINT の記録が無い:\n{report}"
+    );
+    assert!(
+        stderr.contains("SIGINT"),
+        "SIGINT を受けた旨が stderr に出ていない:\n{stderr}"
     );
 
     cleanup(&scratch);

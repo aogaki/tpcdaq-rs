@@ -928,6 +928,12 @@ fn run(cfg: &args::Args) -> Result<String, String> {
         cfg.min_free_gib,
     )?;
 
+    // --- SIGINT = graceful(TODO/053-D。一晩走行の運用要件)---------------------
+    // 「今の run を**完走**してから report を書いて exit 0」。走行中の run を切ると
+    // framer が途中で切れて「全カウンタ 0」が壊れる = 証拠が濁る。
+    let interrupted = Arc::new(AtomicBool::new(false));
+    install_sigint(Arc::clone(&interrupted));
+
     // --- run 反復 -------------------------------------------------------------
     let mut results: Vec<RunResult> = Vec::new();
     let outcome = run_loop(
@@ -938,6 +944,7 @@ fn run(cfg: &args::Args) -> Result<String, String> {
         &run_index,
         &run_number,
         Arc::clone(&stop),
+        Arc::clone(&interrupted),
         &mut results,
     );
 
@@ -948,7 +955,15 @@ fn run(cfg: &args::Args) -> Result<String, String> {
     let shutdown = shutdown_stack(&mut stack);
     // **失敗しても、そこまでに合格した run はレポートに出す**(証拠第一)。
     let laps_total = results.iter().map(|r| r.laps).sum::<u64>();
-    let report = report(cfg, &csv_path, &names, &results, &shutdown, laps_total);
+    let report = report(
+        cfg,
+        &csv_path,
+        &names,
+        &results,
+        &shutdown,
+        laps_total,
+        interrupted.load(Ordering::Relaxed),
+    );
     std::fs::write(out_dir.join("report.txt"), &report).map_err(|e| e.to_string())?;
 
     match outcome {
@@ -1282,6 +1297,38 @@ struct RunResult {
     seconds: f64,
 }
 
+/// SIGINT を「現 run を完走してから畳む」合図に変える(TODO/053-D)。
+///
+/// tokio は既に依存にあり `signal` feature も入っている —— 新依存も `unsafe` も足さずに
+/// シグナルを取れる唯一の手段がこれ(std にシグナル API は無い)。ハーネス本体は
+/// 同期コードなので、**専用スレッドの current-thread ランタイム**で 1 回だけ待つ。
+///
+/// **SIGTERM / SIGKILL は従来どおり即死**(暴走時の逃げ道を塞がない)。
+fn install_sigint(flag: Arc<AtomicBool>) {
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                // 黙って「Ctrl-C が効かない」状態にしない(CLAUDE.md)。
+                eprintln!("soak_harness: SIGINT ハンドラを張れなかった({e})—— Ctrl-C は即死のまま");
+                return;
+            }
+        };
+        rt.block_on(async {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                flag.store(true, Ordering::Relaxed);
+                eprintln!(
+                    "soak_harness: SIGINT —— 現 run を完走してから report を書いて終了する\
+                     (即座に止めるなら SIGTERM)"
+                );
+            }
+        });
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_loop(
     cfg: &args::Args,
@@ -1291,6 +1338,7 @@ fn run_loop(
     run_index: &AtomicU64,
     run_number: &AtomicU64,
     stop: Arc<AtomicBool>,
+    interrupted: Arc<AtomicBool>,
     results: &mut Vec<RunResult>,
 ) -> Result<(), String> {
     let token = post(
@@ -1305,7 +1353,7 @@ fn run_loop(
     let started = Instant::now();
     let mut index = 0u64;
 
-    while started.elapsed().as_secs_f64() < cfg.duration_s {
+    while started.elapsed().as_secs_f64() < cfg.duration_s && !interrupted.load(Ordering::Relaxed) {
         index += 1;
         run_index.store(index, Ordering::Relaxed);
         // 残り時間が 1 run より短いなら、その分だけ回して打ち切る(尻切れを作らない)。
@@ -1341,6 +1389,10 @@ fn run_loop(
             std::fs::remove_dir_all(&dir).map_err(|e| format!("remove {}: {e}", dir.display()))?;
         }
         results.push(result);
+        if interrupted.load(Ordering::Relaxed) {
+            eprintln!("soak_harness: SIGINT —— run {index} を完走したのでここで畳む");
+            break;
+        }
         if stop.load(Ordering::Relaxed) || cfg.max_runs.is_some_and(|n| index >= n) {
             break;
         }
@@ -1786,10 +1838,18 @@ fn report(
     runs: &[RunResult],
     shutdown: &Shutdown,
     laps_total: u64,
+    interrupted: bool,
 ) -> String {
     let (columns, samples, elapsed) = read_csv(csv_path);
     let mut out = String::new();
     let _ = writeln!(out, "===== soak_harness report =====");
+    if interrupted {
+        // 「予定時間まで走った」のか「SIGINT で切り上げた」のかがレポートだけで分かること。
+        let _ = writeln!(
+            out,
+            "**SIGINT で打ち切り**(現 run を完走してから畳んだ —— 走行時間は予定より短い)"
+        );
+    }
     let _ = writeln!(
         out,
         "mode={:?} 走行予定={:.3} h / 1 run={:.3} min / rate={} Mbps(0=全速)",

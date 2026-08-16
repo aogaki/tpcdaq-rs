@@ -1,6 +1,7 @@
 # 053 — root-sink の RSS 成長 + スループット天井(031 soak 初回捕獲の実欠陥)
 
-**Status: READY**(起票 2026-08-15 Fable — **031 の一晩 soak はこの修正が前提**)
+**Status: COMPLETED**(2026-08-15 — 結果は末尾)
+**Status(起票時): READY**(起票 2026-08-15 Fable — **031 の一晩 soak はこの修正が前提**)
 **仕様**: SPEC v1.15 §12-5(一晩 soak: RSS 平坦 + ロスゼロ)/ **v1.16 §12-6**
 (≥3× = mini 672 Mbps、10 分 drop 0)/ 絶対ルール(保存系ロスレス)
 **証拠**: `reference/_spike/soak_evidence_031/`(CSV 3 本 + report + root_sink ログ)
@@ -39,3 +40,33 @@
 
 - C++ 全スイート + conformance green(make -j)。cargo ゲート全 green(D 以外 Rust 非接触)。
 - C の実測数値(CSV/report)を結果節に。証拠は `reference/_spike/soak_evidence_031/` に追加。
+
+## 結果(2026-08-15 implementer/Opus(スリープ中断 → 再開)→ 発注側(Fable)レビュー PASS)
+
+- **A(計測)**: 成長の主体 = `GET::GDataChannel::fSamples`(TRefArray)の `fUIDs` —
+  `TClonesArray::Clear()` はデストラクタを呼ばず、次フレームの placement new で毎フレーム
+  迷子になる(malloc_history 最上位スタックで確定、**0.55 MB = 272ch×512×4 B の完全一致**)。
+  天井の主体 = Recorder 単スレッドの PEventTPC 生成 **21 ms/event**(Fill 45%(うち zlib 25%)/
+  AddValByStrip の std::map insert 29%(131k/event)/ GDataFrame 中間表現 15%)。
+  **リークと天井は独立**(修正前後で ms/event 不変)。
+- **B(修正)**: `root_recorder.hpp` 実質 1 行(`GetChannels()->Delete()` を Clear() 前に)。
+  third_party 無改変。**red 実測済みの成長回帰テスト付き**(200 events で +109 MB → green)。
+  挙動不変の証明: root_sink 全 7 スイート + test-root 337 + conformance + **021 実データ
+  オラクル `compared 3852 events, 0 differences`** 全て無変更 green。cargo 448 passed。
+- **C(実測)**: 45 Mbps 対照 720 s — RSS **585 → 2.0 KiB/event(293×)**・平坦判定 OK・
+  4 run 合格・完全追随。ELITPC 級(2.2 MB/event)でも平坦を 6 点実測。
+  **C① ≥100 events/s と C② 672 Mbps drop 0 は未達**(実測 32.2 /s = 天井そのもの) —
+  掟どおり実装せず報告 = **受理。天井は 054 に分離**(発注書の受け入れを事後修正する裁定)。
+  216× 時の counted drop・graw_replay の ENOBUFS 落ちの証拠も保全。
+- **D**: soak_harness SIGINT graceful(+64 行、新依存/unsafe なし、現 run 完走 → report。
+  実プロセス kill テスト付き)+ soak_smoke のスタックテスト直列化。
+- **逸脱の裁定**: 45 Mbps 対照走行の追加 = 受理(キュー在庫と分離するため必須だった)/
+  static Mutex = 受理。
+- **未決 → 処置**: ①天井 = **TODO/054 起票**(hint 挿入 + ImplicitMT、受け入れは内容一致)
+  ②キュー単位(個数→バイト、ELITPC で効く)+ ③過負荷時 EOS 予算 = **SPEC 検討として
+  CURRENT.md 保留節へ** ④単調性判定の過敏(小絶対値プロセス)= 一晩レポートの読みで
+  人裁定 + 054 相乗り候補。
+- 実行環境: macOS Darwin 25.5.0、2026-08-15(途中マシンスリープで中断 → コンテキスト保持
+  のまま再開、ゲートは全て通し直し)。
+
+**Status: COMPLETED**(C①② の未達は仕様側の天井 = 054 へ分離、という発注側裁定込み)

@@ -19,6 +19,7 @@
 // 同時に 2 個生かしてはいけない —— 充填テストの GDataFrame を**畳んでから** Recorder
 // (内部で GDataFrame を 1 個持つ)のテストに入る。main の scope 分けはそのため。
 
+#include <sys/resource.h>
 #include <sys/stat.h>
 
 #include <cmath>
@@ -696,6 +697,88 @@ void test_recorder_run_id_override() {
   }
 }
 
+// TODO/053: **1 イベント書く毎にメモリが増え続けない**。
+//
+// 実欠陥(031 soak が捕獲、053-A で計測特定): `GDataFrame::Clear()` が呼ぶ
+// `TClonesArray::Clear()` は**デストラクタを呼ばない**。次フレームの `AddChannel()` は
+// 同じスロットへ placement new するので、`GDataChannel` が所有する `TRefArray fSamples`
+// の内部配列が毎フレーム迷子になる —— 実機 mini(272 ch × 512 サンプル)で
+// **0.55 MB/イベント**の純増。Recorder が `Delete()` してから `Clear()` することで解く。
+//
+// 判定は `getrusage` の**ピーク RSS**(高々増える一方の値)。実機と同じ 139,264 items の
+// フレームを流し、ウォームアップ後の増分を見る:
+//   * 欠陥あり = 200 イベント × 0.55 MB = **110 MiB 増**(実測 +109〜115 MiB)
+//   * 修正後   = ROOT のバスケット等だけ = **数 MiB**(実測 +0〜4 MiB)
+// しきい値 32 MiB はこの 2 群のちょうど中間より低い側に置いてある(片側 3 倍以上の余裕)。
+//
+// ジオメトリは reduced フィクスチャ(strip が数本だけ)—— 出力を小さく保ちつつ
+// `build_frame` は実機と同じ全チャンネル分を回す(漏れは build_frame 側にある)。
+long peak_rss_kib() {
+  struct rusage ru;
+  if (::getrusage(RUSAGE_SELF, &ru) != 0) return 0;
+#if defined(__APPLE__)
+  return static_cast<long>(ru.ru_maxrss / 1024);  // macOS は byte
+#else
+  return static_cast<long>(ru.ru_maxrss);  // Linux は KiB
+#endif
+}
+
+void test_frame_buffers_do_not_grow_per_event() {
+  const std::string dir = scratch_dir("nogrow");
+  const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
+
+  // 実機 mini の 1 フレーム = 4 AGET × 68 ch × 512 bucket = 139,264 items。
+  std::vector<Item> items;
+  items.reserve(4u * 68u * 512u);
+  for (uint32_t aget = 0; aget < 4; ++aget) {
+    for (uint32_t chan = 0; chan < 68; ++chan) {
+      for (uint32_t cell = 0; cell < 512; ++cell) {
+        items.push_back(Item{aget, chan, cell, (aget * 137 + chan * 13 + cell) & 0xFFFu});
+      }
+    }
+  }
+
+  constexpr int kWarmupEvents = 40;   // ROOT のバスケット等が定常になるまで
+  constexpr int kMeasuredEvents = 200;
+  constexpr long kMaxGrowthKib = 32 * 1024;  // 32 MiB(欠陥時は 110 MiB 超)
+
+  rootsink::RecorderConfig cfg;
+  cfg.output_root = dir;
+  cfg.format = rootsink::OutputFormat::PEvent;
+  cfg.geometry = &geo;
+  cfg.fill = tiny_windows(/*remove_pedestal=*/true);
+  rootsink::Recorder rec(cfg);
+
+  uint32_t event_idx = 0;
+  for (int i = 0; i < kWarmupEvents; ++i, ++event_idx) {
+    rootsink::BuiltEvent ev;
+    ev.run_number = 53;
+    ev.event_idx = event_idx;
+    ev.fragments.push_back(make_fragment(event_idx, 0, 0, 1000 + event_idx, items));
+    rec.write(ev, 0);
+  }
+  const long warm_kib = peak_rss_kib();
+
+  for (int i = 0; i < kMeasuredEvents; ++i, ++event_idx) {
+    rootsink::BuiltEvent ev;
+    ev.run_number = 53;
+    ev.event_idx = event_idx;
+    ev.fragments.push_back(make_fragment(event_idx, 0, 0, 1000 + event_idx, items));
+    rec.write(ev, 0);
+  }
+  const long growth_kib = peak_rss_kib() - warm_kib;
+
+  CHECK_EQ(rec.entries_written(), kWarmupEvents + kMeasuredEvents);
+  CHECK(rec.fatal_reason() == nullptr);
+  if (growth_kib > kMaxGrowthKib) {
+    std::printf("  peak RSS grew %ld KiB over %d events (%.2f MB/event)\n", growth_kib,
+                kMeasuredEvents,
+                static_cast<double>(growth_kib) / 1024.0 / kMeasuredEvents);
+  }
+  CHECK(growth_kib <= kMaxGrowthKib);
+  rec.close_run(53, 0);
+}
+
 void test_recorder_gdataframe_mode_still_writes_old_tree() {
   const std::string dir = scratch_dir("gdf");
   {
@@ -813,6 +896,7 @@ int main() {
   test_fill_config_validation();
   test_recorder_writes_tpcdata_tree();
   test_recorder_run_id_override();
+  test_frame_buffers_do_not_grow_per_event();
   test_recorder_gdataframe_mode_still_writes_old_tree();
   test_real_pevent_structure();
 

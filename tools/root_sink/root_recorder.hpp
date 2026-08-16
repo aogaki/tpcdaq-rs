@@ -539,6 +539,18 @@ class Recorder {
   // `fillEventFromFrame` との意味論の等価性を構造的に担保する(SPEC §6.4 v1.8)。
   // 充填の正は graw2root.cpp と C++ 版 tpcdaq RootWriter。
   void build_frame(const OwnedFragment& f) {
+    // **チャンネルはデストラクタを呼んでから捨てる**(TODO/053-A の計測で特定)。
+    //
+    // `GDataFrame::Clear()` は `fChannels->Clear()` を呼ぶが、TClonesArray::Clear() は
+    // **デストラクタを呼ばない**(スロットを使い回すのが TClonesArray の趣旨)。一方
+    // `GDataFrame::AddChannel()` は同じスロットへ placement new する ——
+    // `GDataChannel` は `TRefArray fSamples` を **所有している** ので、placement new が
+    // 内部配列(`fUIDs`)のポインタを上書きして毎フレーム迷子にする。実機 mini では
+    // 272 ch × 512 サンプル分 = **0.55 MB/イベントの純増**(031 soak が捕獲した +660 MB/min)。
+    // ROOT の契約どおり「中身がメモリを持つ TClonesArray は Delete()」で解く。
+    // **Clear() より前**に呼ぶこと(Clear() が fCont を 0 埋めした後では何も destruct
+    // されない)。fSamples 側(GDataSample)は生の 2 値だけなので Delete 不要。
+    frame_->GetChannels()->Delete();
     frame_->Clear();
     GET::GFrameHeader& h = frame_->fHeader;
     // Fragment(SPEC §2.4)は dataSource を運ばない(MFM ヘッダの 1 バイト)。
