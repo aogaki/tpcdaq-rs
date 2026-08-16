@@ -51,9 +51,12 @@ run 一周がフルスタックで回る。前波は
    **一晩 soak 実走中(2026-08-15 晩、45 Mbps × 12 h、`~/soak_0815/`。判定は明朝
    `report.txt` — 小絶対値プロセスの単調性判定は過敏なので人裁定併用(053 未決④))**。
    合格で 031 完了。
-6. **[054_root_sink_throughput.md](054_root_sink_throughput.md)** — READY(**soak と CPU
-   競合するため発注は soak 終了後**)。攻め手は hint 挿入 + ImplicitMT に限定、受け入れは
-   021 の内容一致オラクル。100 Hz 未達ならその実測が並列化裁定の材料。
+6. **[054_root_sink_throughput.md](054_root_sink_throughput.md)** — READY・v2 改訂済み
+   (**soak と CPU 競合するため発注は soak 終了後**)。**ユーザー裁定(2026-08-15):
+   GDataFrame は graw2root のもので全く不要 → SPEC v1.17 で全撤去を確定**(v1.8 の削除条件 =
+   PEventTPC オラクル成立は 021 で満了済み)。攻め手 = C) GDataFrame 撤去(15% +
+   third_party 縮小)→ A) map hint(29%)→ B) ImplicitMT(25%)。受け入れは 021 の
+   内容一致オラクル。100 Hz 未達ならその実測が並列化裁定の材料。
 6. **デモ改良トラック(継続、テスト計画より先 — 2026-08-14 ユーザー)**: 当面はデモの
    完成度を延々と上げる。目玉候補 = **graw ファイルをデータソースとする仮想 zCoBo**
    (getHwServer ではなく**板ごと偽る** — 2026-08-14 ユーザー用語確定)。制御面

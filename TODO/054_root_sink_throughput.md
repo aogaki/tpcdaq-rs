@@ -14,18 +14,25 @@ Recorder 単スレッド 21 ms/event(隔離 47 /s、実稼働 32 /s)。内訳:
 `tree_->Fill()` 45%(うち zlib deflate 25%)/ `PEventTPC::AddValByStrip` = std::map insert
 29%(131,072 insert/event)/ GDataFrame 中間表現 15%。目標 = **≥100 events/s(mini)**。
 
-## 攻め手(裁定済み — この 2 つに限定。GDataFrame 廃止は SPEC の柱に触るため**やらない**)
+## 攻め手(v2 改訂 2026-08-15 — **ユーザー裁定「GDataFrame は graw2root のもので全く不要」
+→ SPEC v1.17 適用済み**。攻め手は 3 つ = 計 59% を狙う)
 
-- **A. map insert の hint 化(29% を攻める)**: `AddValByStrip` 呼び出し列が strip/時間で
-  ほぼ整列しているなら、TPCReco API の範囲で挿入順・hint を工夫(`chargeMap` の最終内容が
-  同一なら手段は任せる。TPCReco 側のコードは**無改変** — 呼び方だけで削る)。
-  併せて Filler 側の一時確保・再確保も点検(1 イベント毎の map 再構築コスト)。
-- **B. `ROOT::EnableImplicitMT()` の試行(zlib 25% を攻める)**: バスケット圧縮の並列化。
-  **受け入れは 021 オラクルの内容一致**(`compared 3852 events, 0 differences`)であって
-  バイト一致ではない(§6.4 — 053 結果節の補足どおり)。IMT で内容が変わらないことを
-  オラクルで証明できなければ**採用しない**。スレッド数は設定可能に(既定は控えめ)。
+- **C. GDataFrame の全撤去(15% + 保守負債)** — **最初にやる**(A/B の計測対象が変わるため):
+  ①中間表現の撤去: `build_frame`(Fragment → GDataFrame)を廃し、**Filler が
+  OwnedFragment を直接読んで PEventTPC を充填**(ch→strip 変換は既存 geometry 経路)。
+  等価性の担保は §12-3 の内容一致オラクル(SPEC v1.17 §6.4)。
+  ②`--format gdataframe` テスト専用モードと専用回帰(test_recorder の GDataFrame 読み戻し
+  群 = 011/012 由来)を撤去 — **撤去したテストの一覧と理由(v1.17 削除条件成立)を結果節に
+  明記**(「テストを消す」のではなく「役目を終えたオラクルを SPEC の予定どおり退役させる」)。
+  ③不要化した `third_party/get/` の GDataFrame 系クラスを削除(CeCILL 隔離ごと縮小。
+  053 が直した TRefArray リークのクラス自体が消えることも記録)。
+- **A. map insert の hint 化(29%)**: `AddValByStrip` 呼び出し列の整列性を活かして
+  挿入 hint / 順序を工夫(TPCReco 側コード**無改変**、`chargeMap` の最終内容同一)。
+  C 後の Filler 直読設計に合わせて実施。
+- **B. `ROOT::EnableImplicitMT()` の試行(25%)**: バスケット圧縮の並列化。
+  **受け入れは 021 オラクルの内容一致**。証明できなければ採用しない。スレッド数設定可。
 - 相乗り可(小): 053 未決④ = soak_harness の RSS 単調性判定に**絶対値フロア**
-  (例: 上昇幅 < 32 MiB は OK 扱い)を追加(decoder 13.6→14.5 MB を「上昇」と誤判定した件)。
+  (例: 上昇幅 < 32 MiB は OK 扱い)。
 
 ## 受け入れ
 
@@ -39,6 +46,6 @@ Recorder 単スレッド 21 ms/event(隔離 47 /s、実稼働 32 /s)。内訳:
 
 ## 非スコープ
 
-- GDataFrame 中間表現の廃止(SPEC §6.4 の等価性担保 — ユーザー/Fable の SPEC 裁定なしに
-  触らない)/ chargeMap・圧縮形式の変更(出力形式の定義)/ キュー単位のバイト建て化
-  (SPEC 検討 — CURRENT.md 保留節)。
+- chargeMap・圧縮形式の変更(出力形式の定義)/ キュー単位のバイト建て化
+  (SPEC 検討 — CURRENT.md 保留節)/ Recorder の複数スレッド化(A/B/C で 100 Hz に
+  届かない場合の次の裁定材料として実測を残すこと)。

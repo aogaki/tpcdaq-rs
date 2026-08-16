@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.16(2026-08-15 — 実装の正本)**
+- **status**: **v1.17(2026-08-15 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -123,6 +123,13 @@
   216× 条件で receiver の never-stop + counted drop(§1.4)が silent でなく働くことを実測。
   あわせて 031 の soak サニティが root-sink の実欠陥 2 件(RSS +0.55 MB/event 成長 /
   天井 ≈30 events/s)を捕獲 — 修正 = TODO/053、soak 本走行はその後。
+  / **v1.17(2026-08-15)GDataFrame の全撤去(ユーザー裁定)**: GDataFrame は
+  graw2root(GET 付属の別ツール — §6.4 v1.7 の用語注意で「混同注意」とした、まさにその
+  別系統)の形式であり我々のチェーンに不要。v1.8 の削除条件(PEventTPC 実データオラクルの
+  成立)は 021 で満了済み。§6.4 = 中間表現撤去(Filler が Fragment 直読)+
+  `--format gdataframe` モード・専用回帰の撤去、§12-3 = 「旧 GDataFrame 比較を維持」の
+  文言を撤去。等価性の担保は内容一致オラクル(3852 events / 0 differences)が担う。
+  性能上も中間表現は 21 ms/event の 15% を占めていた(053 計測)。実装 = TODO/054。
 - **正本性**: 本書が実装の正本。PROPOSAL v0.4 と食い違う場合は本書が勝つ(差分は §14 に列挙。
   PROPOSAL v0.5 への反映は Warsaw フィードバックと併せて判断 — 未実施)。
 - **入力**: PROPOSAL_ja.md v0.4 / delila-rs 実装調査 / C++ 版 tpcdaq 実装調査 /
@@ -639,7 +646,7 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
   フラグメントは **TTree に書かず `late_fragments` としてカウント + warn 可視化**。
   データ自体は生 graw(ロスレス保存系)に必ず在る — run.root は v1.8 から「解析用の変換出力」
   であり(FPN 落とし・窓切り・ペデスタル減算を含む)、ロスレス保証の担い手ではない。
-  (旧 GDataFrame テストモードでは従来どおり追記 — 011/012 回帰の維持のため。)
+  (旧 GDataFrame テストモードに関する注記は v1.17 のモード撤去により削除。)
 - **重複フラグメント(同一イベント内の同一 (cobo,asad)、v1.10 明文化 — R-P2-4)**:
   `duplicate_fragments` で計数のうえ、**イベントに全部載せて全部 fill する(加算)** —
   「捨てない」を優先する。実機で重複は発生しない想定であり、PEventTPC の chargeMap /
@@ -696,12 +703,14 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
   `max_signal_cell` 506(TPCReco `allowedOptions.json` の既定と同値)。
 - 圧縮は **101(ZLIB-1)を既定とし設定可能**(v1.5。実機 grawToEventTPC 出力が ZLIB level 1
   であることを 2026 実ファイルで直接確認済み — WARSAW_PLAN §4)。
-- **GDataFrame の扱い(v1.8 降格)**: 取り込み側の内部表現として維持(Fragment → GDataFrame
-  充填は 011 で実データ全値一致を実証済み — PEventTPC 充填はこの GDataFrame を読む。
-  fillEventFromFrame と同じ入力形に揃えることで意味論の等価性を構造的に担保)。
-  **GDataFrame TTree 出力はテスト専用モード**(`--format gdataframe`)として残す — P2 の
-  mini 実データ全値一致オラクル(§12-3)を持つ唯一の回帰のため。PEventTPC の同 run
-  実データオラクル(§12-3 v1.8)が閉じたら削除してよい。既定は PEventTPC。
+- **GDataFrame の扱い(v1.8 降格 → v1.17 全撤去)**: **ユーザー裁定(2026-08-15):
+  GDataFrame は graw2root(GET 付属の別ツール)の形式であり、我々のチェーンに全く不要。**
+  v1.8 が定めた削除条件「PEventTPC の同 run 実データオラクルが閉じたら」は 021
+  (`compared 3852 events, 0 differences`)で**成立済み**。よって:
+  ①中間表現(Fragment → GDataFrame → PEventTPC)を撤去し、**Filler は Fragment を直接読む**
+  (等価性の担保は中間表現の共有ではなく **§12-3 の内容一致オラクル**が担う)
+  ②`--format gdataframe` テスト専用モードと専用回帰を撤去
+  ③不要化した third_party/get の GDataFrame 系クラスを整理。実装 = TODO/054。
 
 ### 6.5 ファイル命名・ライフサイクル
 
@@ -929,7 +938,7 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
 |---|---|---|
 | 1 | デコーダオラクル | 実 2025 run graw(ローカル、`TPCDAQ_REAL_GRAW` 環境変数)で **events=108 / items=15,040,512 / malformed=0**。実 ELITPC graw(`TPCDAQ_REAL_GRAW_DIR`、2022/2026 各 4 ファイル、v1.7)で **各ファイル frames=3852 / items=536,444,928 / malformed=0 / unsupported=0 / eventIdx 0..=3851 連続 / eventTime 単調**。CI は合成フィクスチャで frameType 1/2 両方 green |
 | 2 | graw バイト一致 | frameType 1/2 を asadIdx で分別した列 = per-AsAd 出力、残り全フレームの列 = ctrl/ 出力、**全出力の合計 = 入力の完全ロスレス分割**(v1.2)。mini 実 graw オラクル: AsAd ファイル 30,108,672 B + ctrl 12 B(frameType 7 ×1)= 30,108,684 B。ローテーション跨ぎも連結一致。ELITPC 実ファイル(1,073,875,968 B > 2^30)を既定 max でリプレイすると **_0000 が入力と完全バイト一致 + 空 _0001**(ローテーション境界の実機一致、v1.7) |
-| 3 | TTree 互換 | **v1.8: PEventTPC 互換** — ①構造一致: 実機 grawToEventTPC 出力(2026 実ファイル)とツリー名/ブランチ/クラス streamer バージョン/圧縮が一致 ②値一致(単体): 既知入力 → chargeMap 期待値(strip 射影・signal 窓・ペデスタル算法の手計算オラクル)③値一致(実データ): 同一 run の graw 4 本組と grawToEventTPC 変換済み .root のペアで全イベント全 key の値一致(env-gated)— **2026-08-14 達成: `compared 3852 events, 0 differences`**(TODO/021、tests/elitpc_pevent_e2e.rs)。旧 GDataFrame 比較(mini 実データ全値一致)は `--format gdataframe` テスト専用モードの回帰として維持 |
+| 3 | TTree 互換 | **v1.8: PEventTPC 互換** — ①構造一致: 実機 grawToEventTPC 出力(2026 実ファイル)とツリー名/ブランチ/クラス streamer バージョン/圧縮が一致 ②値一致(単体): 既知入力 → chargeMap 期待値(strip 射影・signal 窓・ペデスタル算法の手計算オラクル)③値一致(実データ): 同一 run の graw 4 本組と grawToEventTPC 変換済み .root のペアで全イベント全 key の値一致(env-gated)— **2026-08-14 達成: `compared 3852 events, 0 differences`**(TODO/021、tests/elitpc_pevent_e2e.rs)。~~旧 GDataFrame 比較の維持~~ **v1.17 で撤去**(GDataFrame は graw2root の形式で不要 — ユーザー裁定。§6.4) |
 | 4 | 2 ソースビルド | graw_replay ×2 並走(異なる CoBo id を模す)→ 全イベント complete、eventIdx 昇順、incomplete=0、CoBo 毎フレーム数一致 |
 | 5 | 連続負荷 | **v1.15 で二段化(ユーザー裁定 2026-08-15 — ソフト単体の 24 h は過剰、フル 24 h はハード込みでこそ意味がある)**: **(a) 自宅ソフト soak = 一晩(≥ 8 h、既定 12 h)のトレンド駆動** — 100 Hz 相当ペース(mini ≈ 28 MB/s)のループリプレイ、保存系 drop 0(全カウンタ 0: overflow / gap / malformed / late)、各プロセスの RSS/fd/全カウンタを定期サンプリングし**後半半分で単調増加なし**(上昇トレンドが出たら延長 or 修正)。ディスク節約のため「書いて検証して消す」ハーネス可。**(b) フル 24 h(100 Hz 相当連続)は ELI-NP 実機テストでハード込みで実施**(P5 前段 — §13-7 の現地項目に併合。ソフト soak は実機時間をハード起因の問題だけに純化するためのフィルタという位置づけ) |
 | 6 | 瞬発負荷 | **v1.16 で定義を明示レート形に改訂**: **ペーシング付き ≥3× 目標レート(mini ≈ 672 Mbps / 84 MB/s)で 10 分、保存系 drop 0**(バッファ設計の証明)。旧「ペーシングなし全速」は loopback で **216× 目標(6.06 GB/s)** に達し物理的対応物が無い(031 実測)。なおその 216× 条件で receiver の never-stop + counted drop(§1.4)が設計どおり働き silent でないことは実測確認済み — これは §12-6 の合否とは別の設計検証として記録 |
