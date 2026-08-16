@@ -130,6 +130,16 @@
   `--format gdataframe` モード・専用回帰の撤去、§12-3 = 「旧 GDataFrame 比較を維持」の
   文言を撤去。等価性の担保は内容一致オラクル(3852 events / 0 differences)が担う。
   性能上も中間表現は 21 ms/event の 15% を占めていた(053 計測)。実装 = TODO/054。
+  **同日追補(調査 3 レーンの確定事項)**: ①GDataFrame の出自 = GET **CoBoFrameViewer**
+  パッケージのオフライン ROOT 永続化モデル(graw2root 変換器 + root2disp ビューア専用。
+  ライブビューアすら CoBoEvent 直読)②TPCReco では `fillEventFromFrame(GET::GDataFrame&)`
+  の**入力アダプタ層**(WITH_GET ガード内のみ、ROOT 出力に 1 バイトも入らない、解析/GUI は
+  不知)③よって撤去は grawToEventTPC 互換に**無影響** — Filler 直読の意味論の正本は
+  `EventSourceGRAW.cpp:301-323` と `PedestalCalculatorGRAW.cpp`(054 発注書に指針明記)
+  ④**注意(記録)**: TPCReco latest スナップショットの `EventSourceGRAW.cpp:262` は
+  runId を eventId で**上書きする**(本家のバグと思われる)。実機配備版の実出力
+  (`PEventTPC_2026-08-11...root` の runId=20260811074737)は run 開始時刻であり、
+  **我々の実装は実機出力側に一致**(§6.4 の既定を維持。BuildIndex の意味からも正)。
 - **正本性**: 本書が実装の正本。PROPOSAL v0.4 と食い違う場合は本書が勝つ(差分は §14 に列挙。
   PROPOSAL v0.5 への反映は Warsaw フィードバックと併せて判断 — 未実施)。
 - **入力**: PROPOSAL_ja.md v0.4 / delila-rs 実装調査 / C++ 版 tpcdaq 実装調査 /

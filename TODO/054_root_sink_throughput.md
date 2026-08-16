@@ -34,6 +34,26 @@ Recorder 単スレッド 21 ms/event(隔離 47 /s、実稼働 32 /s)。内訳:
 - 相乗り可(小): 053 未決④ = soak_harness の RSS 単調性判定に**絶対値フロア**
   (例: 上昇幅 < 32 MiB は OK 扱い)。
 
+## C の実装指針 — 意味論の正本(2026-08-15 調査で確定。docs 調査 3 レーンの結論)
+
+GDataFrame は TPCReco にとっても**入力アダプタ層**であり(WITH_GET ガード内のみ・ROOT に
+1 バイトも入らない・解析/GUI は不知)、撤去後の Filler 直読が鏡写しにすべき**正本は次の
+2 か所だけ**(`reference/TPCReco/latest/`):
+1. **`EventSources/src/EventSourceGRAW.cpp:301-323`** — ループ順(aget 外・normal chan 内)/
+   normal→raw リオーダ(`Aget_normal2raw` = GeometryTPC.cpp:1321-1331)/ signal 窓 /
+   減算 / strip 射影 / chargeMap への **`+=` 加算**。
+2. **`GrawToROOT/src/PedestalCalculatorGRAW.cpp:127-205` + `DataFormats/src/
+   PedestalCalculator.cpp:255-262`** — (cobo,asad) フレーム毎リセット / FPN 平均 2 本
+   (窓別)/ チャンネルオフセット / `correction = offset + FPN_ave_signal[cell]`。
+
+**移送チェックリスト(build_frame にだけ載っている意味論 — 落とすと壊れる)**:
+①(aget,chan) 重複時**先勝ち**(SearchChannel 由来 — pevent_fill.hpp:234)
+②(aget,chan) 昇順 + チャンネル内 bucket 昇順(root_recorder.hpp:597-615)
+③`chan >= 68` の item を落として数える(`items_out_of_range_` — 我々独自の防御、
+build_frame と一緒に消さない)
+④件数 0 の cell のペデスタルは 0.0 のまま ⑤同一 eventId は 1 回だけ書く
+⑥signal 窓は PEventTPC 充填時適用(EventSourceBase の filterTimeCells とは別物 — 混同注意)。
+
 ## 受け入れ
 
 - **実測**: 隔離プローブ(053 の mem_probe 相当 — `prof_053_mem_probe.cxx.txt` に写しあり)で
