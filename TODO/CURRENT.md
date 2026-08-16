@@ -74,6 +74,11 @@
 9. **[057_ecc_timeout_not_firing.md](057_ecc_timeout_not_firing.md) — OPEN(調査)**:
    056 で実 ECC configure 261 s の間、controller の ECC REQ タイムアウト 60 s が
    発火しなかった疑い。次セッションの候補。
+10′. ~~059~~ **完了(2026-08-16)— Wojciech 要望 3 点の成立性調査**: ZS(FW 対応済み・
+   frameType 1 化に注意)/ Unfolding(TPCReco に無いが順方向応答 StripResponseCalculator
+   あり = 逆問題として定式化)/ ゲイン正規化(greenfield、FW パルサー較正あり)。
+   **裁定: 生データは graw のみ・ROOT は処理込み可 / 優先 Unfolding > ゲイン > ZS**。
+   WARSAW_PLAN §7 新設。[archive/059](archive/059_wojciech_wishlist.md)。
 10. ~~058~~ **完了(2026-08-16)— モニタ 2D 改善(SPEC v1.18)**: 2D 転置(縦 strip /
    横 time)+ Event Display に表示専用ベースライン減算(先頭 25 cell 平均・負値保持)。
    UI のみ +6 テスト(192)。Waveform 生 ADC 確定 / StripTime 積算のまま /
