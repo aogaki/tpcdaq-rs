@@ -1,6 +1,6 @@
 # 031 — 負荷ハーネス(§12-5 連続 24 h / §12-6 瞬発 10 分 = R-P2-11、Warsaw 前必須)
 
-**Status: OPEN(030 完了後に発注 — モニタ経路込みで測る意味があるため = R-P2-11 修正案)**
+**Status: COMPLETED**(2026-08-16 — 一晩 soak 合格。§12-5 フルレート持続 + §12-6 は 054 に移管)
 **仕様**: SPEC **v1.11** §12-5(100 Hz 相当ペース 24 h、保存系 drop 0、RSS 後半 12 h
 単調増加なし、「書いて検証して消す」可)/ §12-6(全速 ≥3× 相当 10 分、drop 0)/
 §12 末尾(graw_replay ペーシング)/ §1.4(ロスレス系の背圧)
@@ -121,3 +121,60 @@
   §12-6 の「全速」定義は v1.16 で明示レート形(≥3× = 672 Mbps)に改訂。
 - **一晩の本番走行(§12-5 v1.15)は 053 完了後に起動**(detach コマンドは実装報告③のとおり。
   SIGINT graceful は 053-D で追加される)。本チケットは**その走行の合格をもって完了**。
+
+---
+
+## 結果(2026-08-16 — 一晩本番走行の判定。ハーネス実装自体の結果は追記 3 参照)
+
+### 実行
+
+- コマンド: `nohup caffeinate -i ./reference/_spike/soak_bin/soak_harness --mode soak
+  --duration-h 12 --run-minutes 10 --rate-mbps 45 --metrics-interval-s 60
+  --out-dir ~/soak_0815`(053 修正込みスナップショットバイナリ、detach 起動)
+- 走行: 2026-08-15 20:16 〜 08-16 04:40 EDT。ユーザーの朝の移動予定のため 04:30 に
+  SIGINT で graceful 打ち切り(現 run 完走 → report 生成)。**実走 30,244.7 s = 8.40 h ≥ 8 h**
+  (§12-5 v1.15 の下限を満たす)。環境: macOS(Darwin 25.5.0)、loopback、
+  mini 実 .graw(30,108,684 B/lap)。
+- レート 45 Mbps の理由: root-sink 天井 ≈32 events/s(053 実測、修正は 054)があるため、
+  持続可能レート(≈20 events/s)でトレンド検証を主眼に走らせた(v1.15 の趣旨 =
+  リーク・成長・ドリフトの検出)。224 Mbps は 30 分 ×2 run で別途実測(下記)。
+
+### §12-5(a) 一晩ソフト soak — **✔ 合格**
+
+- **run**: 50 run 全合格(back-to-back、書いて検証して消す)。全 run が
+  laps=113 / graw=3,402,281,292 B / entries=12,204 / 604.9 s で**完全一致**(決定論)。
+  総計 5,650 laps / 158.43 GiB 送出 / 610,200 events。達成 45.0 Mbps(指示値どおり)。
+- **ロスレスカウンタ全 0(8.4 h 通し)**: recv overflow/framer_resets/abandoned/encode/
+  send、dec malformed/seq_gaps/run_mismatches/batches_abandoned/eos_abandoned/
+  cobo_mismatch、gw 全カウンタ、rs incomplete/late/pending = **全て 0**。
+  root-sink 終了 JSON: entries_written=610,200(=50×12,204)/ duplicates=0 /
+  items=84,978,892,800(=610,200×139,264 で厳密一致)/ items_out_of_range=0。
+- **RSS 単調性(v1.15 式: 後半 [H/2,H]、先頭窓×1.05 ≥ 末尾窓、窓=H/12)**:
+  全 8 プロセス **OK**。root_sink は後半先頭窓 530,598 KiB → 末尾窓 530,654 KiB
+  (+56 KiB/4.2 h — 053 リーク修正が長時間で実証された。修正前は +0.55 MB/event)。
+- **fd**: root_sink 157→209 は起動後 60 s で 209 に達して以後 8.4 h 完全一定
+  (プラトー、リークではない)。他プロセスは全て一定。
+- **モニタ系 drop(silent にしない)**: mon_publish_drops=341,664(カウント済み・設計どおり)、
+  monitor_gaps=0 / ws_dropped=0 / clients_dropped_slow=0。
+- 証拠: `reference/_spike/soak_evidence_031/report_overnight_45mbps_8h4.txt` +
+  `metrics_overnight_45mbps_8h4.csv`(505 サンプル × 51 列)。
+
+### 224 Mbps(100 Hz 相当)30 分 — 参考実測(053 後)
+
+2 run 合格・達成 223.2 Mbps・全ロスレスカウンタ 0・overflow 0。ただし root-sink /
+decoder の RSS が run 中 3〜4.3 GiB まで膨張(天井超過分をキューが吸収し run 間で回復)。
+**长時間の持続はできない形** — フルレート持続の受け入れは 054(≥100 events/s)へ。
+証拠: `report_053after_224mbps.txt`。
+
+### §12-6 瞬発負荷(v1.16: 672 Mbps × 10 分 drop 0)— **✘ 未達 → 054 に移管**
+
+recv_overflow_frames=94,544(counted drop、silent でない = §1.4 は設計どおり)、
+RSS root_sink 13.7 GiB / decoder 10.2 GiB。原因は root-sink 天井(053 で確定、
+21 ms/event)。**054 完了後に再実測**(054 受け入れに追記)。
+証拠: `report_053after_burst672.txt`。
+
+### スキップ・残課題
+
+- 任意項目「2 ソース合成 burst」: 未実施(root-sink 天井の解消が先 — 054 後に価値が出る)。
+- §12-5(b) フル 24 h はハード込みで ELI-NP(v1.15 の仕様どおり、本チケットの範囲外)。
+- テストスイート: cargo 448 passed(soak_smoke 含む、追記 3 時点から無変更)。

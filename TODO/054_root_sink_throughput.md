@@ -60,6 +60,9 @@ build_frame と一緒に消さない)
   ms/event の before/after。soak_harness 30 分 @224 Mbps で **events_built ≥ 100/s +
   全ロスレスカウンタ 0 + RSS 平坦**。届かない場合は**到達値と残りの内訳**を計測で報告
   (それ自体が成果 — 100 Hz が単スレッドの物理限界なら、その事実が (b) 並列化裁定の材料)。
+- **§12-6 再実測(031 からの移管)**: burst 672 Mbps × 10 分で保存系 drop 0
+  (031 実測は recv_overflow=94,544 で未達 — 原因が本チケットの天井そのもの。
+  100 events/s に届いた場合のみ挑戦し、結果を ✔/✘ どちらでも結果節に記録)。
 - 挙動: root_sink 全スイート + conformance + **021 オラクル(内容一致)** 無変更 green。
   cargo 無影響(相乗り分除く)。
 - ELITPC 換算(2.2 MB/event、524k insert/event)の外挿見積もりを結果節に。

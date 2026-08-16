@@ -1,7 +1,6 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-08-15(仮想 zCoBo トラック完走 = 038〜042。実 ECC + vcobo-daq で
-run 一周がフルスタックで回る。前波は
+**最終更新: 2026-08-16(031 一晩 soak 合格 → 完了。残チケットは 054 のみ。前波は
 [archive/CURRENT_2026-08-14_p2_p3wave.md](archive/CURRENT_2026-08-14_p2_p3wave.md))**
 
 ## いま(1 分で読める要約)
@@ -22,7 +21,9 @@ run 一周がフルスタックで回る。前波は
 - **仮想 zCoBo スタック稼働**(2026-08-15): 実 ECC(実験と同一版)+ `tools/vcobo/` で
   検出器なしに run 一周が本番経路で回る。正本 = docs/VIRTUAL_ZCOBO_ja.md v1.2、
   レシピ = reference/_spike/demo/。
-- 実装の正本 = **docs/SPEC_ja.md v1.14**。モデル使い分け・完了時ルール = CLAUDE.md。
+- **一晩 soak 合格(2026-08-16、031)**: 45 Mbps × 8.4 h / 50 run / ロス 0 / RSS 平坦。
+  ソフト側の耐久はクリア — 残る性能課題は root-sink 天井(054)のみ。
+- 実装の正本 = **docs/SPEC_ja.md v1.17**。モデル使い分け・完了時ルール = CLAUDE.md。
 - 公開リポ: https://github.com/aogaki/tpcdaq-rs(実データ・FW・実 .dat は reference/ = .gitignore)。
 
 ## 次にやること(次セッションの入口 — 順序は 044 で裁定済み・ユーザー合意 2026-08-15)
@@ -45,14 +46,14 @@ run 一周がフルスタックで回る。前波は
    C3 = controller 分割は見送り確定(P4 の controller 追加は 052 の fallback 125 行のみ)。
    **ブラウザ受け入れデモの手順 = [archive/050](archive/050_run_control_wiring.md) 結果節**
    (UI ビルド → start_demo.sh(ui_dir 自動)→ http://127.0.0.1:8080/ → 操作列 ①〜⑧)。
-5. **[031_load_harness.md](031_load_harness.md)** — ハーネス完成(447→448 passed)。
-   サニティが root-sink の実欠陥 2 件を捕獲 → **053 完了**(リーク 1 行根治 =
-   585→2.0 KiB/event。天井 32 events/s は 054 に分離)。
-   **一晩 soak 実走中(2026-08-15 晩、45 Mbps × 12 h、`~/soak_0815/`。判定は明朝
-   `report.txt` — 小絶対値プロセスの単調性判定は過敏なので人裁定併用(053 未決④))**。
-   合格で 031 完了。
+5. ~~031~~ **完了(2026-08-16)— 一晩 soak 合格(§12-5(a) v1.15 ✔)**: 45 Mbps × 8.40 h、
+   **50 run 全合格・全 run バイト/エントリ完全一致・ロスレスカウンタ全 0・RSS 単調性
+   全 8 プロセス OK**(053 リーク修正の長時間実証: 後半 4.2 h で +56 KiB)。610,200 events /
+   158 GiB。§12-5 フルレート持続 + **§12-6(672 Mbps burst)は未達 → 054 に移管**
+   (原因 = root-sink 天井そのもの)。[archive/031](archive/031_load_harness.md) 結果節が正。
 6. **[054_root_sink_throughput.md](054_root_sink_throughput.md)** — READY・v2 改訂済み
-   (**soak と CPU 競合するため発注は soak 終了後**)。**ユーザー裁定(2026-08-15):
+   (soak 終了済みなので発注可。**唯一の残チケット**。§12-6 再実測を受け入れに追加済み)。
+   **ユーザー裁定(2026-08-15):
    GDataFrame は graw2root のもので全く不要 → SPEC v1.17 で全撤去を確定**(v1.8 の削除条件 =
    PEventTPC オラクル成立は 021 で満了済み)。攻め手 = C) GDataFrame 撤去(15% +
    third_party 縮小)→ A) map hint(29%)→ B) ImplicitMT(25%)。受け入れは 021 の
@@ -169,9 +170,10 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 ## 完了ユニット台帳
 
-000〜052 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
-すべて各 md の「結果」節が正。**未完は 031 のみ**)。
-直近(2026-08-15): **038〜042** 仮想 zCoBo トラック / **043** ecc_error 可視化 /
+000〜053 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
+すべて各 md の「結果」節が正。**残チケットは 054 のみ**)。
+直近(2026-08-16): **031** 一晩 soak 合格で完了。
+前日(2026-08-15): **038〜042** 仮想 zCoBo トラック / **043** ecc_error 可視化 /
 **033** 異常系セマンティクス(quiesce 停止 1.3 s 化)/ **044〜049 リファクタ窓** /
-**050〜052 P4**(Run 制御 UI 実配線 + 表示強化 + SPA fallback)。
+**050〜052 P4**(Run 制御 UI 実配線 + 表示強化 + SPA fallback)/ **053** RSS リーク根治。
 前日(2026-08-14): 027〜037。
