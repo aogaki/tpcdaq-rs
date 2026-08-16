@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.18(2026-08-16 — 実装の正本)**
+- **status**: **v1.19(2026-08-16 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -137,6 +137,11 @@
   ため・経験則をデータに焼き込まないため、ワイヤと保存系には適用しない)
   ③Waveform は生 ADC のまま / StripTime は Σ ADC 積算のまま(per-event ビューは
   Event Display が担う)。実装 = TODO/058(UI のみ、+6 テスト)。
+  / **v1.19(2026-08-16)§6.4 ROOT 系統の位置づけ再定義(ユーザー裁定 — Warsaw 大
+  Wojciech 教授の要望 3 点が起点)**: **生データは graw のみ**。ROOT は解析レディー
+  プロダクトであり処理を含んでよい(基底 = grawToEventTPC 互換 PEventTPC は不変・
+  §12-3 オラクル維持。将来 Unfolding / ストリップ毎ゲイン正規化等を追加しうる —
+  WARSAW_PLAN §7、成立性調査 = TODO/059)。§14-8 に PROPOSAL R8 との差分を記録。
   **同日追補(調査 3 レーンの確定事項)**: ①GDataFrame の出自 = GET **CoBoFrameViewer**
   パッケージのオフライン ROOT 永続化モデル(graw2root 変換器 + root2disp ビューア専用。
   ライブビューアすら CoBoEvent 直読)②TPCReco では `fillEventFromFrame(GET::GDataFrame&)`
@@ -688,6 +693,15 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 同一**。オフライン解析は TPCReco であり(mini/ELITPC 共通)、変換ステップなしで我々の出力を
 そのまま解析に使えることが価値。v1.7 までの GDataFrame 出力は瑕疵と裁定。
 
+**位置づけの再定義(v1.19、ユーザー裁定 2026-08-16 — Wojciech 要望起点)**:
+**生データは graw のみ**。ROOT は「生データの別形式」ではなく**解析をすぐ始めるための
+解析レディープロダクト**であり、処理を含んでよい(graw から原理的に作り直せることが保険。
+現に PEventTPC はペデスタル減算済みで、既にこの位置づけにある)。
+- **基底は現行どおり grawToEventTPC 互換の PEventTPC**(§12-3 内容一致オラクルは不変)。
+- 将来、**Unfolding(ストリップ毎の信号復元)・ストリップ毎ゲイン正規化**等の処理済み
+  派生物を**追加**しうる(WARSAW_PLAN §7。基底互換ツリーを壊さない追加が既定形 —
+  具体形は実装時に本節を改訂して定義する)。
+
 - **ツリー/ブランチ(TPCReco EventSourceROOT がハード期待する形)**: ツリー名 `TPCData`
   (タイトル空文字)、単一ブランチ `Branch("Event", &pevent, 128000, 2)`(splitlevel 2)。
   **1 エントリ = 1 イベント(全 AsAd ビルド済み)**。出自 = `ConvertGrawFile.cpp:40-45` +
@@ -1033,6 +1047,11 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
    新規」が正確。
 7. C++ 版 tpcdaq は run 番号がハードコード 0 で run メタデータを一切書いていない(JSONL 設計 §9 が
    これを埋める新規部分であることの確認)。
+8. **R8「graw2root 互換 ROOT」の位置づけ再定義(v1.19、ユーザー裁定 2026-08-16)**:
+   PROPOSAL R8 は ROOT 系統を「互換出力のオンライン再現」と定義したが、これを
+   「**解析レディープロダクト**(互換 PEventTPC を基底に、Unfolding・ゲイン正規化等の
+   処理済み派生物を追加しうる)」へ拡張する。**生データは graw のみ**という区別を明文化
+   (§6.4 v1.19)。Warsaw 大 Wojciech 教授の要望 3 点(WARSAW_PLAN §7)が起点。
 
 ## 15. 用語
 

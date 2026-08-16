@@ -27,7 +27,7 @@
   レシピ = reference/_spike/demo/。
 - **一晩 soak 合格(2026-08-16、031)**: 45 Mbps × 8.4 h / 50 run / ロス 0 / RSS 平坦。
   ソフト側の耐久はクリア — 残る性能課題は root-sink 天井(054)のみ。
-- 実装の正本 = **docs/SPEC_ja.md v1.18**。モデル使い分け・完了時ルール = CLAUDE.md。
+- 実装の正本 = **docs/SPEC_ja.md v1.19**。モデル使い分け・完了時ルール = CLAUDE.md。
 - 公開リポ: https://github.com/aogaki/tpcdaq-rs(実データ・FW・実 .dat は reference/ = .gitignore)。
 
 ## 次にやること(次セッションの入口 — 順序は 044 で裁定済み・ユーザー合意 2026-08-15)
@@ -79,6 +79,9 @@
    あり = 逆問題として定式化)/ ゲイン正規化(greenfield、FW パルサー較正あり)。
    **裁定: 生データは graw のみ・ROOT は処理込み可 / 優先 Unfolding > ゲイン > ZS**。
    WARSAW_PLAN §7 新設。[archive/059](archive/059_wojciech_wishlist.md)。
+10″. ~~060~~ **完了(2026-08-16)— SPEC v1.19**: 生データは graw のみ、ROOT は
+   解析レディープロダクト(処理込み可・基底互換不変)を §6.4/§14-8 に明文化。
+   [archive/060](archive/060_root_analysis_ready.md)。
 10. ~~058~~ **完了(2026-08-16)— モニタ 2D 改善(SPEC v1.18)**: 2D 転置(縦 strip /
    横 time)+ Event Display に表示専用ベースライン減算(先頭 25 cell 平均・負値保持)。
    UI のみ +6 テスト(192)。Waveform 生 ADC 確定 / StripTime 積算のまま /
