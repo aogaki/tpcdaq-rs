@@ -27,7 +27,7 @@
   レシピ = reference/_spike/demo/。
 - **一晩 soak 合格(2026-08-16、031)**: 45 Mbps × 8.4 h / 50 run / ロス 0 / RSS 平坦。
   ソフト側の耐久はクリア — 残る性能課題は root-sink 天井(054)のみ。
-- 実装の正本 = **docs/SPEC_ja.md v1.17**。モデル使い分け・完了時ルール = CLAUDE.md。
+- 実装の正本 = **docs/SPEC_ja.md v1.18**。モデル使い分け・完了時ルール = CLAUDE.md。
 - 公開リポ: https://github.com/aogaki/tpcdaq-rs(実データ・FW・実 .dat は reference/ = .gitignore)。
 
 ## 次にやること(次セッションの入口 — 順序は 044 で裁定済み・ユーザー合意 2026-08-15)
@@ -74,6 +74,10 @@
 9. **[057_ecc_timeout_not_firing.md](057_ecc_timeout_not_firing.md) — OPEN(調査)**:
    056 で実 ECC configure 261 s の間、controller の ECC REQ タイムアウト 60 s が
    発火しなかった疑い。次セッションの候補。
+10. ~~058~~ **完了(2026-08-16)— モニタ 2D 改善(SPEC v1.18)**: 2D 転置(縦 strip /
+   横 time)+ Event Display に表示専用ベースライン減算(先頭 25 cell 平均・負値保持)。
+   UI のみ +6 テスト(192)。Waveform 生 ADC 確定 / StripTime 積算のまま /
+   elitpc デモ 1 event/s。[archive/058](archive/058_monitor_striptime_v2.md)。
 6. **デモ改良トラック(継続、テスト計画より先 — 2026-08-14 ユーザー)**: 当面はデモの
    完成度を延々と上げる。目玉候補 = **graw ファイルをデータソースとする仮想 zCoBo**
    (getHwServer ではなく**板ごと偽る** — 2026-08-14 ユーザー用語確定)。制御面

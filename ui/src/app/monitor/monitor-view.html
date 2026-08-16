@@ -13,8 +13,10 @@
     <mat-tab label="Histograms (9)">
       <ng-template matTabContent>
         <p class="hint">
-          x 軸は monitor から届いた範囲のまま固定(オートレンジなし)—— 飽和天井 4095
-          が常に見える(SPEC §5.2)。ビン数・strip 数はメッセージ由来。
+          1D(Charge / ChargeMax)の x 軸は monitor から届いた範囲のまま固定(オートレンジなし)——
+          飽和天井 4095 が常に見える(SPEC §5.2)。2D(StripTime)は
+          <strong>縦 = strip / 横 = time bucket</strong> で、run 積算の Σ ADC マップ(生
+          ADC・減算なし)。 ビン数・strip 数はメッセージ由来。
         </p>
         @for (group of rows; track group.row.key) {
           <section class="row">
@@ -32,7 +34,10 @@
     <mat-tab label="Event display">
       <ng-template matTabContent>
         <p class="hint">
-          最新の built event(`0x02 Uvw`)を面毎に strip × time bucket で表示。生 ADC・減算なし。
+          最新の built event(`0x02 Uvw`)を面毎に
+          <strong>縦 = strip / 横 = time bucket</strong> で表示。 値は
+          <strong>生 ADC − ベースライン</strong>(strip 毎に先頭 25 cell の平均。負値はそのまま)——
+          <strong>表示だけの補正</strong>で、保存データもワイヤ(生 ADC)も変えていない。
         </p>
         <section class="row">
           <div class="grid">

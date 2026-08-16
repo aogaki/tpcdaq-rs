@@ -13,6 +13,19 @@
  * ワイヤ側(§10.2)は 2D が **iy 外側 row-major**(`idx = iy*nx + ix`)なので、
  * 行と列を取り違えると「転置した絵」が出る。`root-histo.spec.ts` が全ビン検査する。
  *
+ * ## 2D の向き(TODO/058 — ユーザー裁定 2026-08-16)
+ *
+ * **縦(Y)= strip 番号、横(X)= time bucket**(TPCReco の慣習)。ワイヤは strip が
+ * x のままなので、**転置はここでやる**(§5.3/§10.2 の格子もサーバ側の集計も不変)。
+ * StripTime(`0x11`)と Event Display(`0x02`)の**両方**が同じ向き。
+ *
+ * ## Event Display のベースライン減算(TODO/058、表示専用)
+ *
+ * 各イベント・各 strip で **先頭 25 cell(0..24)の平均**を引く。**負値はそのまま**
+ * (0 に切り上げない)。データを書き換えるのではなく「見やすさのためだけの補正」なので、
+ * ワイヤ(`0x02` = 生 ADC)にも保存系にも一切触らない —— オフライン解析は自前で
+ * ベースラインを計算し直す。StripTime(Σ ADC の run 積算マップ)には**適用しない**。
+ *
  * ch 数・ビン数・面の本数は**すべてメッセージ由来**(プロジェクト不変条件)。
  */
 
@@ -81,11 +94,11 @@ export interface HistoRow {
 export const HISTO_ROWS: readonly HistoRow[] = [
   {
     key: 'StripTime',
-    label: 'StripTime — Σ ADC (strip × time bucket)',
+    label: 'StripTime — Σ ADC (run 積算。縦 = strip / 横 = time bucket)',
     ids: [1, 2, 3],
     is2d: true,
-    xTitle: 'strip',
-    yTitle: 'time bucket',
+    xTitle: 'time bucket',
+    yTitle: 'strip',
   },
   {
     key: 'Charge',
@@ -112,14 +125,14 @@ export function histoPanelSpec(row: HistoRow, planeIndex: number): PanelSpec {
   return { name, title: name, xTitle: row.xTitle, yTitle: row.yTitle };
 }
 
-/** イベント表示(0x02 Uvw)の 1 面。 */
+/** イベント表示(0x02 Uvw)の 1 面。軸は 2D 共通で x = time bucket / y = strip。 */
 export function uvwPanelSpec(planeIndex: number): PanelSpec {
   const plane = PLANE_NAMES[planeIndex] ?? '?';
   return {
     name: `Event${plane}`,
     title: `Event${plane}`,
-    xTitle: 'strip',
-    yTitle: 'time bucket',
+    xTitle: 'time bucket',
+    yTitle: 'strip',
   };
 }
 
@@ -180,24 +193,29 @@ function buildHisto1d(create: HistFactory, message: Histo1dMessage, spec: PanelS
   return histo;
 }
 
-/** `0x11 Histo2d` → TH2D。ワイヤは iy 外側 row-major。 */
+/**
+ * `0x11 Histo2d` → TH2D。ワイヤは iy 外側 row-major(ix = strip、iy = bucket)で、
+ * **描くときに転置する**(058): ROOT の x = bucket、y = strip。
+ * 軸範囲もワイヤの x↔y を入れ替えて渡す(値は全部メッセージ由来)。
+ */
 function buildHisto2d(create: HistFactory, message: Histo2dMessage, spec: PanelSpec): RootHisto {
   const { nx, ny } = message;
-  const histo = create('TH2D', nx, ny);
+  // ROOT 側のビン数(x = time bucket = ワイヤの ny、y = strip = ワイヤの nx)。
+  const histo = create('TH2D', ny, nx);
   applySpec(histo, spec);
-  histo.fXaxis.fXmin = message.xmin;
-  histo.fXaxis.fXmax = message.xmax;
-  histo.fYaxis.fXmin = message.ymin;
-  histo.fYaxis.fXmax = message.ymax;
+  histo.fXaxis.fXmin = message.ymin;
+  histo.fXaxis.fXmax = message.ymax;
+  histo.fYaxis.fXmin = message.xmin;
+  histo.fYaxis.fXmax = message.xmax;
 
-  const stride = nx + 2;
+  const stride = ny + 2;
   let sum = 0;
   for (let iy = 0; iy < ny; iy++) {
     const src = iy * nx;
-    const dst = (iy + 1) * stride + 1;
     for (let ix = 0; ix < nx; ix++) {
       const value = message.bins[src + ix];
-      histo.fArray[dst + ix] = value;
+      // (strip ix, bucket iy) → ROOT の (x = iy, y = ix)
+      histo.fArray[(ix + 1) * stride + (iy + 1)] = value;
       sum += value;
     }
   }
@@ -205,28 +223,54 @@ function buildHisto2d(create: HistFactory, message: Histo2dMessage, spec: PanelS
   return histo;
 }
 
+/** Event Display のベースライン窓 = 先頭 25 cell(0..24)。TODO/058(表示専用)。 */
+export const BASELINE_CELLS = 25;
+
+/**
+ * strip 1 本のベースライン = 先頭 25 cell の平均(TODO/058)。
+ *
+ * cell が 25 本より少ないグリッド(テスト用の小さいメッセージ)では**ある分だけ**で
+ * 平均を取る —— 実機は常に 512 cell なので、これは短いメッセージを黙って壊さないため。
+ * 読み出しの無い strip は全セル 0 なのでベースラインも 0(= 何も引かれない)。
+ */
+export function stripBaseline(adc: ArrayLike<number>, offset: number, nBuckets: number): number {
+  const cells = Math.min(BASELINE_CELLS, nBuckets);
+  if (cells <= 0) return 0;
+  let sum = 0;
+  for (let b = 0; b < cells; b++) sum += adc[offset + b];
+  return sum / cells;
+}
+
 /**
  * `0x02 Uvw` → TH2D(イベント表示 = R9。ヒストと同じ描画系に揃える — 028 発注書 4)。
- * 軸は x = strip 1..nStrips、y = bucket 0..nBuckets。どちらもメッセージ由来。
+ * 軸は **x = time bucket 0..nBuckets、y = strip 1..nStrips**(058 で転置)。
+ * どちらもメッセージ由来。
+ *
+ * 値は `adc - baseline(strip)`(058)。**負値はそのまま**入れる —— ROOT の fArray は
+ * Float64Array なので u16 のワイヤ値が負になっても情報は落ちない。読み出しの無い
+ * strip は 0 のままで、JSROOT の `colz` は値ちょうど 0 のセルを描かない(= 未読が
+ * 「引きすぎた黒」に見えない)。
  */
 function buildUvw(create: HistFactory, message: UvwMessage, spec: PanelSpec): RootHisto {
-  const nx = message.nStrips;
-  const ny = message.nBuckets;
-  const histo = create('TH2D', nx, ny);
+  const nStrips = message.nStrips;
+  const nBuckets = message.nBuckets;
+  const histo = create('TH2D', nBuckets, nStrips);
   applySpec(histo, spec);
-  histo.fXaxis.fXmin = 1;
-  histo.fXaxis.fXmax = nx + 1;
-  histo.fYaxis.fXmin = 0;
-  histo.fYaxis.fXmax = ny;
+  histo.fXaxis.fXmin = 0;
+  histo.fXaxis.fXmax = nBuckets;
+  histo.fYaxis.fXmin = 1;
+  histo.fYaxis.fXmax = nStrips + 1;
 
-  const stride = nx + 2;
+  const stride = nBuckets + 2;
   let sum = 0;
-  // ワイヤは strip-major(`idx=(strip-1)*nBuckets+bucket`)、ROOT は bucket が外側。
-  for (let ix = 0; ix < nx; ix++) {
-    const src = ix * ny;
-    for (let iy = 0; iy < ny; iy++) {
-      const value = message.adc[src + iy];
-      histo.fArray[(iy + 1) * stride + (ix + 1)] = value;
+  // ワイヤは strip-major(`idx=(strip-1)*nBuckets+bucket`)、ROOT は strip が外側(y)。
+  for (let s = 0; s < nStrips; s++) {
+    const src = s * nBuckets;
+    const baseline = stripBaseline(message.adc, src, nBuckets);
+    const dst = (s + 1) * stride + 1;
+    for (let b = 0; b < nBuckets; b++) {
+      const value = message.adc[src + b] - baseline;
+      histo.fArray[dst + b] = value;
       sum += value;
     }
   }
