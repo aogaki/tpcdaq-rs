@@ -1162,14 +1162,24 @@ impl<'a> Sequencer<'a> {
             .and_then(Value::as_str)
             .unwrap_or("<none>")
             .to_string();
-        match self.transport.ecc(request) {
+        // 所要を必ず残す(057: 実 ECC の configure は初回に分単位かかりうる。elapsed が
+        // 無いと「1 本が長い」のか「本数の合計」なのか事後に切り分けられない)。
+        let started = std::time::Instant::now();
+        let outcome = self.transport.ecc(request);
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        match outcome {
             Err(e) => Err(format!("ecc {action} unreachable: {e}")),
             Ok(reply) if !reply.ok => Err(format!(
                 "ecc {action} failed in state {}: {}",
                 reply.state, reply.error
             )),
             Ok(reply) => {
-                info!(action, state = reply.state, "ecc command applied");
+                info!(
+                    action,
+                    state = reply.state,
+                    elapsed_ms,
+                    "ecc command applied"
+                );
                 Ok(reply.state)
             }
         }

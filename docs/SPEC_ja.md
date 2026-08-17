@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.19(2026-08-16 — 実装の正本)**
+- **status**: **v1.20(2026-08-17 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -142,6 +142,10 @@
   プロダクトであり処理を含んでよい(基底 = grawToEventTPC 互換 PEventTPC は不変・
   §12-3 オラクル維持。将来 Unfolding / ストリップ毎ゲイン正規化等を追加しうる —
   WARSAW_PLAN §7、成立性調査 = TODO/059)。§14-8 に PROPOSAL R8 との差分を記録。
+  / **v1.20(2026-08-17)§8.2 ECC タイムアウトの意味論明文化(057 調査)**:
+  per-REQ 60 s は正しく発火する(実測固定)。シーケンス全体は意図的に無期限
+  (非冪等な歩きを途中放棄しない)— クライアント側タイムアウト + status ポーリングが
+  正規の回復。`ecc command applied` ログに elapsed_ms を常設。
   **同日追補(調査 3 レーンの確定事項)**: ①GDataFrame の出自 = GET **CoBoFrameViewer**
   パッケージのオフライン ROOT 永続化モデル(graw2root 変換器 + root2disp ビューア専用。
   ライブビューアすら CoBoEvent 直読)②TPCReco では `fillEventFromFrame(GET::GDataFrame&)`
@@ -861,6 +865,14 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
   DataSender id は `CoBo[k]` 形式、flowType は大文字 `TCP`、Ice encoding 1.1 固定。
   router_port は receiver が**実際に bind したポート**を controller が Arm 応答から取って渡す。
 - 例外は全部 Result 化(never throw)。ECC 不達は `state: "Unknown"`。
+- **タイムアウトの意味論(v1.20 明文化 — 057 調査で確定)**: controller の ECC REQ は
+  **1 リクエストあたり 60 s**(rcvtimeo。発火することは遅延 fake ECC で実測固定 —
+  tests/controller_ecc_timeout.rs)。**run/start 等のシーケンス全体には意図的に期限を
+  設けない** — 歩き戻し込みで最大 9 REQ = 最悪 540 s。ECC 歩きは状態を持つ列であり、
+  途中で放棄する方が危険(非冪等)。クライアントは自前のタイムアウト + `/api/status`
+  ポーリングで回復する(UI は既にこの形)。実測の含意: 実 ECC の configure は
+  コールドスタートで分単位かかりうる(056 で 261 s 観測)— 各 REQ の所要は
+  controller ログの `ecc command applied` に `elapsed_ms` として常時記録される。
 
 ### 8.3 検証
 

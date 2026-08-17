@@ -1,6 +1,6 @@
 # 057 — controller の ECC REQ タイムアウトが発火しない疑い(056 実測起因)
 
-**Status: OPEN(調査ユニット — 原因が局所化していないので Fable/主対話が一次対応)**
+**Status: COMPLETED**(2026-08-17 — 結果は末尾。裁定込み)
 **証拠**: 056 受け入れ実測(2026-08-16)の初回 elitpc run
 
 ## 観測事実
@@ -27,3 +27,25 @@
 ## 非スコープ
 
 - ECC 本体の改変(初回 261 s の内因調査はログ観察まで)。
+
+---
+
+## 結果(2026-08-17 — implementer/Opus 調査、発注側(Fable)裁定)
+
+- **結論: タイムアウトは壊れていない**。rcvtimeo 60 s は `ZmqTransport::ecc`
+  (controller.rs:349-385)の recv 側に正しく効き、90 s 固まる相手に **60.00 s
+  ちょうどで Err** することを実測。tokio に吸われてもいない(spawn_blocking 内の同期 zmq)。
+- **261 s の正体(最有力)**: run/start は最大 9 本の ECC REQ(歩き戻し + 4 相)を
+  順に撃ち、**シーケンス全体には期限が無い**(最悪 540 s)。個々の 60 s は全部生きて
+  いた。curl --max-time 180 が先に切れ run は完走 — 観測と完全整合。ecc_bridge/
+  ecc_server ログは無タイムスタンプで一次資料は消失(コールドスタート再現は ELI-NP
+  観察項目へ — elapsed_ms ログ追加により次回は即断できる)。
+- **裁定**: A) 全体期限は**設けない**(非冪等な歩きを途中放棄する方が危険。SPEC v1.20
+  §8.2 に明文化)。B) `ecc command applied` に **elapsed_ms を追加**(発注側が実装 —
+  1 行 + fmt/clippy/対象テスト green)。D) UI 回復は status ポーリングで既に成立。
+- **テスト**: tests/controller_ecc_timeout.rs 新規 3 本(タイムアウト発火 / REST 通しで
+  HTTP 500 + audit ok=false — 従来 1 本も無かった経路)。cargo **453 passed / 0 failed /
+  1 ignored**(基準 450 + 3)。
+- 実行環境: macOS Darwin 25.5.0、2026-08-17。
+
+**Status: COMPLETED**

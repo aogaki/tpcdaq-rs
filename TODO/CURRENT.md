@@ -27,7 +27,7 @@
   レシピ = reference/_spike/demo/。
 - **一晩 soak 合格(2026-08-16、031)**: 45 Mbps × 8.4 h / 50 run / ロス 0 / RSS 平坦。
   ソフト側の耐久はクリア — 残る性能課題は root-sink 天井(054)のみ。
-- 実装の正本 = **docs/SPEC_ja.md v1.19**。モデル使い分け・完了時ルール = CLAUDE.md。
+- 実装の正本 = **docs/SPEC_ja.md v1.20**。モデル使い分け・完了時ルール = CLAUDE.md。
 - 公開リポ: https://github.com/aogaki/tpcdaq-rs(実データ・FW・実 .dat は reference/ = .gitignore)。
 
 ## 次にやること(次セッションの入口 — 順序は 044 で裁定済み・ユーザー合意 2026-08-15)
@@ -61,19 +61,19 @@
    `3852 events, 0 differences` 無変更 green。A(map hint)は実測して棄却(libc++ で悪化 +
    TPCReco 無改変では口が無い)。80 Mbps × 30 分 soak 合格。**ELITPC 実測 ≈10 /s = 10× 不足**。
    [archive/054](archive/054_root_sink_throughput.md) 結果節が正。
-7. **[055_recorder_parallel_ruling.md](055_recorder_parallel_ruling.md) — DRAFT・
-   ユーザー裁定待ち**: ①ELI-NP 前に並列化するか(凍結時期)②並列化の形
-   (worker 毎 TTree = P1 / fill のみ並列 = P2)③保留②(EOS 予算)の扱い。
-   §12-6 再実測もここに移管。**追記済み(2026-08-16 ユーザー): 100 Hz は mini のみ、
-   ELITPC は流用(7 TB/日はストレージ的に端から無理)。M4 Pro 実測は実環境より有利 —
-   現地再計測 + マージン前提**。
+7. ~~055~~ **裁定完了(2026-08-17)**: **案 Y(ELI-NP 前に並列化)+ P1(worker 毎
+   TTree、N=1 完全互換)**。ZS は Mikolaj 裁定で消滅、EOS 予算は据え置き(064 実測で
+   再判定)。[archive/055](archive/055_recorder_parallel_ruling.md)。
+   → **実装 = [064_recorder_parallel_p1.md](064_recorder_parallel_p1.md)(発注済み・
+   implementer/Opus 実行中)** — §12-5 フルレート持続 + §12-6 burst の最終受け入れ込み。
 8. ~~056~~ **完了(2026-08-16)— ELITPC 構成デモ開通**: vcobo に eventIdx マージ
    (テスト 92→148、実 4 本組 15,408 frames / eventIdx 0..3851)+ elitpc xcfg 3 点 +
    `TPCDAQ_DEMO_PROFILE=elitpc` 切替。実測 304 events complete / late 0 / graw 4 本
    sha256 一致 / mini 回帰無変更。[archive/056](archive/056_elitpc_demo_profile.md)。
-9. **[057_ecc_timeout_not_firing.md](057_ecc_timeout_not_firing.md) — OPEN(調査)**:
-   056 で実 ECC configure 261 s の間、controller の ECC REQ タイムアウト 60 s が
-   発火しなかった疑い。次セッションの候補。
+9. ~~057~~ **完了(2026-08-17)— タイムアウトは健全だった(SPEC v1.20)**: per-REQ
+   60 s は正しく発火(遅延 fake で実測固定、新規テスト 3 本 → cargo 453)。261 s の正体は
+   「シーケンス全体は意図的に無期限(最大 9 REQ)」— §8.2 に明文化し、`elapsed_ms`
+   ログを常設。[archive/057](archive/057_ecc_timeout_not_firing.md)。
 10′. ~~059~~ **完了(2026-08-16)— Wojciech 要望 3 点の成立性調査**: ZS(FW 対応済み・
    frameType 1 化に注意)/ Unfolding(TPCReco に無いが順方向応答 StripResponseCalculator
    あり = 逆問題として定式化)/ ゲイン正規化(greenfield、FW パルサー較正あり)。
