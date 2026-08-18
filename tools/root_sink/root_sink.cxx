@@ -242,6 +242,8 @@ void print_counts_json(const Counts& c, const char* fatal) {
       (rec != nullptr) ? rec->charge_keys_out_of_range() : 0;
   const uint64_t frames_outside_geometry =
       (rec != nullptr) ? rec->frames_outside_geometry() : 0;
+  // Recorder の worker 数(TODO/064)。--no-root では 0(Recorder が居ない)。
+  const int recorder_workers = (rec != nullptr) ? rec->workers() : 0;
   std::string files_json = "[";
   if (rec != nullptr) {
     const std::vector<rootsink::RootFileRecord> files = rec->files_snapshot();
@@ -268,6 +270,7 @@ void print_counts_json(const Counts& c, const char* fatal) {
       ",\"items_out_of_range\":%" PRIu64 ",\"recorder_queue\":%" PRIu64
       ",\"duplicate_event_ids\":%" PRIu64 ",\"channels_without_strip\":%" PRIu64
       ",\"charge_keys_out_of_range\":%" PRIu64 ",\"frames_outside_geometry\":%" PRIu64
+      ",\"workers\":%d"
       ",\"snapshots_published\":%" PRIu64 ",\"events_published\":%" PRIu64
       ",\"publish_drops\":%" PRIu64 ",\"pub_bind_failed\":%d"
       ",\"root_files\":%s,\"fatal\":\"%s\"}\n",
@@ -276,7 +279,7 @@ void print_counts_json(const Counts& c, const char* fatal) {
       c.duplicate_fragments, c.pending_events, c.heartbeats, c.unknown, c.stale_eos,
       c.unexpected_sources, c.run_number_mismatch, entries_written, items_out_of_range,
       c.recorder_queue, duplicate_event_ids, channels_without_strip,
-      charge_keys_out_of_range, frames_outside_geometry,
+      charge_keys_out_of_range, frames_outside_geometry, recorder_workers,
       g_mon.snapshots_published.load(std::memory_order_relaxed),
       g_mon.events_published.load(std::memory_order_relaxed),
       g_mon.publish_drops.load(std::memory_order_relaxed),
@@ -315,6 +318,11 @@ struct Options {
   // --root-imt(TODO/054-B): ROOT のバスケット圧縮を並列化するスレッド数。
   // 0 = 無効。既定 4 は隔離プローブで頭打ちになった本数(実測 -6.3% ms/event)。
   int root_imt = rootsink::kDefaultImtThreads;
+  // --root-imt が明示されたか(TODO/064 §7: worker 並列とスレッドプールの二重取りは
+  // 計測で正当化できたときだけ —— N>1 では明示が無ければ IMT を 0 に落とす)。
+  bool root_imt_set = false;
+  // --recorder-workers(TODO/064): Recorder の worker 数。1 = 現行と完全同一。
+  int recorder_workers = rootsink::kDefaultRecorderWorkers;
   bool no_root = false;
   // PEventTPC 出力(TODO/020、SPEC §6.4 v1.8 / v1.17)
   std::string geometry;  // --geometry(TTree を書くなら必須)
@@ -358,7 +366,12 @@ void usage(const char* argv0) {
       "                    (default %d = ZLIB-1, readable by all ROOT eras;\n"
       "                    e.g. 505 = ZSTD-5, requires ROOT 6.20+)\n"
       "  --root-imt N      compress ROOT baskets with N threads, 0 = off\n"
-      "                    (default %d; measured -6%% ms/event, saturates at 4)\n"
+      "                    (default %d; measured -6%% ms/event, saturates at 4.\n"
+      "                    With --recorder-workers > 1 the default drops to 0)\n"
+      "  --recorder-workers N\n"
+      "                    parallel ROOT writers, each with its own TTree (default %d).\n"
+      "                    1 = one file per part (run0001.root, run0001_0001.root, ...).\n"
+      "                    N > 1 = one file set per worker (run0001_w0.root, ...)\n"
       "  --no-root         do not write a TTree, only count (fast path for tests)\n"
       "  --geometry FILE   TPCReco geometry .dat, REQUIRED unless --no-root\n"
       "  --pedestal-remove 0|1\n"
@@ -382,7 +395,7 @@ void usage(const char* argv0) {
       argv0, kDefaultBind, kDefaultRcvHwm, kDefaultQueue,
       rootsink::kDefaultBuildTimeoutMs, rootsink::kDefaultMaxRootBytes,
       rootsink::kDefaultCompression, rootsink::kDefaultImtThreads,
-      tpcpevent::kDefaultMinPedestalCell,
+      rootsink::kDefaultRecorderWorkers, tpcpevent::kDefaultMinPedestalCell,
       tpcpevent::kDefaultMaxPedestalCell, tpcpevent::kDefaultMinSignalCell,
       tpcpevent::kDefaultMaxSignalCell, kDefaultPubBind, kDefaultSnapshotHz,
       kDefaultEventPublishHz);
@@ -482,6 +495,10 @@ Options parse_args(int argc, char** argv) {
           static_cast<int>(parse_nonnegative("--root-compression", argv[++i]));
     } else if (a == "--root-imt" && has_value) {
       opt.root_imt = static_cast<int>(parse_nonnegative("--root-imt", argv[++i]));
+      opt.root_imt_set = true;
+    } else if (a == "--recorder-workers" && has_value) {
+      opt.recorder_workers =
+          static_cast<int>(parse_positive("--recorder-workers", argv[++i]));
     } else if (a == "--no-root") {
       opt.no_root = true;
     } else if (a == "--geometry" && has_value) {
@@ -532,6 +549,16 @@ Options parse_args(int argc, char** argv) {
   if (!opt.fill.validate(&why)) {
     std::fprintf(stderr, "root_sink: %s\n", why.c_str());
     std::exit(kExitUsage);
+  }
+  // TODO/064 §7: worker 並列と ROOT のスレッドプールの**二重取りはしない**
+  // (計測で正当化できた場合だけ `--root-imt N` を明示する)。N>1 では既定を 0 に落とす。
+  // **黙って変えない**(CLAUDE.md)—— 変えたことを 1 行出す。
+  if (opt.recorder_workers > 1 && !opt.root_imt_set && opt.root_imt != 0) {
+    std::fprintf(stderr,
+                 "root_sink: --recorder-workers %d > 1: ROOT ImplicitMT default drops "
+                 "from %d to 0 (pass --root-imt N to override)\n",
+                 opt.recorder_workers, opt.root_imt);
+    opt.root_imt = 0;
   }
   return opt;
 }
@@ -1005,6 +1032,7 @@ int main(int argc, char** argv) {
     rcfg.geometry = geometry.get();
     rcfg.fill = opt.fill;
     rcfg.run_id_override = opt.run_id;
+    rcfg.workers = opt.recorder_workers;
     recorder.reset(new rootsink::Recorder(rcfg));
     // スレッドを起こす前に公開する(fatal 時の JSON から必ず見える)。
     g_recorder.store(recorder.get(), std::memory_order_release);
@@ -1051,10 +1079,11 @@ int main(int argc, char** argv) {
   } else {
     std::fprintf(stderr,
                  "root_sink: writing PEventTPC TTree \"%s\" under %s (max-root-bytes=%" PRIu64
-                 " compression=%d imt=%d pedestal_remove=%d pedestal_cells=%d..%d "
-                 "signal_cells=%d..%d)\n",
+                 " compression=%d imt=%d workers=%d pedestal_remove=%d "
+                 "pedestal_cells=%d..%d signal_cells=%d..%d)\n",
                  rootsink::kPEventTreeName, opt.output_root.c_str(), opt.max_root_bytes,
-                 opt.root_compression, opt.root_imt, opt.fill.remove_pedestal ? 1 : 0,
+                 opt.root_compression, opt.root_imt, opt.recorder_workers,
+                 opt.fill.remove_pedestal ? 1 : 0,
                  opt.fill.min_pedestal_cell, opt.fill.max_pedestal_cell,
                  opt.fill.min_signal_cell, opt.fill.max_signal_cell);
   }
@@ -1079,7 +1108,7 @@ int main(int argc, char** argv) {
             // TTree finalize の**後**にモニタヒストを書く(SPEC §6.5 / R10 = §12-9)。
             if (item.hists) recorder->write_monitor_root(item.run_number, *item.hists);
           } else {
-            recorder->write(item.event, now_ms());
+            recorder->write(std::move(item.event), now_ms());
           }
           if (recorder->fatal_reason() != nullptr) {
             // 書けないまま走り続けない。counts は集計スレッドの持ち物だが、

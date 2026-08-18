@@ -20,6 +20,7 @@
 //   ./test_recorder /path/run0000.root   # 読み戻して要約(entries=... を印字)
 
 #include <sys/stat.h>
+#include <sys/wait.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -670,6 +671,385 @@ void test_zero_event_run_writes_no_monitor_root() {
 }
 
 // ---------------------------------------------------------------------------
+// 10. P1 並列 Recorder(TODO/064)—— worker 毎 TTree
+// ---------------------------------------------------------------------------
+//
+// 骨子(発注書 064 §1〜7): ビルダは単一のまま、**組み上がったイベントを round-robin で
+// N worker へ**分配する。worker は自分の Filler + TFile/TTree を専有し、fill + Fill を
+// 丸ごと並列に回す。**N=1 は現行と完全同一**(コードパスも出力名も)—— それを証明する
+// のは上の 1〜9 群(無改変で green のまま)であり、ここは N>1 の性質だけを見る。
+
+// P1 群が使い回す合成イベント。**event_idx で全部の値がずれる**ので、worker 間の
+// 取り違え(どの worker がどのイベントを書いたか)が値で見える。
+//
+// **bucket は 100**(既定の signal 窓 5..506 の内側 — pevent_fill.hpp)。窓の外
+// (このファイルの他のライフサイクル試験が使う bucket 2 など)だと item が落ちて
+// **chargeMap が空**になり、compare_pevent 系の照合が「両側とも空 = 一致」で
+// 素通りする(2026-08-17 に 10i のネガティブコントロールが捕獲)。
+constexpr uint32_t kSignalBucket = 100;
+
+rootsink::BuiltEvent make_event(uint32_t run, uint32_t event_idx) {
+  rootsink::BuiltEvent ev;
+  ev.run_number = run;
+  ev.event_idx = event_idx;
+  rootsink::OwnedFragment f = make_fragment(run, event_idx, 0, 0);
+  push_item(f.items, pack_item(0, 1, kSignalBucket, 3 + event_idx));
+  ev.fragments.push_back(std::move(f));
+  return ev;
+}
+
+// ある .root の event_id 集合(順不同の照合用)。
+std::vector<unsigned> event_ids_of(const std::string& path) {
+  std::vector<unsigned> ids;
+  for (const ReadEntry& e : read_root_file(path)) ids.push_back(e.event_id);
+  return ids;
+}
+
+// 10a. round-robin で worker 毎の TTree に分かれる(骨子 §1/§3)
+//
+// 手計算の出典: 分配は write() の呼び出し順に worker 0,1,0,1,… なので、
+// 6 イベント(event_idx 0..5)を N=2 に流すと
+//   worker 0 = {0, 2, 4} / worker 1 = {1, 3, 5}
+// worker 内は eventIdx 単調(round-robin なので自然に成立 — 骨子 §3)。
+void test_round_robin_splits_events_into_per_worker_trees() {
+  const std::string dir = scratch_dir("p1split");
+  const uint32_t kRun = 40;
+  uint64_t entries_written = 0;
+  std::vector<rootsink::RootFileRecord> files;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.geometry = &fixture_geometry();
+    cfg.workers = 2;
+    rootsink::Recorder rec(cfg);
+    for (uint32_t i = 0; i < 6; ++i) rec.write(make_event(kRun, i), 1000 + i);
+    rec.close_run(kRun, 2000);
+    CHECK(rec.fatal_reason() == nullptr);
+    entries_written = rec.entries_written();
+    files = rec.files_snapshot();
+  }
+  const std::string run_dir = dir + "/run0040";
+  CHECK_EQ(entries_written, 6);
+  // N>1 では **`_w{k}` 付きの名前だけ**(素の run0040.root は作らない)。
+  CHECK(!exists(run_dir + "/run0040.root"));
+  CHECK(exists(run_dir + "/run0040_w0.root"));
+  CHECK(exists(run_dir + "/run0040_w1.root"));
+  CHECK_EQ(list_prefixed(run_dir, "run_inprogress_").size(), 0);  // 全部 finalize 済み
+
+  const std::vector<unsigned> w0 = event_ids_of(run_dir + "/run0040_w0.root");
+  const std::vector<unsigned> w1 = event_ids_of(run_dir + "/run0040_w1.root");
+  CHECK_EQ(w0.size(), 3);
+  CHECK_EQ(w1.size(), 3);
+  if (w0.size() == 3) {
+    CHECK_EQ(w0[0], 0);
+    CHECK_EQ(w0[1], 2);
+    CHECK_EQ(w0[2], 4);
+  }
+  if (w1.size() == 3) {
+    CHECK_EQ(w1[0], 1);
+    CHECK_EQ(w1[1], 3);
+    CHECK_EQ(w1[2], 5);
+  }
+  // ④終了 JSON の root_files 台帳に**全パート**が載る(移送チェックリスト)。
+  CHECK_EQ(files.size(), 2);
+  uint64_t ledger_entries = 0;
+  for (const rootsink::RootFileRecord& r : files) {
+    ledger_entries += r.entries;
+    CHECK(r.path.find("_w") != std::string::npos);
+    CHECK(exists(r.path));
+  }
+  CHECK_EQ(ledger_entries, 6);
+  remove_tree(dir);
+}
+
+// 10b. ロールオーバは worker 毎に独立して番号を進める(骨子 §3)
+//
+// 手計算の出典: `max_root_bytes = 1` = 事実上「毎エントリでロールオーバ」。
+// 4 イベントを N=2 に流すと各 worker が 2 イベント = 2 パート:
+//   worker 0 -> run0041_w0.root, run0041_w0_0001.root
+//   worker 1 -> run0041_w1.root, run0041_w1_0001.root
+void test_rollover_numbers_parts_per_worker() {
+  const std::string dir = scratch_dir("p1rollover");
+  const uint32_t kRun = 41;
+  std::vector<rootsink::RootFileRecord> files;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.geometry = &fixture_geometry();
+    cfg.workers = 2;
+    cfg.max_root_bytes = 1;
+    rootsink::Recorder rec(cfg);
+    for (uint32_t i = 0; i < 4; ++i) rec.write(make_event(kRun, i), 1000 + i);
+    rec.close_run(kRun, 2000);
+    CHECK(rec.fatal_reason() == nullptr);
+    files = rec.files_snapshot();
+  }
+  const std::string run_dir = dir + "/run0041";
+  static const char* kExpect[4] = {"run0041_w0.root", "run0041_w0_0001.root",
+                                   "run0041_w1.root", "run0041_w1_0001.root"};
+  for (const char* name : kExpect) CHECK(exists(run_dir + "/" + name));
+  CHECK_EQ(list_prefixed(run_dir, "run_inprogress_").size(), 0);
+  CHECK_EQ(files.size(), 4);
+  // worker 0 は {0,2}、worker 1 は {1,3} を 1 イベント/パートで持つ。
+  CHECK_EQ(event_ids_of(run_dir + "/run0041_w0.root").size(), 1);
+  if (!event_ids_of(run_dir + "/run0041_w0.root").empty()) {
+    CHECK_EQ(event_ids_of(run_dir + "/run0041_w0.root")[0], 0);
+    CHECK_EQ(event_ids_of(run_dir + "/run0041_w0_0001.root")[0], 2);
+    CHECK_EQ(event_ids_of(run_dir + "/run0041_w1.root")[0], 1);
+    CHECK_EQ(event_ids_of(run_dir + "/run0041_w1_0001.root")[0], 3);
+  }
+  remove_tree(dir);
+}
+
+// 10c. カウンタは全 worker 合算(骨子 §4 / 移送チェックリスト①)
+//
+// 手計算の出典: item の chan は 7bit(0–127)だが AGET は 68 ch。
+// 各イベントに `chan = 100` の item を **1 個**混ぜるので、6 イベントで
+// items_out_of_range = 6。N=3 なら worker 毎の Filler は 2 ずつ数え、合算で 6。
+void test_counters_are_summed_across_workers() {
+  const std::string dir = scratch_dir("p1counters");
+  const uint32_t kRun = 42;
+  uint64_t items_oor = 0;
+  uint64_t entries = 0;
+  uint64_t bytes = 0;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.geometry = &fixture_geometry();
+    cfg.workers = 3;
+    rootsink::Recorder rec(cfg);
+    for (uint32_t i = 0; i < 6; ++i) {
+      rootsink::BuiltEvent ev = make_event(kRun, i);
+      push_item(ev.fragments[0].items, pack_item(0, 100, 2, 7));  // chan 100 >= 68
+      rec.write(std::move(ev), 1000 + i);
+    }
+    rec.close_run(kRun, 2000);
+    CHECK(rec.fatal_reason() == nullptr);
+    items_oor = rec.items_out_of_range();
+    entries = rec.entries_written();
+    bytes = rec.bytes_written();
+  }
+  CHECK_EQ(items_oor, 6);
+  CHECK_EQ(entries, 6);
+  // bytes_written は全 worker の実ファイルサイズ合計。
+  const std::string run_dir = dir + "/run0042";
+  uint64_t on_disk = 0;
+  for (const std::string& name : rootsink::list_directory(run_dir)) {
+    on_disk += rootsink::file_size_bytes(run_dir + "/" + name);
+  }
+  CHECK_EQ(bytes, on_disk);
+  remove_tree(dir);
+}
+
+// 10d. 重複 eventId の判定は**分配前に一元化**(移送チェックリスト②)
+//
+// worker に散らした後では「以前に書いた番号」が worker 毎にしか見えないので、
+// dispatcher 側で 1 か所だけ判定する。
+// 手計算の出典: 5, 6 を書いた後の 3 は `3 <= last(6)` なので弾かれる。
+// N=2 でも duplicate_event_ids = 1 / entries_written = 2。
+void test_duplicate_event_id_is_rejected_before_distribution() {
+  const std::string dir = scratch_dir("p1dup");
+  const uint32_t kRun = 43;
+  uint64_t dups = 0;
+  uint64_t entries = 0;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.geometry = &fixture_geometry();
+    cfg.workers = 2;
+    rootsink::Recorder rec(cfg);
+    rec.write(make_event(kRun, 5), 1000);
+    rec.write(make_event(kRun, 6), 1001);
+    rec.write(make_event(kRun, 3), 1002);  // 遅延・重複 —— 書かずに数える
+    rec.close_run(kRun, 2000);
+    dups = rec.duplicate_event_ids();
+    entries = rec.entries_written();
+  }
+  CHECK_EQ(dups, 1);
+  CHECK_EQ(entries, 2);
+  remove_tree(dir);
+}
+
+// 10e. EOS 無しの停止でも**キュー在庫は書き切る**、ただし finalize しない(骨子 §6)
+//
+// 保存系はロスレス —— worker のキューに積んだイベントを停止で捨てない。
+// 一方で run は閉じていないので、パートは inprogress のまま(SPEC §6.5 の意味論不変)。
+void test_stop_without_eos_flushes_workers_but_keeps_inprogress() {
+  const std::string dir = scratch_dir("p1stop");
+  const uint32_t kRun = 44;
+  std::vector<rootsink::RootFileRecord> files;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.geometry = &fixture_geometry();
+    cfg.workers = 2;
+    rootsink::Recorder rec(cfg);
+    for (uint32_t i = 0; i < 4; ++i) rec.write(make_event(kRun, i), 1000 + i);
+    rec.shutdown();  // EOS 無しの停止
+    CHECK(rec.fatal_reason() == nullptr);
+    CHECK_EQ(rec.entries_written(), 4);  // 在庫は捨てずに書き切った
+    files = rec.files_snapshot();
+  }
+  const std::string run_dir = dir + "/run0044";
+  CHECK(!exists(run_dir + "/run0044_w0.root"));  // 完成 run に化けない
+  CHECK(!exists(run_dir + "/run0044_w1.root"));
+  const std::vector<std::string> left = list_prefixed(run_dir, "run_inprogress_");
+  CHECK_EQ(left.size(), 2);  // worker 毎に 1 本
+  CHECK_EQ(files.size(), 2);
+  uint64_t total = 0;
+  for (const rootsink::RootFileRecord& r : files) {
+    total += r.entries;
+    CHECK(r.path.find("run_inprogress_") != std::string::npos);
+  }
+  CHECK_EQ(total, 4);
+  // 中身も読める(4 イベントすべてが 2 本のどちらかに在る)。
+  size_t read_back = 0;
+  for (const std::string& name : left) read_back += event_ids_of(run_dir + "/" + name).size();
+  CHECK_EQ(read_back, 4);
+  remove_tree(dir);
+}
+
+// 10f. `run{N}_monitor.root` は N>1 でも **1 つだけ**(移送チェックリスト③)
+void test_monitor_root_is_single_with_parallel_workers() {
+  const std::string dir = scratch_dir("p1monitor");
+  const uint32_t kRun = 45;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.geometry = &fixture_geometry();
+    cfg.workers = 4;
+    rootsink::Recorder rec(cfg);
+    for (uint32_t i = 0; i < 8; ++i) rec.write(make_event(kRun, i), 1000 + i);
+    rec.close_run(kRun, 2000);
+    rec.write_monitor_root(kRun, make_known_snapshot());
+    CHECK(rec.fatal_reason() == nullptr);
+  }
+  const std::string run_dir = dir + "/run0045";
+  CHECK(exists(run_dir + "/run0045_monitor.root"));
+  CHECK_EQ(list_prefixed(run_dir, "run0045_monitor").size(), 1);
+  // 8 イベントが 4 worker に 2 つずつ。
+  for (int k = 0; k < 4; ++k) {
+    char name[64];
+    std::snprintf(name, sizeof(name), "/run0045_w%d.root", k);
+    CHECK_EQ(event_ids_of(run_dir + name).size(), 2);
+  }
+  remove_tree(dir);
+}
+
+// 10g. 新しい run で part 番号は worker 毎に 0 へ戻る(骨子 §6 / §3)
+void test_new_run_resets_part_numbering_in_every_worker() {
+  const std::string dir = scratch_dir("p1tworuns");
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.geometry = &fixture_geometry();
+    cfg.workers = 2;
+    rootsink::Recorder rec(cfg);
+    for (uint32_t i = 0; i < 2; ++i) rec.write(make_event(46, i), 1000 + i);
+    rec.close_run(46, 1100);
+    for (uint32_t i = 0; i < 2; ++i) rec.write(make_event(47, i), 2000 + i);
+    rec.close_run(47, 2100);
+    CHECK(rec.fatal_reason() == nullptr);
+    CHECK_EQ(rec.entries_written(), 4);
+  }
+  CHECK(exists(dir + "/run0046/run0046_w0.root"));
+  CHECK(exists(dir + "/run0046/run0046_w1.root"));
+  CHECK(exists(dir + "/run0047/run0047_w0.root"));   // part 0 に戻っている
+  CHECK(exists(dir + "/run0047/run0047_w1.root"));
+  CHECK(!exists(dir + "/run0047/run0047_w0_0001.root"));
+  remove_tree(dir);
+}
+
+// 10h. **全パートのユニオン = N=1 の 1 本**(受け入れ 4 の仕組みを合成データで先に閉じる)
+//
+// compare_pevent を複数ファイル(カンマ区切り)対応に拡張した —— その拡張自体の
+// テスト。同じ 6 イベントを N=1 と N=2 で書き、`w0,w1` の**ユニオン**が N=1 の 1 本と
+// 全イベント全 key 一致することを compare_pevent 自身に判定させる。
+// **runId は固定**(--run-id 相当の run_id_override)—— 既定は「run を開いた時刻」なので、
+// 2 回の Recorder で値が変わると EventInfo 差分になる。
+void test_compare_pevent_matches_the_union_of_worker_parts() {
+  const char* env_bin = std::getenv("TPCDAQ_COMPARE_PEVENT");
+  const std::string cmp_bin = (env_bin != nullptr && env_bin[0] != '\0')
+                                  ? std::string(env_bin)
+                                  : std::string("./compare_pevent");
+  if (!exists(cmp_bin)) {
+    std::printf("SKIP compare_pevent union test: %s not built (make compare)\n",
+                cmp_bin.c_str());
+    return;
+  }
+  const std::string dir = scratch_dir("p1union");
+  const uint32_t kRun = 48;
+  const long kRunId = 20260817123456L;  // 固定 runId(2 回の Recorder で同じ値にする)
+  for (int workers : {1, 2}) {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir + "/n" + std::to_string(workers);
+    cfg.geometry = &fixture_geometry();
+    cfg.run_id_override = kRunId;
+    cfg.workers = workers;
+    rootsink::Recorder rec(cfg);
+    for (uint32_t i = 0; i < 6; ++i) rec.write(make_event(kRun, i), 1000 + i);
+    rec.close_run(kRun, 2000);
+    CHECK(rec.fatal_reason() == nullptr);
+  }
+  const std::string single = dir + "/n1/run0048/run0048.root";
+  const std::string parts =
+      dir + "/n2/run0048/run0048_w0.root," + dir + "/n2/run0048/run0048_w1.root";
+  CHECK(exists(single));
+  const std::string cmd = cmp_bin + " '" + parts + "' '" + single + "'";
+  const int rc = std::system(cmd.c_str());
+  CHECK_EQ(WEXITSTATUS(rc), 0);  // 0 = 完全一致
+  remove_tree(dir);
+}
+
+// 10i. **ネガティブコントロール**: 中身が違えば compare_pevent は必ず落ちる
+//
+// 10h(ユニオン一致)だけだと、比較器が **chargeMap を 1 つも読んでいなくても**
+// 「0 differences」で緑になってしまう(両側とも空 map = 一致)。TChain 化(複数ファイル
+// 対応)でブランチ有効化を壊していないことを、**差分が出ることの側**から固定する。
+//
+// 手計算の出典: 同じ 6 イベントを書くが、片方だけ最後のイベント(event_idx 5)の
+// ADC を 1 だけずらす(`3 + 5 = 8` → `9`)。chargeMap の値が 1 つ違うので
+// compare_pevent は **exit 1**(差分あり)でなければならない。
+void test_compare_pevent_detects_a_one_adc_difference() {
+  const char* env_bin = std::getenv("TPCDAQ_COMPARE_PEVENT");
+  const std::string cmp_bin = (env_bin != nullptr && env_bin[0] != '\0')
+                                  ? std::string(env_bin)
+                                  : std::string("./compare_pevent");
+  if (!exists(cmp_bin)) {
+    std::printf("SKIP compare_pevent negative control: %s not built (make compare)\n",
+                cmp_bin.c_str());
+    return;
+  }
+  const std::string dir = scratch_dir("p1negctl");
+  const uint32_t kRun = 49;
+  const long kRunId = 20260817123456L;
+  for (int variant : {0, 1}) {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir + "/v" + std::to_string(variant);
+    cfg.geometry = &fixture_geometry();
+    cfg.run_id_override = kRunId;
+    cfg.workers = 2;  // ユニオン側でも検出できること
+    rootsink::Recorder rec(cfg);
+    for (uint32_t i = 0; i < 6; ++i) {
+      rootsink::BuiltEvent ev = make_event(kRun, i);
+      if (variant == 1 && i == 5) {
+        // 最後のイベントの ADC を 1 だけ増やす(pack_item の adc = 3 + i = 8 -> 9)
+        ev.fragments[0].items.clear();
+        push_item(ev.fragments[0].items, pack_item(0, 1, kSignalBucket, 3 + i + 1));
+      }
+      rec.write(std::move(ev), 1000 + i);
+    }
+    rec.close_run(kRun, 2000);
+    CHECK(rec.fatal_reason() == nullptr);
+  }
+  const std::string a = dir + "/v0/run0049/run0049_w0.root," + dir + "/v0/run0049/run0049_w1.root";
+  const std::string b = dir + "/v1/run0049/run0049_w0.root," + dir + "/v1/run0049/run0049_w1.root";
+  const int rc = std::system((cmp_bin + " '" + a + "' '" + b + "'").c_str());
+  CHECK_EQ(WEXITSTATUS(rc), 1);  // 1 = 差分あり(0 なら比較器が中身を読んでいない)
+  remove_tree(dir);
+}
+
+// ---------------------------------------------------------------------------
 // inspect モード(E2E の entries 照合に使う)
 // ---------------------------------------------------------------------------
 int inspect(const std::string& path) {
@@ -705,5 +1085,15 @@ int main(int argc, char** argv) {
   test_explicit_compression_setting_is_honored();
   test_monitor_root_holds_the_nine_histograms();
   test_zero_event_run_writes_no_monitor_root();
+  // --- P1 並列 Recorder(TODO/064)---
+  test_round_robin_splits_events_into_per_worker_trees();
+  test_rollover_numbers_parts_per_worker();
+  test_counters_are_summed_across_workers();
+  test_duplicate_event_id_is_rejected_before_distribution();
+  test_stop_without_eos_flushes_workers_but_keeps_inprogress();
+  test_monitor_root_is_single_with_parallel_workers();
+  test_new_run_resets_part_numbering_in_every_worker();
+  test_compare_pevent_matches_the_union_of_worker_parts();
+  test_compare_pevent_detects_a_one_adc_difference();
   return tpccheck::report("test_recorder");
 }

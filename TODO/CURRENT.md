@@ -14,12 +14,13 @@
   Angular で 9 ヒスト + イベント表示 + 波形 + ログブック。Run 制御は完成形レイアウト + 全 disabled)。
 - **run 制御の実機ハードニング完了**: **032**(receiver 単一リンク + silent stall の可視化)/
   **034**(連続 run)/ **036**(実 ECC の `reset` = `EV_UNDO` への対応 + テストダブルの実機準拠化)。
-- **リポ全体ゲート: cargo 450 passed / 0 failed / 1 ignored**。C++ 側 `test_ecc_bridge 457`
-  (パリティ表 +257)/ `ecc_e2e 52` / root_sink 8 スイート green(recorder 101 / pevent 99 —
-  GDataFrame 撤去後)+ **vcobo 155+**(92+57+6)。clippy -D warnings クリーン。
-  UI 適合 171 tests green、**dist 4.9 MB**(旧 7.8)。
-- **root-sink は PEventTPC 1 形式のみ(v1.17)**: GDataFrame・third_party/get/ 全撤去(054)。
-  実稼働 41.5 events/s(mini)。**100 Hz は単スレッドでは届かない → 055 裁定待ち**。
+- **リポ全体ゲート: cargo 454 passed / 0 failed / 1 ignored**。C++ 側 `test_ecc_bridge 457`
+  / `ecc_e2e 52` / root_sink 8 スイート green(**recorder 170** / pevent 99)+
+  **vcobo 148+**(マージ対応後)。clippy -D warnings クリーン。
+  UI 適合 **192** tests green(**全面英語化済み**)、dist 4.9 MB。
+- **root-sink は PEventTPC 1 形式 + P1 並列書き出し(v1.21)**: `--recorder-workers 4` で
+  **mini 100 events/s 達成**(30 分 @224 Mbps 持続 100.4 /s)。burst 672 Mbps drop 0。
+  §12 の負荷受け入れは全て宅内でクローズ。
 - **run/stop 所要 1.3 s**(033-E 静止検出。旧 5.6 s)。run/start ≈ 7 s(実 ECC 支配)。
   **decode 26% 短縮**(045)。production の panic 起点ゼロ(046)。
 - **仮想 zCoBo スタック稼働**(2026-08-15): 実 ECC(実験と同一版)+ `tools/vcobo/` で
@@ -27,7 +28,7 @@
   レシピ = reference/_spike/demo/。
 - **一晩 soak 合格(2026-08-16、031)**: 45 Mbps × 8.4 h / 50 run / ロス 0 / RSS 平坦。
   ソフト側の耐久はクリア — 残る性能課題は root-sink 天井(054)のみ。
-- 実装の正本 = **docs/SPEC_ja.md v1.20**。モデル使い分け・完了時ルール = CLAUDE.md。
+- 実装の正本 = **docs/SPEC_ja.md v1.21**。モデル使い分け・完了時ルール = CLAUDE.md。
 - 公開リポ: https://github.com/aogaki/tpcdaq-rs(実データ・FW・実 .dat は reference/ = .gitignore)。
 
 ## 次にやること(次セッションの入口 — 順序は 044 で裁定済み・ユーザー合意 2026-08-15)
@@ -61,11 +62,14 @@
    `3852 events, 0 differences` 無変更 green。A(map hint)は実測して棄却(libc++ で悪化 +
    TPCReco 無改変では口が無い)。80 Mbps × 30 分 soak 合格。**ELITPC 実測 ≈10 /s = 10× 不足**。
    [archive/054](archive/054_root_sink_throughput.md) 結果節が正。
-7. ~~055~~ **裁定完了(2026-08-17)**: **案 Y(ELI-NP 前に並列化)+ P1(worker 毎
-   TTree、N=1 完全互換)**。ZS は Mikolaj 裁定で消滅、EOS 予算は据え置き(064 実測で
-   再判定)。[archive/055](archive/055_recorder_parallel_ruling.md)。
-   → **実装 = [064_recorder_parallel_p1.md](064_recorder_parallel_p1.md)(発注済み・
-   implementer/Opus 実行中)** — §12-5 フルレート持続 + §12-6 burst の最終受け入れ込み。
+7. ~~055/064~~ **完了(2026-08-18)— 並列化 P1 で mini 100 events/s 達成(SPEC v1.21)**:
+   N=4 で隔離 152 /s・**30 分 @224 Mbps 持続 100.4 /s(10/10 run・全カウンタ 0)**・
+   **burst 672 Mbps drop 0** → §12 受け入れ表 5/6 クローズ。旧保留②(過負荷 stop の
+   eos-timeout)は並列化で解消。021 オラクル N=1 無改変 + N=2 ユニオンとも 0 differences。
+   test_recorder 170 / cargo 454。compare_pevent の複数ファイル化で混入した silent
+   failure を自己摘発(ネガティブコントロール常設 — 教訓は結果節)。
+   [archive/064](archive/064_recorder_parallel_p1.md) 結果節が正。
+   **凍結前の推奨(任意)**: 一晩 @224 Mbps / N=4 soak を 1 本(§12-5(a) の完全形)。
 8. ~~056~~ **完了(2026-08-16)— ELITPC 構成デモ開通**: vcobo に eventIdx マージ
    (テスト 92→148、実 4 本組 15,408 frames / eventIdx 0..3851)+ elitpc xcfg 3 点 +
    `TPCDAQ_DEMO_PROFILE=elitpc` 切替。実測 304 events complete / late 0 / graw 4 本
@@ -178,13 +182,11 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 ## 保留・確認事項
 
-- **SPEC 検討 2 件(053 の実測起因)**:
-  ①有界キューの単位が「メッセージ個数」(decoder 8 MiB バッチ × queue/rcvhwm 1000 =
-  最悪 8.9 GB×2 系統が正当な在庫。ELITPC 4 AsAd で効く — バイト建て上限 or 既定値変更の裁定)
-  ②過負荷でバックログを抱えた stop は EOS 予算 5 s を超え `error:eos-timeout` になる
-  (§9.2 の意味論としてそれで正しいか)。**054 実測で②が定量化**: 224 Mbps では stop 時
-  在庫 ≈8,000 イベント → 吐き出し 100 s 超。②の裁定は **055 の並列化裁定と一体で**
-  (並列化で在庫が溜まらなくなれば消える可能性)。
+- **SPEC 検討(残 1 件)**: ①有界キューの単位が「メッセージ個数」— **064 の burst で
+  実測が付いた**(672 Mbps 時に root_sink RSS ピーク 6.88 GiB、主因 = `--queue` 既定
+  1000 バッチ)。バイト建て上限 or 既定値変更の裁定は ELI-NP の実機メモリ事情を見てから。
+  ~~②過負荷 stop の eos-timeout~~ **解消(2026-08-18、064)**: N=4 で 224 Mbps
+  10/10 run 正常停止 — EOS 予算 5 s は据え置きで成立(SPEC v1.21 履歴に記録)。
 - **実 ECC の例外取りこぼし 2 箇所(043 発見 — 上流仕様なので改変しない。運用留意)**:
   `GetEccImpl::breakup` は失敗時 Ice **UnknownException**(SM::Exception を catch しない)/
   `onUnPrepare`(reset の Prepared→Described)は失敗時 dhsm が **halt** = 我々の map では

@@ -136,14 +136,14 @@ test_monitor_pub: test_monitor_pub.cpp monitor_pub.hpp monitor_hist.hpp geo.hpp 
                   tpc_wire.hpp check.hpp
 	$(CXX) $(CXXFLAGS) $< -o $@
 
-test_recorder: test_recorder.cxx root_recorder.hpp eb_core.hpp tpc_wire.hpp check.hpp \
-               monitor_hist.hpp $(PEVENT_DEPS) | tpcreco-check
+test_recorder: test_recorder.cxx root_recorder.hpp eb_core.hpp rs_core.hpp tpc_wire.hpp \
+               check.hpp monitor_hist.hpp $(PEVENT_DEPS) | tpcreco-check
 	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) $(PEVENT_CFLAGS) \
 	  test_recorder.cxx $(TPCRECO_DICT) $(TPCRECO_SRC) \
 	  $(ROOT_LIBS) $(LDFLAGS) -o $@
 
-test_pevent: test_pevent.cxx root_recorder.hpp eb_core.hpp tpc_wire.hpp check.hpp \
-             monitor_hist.hpp $(PEVENT_DEPS) | tpcreco-check
+test_pevent: test_pevent.cxx root_recorder.hpp eb_core.hpp rs_core.hpp tpc_wire.hpp \
+             check.hpp monitor_hist.hpp $(PEVENT_DEPS) | tpcreco-check
 	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) $(PEVENT_CFLAGS) \
 	  test_pevent.cxx $(TPCRECO_DICT) $(TPCRECO_SRC) \
 	  $(ROOT_LIBS) $(LDFLAGS) -o $@
@@ -168,7 +168,7 @@ test: $(TESTS)
 # バイナリの再ビルド漏れを防ぐ(024 取り込みレビューで stale バイナリの偽 red を実測
 # — テストバイナリだけ新しく本体が古い、が起きない)。ROOT リンクは test-root 側の
 # 前提なのでここに置く(非 ROOT 環境の `make test` には影響しない)。
-test-root: $(ROOTTESTS) root_sink
+test-root: $(ROOTTESTS) root_sink compare_pevent
 	./test_recorder
 	./test_pevent
 

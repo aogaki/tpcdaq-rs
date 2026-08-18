@@ -1,7 +1,12 @@
 // compare_pevent.cxx — PEventTPC TTree の全値比較(TODO/020 §6、SPEC §12-3 v1.8 の
 // 実データ照合に使う道具)。
 //
-//   compare_pevent <a.root> <b.root> [tree_a] [tree_b]
+//   compare_pevent <a.root[,a2.root,…]> <b.root[,…]> [tree_a] [tree_b]
+//
+// **片側は複数ファイルでよい**(TODO/064: Recorder P1 並列化で run が
+// `run0001_w0.root` / `run0001_w1.root` … に分かれる)。カンマ区切りで並べると
+// **ユニオン**を 1 本のツリーとして扱う(実体は `TChain`)。ROOT のワイルドカードも
+// そのまま通る(例 `'run0001_w*.root'`)。1 本だけ渡したときの挙動は従来と同じ。
 //
 // **eventId で突き合わせる**(エントリ順に依存しない)。我々の出力は event_idx 昇順、
 // grawToEventTPC の出力は .graw の到着順 —— 順序で偽陰性にしない。
@@ -25,6 +30,9 @@
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
+
+#include <TChain.h>
 #include <TFile.h>
 #include <TTree.h>
 
@@ -39,14 +47,34 @@ constexpr size_t kMaxReportedDiffs = 20;
 
 void usage(const char* argv0) {
   std::printf(
-      "usage: %s <a.root> <b.root> [tree_a] [tree_b]\n"
+      "usage: %s <a.root[,a2.root,...]> <b.root[,...]> [tree_a] [tree_b]\n"
       "\n"
       "Compares two PEventTPC trees (default tree name: TPCData) event by event,\n"
       "matched on EventInfo::eventId. Every EventInfo field and every chargeMap\n"
       "key/value must match exactly (tolerance 0).\n"
       "\n"
+      "Either side may be a comma-separated list of files (or a ROOT wildcard):\n"
+      "the union is treated as one tree. This is how the parallel recorder's\n"
+      "per-worker parts (run0001_w0.root, run0001_w1.root, ...) are compared\n"
+      "against a single reference file (TODO/064).\n"
+      "\n"
       "exit: 0 = identical, 1 = differences, 2 = usage or IO error\n",
       argv0);
+}
+
+// "a.root,b.root" → {"a.root", "b.root"}。空要素は落とす。
+std::vector<std::string> split_paths(const std::string& spec) {
+  std::vector<std::string> out;
+  size_t pos = 0;
+  for (;;) {
+    const size_t comma = spec.find(',', pos);
+    const std::string piece =
+        spec.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+    if (!piece.empty()) out.push_back(piece);
+    if (comma == std::string::npos) break;
+    pos = comma + 1;
+  }
+  return out;
 }
 
 // 差分の台帳。先頭 kMaxReportedDiffs 件だけ出して、総数は必ず出す。
@@ -71,38 +99,82 @@ class DiffLog {
 };
 
 struct Side {
-  TFile* file = nullptr;
-  TTree* tree = nullptr;
+  // **常に TChain**(1 ファイルでも同じ道)。複数ファイルのユニオンを 1 本の
+  // ツリーとして読むための唯一の仕掛け —— 分岐を増やさない(KISS)。
+  //
+  // **索引用と比較用で chain を分ける**: 索引パスは chargeMap を読まない
+  // (1 エントリ 17 MB を 3852 回読むのを避ける)。単一 TTree のときは同じ木で
+  // `SetBranchStatus("myChargeMap*", false)` → `SetBranchStatus("*", true)` と
+  // 切り替えれば戻ったが、**TChain では戻らないことがある**(2026-08-17 実測、
+  // TODO/064): 1 ファイルの chain は索引中に木を読み込んだきり再ロードしないので
+  // 無効化されたままになり、**chargeMap を空として読む** —— 相手も空なら
+  // 「compared N events, 0 differences」で**緑に見えてしまう**。
+  // 実測の形: A=2 ファイル(木の切替で状態が再適用される)は読めて、
+  // B=1 ファイルだけ空 → `chargeMap size A=1 B=0` が全イベントに出た。
+  // よって **比較用 chain のブランチ状態は最後まで一切触らない**。
+  // 捕獲したのは test_recorder の 1 ADC ネガティブコントロール(10i)。
+  TChain* index_tree = nullptr;  // EventInfo だけ(chargeMap 無効のまま使い捨て)
+  TChain* tree = nullptr;        // 値の比較用(**ブランチ状態を一切触らない**)
+  PEventTPC* index_event = nullptr;
   PEventTPC* event = nullptr;
-  std::map<unsigned, Long64_t> by_event_id;  // eventId → entry
+  std::map<unsigned, Long64_t> by_event_id;  // eventId → chain 通しの entry
   size_t duplicate_event_ids = 0;
+  size_t files = 0;
 };
 
-bool open_side(const std::string& path, const std::string& tree_name, Side* s) {
-  s->file = TFile::Open(path.c_str(), "READ");
-  if (s->file == nullptr || s->file->IsZombie()) {
-    std::fprintf(stderr, "compare_pevent: cannot open %s\n", path.c_str());
+// paths を chain に足す。**存在しない名前は先に弾く**(TChain::Add は黙って受ける)。
+bool add_paths(TChain* chain, const std::vector<std::string>& paths) {
+  for (const std::string& path : paths) {
+    // ワイルドカード無しの名前は先に存在確認する —— TChain::Add は存在しない
+    // ファイルも黙って受けるので、typo が「0 イベント」に化ける(CLAUDE.md)。
+    if (path.find('*') == std::string::npos && path.find('?') == std::string::npos) {
+      struct stat st;
+      if (::stat(path.c_str(), &st) != 0) {
+        std::fprintf(stderr, "compare_pevent: cannot open %s\n", path.c_str());
+        return false;
+      }
+    }
+    if (chain->Add(path.c_str()) == 0) {
+      std::fprintf(stderr, "compare_pevent: %s matched no file\n", path.c_str());
+      return false;
+    }
+  }
+  return true;
+}
+
+bool open_side(const std::string& spec, const std::string& tree_name, Side* s) {
+  const std::vector<std::string> paths = split_paths(spec);
+  if (paths.empty()) {
+    std::fprintf(stderr, "compare_pevent: empty file list \"%s\"\n", spec.c_str());
     return false;
   }
-  s->tree = dynamic_cast<TTree*>(s->file->Get(tree_name.c_str()));
-  if (s->tree == nullptr) {
-    std::fprintf(stderr, "compare_pevent: no TTree named \"%s\" in %s\n", tree_name.c_str(),
-                 path.c_str());
+  s->index_tree = new TChain(tree_name.c_str());
+  s->tree = new TChain(tree_name.c_str());
+  if (!add_paths(s->index_tree, paths) || !add_paths(s->tree, paths)) return false;
+  // GetEntries() がここで実際にファイルを開く(ツリーが無ければ 0 になる)。
+  if (s->tree->GetEntries() == 0) {
+    std::fprintf(stderr, "compare_pevent: no TTree named \"%s\" (or no entries) in %s\n",
+                 tree_name.c_str(), spec.c_str());
     return false;
   }
+  s->files = paths.size();
+  s->index_tree->SetBranchAddress("Event", &s->index_event);
   s->tree->SetBranchAddress("Event", &s->event);
   return true;
 }
 
 // ①EventInfo だけ読んで eventId → entry の索引を作る(chargeMap は読まない)。
+// **索引専用の chain を使い、比較用 chain のブランチ状態は最後まで触らない**
+// (Side のコメント参照 —— TChain では "*" true に戻らない)。
 void index_events(Side* s) {
-  s->tree->SetBranchStatus("myChargeMap*", false);
-  for (Long64_t i = 0; i < s->tree->GetEntries(); ++i) {
-    s->tree->GetEntry(i);
-    const unsigned id = s->event->GetEventInfo().GetEventId();
+  s->index_tree->SetBranchStatus("myChargeMap*", false);
+  for (Long64_t i = 0; i < s->index_tree->GetEntries(); ++i) {
+    s->index_tree->GetEntry(i);
+    const unsigned id = s->index_event->GetEventInfo().GetEventId();
     if (!s->by_event_id.insert({id, i}).second) ++s->duplicate_event_ids;
   }
-  s->tree->SetBranchStatus("*", true);
+  delete s->index_tree;  // 索引が済んだら畳む(開いた TFile も道連れ)
+  s->index_tree = nullptr;
 }
 
 void compare_event_info(unsigned id, const eventraw::EventInfo& a,
@@ -203,10 +275,12 @@ int main(int argc, char** argv) {
   index_events(&a);
   index_events(&b);
 
-  std::printf("A: %s tree=%s entries=%lld unique_event_ids=%zu\n", positional[0].c_str(),
-              tree_a.c_str(), a.tree->GetEntries(), a.by_event_id.size());
-  std::printf("B: %s tree=%s entries=%lld unique_event_ids=%zu\n", positional[1].c_str(),
-              tree_b.c_str(), b.tree->GetEntries(), b.by_event_id.size());
+  std::printf("A: %s tree=%s files=%zu entries=%lld unique_event_ids=%zu\n",
+              positional[0].c_str(), tree_a.c_str(), a.files, a.tree->GetEntries(),
+              a.by_event_id.size());
+  std::printf("B: %s tree=%s files=%zu entries=%lld unique_event_ids=%zu\n",
+              positional[1].c_str(), tree_b.c_str(), b.files, b.tree->GetEntries(),
+              b.by_event_id.size());
 
   DiffLog log;
   if (a.duplicate_event_ids != 0 || b.duplicate_event_ids != 0) {
@@ -241,7 +315,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "(%zu more differences not shown)\n",
                  log.count() - kMaxReportedDiffs);
   }
-  a.file->Close();
-  b.file->Close();
+  delete a.tree;  // TChain が開いた TFile ごと畳む
+  delete b.tree;
   return log.count() == 0 ? kExitMatch : kExitDiff;
 }

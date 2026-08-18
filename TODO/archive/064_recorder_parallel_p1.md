@@ -1,6 +1,6 @@
 # 064 — Recorder 並列化 P1(worker 毎 TTree、mini 100 Hz へ)
 
-**Status: READY**(起票 2026-08-17 Fable — 裁定 = [archive/055](archive/055_recorder_parallel_ruling.md)。
+**Status: COMPLETED**(2026-08-18 — 結果は末尾。起票 2026-08-17。
 ELI-NP 実機テスト前に済ませる = 案 Y)
 **仕様**: SPEC §6.4/§6.5(ファイル命名は本チケット完了時に v1.20 で改訂)/
 §12-5(a) フルレート持続・**§12-6 burst(672 Mbps × 10 分 drop 0)= 031→054 から移管された
@@ -60,3 +60,67 @@ Rust 側 assert と突き合うこと ②duplicate eventId 判定は**分配前(
 
 - キュー単位のバイト建て化(CURRENT.md 保留①)/ モニタ経路の構造変更 /
   SPEC 文書の改訂(完了時に発注側が v1.20 で行う)/ ZS(不採用確定 — 055)。
+
+---
+
+## 結果(2026-08-17〜18 — implementer/Opus 実装、発注側(Fable)一括レビュー PASS)
+
+### 実装
+
+Recorder を **dispatcher + RecorderWorker**(TFile/TTree/PEventTPC/Filler 専有)に分割。
+有界キュー(4 段/worker、満杯は分配側が待つ = 背圧・捨てない)、BeginRun/CloseRun は
+in-band マーカー(追い越し構造なし)、stop は全 worker join。**N=1 はスレッドも
+キューも作らず呼び手スレッドで直接実行 = 現行と同一コードパス・同一出力名**
+(既存テスト無改変 green が証明)。N>1 は `run{N}_w{k}.root` + worker 毎 1 GiB
+ローテーション。duplicate eventId 判定は分配前に一元化。モニタ経路は無改変
+(充填・publish は元よりビルダ側 = 分配前と実地確認)。
+
+### ゲート(発注側追試済み)
+
+test_recorder **101 → 170**(P1 9 本 + ネガティブコントロール)/ 他 C++ 7 スイート +
+conformance 無改変 green / cargo **454 passed / 0 failed / 1 ignored**(soak_harness
++1)/ clippy・fmt クリーン。
+
+### 受け入れ実測(全 ✔)
+
+1. **N スケーリング(mini)**: 51.6 → 96.7 → **152.0(N=4、2.95×)** → 215.8 events/s(N=8)。
+   **N=4 で目標 100 の 1.5× マージン**。
+2. **soak 30 分 @224 Mbps / N=4**: **10/10 run 合格、100.4 events/s、達成 223.9 Mbps、
+   全ロスレスカウンタ 0、eos-timeout なし(= 保留②解消)、RSS 8 プロセス OK**
+   (root_sink 傾き負、絶対値 ≈0.87 GiB — N=1 比 2 倍、実環境見積もり材料)。
+3. **§12-6 burst 672 Mbps × 10 分 / N=4**: **recv_overflow = 0**(031 実測 94,544 → 0)、
+   達成 648.4 Mbps、実効 290.8 events/s、全 run 正常停止。**受け入れ表 6 クローズ**。
+4. **021 オラクル**: N=1 無改変 `3852 events, 0 differences`(compare 828.8 s —
+   054 と同等 = 実読の裏付け)。**N=2 ユニオン(w0 1,926 + w1 1,926)も
+   `3852 events, 0 differences`**(compare_pevent 複数ファイル対応、テスト無改変・
+   ラッパ注入)。
+5. mini 回帰 green。 6. ELITPC: N=4 で 38.2 events/s(2.95×)。
+
+### チェックリスト①〜⑥
+
+全消し込み(counted drop 合算 10c / duplicate 一元化 10d / monitor.root 単一 10f /
+台帳全パート 10a+soak 120 パート / graceful join 10e / ELITPC probe 健在)。
+
+### 逸脱(裁定済み)
+
+1. verify_run の存在チェックを worker 追随(発注時指示との差分 — **裁定で許可**。
+   純関数化 + 単体テスト、判定強度不変)。
+2. `--root-imt` は N>1 既定 0(裁定確定)。実測 N=4+IMT4 で再現性ある +6% —
+   高コア機は `--root-imt 4` 明示で回収可(N=8 は差なし)。
+3. **compare_pevent の複数ファイル化で silent failure を自ら混入 → 自己摘発 → 修正**:
+   TChain の SetBranchStatus 状態が 1 ファイル chain で再適用されず chargeMap を空読み
+   (両側空 = 偽の 0 differences)。「照合 27.5 s は速すぎる」を疑いネガティブ
+   コントロール(1 ADC 差を検出できるか)で発見。索引用/比較用 chain 分離で修正し、
+   **不一致検出テスト(10i)を対で常設**。教訓: 一致テストには必ず不一致テストを対で。
+
+### 残件(064 範囲外として起票せず記録)
+
+- burst 中 RSS ピーク root_sink 6.88 GiB / decoder 2.98 GiB — 主因は既存の
+  `--queue` 既定 1000 バッチ(メッセージ個数建て)。**保留①(バイト建て化)の実測材料**。
+- §12-5(a) の「一晩 @100 Hz 相当」は 30 分 @224 + 一晩 @45(031)の合わせ技で実質充足だが、
+  **凍結前に一晩 @224 / N=4 を 1 本流すのを推奨**(任意)。
+
+- 実行環境: macOS Darwin 25.5.0 / M4 Pro 14 CPU(バッテリー駆動でも合格値)、
+  2026-08-17〜18。証拠 = `reference/_spike/soak_evidence_064/`。
+
+**Status: COMPLETED**

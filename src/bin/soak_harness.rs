@@ -95,6 +95,7 @@ mod args {
            --rate-mbps <f64>        リプレイのペース(既定: soak 224 / burst 0 = 全速)\n\
            --run-minutes <f64>      1 run の長さ 分(既定 10。graw_replay --laps-until-s に変換)\n\
            --runs <u64>             run 本数の上限(既定 なし = 時間で決まる。スモーク用)\n\
+           --recorder-workers <u64> root_sink の並列 writer 数(既定 1 = 現行と同一。TODO/064)\n\
            --rss-limit-mib <u64>    1 プロセスの RSS 上限(既定 4096)\n\
            --metrics-interval-s <u64>  CSV サンプリング間隔 秒(既定 60)\n\
            --min-free-gib <u64>     走行中に守る空きディスクの床 GiB(既定 20)\n\
@@ -121,6 +122,8 @@ mod args {
         pub run_seconds: f64,
         /// 走行時間とは別に run 本数を打ち切る(スモーク用。`None` = 時間だけで決める)。
         pub max_runs: Option<u64>,
+        /// root_sink の `--recorder-workers`(TODO/064)。1 = 渡さない(既定と同じ)。
+        pub recorder_workers: u64,
         pub rss_limit_mib: u64,
         pub metrics_interval_s: u64,
         pub min_free_gib: u64,
@@ -158,6 +161,7 @@ mod args {
         let mut rate_mbps: Option<f64> = None;
         let mut run_minutes: f64 = 10.0;
         let mut max_runs: Option<u64> = None;
+        let mut recorder_workers: u64 = 1;
         let mut rss_limit_mib: u64 = 4096;
         let mut metrics_interval_s: u64 = 60;
         let mut min_free_gib: u64 = 20;
@@ -195,6 +199,9 @@ mod args {
                 }
                 "--run-minutes" => run_minutes = positive("--run-minutes", &value()?)?,
                 "--runs" => max_runs = Some(positive_u64("--runs", &value()?)?),
+                "--recorder-workers" => {
+                    recorder_workers = positive_u64("--recorder-workers", &value()?)?
+                }
                 "--rss-limit-mib" => rss_limit_mib = positive_u64("--rss-limit-mib", &value()?)?,
                 "--metrics-interval-s" => {
                     metrics_interval_s = positive_u64("--metrics-interval-s", &value()?)?
@@ -225,6 +232,7 @@ mod args {
             rate_mbps,
             run_seconds: run_minutes * 60.0,
             max_runs,
+            recorder_workers,
             rss_limit_mib,
             metrics_interval_s,
             min_free_gib,
@@ -1010,6 +1018,11 @@ fn start_stack(
         "--expect",
         "0:0",
     ]);
+    // TODO/064: 並列 Recorder。**既定(1)では引数を渡さない** —— 現行と完全に同じ
+    // コマンドラインで走らせる(N=1 同一性の証明を計測側でも崩さない)。
+    if cfg.recorder_workers > 1 {
+        cmd.args(["--recorder-workers", &cfg.recorder_workers.to_string()]);
+    }
     let mut root_sink = Proc::spawn("root_sink", log_dir, cmd)?;
     root_sink.wait_for_log("monitor PUB bind", Duration::from_secs(30))?;
     procs.push(root_sink);
@@ -1497,7 +1510,23 @@ fn one_run(
         replayed_bytes,
         begin.elapsed().as_secs_f64(),
         &pre_stop,
+        cfg.recorder_workers,
     )
+}
+
+/// run の完了を示す**パート 0** のファイル名(TODO/064)。
+///
+/// N=1 は従来どおり `run{run:04}.root`。**N>1 では worker 毎に TTree を分けるので
+/// 素の名前は存在しない**(`run{run:04}_w0.root` … `_w{N-1}.root`)—— 存在チェックだけ
+/// worker 0 のパート 0 へ追随させる。**判定の強さは変えない**: entries の合算
+/// (`finalized ` ログ行の前置一致)・生 graw バイト照合・ロスレスカウンタ照合は
+/// N>1 でもそのまま効く(`run0001_w0.root` も `run0001_w0_0001.root` も前置一致で拾う)。
+fn run_root_file_name(run: u32, recorder_workers: u64) -> String {
+    if recorder_workers > 1 {
+        format!("run{run:04}_w0.root")
+    } else {
+        format!("run{run:04}.root")
+    }
 }
 
 /// run 1 本分の照合(**合格したものだけ消す**)。
@@ -1508,9 +1537,10 @@ fn verify_run(
     replayed_bytes: u64,
     seconds: f64,
     pre_stop: &Value,
+    recorder_workers: u64,
 ) -> Result<RunResult, String> {
     let run_dir = stack.data_root.join(format!("run{run:04}"));
-    let root_file = run_dir.join(format!("run{run:04}.root"));
+    let root_file = run_dir.join(run_root_file_name(run, recorder_workers));
     let monitor_file = run_dir.join(format!("run{run:04}_monitor.root"));
 
     // root-sink の run クローズと ROOT の finalize は EOS の後(非同期)。
@@ -2029,6 +2059,23 @@ mod tests {
             "上昇幅 {} KiB は 32 MiB 未満なので合格扱い",
             v.last_window - v.first_window
         );
+    }
+
+    /// run 完了ファイルの名前は **worker 数で変わる**(TODO/064)。
+    ///
+    /// 手計算の出典: N=1 は現行の `run{run:04}.root`(**1 バイトも変えない**)。
+    /// N>1 は Recorder が worker 毎に TTree を分けるので素の名前は存在せず、
+    /// パート 0 は worker 0 の `run{run:04}_w0.root`(root_recorder.hpp の
+    /// `final_path()` と同じ規則)。
+    #[test]
+    fn run_root_file_name_follows_the_worker_count() {
+        // N=1: 現行と同一(既定値 1 と、明示 1 の両方)
+        assert_eq!(run_root_file_name(1, 1), "run0001.root");
+        assert_eq!(run_root_file_name(12, 1), "run0012.root");
+        // N>1: worker 0 のパート 0
+        assert_eq!(run_root_file_name(1, 2), "run0001_w0.root");
+        assert_eq!(run_root_file_name(1, 4), "run0001_w0.root");
+        assert_eq!(run_root_file_name(12, 4), "run0012_w0.root");
     }
 
     /// 32 MiB を超える上昇は従来どおり不合格(フロアが実欠陥を隠さないこと)。
