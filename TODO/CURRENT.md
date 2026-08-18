@@ -1,7 +1,7 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-08-16(031 soak 合格 + 054 GDataFrame 撤去/性能 完了。
-次の入口 = 055 並列化のユーザー裁定。前波は
+**最終更新: 2026-08-18(064 並列 recorder = mini 100 events/s + 065 reference/config 全数調査。
+前波は
 [archive/CURRENT_2026-08-14_p2_p3wave.md](archive/CURRENT_2026-08-14_p2_p3wave.md))**
 
 ## いま(1 分で読める要約)
@@ -31,7 +31,56 @@
 - 実装の正本 = **docs/SPEC_ja.md v1.21**。モデル使い分け・完了時ルール = CLAUDE.md。
 - 公開リポ: https://github.com/aogaki/tpcdaq-rs(実データ・FW・実 .dat は reference/ = .gitignore)。
 
-## 次にやること(次セッションの入口 — 順序は 044 で裁定済み・ユーザー合意 2026-08-15)
+## 次にやること(次セッションの入口)
+
+**2026-08-18 ユーザー裁定: ELITPC 100 Hz の追求は本気で後回し**(コラボの誰も可能と
+思っておらず「やりすぎ」。mini 100 events/s = 064 で最低目標達成済み)。
+→ **次の入口 = [066_unfolding_spike.md](066_unfolding_spike.md)(READY)**: Unfolding の
+検証ハーネス先行構築 + 実データ(reference/exp_data/2026)からのパラメータ拘束見積もり。
+ベイズは判断材料が出てから。~~ユーザー依頼中: pulser .graw~~ **到着済み(2026-08-18)**:
+`reference/exp_data/2026/` に **pedestal 32 run / 35 GB**(内部 periodically = ランダム
+トリガ、physics と同一 compact)と **pulser 26 run / 4.3 GB(+中断 0 バイト 3 本)** を確認。
+全数ヘッダ走査で新事実 3 つ: ①**FDT 接続開設時に CoBo が topology frame(frameType 7、
+12 B、asadMask 付き)を必ず送る**(一次資料 MemRead.cpp:362 — 我々の receiver は未テスト =
+**ELI-NP 地雷**)②**pulser は frameType 1(rev 5、itemSize 4、557,312 B 固定)= frameType 1
+の実データ照合が初めて可能に** ③GetController 経由ランは `CoBo_{TS}_{idx}.graw` 単一
+ファイル AsAd インターリーブ + 1 GiB 分割。→ ~~067~~ **完了(2026-08-18 同日、SPEC v1.23)**: topology frame 防御(decoder カウンタ +
+INFO、欠落 0 テスト固定)/ **frameType 1 実データ照合を GET 純正 MFM ライブラリと全一致で
+クローズ**(304 frames / 42,336,256 items、hit pattern = FPN 除外・データ = FPN 込みと意味確定)/
+0 バイト .graw 耐性(--loop 無限ループの副産物修正)。ゲート **cargo 454 → 468 passed**、
+clippy クリーン、vcobo 148 無変更。**実データで新事実**: pedestal の AsAd 到着順回転 +
+eventIdx 後退(幅 1)を実測 → §6.3 に「ビルダは順序に依存しない」を実データ根拠付きで明文化。
+**Fable 裁定: flowType は TCP 維持・FDT 非対応を §8.2 に明文化**(FDT は IMALIVE/GOODBYE/
+run 毎再接続のワイヤ差分あり — 将来必要時は 3 点セット新ユニット)。vcobo への topology 送出は
+撤回(誤前提)。[archive/067](archive/067_real_stream_compat.md) 結果節が正。
+**2026-08-18 追記(並列消化中)**: 067 / 066 / 068 を implementer(Opus)3 レーン並列で実行。
+~~068~~ **完了(同日)— pedestal 36 run / pulser 25 run を全数走査(40 GB / 84 s、サンプリング
+なし、デコードは本体 Decoder と 1 item 照合してから使用)**。066/ゲイン正規化が使う数値:
+**per-channel ベースライン必須(ch 毎 mean 224–512 ADC)/ ノイズ RMS 中央値 6.64(FPN 2.05)/
+相対ゲイン ±4.4%(最悪 ±8.4%、AGET 単位系統差 5.3%、AsAd3 低め)/ 18 日間安定(pedestal 表・
+ゲイン表とも 1 セットで足りる)/ 恒常異常 7 ch(全て生きている — pulser ゲインは正常。マスク
+ではなく閾値個別化の対象)/ pulser の FPN は 4095 飽和 = FPN からゲイン不可**。
+イベントビルダ裁定 2 件(固定窓なし / run 末尾 incomplete は既定 emit)は SPEC v1.23 同日追補。
+成果物 = reference/_spike/asset_survey/out/(SUMMARY.md + CSV 17 種)。
+[archive/068](archive/068_asset_survey.md) 結果節が正。
+~~066~~ **完了(同日)— Unfolding スパイク A/B/C 完走、Fable 裁定確定**:
+実 physics 334 events 選別 → TPCReco StripResponseCalculator **無改変リンク成功** +
+1D 解析再実装(本家と数値照合済み: 時間 1e-4、横断 0.041)→ χ² 拘束マップ。
+**拘束可 = σ_T 0.90 mm [0.60,1.20] と σ_L 6.0 cells [5.0,7.0] のみ。v_drift×σ_L[mm] は
+厳密縮退・ゲインは恒久 nuisance。実データ χ²/ndf 8.7〜11 = モデル不足支配(イオンテール
+未モデル化)**。閉包テストでバイアスなし。**裁定: データ駆動本実装せず・ベイズ層積まず・
+Mikolaj 待ち(受け入れ試験 = `SIGMA_T=... SIGMA_L=... ./run_all.sh` で完成済み)**。
+縮退を破る道 = (a) D_L をガス物性から与え v_drift を決める(物理側相談)
+(b) パルサーで電子回路応答実測 + イオンテール追加(068 ゲイン表と同根 — 起票は保留)。
+CKW は 25 MHz 採用(一次資料 + χ² も同向)。ROOT 6.08⇄6.36 互換問題は Warsaw 残確認へ追記。
+[archive/066](archive/066_unfolding_spike.md) 結果節 + reference/_spike/unfold/FINDINGS.md が正。**[069_elinp_test_plan.md](069_elinp_test_plan.md)
+(DRAFT)を Fable が起草** — ELI-NP 実機テスト計画(Phase 0〜4 + 現地で確定させる問い Q1〜Q4。
+032/036/041/043/057/034/§13 の実機項目を全数集約。ユーザーレビュー待ち)。
+SPEC は **v1.22**(§13-7 制御プレーン注記)。なお topology frame はソース上 FDT 限定送出
+(`MemRead.cpp` の senderType ガード)で、**我々の TCP 経路では来ないはず** — 「必ず受ける」
+は過大だった(069 Q1 で現地確定。067 の防御実装は GetController 形式リプレイに必要なので継続)。
+
+## 旧・次にやること(順序は 044 で裁定済み・ユーザー合意 2026-08-15 — 履歴として保持)
 
 **043 → 033 → 044(リファクタ窓)→ P4 UI 実配線 → 031 soak → ELI-NP** の順。
 
@@ -135,7 +184,15 @@
    **テスト計画の起票はデモ改良が一段落してから**(2026-08-14 ユーザー)。
 8. **P5 Warsaw 展開** = docs/WARSAW_PLAN_ja.md — **完全後回し**。実機受け入れ試験・残確認
    (WARSAW_PLAN の工学項目)は ELI-NP テスト完了後。Warsaw 固有で残るのは
-   旧 ROOT 互換 / grawToEventTPC 実機互換 / zCoBo リンク本数 / 先方 LAN 条件。
+   旧 ROOT 互換 / grawToEventTPC 実機互換 / zCoBo リンク本数 / 先方 LAN 条件 /
+   **zCoBo 台数構成**(2018 describe-elitpc は 2 台 2 リンクだが現行 HIGS は zCobo1k 1 台
+   4 AsAd — 065 の観察。受信系は複数 CoBo 前提を維持しつつ現地裏取り)。
+   **旧 ROOT 互換の具体機序が判明(066)**: PEventTPC の chargeMap キー
+   `std::tuple<int,int,int,int>` は **libstdc++ と libc++ でメンバのメモリ順が逆**で
+   StreamerInfo checksum が食い違い、ROOT 6.08 製ファイルを 6.36 で読むと**エラーではなく
+   壊れた値**が返る(読みは StreamerInfo 貼り替えで回避可 — reference/_spike/unfold/
+   pevent_read.hpp)。**我々の出力を先方の旧 ROOT で読む向きの実地確認が必須**
+   (本番が Linux/libstdc++ 同士なら顕在化しない可能性が高いが、実測で潰す)。
 
 ## この波(2026-08-14 後半)で決まったこと・分かったこと
 
@@ -216,9 +273,12 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 ## 完了ユニット台帳
 
-000〜054 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
-すべて各 md の「結果」節が正。**残は 055(DRAFT・裁定待ち)のみ**)。
-直近(2026-08-16): **031** 一晩 soak 合格 / **054** GDataFrame 全撤去 + IMT(+29%)。
+000〜065 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
+すべて各 md の「結果」節が正)。
+直近(2026-08-18): **064** 並列 recorder = mini 100 events/s / **065** reference/config
+全数調査(現行実験 ECC 設定の生コピー — 現用 = trigDelay1748@25MHz・フル readout 確認、
+大半は ZC706 とバイト同一、physics xcfg は 2022 年以来 delay 以外不変)。
+前々日(2026-08-16): **031** 一晩 soak 合格 / **054** GDataFrame 全撤去 + IMT(+29%)。
 前日(2026-08-15): **038〜042** 仮想 zCoBo トラック / **043** ecc_error 可視化 /
 **033** 異常系セマンティクス(quiesce 停止 1.3 s 化)/ **044〜049 リファクタ窓** /
 **050〜052 P4**(Run 制御 UI 実配線 + 表示強化 + SPA fallback)/ **053** RSS リーク根治。
