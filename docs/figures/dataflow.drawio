@@ -1,0 +1,112 @@
+<mxfile host="app.diagrams.net">
+  <diagram id="tpcdaq-dataflow" name="tpcdaq data flow">
+    <mxGraphModel dx="1200" dy="700" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1040" pageHeight="520" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="zcobo" value="&lt;b&gt;zCoBo boards&lt;/b&gt;&lt;br&gt;GET firmware — unmodified" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F0FA;strokeColor=#2E6FB7;fontColor=#1d3f63;" vertex="1" parent="1">
+          <mxGeometry x="30" y="175" width="150" height="64" as="geometry"/>
+        </mxCell>
+        <mxCell id="receiver" value="&lt;b&gt;receiver&lt;/b&gt;&lt;br&gt;Rust" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F0FA;strokeColor=#2E6FB7;fontColor=#1d3f63;" vertex="1" parent="1">
+          <mxGeometry x="250" y="100" width="120" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="grawwriter" value="&lt;b&gt;graw-writer&lt;/b&gt;&lt;br&gt;Rust" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F0FA;strokeColor=#2E6FB7;fontColor=#1d3f63;" vertex="1" parent="1">
+          <mxGeometry x="430" y="40" width="130" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="rawfiles" value="&lt;b&gt;graw files&lt;/b&gt;&lt;br&gt;the only raw data — byte-identical, per AsAd" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#D6E5F6;strokeColor=#2E6FB7;strokeWidth=2;fontColor=#1d3f63;" vertex="1" parent="1">
+          <mxGeometry x="606" y="34" width="240" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="decoder" value="&lt;b&gt;decoder&lt;/b&gt;&lt;br&gt;Rust" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F0FA;strokeColor=#2E6FB7;fontColor=#1d3f63;" vertex="1" parent="1">
+          <mxGeometry x="430" y="130" width="130" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="rootsink" value="&lt;b&gt;root-sink&lt;/b&gt;&lt;br&gt;C++ / ROOT — event builder, parallel writers&lt;br&gt;&lt;i&gt;+ gain / unfolding (planned)&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E8F0FA;strokeColor=#2E6FB7;fontColor=#1d3f63;" vertex="1" parent="1">
+          <mxGeometry x="620" y="122" width="200" height="80" as="geometry"/>
+        </mxCell>
+        <mxCell id="rootfile" value="&lt;b&gt;run.root&lt;/b&gt;&lt;br&gt;analysis-ready (PEventTPC)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#D6E5F6;strokeColor=#2E6FB7;strokeWidth=2;fontColor=#1d3f63;" vertex="1" parent="1">
+          <mxGeometry x="862" y="132" width="160" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="monitor" value="&lt;b&gt;monitor&lt;/b&gt;&lt;br&gt;Rust" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDF1E3;strokeColor=#D97A1A;fontColor=#7a4207;" vertex="1" parent="1">
+          <mxGeometry x="640" y="256" width="130" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="webui" value="&lt;b&gt;Web UI&lt;/b&gt;&lt;br&gt;Angular + JSROOT&lt;br&gt;run control · histograms · event display · waveform · logbook · LV/HV power" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FDF1E3;strokeColor=#D97A1A;fontColor=#7a4207;" vertex="1" parent="1">
+          <mxGeometry x="830" y="240" width="192" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="controller" value="&lt;b&gt;controller&lt;/b&gt;&lt;br&gt;Rust — REST" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1EDF8;strokeColor=#7B5EA7;fontColor=#463366;" vertex="1" parent="1">
+          <mxGeometry x="600" y="402" width="150" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="bridge" value="&lt;b&gt;ecc-bridge&lt;/b&gt;&lt;br&gt;C++ — Ice client" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1EDF8;strokeColor=#7B5EA7;fontColor=#463366;" vertex="1" parent="1">
+          <mxGeometry x="380" y="402" width="150" height="48" as="geometry"/>
+        </mxCell>
+        <mxCell id="ecc" value="&lt;b&gt;ECC server&lt;/b&gt;&lt;br&gt;GET software — unmodified" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F1EDF8;strokeColor=#7B5EA7;fontColor=#463366;" vertex="1" parent="1">
+          <mxGeometry x="140" y="396" width="170" height="60" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="e1" value="TCP data link (one per computer)" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#2E6FB7;strokeWidth=2;fontColor=#2E6FB7;fontSize=10;" edge="1" parent="1" source="zcobo" target="receiver">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#2E6FB7;strokeWidth=2;" edge="1" parent="1" source="receiver" target="grawwriter">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#2E6FB7;strokeWidth=2;" edge="1" parent="1" source="grawwriter" target="rawfiles">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#2E6FB7;strokeWidth=2;" edge="1" parent="1" source="receiver" target="decoder">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#2E6FB7;strokeWidth=2;" edge="1" parent="1" source="decoder" target="rootsink">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#2E6FB7;strokeWidth=2;" edge="1" parent="1" source="rootsink" target="rootfile">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e7" value="latest events + histograms" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#D97A1A;strokeWidth=2;fontColor=#D97A1A;fontSize=10;" edge="1" parent="1" source="rootsink" target="monitor">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e8" value="WebSocket" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#D97A1A;strokeWidth=2;fontColor=#D97A1A;fontSize=10;" edge="1" parent="1" source="monitor" target="webui">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e9" value="REST" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#7B5EA7;strokeWidth=2;dashed=1;fontColor=#7B5EA7;fontSize=10;" edge="1" parent="1" source="webui" target="controller">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#7B5EA7;strokeWidth=2;dashed=1;" edge="1" parent="1" source="controller" target="bridge">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e11" value="Ice" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#7B5EA7;strokeWidth=2;dashed=1;fontColor=#7B5EA7;fontSize=10;" edge="1" parent="1" source="bridge" target="ecc">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="e12" value="slow control" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#7B5EA7;strokeWidth=2;dashed=1;fontColor=#7B5EA7;fontSize=10;" edge="1" parent="1" source="ecc" target="zcobo">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="leg1" value="recording — lossless, never drops" style="text;html=1;fontSize=11;fontColor=#333333;labelBackgroundColor=none;" vertex="1" parent="1">
+          <mxGeometry x="74" y="476" width="220" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg1l" style="endArrow=none;strokeColor=#2E6FB7;strokeWidth=3;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="30" y="486" as="sourcePoint"/>
+            <mxPoint x="66" y="486" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="leg2" value="monitoring — latest-first, drops are counted" style="text;html=1;fontSize=11;fontColor=#333333;labelBackgroundColor=none;" vertex="1" parent="1">
+          <mxGeometry x="354" y="476" width="280" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg2l" style="endArrow=none;strokeColor=#D97A1A;strokeWidth=3;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="310" y="486" as="sourcePoint"/>
+            <mxPoint x="346" y="486" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="leg3" value="control" style="text;html=1;fontSize=11;fontColor=#333333;labelBackgroundColor=none;" vertex="1" parent="1">
+          <mxGeometry x="704" y="476" width="100" height="20" as="geometry"/>
+        </mxCell>
+        <mxCell id="leg3l" style="endArrow=none;strokeColor=#7B5EA7;strokeWidth=3;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="660" y="486" as="sourcePoint"/>
+            <mxPoint x="696" y="486" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

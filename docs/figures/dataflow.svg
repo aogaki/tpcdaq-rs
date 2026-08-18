@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1040" height="520" viewBox="0 0 1040 520" font-family="Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ab" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 z" fill="#2E6FB7"/>
+    </marker>
+    <marker id="ao" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 z" fill="#D97A1A"/>
+    </marker>
+    <marker id="ap" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto">
+      <path d="M0,0 L10,4 L0,8 z" fill="#7B5EA7"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="1040" height="520" fill="#ffffff"/>
+
+  <!-- ============ data path (blue, lossless) ============ -->
+  <!-- zCoBo -->
+  <rect x="30" y="175" width="150" height="64" rx="7" fill="#E8F0FA" stroke="#2E6FB7" stroke-width="1.6"/>
+  <text x="105" y="201" text-anchor="middle" font-size="13.5" font-weight="bold" fill="#1d3f63">zCoBo boards</text>
+  <text x="105" y="219" text-anchor="middle" font-size="11" fill="#3a5a7d">GET firmware — unmodified</text>
+
+  <!-- receiver -->
+  <rect x="250" y="100" width="120" height="48" rx="7" fill="#E8F0FA" stroke="#2E6FB7" stroke-width="1.6"/>
+  <text x="310" y="121" text-anchor="middle" font-size="13" font-weight="bold" fill="#1d3f63">receiver</text>
+  <text x="310" y="137" text-anchor="middle" font-size="11" fill="#3a5a7d">Rust</text>
+
+  <!-- graw-writer -->
+  <rect x="430" y="40" width="130" height="48" rx="7" fill="#E8F0FA" stroke="#2E6FB7" stroke-width="1.6"/>
+  <text x="495" y="61" text-anchor="middle" font-size="13" font-weight="bold" fill="#1d3f63">graw-writer</text>
+  <text x="495" y="77" text-anchor="middle" font-size="11" fill="#3a5a7d">Rust</text>
+
+  <!-- raw files -->
+  <rect x="606" y="34" width="240" height="60" rx="3" fill="#D6E5F6" stroke="#2E6FB7" stroke-width="1.9"/>
+  <text x="726" y="57" text-anchor="middle" font-size="13" font-weight="bold" fill="#1d3f63">graw files</text>
+  <text x="726" y="74" text-anchor="middle" font-size="10.5" fill="#3a5a7d">the only raw data — byte-identical, per AsAd</text>
+
+  <!-- decoder -->
+  <rect x="430" y="130" width="130" height="48" rx="7" fill="#E8F0FA" stroke="#2E6FB7" stroke-width="1.6"/>
+  <text x="495" y="151" text-anchor="middle" font-size="13" font-weight="bold" fill="#1d3f63">decoder</text>
+  <text x="495" y="167" text-anchor="middle" font-size="11" fill="#3a5a7d">Rust</text>
+
+  <!-- root-sink -->
+  <rect x="620" y="122" width="200" height="80" rx="7" fill="#E8F0FA" stroke="#2E6FB7" stroke-width="1.6"/>
+  <text x="720" y="143" text-anchor="middle" font-size="13" font-weight="bold" fill="#1d3f63">root-sink</text>
+  <text x="720" y="160" text-anchor="middle" font-size="10.5" fill="#3a5a7d">C++ / ROOT — event builder,</text>
+  <text x="720" y="174" text-anchor="middle" font-size="10.5" fill="#3a5a7d">parallel writers</text>
+  <text x="720" y="190" text-anchor="middle" font-size="10.5" font-style="italic" fill="#3a5a7d">+ gain / unfolding (planned)</text>
+
+  <!-- run.root -->
+  <rect x="862" y="132" width="160" height="60" rx="3" fill="#D6E5F6" stroke="#2E6FB7" stroke-width="1.9"/>
+  <text x="942" y="155" text-anchor="middle" font-size="13" font-weight="bold" fill="#1d3f63">run.root</text>
+  <text x="942" y="172" text-anchor="middle" font-size="10.5" fill="#3a5a7d">analysis-ready (PEventTPC)</text>
+
+  <!-- ============ monitor path (orange) ============ -->
+  <rect x="640" y="256" width="130" height="48" rx="7" fill="#FDF1E3" stroke="#D97A1A" stroke-width="1.6"/>
+  <text x="705" y="277" text-anchor="middle" font-size="13" font-weight="bold" fill="#7a4207">monitor</text>
+  <text x="705" y="293" text-anchor="middle" font-size="11" fill="#8a5a1e">Rust</text>
+
+  <rect x="830" y="240" width="192" height="100" rx="7" fill="#FDF1E3" stroke="#D97A1A" stroke-width="1.6"/>
+  <text x="926" y="262" text-anchor="middle" font-size="13" font-weight="bold" fill="#7a4207">Web UI</text>
+  <text x="926" y="279" text-anchor="middle" font-size="10.5" fill="#8a5a1e">Angular + JSROOT</text>
+  <text x="926" y="296" text-anchor="middle" font-size="10.5" fill="#8a5a1e">run control · histograms</text>
+  <text x="926" y="311" text-anchor="middle" font-size="10.5" fill="#8a5a1e">event display · waveform</text>
+  <text x="926" y="326" text-anchor="middle" font-size="10.5" fill="#8a5a1e">logbook · LV/HV power</text>
+
+  <!-- ============ control path (purple, dashed) ============ -->
+  <rect x="600" y="402" width="150" height="48" rx="7" fill="#F1EDF8" stroke="#7B5EA7" stroke-width="1.6"/>
+  <text x="675" y="423" text-anchor="middle" font-size="13" font-weight="bold" fill="#463366">controller</text>
+  <text x="675" y="439" text-anchor="middle" font-size="11" fill="#5d4a80">Rust — REST</text>
+
+  <rect x="380" y="402" width="150" height="48" rx="7" fill="#F1EDF8" stroke="#7B5EA7" stroke-width="1.6"/>
+  <text x="455" y="423" text-anchor="middle" font-size="13" font-weight="bold" fill="#463366">ecc-bridge</text>
+  <text x="455" y="439" text-anchor="middle" font-size="11" fill="#5d4a80">C++ — Ice client</text>
+
+  <rect x="140" y="396" width="170" height="60" rx="7" fill="#F1EDF8" stroke="#7B5EA7" stroke-width="1.6"/>
+  <text x="225" y="419" text-anchor="middle" font-size="13" font-weight="bold" fill="#463366">ECC server</text>
+  <text x="225" y="437" text-anchor="middle" font-size="10.5" fill="#5d4a80">GET software — unmodified</text>
+
+  <!-- ============ edges: data (blue) ============ -->
+  <polyline points="180,207 215,207 215,124 250,124" fill="none" stroke="#2E6FB7" stroke-width="2" marker-end="url(#ab)"/>
+  <text x="150" y="155" font-size="10.5" fill="#2E6FB7">TCP data link</text>
+  <text x="150" y="168" font-size="10.5" fill="#2E6FB7">(one per computer)</text>
+
+  <polyline points="370,112 400,112 400,64 430,64" fill="none" stroke="#2E6FB7" stroke-width="2" marker-end="url(#ab)"/>
+  <polyline points="560,64 606,64" fill="none" stroke="#2E6FB7" stroke-width="2" marker-end="url(#ab)"/>
+  <polyline points="370,136 400,136 400,154 430,154" fill="none" stroke="#2E6FB7" stroke-width="2" marker-end="url(#ab)"/>
+  <polyline points="560,154 620,154" fill="none" stroke="#2E6FB7" stroke-width="2" marker-end="url(#ab)"/>
+  <polyline points="820,162 862,162" fill="none" stroke="#2E6FB7" stroke-width="2" marker-end="url(#ab)"/>
+
+  <!-- edges: monitor (orange) -->
+  <polyline points="710,202 710,256" fill="none" stroke="#D97A1A" stroke-width="2" marker-end="url(#ao)"/>
+  <text x="722" y="233" font-size="10.5" fill="#D97A1A">latest events + histograms</text>
+  <polyline points="770,282 830,282" fill="none" stroke="#D97A1A" stroke-width="2" marker-end="url(#ao)"/>
+  <text x="774" y="274" font-size="10.5" fill="#D97A1A">WebSocket</text>
+
+  <!-- edges: control (purple dashed) -->
+  <polyline points="900,340 900,426 750,426" fill="none" stroke="#7B5EA7" stroke-width="2" stroke-dasharray="7,5" marker-end="url(#ap)"/>
+  <text x="908" y="380" font-size="10.5" fill="#7B5EA7">REST</text>
+  <polyline points="600,426 530,426" fill="none" stroke="#7B5EA7" stroke-width="2" stroke-dasharray="7,5" marker-end="url(#ap)"/>
+  <polyline points="380,426 310,426" fill="none" stroke="#7B5EA7" stroke-width="2" stroke-dasharray="7,5" marker-end="url(#ap)"/>
+  <text x="332" y="418" font-size="10.5" fill="#7B5EA7">Ice</text>
+  <polyline points="140,426 95,426 95,239" fill="none" stroke="#7B5EA7" stroke-width="2" stroke-dasharray="7,5" marker-end="url(#ap)"/>
+  <text x="30" y="330" font-size="10.5" fill="#7B5EA7">slow control</text>
+
+  <!-- ============ legend ============ -->
+  <line x1="30" y1="486" x2="66" y2="486" stroke="#2E6FB7" stroke-width="2.5"/>
+  <text x="74" y="490" font-size="11" fill="#333">recording — lossless, never drops</text>
+  <line x1="310" y1="486" x2="346" y2="486" stroke="#D97A1A" stroke-width="2.5"/>
+  <text x="354" y="490" font-size="11" fill="#333">monitoring — latest-first, drops are counted</text>
+  <line x1="660" y1="486" x2="696" y2="486" stroke="#7B5EA7" stroke-width="2.5" stroke-dasharray="7,5"/>
+  <text x="704" y="490" font-size="11" fill="#333">control</text>
+</svg>
