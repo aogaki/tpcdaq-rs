@@ -91,6 +91,11 @@
    ゲイン較正は外部パルサー注入(ツール所在を Mikolaj に確認)/ **データリンクは
    コンピュータへ 1 本**(032 設計が適合、残確認は現地裏取りのみ)。
    [archive/061](archive/061_warsaw_answers.md)。
+10⁗′. **英語ミニプロポーザル完成・配布(2026-08-18)**: 本文(6 節)+ データフロー図
+   (docs/figures/dataflow.svg / .drawio)+ UI スクリーンショット 7 図の PDF。
+   **Warsaw 大(Wojciech/Mikolaj)と ELI-NP mini TPC チームへ配布**。
+   マスター = reference/proposal/(proposal.html → Chrome headless で PDF 再生成可。
+   たたき台・英語 md も同所。リポには figures のみ)。
 10⁗. ~~062/063~~ **完了(2026-08-16)— Warsaw プロポーザル準備**: 応答パラメータは
    Mikolaj モデル由来(受領待ちのみ)/ ゲイン較正は内製(FW 内蔵パルサー)で確定(062)。
    **UI 表示文字列を全面英語化**(22 ファイル、192 テスト件数不変、dist 再ビルド済み —
