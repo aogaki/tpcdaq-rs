@@ -50,7 +50,7 @@ C++ サテライト(tools/): ROOT(root-sink)、ZeroC Ice(ecc-bridge、**encoding
 - **ch 数をコードに焼き込まない** — mini(256 信号 ch/272 FPN 込み)/ ELITPC(1024/1088)はジオメトリ設定(TPCReco `.dat` 形式)で切替。C++ 版の mini 前提を持ち込まない。
 - **FPN リオーダ必須** — GRAW 0–67 ↔ geometry 0–63、FPN={11,22,45,56}(reuse/rust_reference 参照)。波高・波形は**生 ADC(減算なし)**が既定。
 - **複数 CoBo 前提** — receiver は CoBo 毎。生 graw は **AsAd 毎ファイル・実機 DataRouter 命名に完全一致**(`CoBo{K}_AsAd{A}_{TS}_{idx:04}.graw`、バイト一致 append。mini = 1、**ELITPC = 1 論理 CoBo × 4 AsAd = 4**(2 枚の zCoBo を 1 CoBo として扱う — 実データ 2026-08-13 確認、SPEC v1.7)。run 番号管理はログブック・ROOT 側 — 2026-08-13 決定、SPEC v1.1)。ビルド後のイベントデータは run 毎に単一 ROOT ファイル(**全 CoBo/AsAd マージが理想形**)。イベントビルダは ELITPC(4 AsAd マージ)で必須。多 CoBo 能力は設計として維持(合成 2-CoBo フィクスチャでテスト)。
-- **frameType 1(2018 形式、実データ照合なし・合成のみ)/ 2(compact rev 5, blkSize256/big-endian — 実機は 2022 時点で既にこれ。SPEC v1.7)両対応**。
+- **frameType 1(2018 形式 — 実 pulser データで照合済み 2026-08-18、SPEC v1.23)/ 2(compact rev 5, blkSize256/big-endian — 実機は 2022 時点で既にこれ。SPEC v1.7)両対応**。topology frame(frameType 7)は decoder が防御(カウンタ + INFO)。
 - **listen-before-start** — `ecc start` 前に受信ポートを listen。
 - **実機プロトコル既知の罠**: DataSender id は `CoBo[0]` 形式・flowType は大文字 `TCP`。Ice encoding は**レッグで違う**: ecc-bridge→ECC = 1.1、**ECC→ハードノード = 1.0**(ECC がプロキシに `-e 1.0` を焼き込む — docs/VIRTUAL_ZCOBO_ja.md §4.2、2026-08-14 確定)。
 - **oxyroot でヒストを書かない** — TH1/TH2 型が存在しない(2026-08-12 ソース+実コンパイルで実証)。ヒストの ROOT 化は常に C++ 側(root-sink)。

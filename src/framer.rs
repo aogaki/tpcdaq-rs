@@ -301,6 +301,32 @@ mod tests {
         assert_eq!(fr.reset_count(), 1);
     }
 
+    /// 実機 CoBo が FDT リンク開設直後に送る topology frame(frameType 7・12 B)を、
+    /// 後続のデータフレームを 1 バイトも巻き込まずに切り出せること(TODO/067-A)。
+    ///
+    /// metaType 0x40 は bit6 が立っているが、フレーム長の解釈に効くのは bit7(endian)と
+    /// bits[3:0](log2 blkSize)だけなので **big-endian・blkSize 1** と読める。
+    /// 出典 = reference/20190315_patched/GetBench/src/get/daq/MemRead.cpp:362。
+    #[test]
+    fn real_topology_frame_is_cut_at_12_bytes_without_eating_the_next_frame() {
+        let topology: [u8; 12] = [
+            0x40, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x07, 0x00, 0x00, 0x0f, 0x00, 0x00,
+        ];
+        let data = make_frame(96, false, 0xD1);
+
+        let mut fr = Framer::new();
+        let mut stream = topology.to_vec();
+        stream.extend_from_slice(&data);
+        fr.push(&stream);
+
+        let first = fr.next().unwrap().to_vec();
+        assert_eq!(first, topology, "topology frame はちょうど 12 B");
+        let second = fr.next().unwrap().to_vec();
+        assert_eq!(second, data, "後続のデータフレームは無傷");
+        assert!(fr.next().is_none());
+        assert_eq!(fr.reset_count(), 0, "再同期は起きない");
+    }
+
     /// 実 2025 データの符号化(metaType 0x08 = blkSize 256、big-endian)でも切り出せる。
     #[test]
     fn blk_size_256_big_endian_header_is_parsed() {

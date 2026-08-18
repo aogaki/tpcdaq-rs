@@ -21,7 +21,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -75,6 +75,24 @@ fn run(cfg: &args::Args) -> Result<u64, ReplayError> {
     }
 }
 
+/// 0 バイトの `.graw` かどうか(TODO/067-C)。中断 run はこれを残す
+/// (reference/exp_data/2026/pulser に実在 3 本)。
+fn is_empty_graw(path: &Path) -> Result<bool, ReplayError> {
+    let meta = std::fs::metadata(path).map_err(|source| ReplayError::FileOpen {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(meta.len() == 0)
+}
+
+/// 0 バイト `.graw` のスキップを必ず可視化する(silent failure を作らない — CLAUDE.md)。
+fn warn_empty_graw(path: &Path) {
+    eprintln!(
+        "graw_replay: {}: file is empty (0 bytes) — skipped (an aborted run leaves such a .graw)",
+        path.display()
+    );
+}
+
 /// 単一ファイル: **バイトそのまま**チャンク送出(従来経路、再フレーミングなし)。
 fn run_single(
     cfg: &args::Args,
@@ -83,6 +101,12 @@ fn run_single(
     start: Instant,
 ) -> Result<u64, ReplayError> {
     let path = &cfg.files[0];
+    // 空ファイルはここで畳む。`--loop` と組み合わさると「読めない→巻き戻す」を
+    // 全速で回し続ける無限ループになるので、ループへ入る前に落とす。
+    if is_empty_graw(path)? {
+        warn_empty_graw(path);
+        return Ok(0);
+    }
     let mut file = File::open(path).map_err(|source| ReplayError::FileOpen {
         path: path.clone(),
         source,
@@ -288,10 +312,16 @@ mod merge {
         emit: &mut dyn FnMut(&[u8]) -> Result<(), ReplayError>,
         paced: &mut dyn FnMut(u64),
     ) -> Result<u64, ReplayError> {
-        let mut sources: Vec<FrameSource> = files
-            .iter()
-            .map(|p| FrameSource::open(p, chunk_bytes))
-            .collect::<Result<_, _>>()?;
+        // 0 バイト .graw(中断 run)は警告してスキップする。残りのファイルはそのまま
+        // マージ送出する(TODO/067-C)。
+        let mut sources: Vec<FrameSource> = Vec::with_capacity(files.len());
+        for path in files {
+            if is_empty_graw(path)? {
+                warn_empty_graw(path);
+                continue;
+            }
+            sources.push(FrameSource::open(path, chunk_bytes)?);
+        }
         let mut heads: Vec<Option<Head>> = Vec::with_capacity(sources.len());
         for src in &mut sources {
             heads.push(src.next_frame()?.map(|frame| Head {

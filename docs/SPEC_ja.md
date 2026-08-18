@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.21(2026-08-18 — 実装の正本)**
+- **status**: **v1.23(2026-08-18 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -146,6 +146,26 @@
   per-REQ 60 s は正しく発火する(実測固定)。シーケンス全体は意図的に無期限
   (非冪等な歩きを途中放棄しない)— クライアント側タイムアウト + status ポーリングが
   正規の回復。`ecc command applied` ログに elapsed_ms を常設。
+  / **v1.23(2026-08-18)実ストリーム 3 事実の取り込み(TODO/067 — 実 pedestal/pulser 全数照合)**:
+  ①**frameType 1 を「実データ照合済み」へ格上げ**(v1.7 ②の「合成のみ」を上書き): 実 pulser
+  (frameType 1 rev 5・itemSize 4)304 frames / 42,336,256 items を GET 純正 MFM ライブラリ
+  (CoBoEvent::decodeSamples と同一経路)と突き合わせ全一致。item ビットパック
+  (aget 30/2・chan 23/7・buck 14/9・sample 0/12)は CoboFormats-Rev-5.xcfg と一致。
+  **hit pattern は FPN{11,22,45,56} を除くが item データは FPN 込み全 ch** と意味確定。
+  ②**topology frame(frameType 7・12 B)**は FDT センダのみ・daqStart 時に送出
+  (MemRead.cpp:362 の senderType ガード)。decoder は認識 + INFO + `topology_frames`
+  カウンタ(unsupported の内数)でスキップ(欠落 0 をテスト固定)。
+  ③**FDT ワイヤ差分を契約として記録し、flowType は TCP 維持を裁定**(§8.2)。
+  §6.3 に実データ由来の到着順注記。§12-1 に pulser frameType 1 オラクル追加。
+  graw_replay は 0 バイト .graw(中断 run)を警告付きスキップ(--loop 無限ループの副産物修正)。
+  **同日追補(TODO/068 — pedestal 36 run / pulser 25 run 全数走査)**: §6.3 の到着順注記に
+  単一ファイル形式の実測(混在は常に隣接 1 イベント)と run 末尾不完全イベントの裁定
+  (既定の incomplete emit で足りる)を追補。ノイズ・ゲインの物理統計は
+  reference/_spike/asset_survey/out/ と archive/068 結果節が正(SPEC 対象外)。
+  / **v1.22(2026-08-18)§13-7 に制御プレーン注記(TODO/065)**: 実 ECC 設定の生コピー
+  調査で判明した describe-elitpc(2018)の CoBo 2 インスタンス定義は zCobo1k 移行前の
+  2 ボード時代の記述と整理。P5 現地確認に「使用中 describe の CoBo インスタンス数」を追加。
+  受信系の複数 CoBo 前提は維持。
   / **v1.21(2026-08-18)Recorder 並列化 P1(TODO/064 — 裁定 = 055)**:
   `--recorder-workers`(既定 1 = 完全互換)で worker 毎 TTree の並列書き出し。
   **mini 100 events/s 達成**(N=4: 隔離 152 /s、30 分 @224 Mbps 持続 100.4 /s・
@@ -686,6 +706,18 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
   「到着順連結で順序が狂う」現行 GET 問題(PROPOSAL Q3)の構造的回避はここで実現される。
 - **イベント内のフラグメント順は (cobo, asad) 昇順で決定的にする**(v1.3。到着順は run 毎に
   揺れるため、§12-4 の 2 ソースビルド一致・TTree 比較が順序で偽陰性にならないように)。
+- **到着順への非依存は実データで裏付け済み(v1.23、TODO/067)**: 実 pedestal
+  (467 event)で AsAd 到着順の回転(`2,3,0,1` 等)2 件、**eventIdx の後退 40 箇所
+  (後退幅は必ず 1 = 隣接 event の混在のみ)**、1 event の到着幅最大 6 フレームを実測。
+  ビルダは **AsAd 順にも eventIdx 単調性にも依存してはならない**(現行 eventIdx
+  グルーピング実装はこの条件を満たす。到着幅 6 ≪ build_timeout)。
+  **同日追補(TODO/068 全ラン走査)**: 単一ファイル形式(GetController 経由)でも
+  イベントは連続塊でない箇所が pedestal 36 run で 25,438 箇所 — ただし**混在は常に隣接
+  1 イベント分**で eventIdx は単調(pulser/physics は 0 箇所 = レート依存)。並べ替え
+  「窓」の固定深さは設けない(eventIdx キー + build_timeout の現行方式が正で、実測上限
+  1 イベントに対し十分)。**run 末尾の切断による不完全イベント**(全データで 15 個、
+  AsAd の欠け順 3→0→1→2 と規則的 = ソース側の run stop 由来)は既定の
+  「incomplete フラグ付き emit(捨てない)」がそのまま適用される — 追加ポリシー不要と裁定。
 - **遅延到着(emit 後)の扱い(v1.8 改訂)**: PEventTPC は eventId 毎に 1 エントリで書き切る
   (grawToEventTPC の eventId 重複排除と同じ意味論)ため、emit 済みイベントへの遅延
   フラグメントは **TTree に書かず `late_fragments` としてカウント + warn 可視化**。
@@ -880,6 +912,16 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
 - DataLinkSet XML は links から生成(CoBo 毎に DataLink 1 本)。**実機の罠を仕様として固定**:
   DataSender id は `CoBo[k]` 形式、flowType は大文字 `TCP`、Ice encoding 1.1 固定。
   router_port は receiver が**実際に bind したポート**を controller が Arm 応答から取って渡す。
+  **flowType は TCP 維持を裁定(v1.23、TODO/067)— FDT は非対応と明文化**。FDT のワイヤは
+  plain TCP と異なる(GetBench 一次資料): 接続直後に 4 B の IMALIVE `00 00 00 00`
+  (FdtDataSender.hpp:125)、イベント 3 s 途絶毎に同 4 B(heartBeatPeriod_ms=3000)、
+  daqStop で 4 B の GOODBYE `FF FF FF FF` + **ソケット close(= run 毎に再接続)**、
+  daqStart で topology frame(frameType 7)送出。これらの 4 B 制御語は MFM フレームでは
+  ないため現行 framer はバッファ破棄で反応する。**将来 FDT が必要になった場合は
+  ①IMALIVE/GOODBYE の除去 ②run 毎 connect/disconnect ③vcobo への同挙動の追加、の
+  3 点セットを新ユニットとして起票すること**(なお実 2025 mini run の graw 先頭にも
+  frameType 7 が実在 — 当時のリンクが FDT だった可能性を示唆。TCP 経路の topology 有無は
+  069 Q1 で現地確定)。decoder の frameType 7 防御(v1.23)はどちらの経路でも無害に働く。
 - 例外は全部 Result 化(never throw)。ECC 不達は `state: "Unknown"`。
 - **タイムアウトの意味論(v1.20 明文化 — 057 調査で確定)**: controller の ECC REQ は
   **1 リクエストあたり 60 s**(rcvtimeo。発火することは遅延 fake ECC で実測固定 —
@@ -1007,7 +1049,7 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
 
 | # | 項目 | 基準 |
 |---|---|---|
-| 1 | デコーダオラクル | 実 2025 run graw(ローカル、`TPCDAQ_REAL_GRAW` 環境変数)で **events=108 / items=15,040,512 / malformed=0**。実 ELITPC graw(`TPCDAQ_REAL_GRAW_DIR`、2022/2026 各 4 ファイル、v1.7)で **各ファイル frames=3852 / items=536,444,928 / malformed=0 / unsupported=0 / eventIdx 0..=3851 連続 / eventTime 単調**。CI は合成フィクスチャで frameType 1/2 両方 green |
+| 1 | デコーダオラクル | 実 2025 run graw(ローカル、`TPCDAQ_REAL_GRAW` 環境変数)で **events=108 / items=15,040,512 / malformed=0**。実 ELITPC graw(`TPCDAQ_REAL_GRAW_DIR`、2022/2026 各 4 ファイル、v1.7)で **各ファイル frames=3852 / items=536,444,928 / malformed=0 / unsupported=0 / eventIdx 0..=3851 連続 / eventTime 単調**。CI は合成フィクスチャで frameType 1/2 両方 green。**frameType 1 実データオラクル(v1.23)**: 実 pulser(`TPCDAQ_REAL_GRAW_PULSER`)で **data_frames=304 / items=42,336,256 / topology=1 / malformed=0 / reset_count=0**、実 pedestal(`TPCDAQ_REAL_GRAW_PEDESTAL`)で **data_frames=1868 / items=260,145,152 / topology=1 / malformed=0**(tests/decoder_real_stream_compat.rs、環境変数未設定時 skip) |
 | 2 | graw バイト一致 | frameType 1/2 を asadIdx で分別した列 = per-AsAd 出力、残り全フレームの列 = ctrl/ 出力、**全出力の合計 = 入力の完全ロスレス分割**(v1.2)。mini 実 graw オラクル: AsAd ファイル 30,108,672 B + ctrl 12 B(frameType 7 ×1)= 30,108,684 B。ローテーション跨ぎも連結一致。ELITPC 実ファイル(1,073,875,968 B > 2^30)を既定 max でリプレイすると **_0000 が入力と完全バイト一致 + 空 _0001**(ローテーション境界の実機一致、v1.7) |
 | 3 | TTree 互換 | **v1.8: PEventTPC 互換** — ①構造一致: 実機 grawToEventTPC 出力(2026 実ファイル)とツリー名/ブランチ/クラス streamer バージョン/圧縮が一致 ②値一致(単体): 既知入力 → chargeMap 期待値(strip 射影・signal 窓・ペデスタル算法の手計算オラクル)③値一致(実データ): 同一 run の graw 4 本組と grawToEventTPC 変換済み .root のペアで全イベント全 key の値一致(env-gated)— **2026-08-14 達成: `compared 3852 events, 0 differences`**(TODO/021、tests/elitpc_pevent_e2e.rs)。~~旧 GDataFrame 比較の維持~~ **v1.17 で撤去**(GDataFrame は graw2root の形式で不要 — ユーザー裁定。§6.4) |
 | 4 | 2 ソースビルド | graw_replay ×2 並走(異なる CoBo id を模す)→ 全イベント complete、eventIdx 昇順、incomplete=0、CoBo 毎フレーム数一致 |
@@ -1054,6 +1096,15 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
    同時 2 接続対応を要する — 現設計は 1 接続ずつ drain。その際は要改修として扱う)。
    **P5 初日の接続数目視は receiver の `extra_connections` カウンタで機械確認できる(v1.12)**
    (run 中 0 のままなら 1 リンク構成の実機確認完了。> 0 なら 2 接続構成 = 上記「要改修」シグナル)。
+   **制御プレーン側の注記(v1.22、TODO/065 — 実 ECC 設定の生コピー調査)**: 実験側の
+   `describe-elitpc.xcfg`(2018 年、現行 GetSoftware_config にも同一で残存)は **CoBo 2
+   インスタンス**(192.168.10.40 / 192.168.3.40)+ DataRouter 2 本(`CoBo[0]`→NarvalActor、
+   `CoBo[1]`→NarvalActor1)を定義しており、上記「1 リンク」と食い違って見えるが、これは
+   **zCobo1k(1 台 4 AsAd、2021-11 初出)移行前の 2 ボード × 2 AsAd 時代の記述**と読むのが
+   自然(現行 HIGS 運用は workspace 経由で単一 TARGET・zCobo1k 設定のみ使用 — 065 実測)。
+   ワイヤ実態(v1.7)と矛盾しない。ただし Warsaw 本体が今もこの 2 インスタンス describe を
+   使う可能性は残るため、P5 現地確認に「使用中 describe の CoBo インスタンス数」を含める。
+   受信系は describe に CoBo が複数現れても壊れない(= 既存の複数 CoBo 前提)を維持する。
 8. (P6)HiVolta: LOCAL モードでのモニタ無干渉・単一 TCP 接続の専有確認。HMP2020: LAN オプション
    有無と `SYST:MIX` 動作(Q2)。
 

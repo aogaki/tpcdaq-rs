@@ -266,6 +266,191 @@ fn multiple_files_are_interleaved_by_event_idx() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 実ストリーム互換(TODO/067-C): 単一ファイル AsAd インターリーブ / 先頭 topology /
+// 0 バイト .graw
+// ---------------------------------------------------------------------------
+
+/// 実機 topology frame の生バイト列(出典 = MemRead.cpp:362 `sendTopology()`。
+/// pedestal / pulser の `_0000.graw` 先頭で実測 2026-08-18)。
+const REAL_TOPOLOGY_FRAME: [u8; 12] = [
+    0x40, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x07, 0x00, 0x00, 0x0f, 0x00, 0x00,
+];
+
+/// GetController 経由 run の実形式(`CoBo_{TS}_{idx}.graw`)を合成で再現する:
+/// 先頭に topology frame 1 本、以降は eventIdx 毎に asadIdx 0→1→2→3 を **1 本の
+/// ファイルへ混載**(TODO/067 の実データ調査で確定した形)。
+fn synth_single_file_interleaved(events: u32) -> Vec<u8> {
+    let mut out = REAL_TOPOLOGY_FRAME.to_vec();
+    for event_idx in 0..events {
+        for asad in 0..4u8 {
+            // fill を (event, asad) で変えて、順序の取り違えがバイト比較で出るようにする。
+            out.extend(synth_frame(
+                event_idx,
+                asad,
+                0x10 + asad + (event_idx as u8) * 4,
+            ));
+        }
+    }
+    out
+}
+
+/// 単一ファイル AsAd インターリーブ形式を **バイト一致**でリプレイでき、
+/// なおかつ受信側が framer + decoder で読めること(先頭 topology は 1 本として
+/// 認識され、データフレームは 1 本も欠けない)。
+#[test]
+fn single_file_asad_interleaved_replays_byte_exactly_and_stays_decodable() {
+    let events = 5u32;
+    let content = synth_single_file_interleaved(events);
+    let path = temp_path("interleaved");
+    std::fs::write(&path, &content).expect("write fixture");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let mut child = Command::new(bin())
+        .arg(addr.to_string())
+        .arg(&path)
+        .spawn()
+        .expect("spawn graw_replay");
+
+    let (mut sock, _peer) = listener.accept().expect("accept connection");
+    let mut received = Vec::new();
+    sock.read_to_end(&mut received).expect("read until close");
+
+    let status = child.wait().expect("wait for graw_replay");
+    assert!(status.success(), "replay must exit 0, got {status:?}");
+    assert_eq!(
+        received, content,
+        "single-file interleaved graw must be replayed byte for byte"
+    );
+
+    // 受信バイト列を実際に切り出して読めることまで確認する(「読める」の実証)。
+    let mut framer = tpcdaq::framer::Framer::new();
+    framer.push(&received);
+    let mut topology_frames = 0usize;
+    let mut asad_order: Vec<(u32, u8)> = Vec::new();
+    while let Some(frame) = framer.next() {
+        if tpcdaq::decode::parse_topology(frame).is_some() {
+            topology_frames += 1;
+            continue;
+        }
+        let event = tpcdaq::decode::peek_event_idx(frame).expect("data frame carries eventIdx");
+        let asad = tpcdaq::decode::peek_asad(frame).expect("data frame carries asadIdx");
+        asad_order.push((event, asad));
+    }
+    assert_eq!(framer.reset_count(), 0, "再同期は起きない");
+    assert_eq!(topology_frames, 1, "topology は先頭の 1 本だけ");
+
+    // 手組みの期待列: (0,0),(0,1),(0,2),(0,3),(1,0),... = eventIdx 毎に AsAd 0..3。
+    let expected: Vec<(u32, u8)> = (0..events)
+        .flat_map(|e| (0..4u8).map(move |a| (e, a)))
+        .collect();
+    assert_eq!(
+        asad_order, expected,
+        "AsAd インターリーブの順序がそのまま保たれること"
+    );
+}
+
+/// 0 バイト .graw(中断 run — pulser に実在 3 本)は **panic せず**、
+/// 明示的な警告を出して exit 0 で終わること(silent にしない — CLAUDE.md)。
+#[test]
+fn zero_byte_graw_is_skipped_with_a_visible_warning_and_exit_zero() {
+    let path = temp_path("empty_single");
+    std::fs::write(&path, b"").expect("write empty fixture");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let reader = std::thread::spawn(move || {
+        let (mut sock, _peer) = listener.accept().expect("accept connection");
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).expect("read until close");
+        buf
+    });
+
+    let output = Command::new(bin())
+        .arg(addr.to_string())
+        .arg(&path)
+        .output()
+        .expect("run graw_replay on an empty file");
+
+    let received = reader.join().expect("reader thread panicked");
+
+    assert!(
+        output.status.success(),
+        "an empty .graw is a skip, not a failure — got {:?}",
+        output.status
+    );
+    assert!(received.is_empty(), "nothing to replay from an empty file");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("empty"),
+        "the skip must be visible on stderr, got: {stderr}"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// マージ送出でも 0 バイト .graw は警告付きでスキップし、**残りのファイルは完全に流れる**。
+#[test]
+fn zero_byte_graw_among_merged_files_is_skipped_and_the_rest_still_replays() {
+    let a: Vec<Vec<u8>> = (0..3u32).map(|e| synth_frame(e, 0, 0xA0)).collect();
+    let b: Vec<Vec<u8>> = (0..3u32).map(|e| synth_frame(e, 1, 0xB0)).collect();
+
+    let path_a = temp_path("merge_a");
+    let path_empty = temp_path("merge_empty");
+    let path_b = temp_path("merge_b");
+    std::fs::write(&path_a, a.concat()).expect("write a");
+    std::fs::write(&path_empty, b"").expect("write empty");
+    std::fs::write(&path_b, b.concat()).expect("write b");
+
+    // 手組みの期待列: 空ファイルは居ないものとして (eventIdx, 引数順) 昇順。
+    let expected: Vec<u8> = [&a[0], &b[0], &a[1], &b[1], &a[2], &b[2]]
+        .iter()
+        .flat_map(|f| f.iter().copied())
+        .collect();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let reader = std::thread::spawn(move || {
+        let (mut sock, _peer) = listener.accept().expect("accept connection");
+        let mut buf = Vec::new();
+        sock.read_to_end(&mut buf).expect("read until close");
+        buf
+    });
+
+    let output = Command::new(bin())
+        .arg(addr.to_string())
+        .arg(&path_a)
+        .arg(&path_empty)
+        .arg(&path_b)
+        .output()
+        .expect("run graw_replay with an empty file in the middle");
+
+    let received = reader.join().expect("reader thread panicked");
+
+    assert!(
+        output.status.success(),
+        "an empty .graw in a merge set is a skip, not a failure — got {:?}",
+        output.status
+    );
+    assert_eq!(
+        received, expected,
+        "every byte of the non-empty files must still be replayed, in merge order"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("empty"),
+        "the skipped empty file must be visible on stderr, got: {stderr}"
+    );
+
+    for p in [&path_a, &path_empty, &path_b] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 /// 引数不備は明確なエラー + 非 0 exit であること(TODO/005: 「接続失敗・途中切断は明確な
 /// エラー + 非 0 exit」の一環として、まず引数レベルの誤りを確認しておく)。
 #[test]

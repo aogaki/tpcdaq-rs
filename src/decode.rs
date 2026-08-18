@@ -20,6 +20,55 @@ pub const HEADER_MIN_BYTES: usize = 88;
 /// frameType 2 の per-AGET カーソルが一周する周期。
 const RAW_CH_PER_AGET: u16 = 68;
 
+/// CoBo topology frame の frameType(TODO/067)。
+///
+/// 一次資料 = `reference/20190315_patched/GetBench/src/get/daq/MemRead.cpp:362`
+/// (`MemRead::sendTopology()`、呼び出し元 `DaqCtrlNodeI::daqStart` = DaqCtrlNodeI.cpp:395)。
+pub const TOPOLOGY_FRAME_TYPE: u16 = 7;
+
+/// topology frame の総バイト数(MemRead.cpp の `frameSize_B = 12`)。
+pub const TOPOLOGY_FRAME_BYTES: usize = 12;
+
+/// topology frame(frameType 7)の payload。
+///
+/// レイアウトの正 = MemRead.cpp:362 の `frameData[8/9/10]`。CoBo が **データリンク開設後の
+/// daqStart で 1 回**送るので run 先頭にしか現れない(ホットパスではない)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Topology {
+    /// `frameData[8]` = coboIdx。
+    pub cobo: u8,
+    /// `frameData[9]` = asadMask。bit N が AsAd N の有効/無効(実運用の ELITPC は 0x0F)。
+    pub asad_mask: u8,
+    /// `frameData[10]` = 2p mode の有効/無効。
+    pub two_p_mode: bool,
+}
+
+impl Topology {
+    /// `asad_mask` に立っているビット数 = 有効な AsAd の枚数。
+    pub fn active_asads(&self) -> u32 {
+        self.asad_mask.count_ones()
+    }
+}
+
+/// フレームバイト列が topology frame(frameType 7)なら payload を返す。
+///
+/// [`peek_asad`] / [`peek_event_idx`] と同じくフルデコードせずヘッダを覗くだけ。
+/// frameType の読み方(エンディアンは metaType bit7)も同一に揃えてある。
+pub fn parse_topology(frame: &[u8]) -> Option<Topology> {
+    if frame.len() < TOPOLOGY_FRAME_BYTES {
+        return None;
+    }
+    let little = frame[0] & 0x80 != 0;
+    if read_uint(&frame[5..7], little) as u16 != TOPOLOGY_FRAME_TYPE {
+        return None;
+    }
+    Some(Topology {
+        cobo: frame[8],
+        asad_mask: frame[9],
+        two_p_mode: frame[10] != 0,
+    })
+}
+
 /// 共通 MFM ヘッダの asadIdx だけを覗き見る(offset 27)。**frameType 1/2 かつヘッダ 28 B
 /// 以上のときだけ `Some(asad)`**(v1.2)。それ以外(短小フレーム、frameType ∉ {1,2} の
 /// 制御フレーム — 実 2025 run 先頭の frameType 7・12 B が実例)は `None`。
@@ -73,6 +122,7 @@ pub struct Decoder {
     items: u64,
     malformed: u64,
     unsupported: u64,
+    topology: u64,
 }
 
 impl Decoder {
@@ -95,6 +145,9 @@ impl Decoder {
         let frame_type = read_uint(&frame[5..7], little) as u16;
         if frame_type != 1 && frame_type != 2 {
             self.unsupported += 1;
+            if frame_type == TOPOLOGY_FRAME_TYPE {
+                self.topology += 1;
+            }
             return None;
         }
         if frame.len() < HEADER_MIN_BYTES {
@@ -187,6 +240,12 @@ impl Decoder {
     /// frameType ∉ {1,2}(topology 等の制御フレーム)でスキップした数。
     pub fn unsupported(&self) -> u64 {
         self.unsupported
+    }
+
+    /// そのうち topology frame(frameType 7)だった数。**`unsupported` の内数**
+    /// (`unsupported` の意味は TODO/067 でも変えていない — 既存の可視化を壊さないため)。
+    pub fn topology(&self) -> u64 {
+        self.topology
     }
 }
 
@@ -517,6 +576,71 @@ mod tests {
         assert_eq!((i1.aget, i1.chan, i1.bucket, i1.adc), (0, 67, 511, 4095));
     }
 
+    /// **実データ照合の合成レプリカ**(TODO/067-B)。
+    ///
+    /// オラクル = GET 純正 MFM ライブラリ(`libMultiFrame`、CoBoFrameViewer の
+    /// `CoBoEvent::decodeSamples()` と同じ経路)で
+    /// `reference/exp_data/2026/pulser/CoBo_2026-08-17T08:09:11.852_0000.graw` の
+    /// **データフレーム 0(asadIdx=0)先頭 10 item** をダンプした値(2026-08-18)。
+    /// 実 .graw はリポに入れられないので、同じ (aget, chan, buck, sample) を実データと
+    /// 同じ符号化(frameType 1 rev 5 / blkSize 256 / big-endian / itemSize 4)で組み直し、
+    /// 我々の decoder が同じ 4 つ組を復元することを固定する。
+    ///
+    /// item のビットパック定義の出典 = `reference/config/CoboFormats-Rev-5.xcfg`
+    /// `<Item><Field><BitField>`: agetIdx offset30/width2、chanIdx offset23/width7、
+    /// buckIdx offset14/width9、sample offset0/width12(4 B を big-endian u32 として読む)。
+    /// これは `decode_items` の frameType 1 経路のシフト量と完全に一致する。
+    ///
+    /// 実データの item 順は **AGET ラウンドロビン(ch 昇順・bucket 最外)** で、
+    /// 開始位相はフレーム毎に違う(frame 0 は aget=3 始まり、frame 1 は aget=2 始まり)。
+    /// frameType 1 は 4 つ組が item に明示されているので位相に依存しない —— この
+    /// 非対称な並びをそのままフィクスチャにして、順序仮定が紛れ込んでいないことを示す。
+    #[test]
+    fn frame_type1_matches_the_mfm_oracle_for_the_real_pulser_encoding() {
+        // MFM オラクル: pulser frame 0 の item[0..10](aget=3 始まりのラウンドロビン)。
+        const ORACLE_ITEMS: [(u8, u8, u16, u16); 10] = [
+            (3, 0, 0, 340),
+            (0, 0, 0, 372),
+            (1, 0, 0, 256),
+            (2, 0, 0, 335),
+            (3, 1, 0, 275),
+            (0, 1, 0, 373),
+            (1, 1, 0, 254),
+            (2, 1, 0, 329),
+            (3, 2, 0, 364),
+            (0, 2, 0, 363),
+        ];
+        let words: Vec<u64> = ORACLE_ITEMS
+            .iter()
+            .map(|&(aget, chan, buck, sample)| {
+                (u64::from(aget) << 30)
+                    | (u64::from(chan) << 23)
+                    | (u64::from(buck) << 14)
+                    | u64::from(sample)
+            })
+            .collect();
+        let frame = make_blk256_frame(1, 4, &words);
+
+        let mut dec = Decoder::new();
+        let frag = dec.decode(&frame).unwrap();
+        assert_eq!(dec.malformed(), 0);
+        assert_eq!(dec.items(), 10);
+
+        let packed = crate::msg::items_from_bytes(&frag.items).unwrap();
+        let got: Vec<(u8, u8, u16, u16)> = packed
+            .iter()
+            .map(|&w| {
+                let i = unpack_item(w);
+                (i.aget, i.chan, i.bucket, i.adc)
+            })
+            .collect();
+        assert_eq!(
+            got,
+            ORACLE_ITEMS.to_vec(),
+            "frameType 1 の 4 つ組は MFM オラクルと完全一致すること"
+        );
+    }
+
     /// 手計算の出典: aget0 の 68ch(bucket0)を敷き詰めた後、69 個目は bucket1 ch0 に一周する。
     /// (C++ 版「blkSize=256・big-endian の frameType2 compact」の移植)。
     #[test]
@@ -625,6 +749,78 @@ mod tests {
             let i2 = unpack_item(packed[2]);
             assert_eq!((i2.aget, i2.chan, i2.bucket, i2.adc), (0, 67, 511, 4095));
         }
+    }
+
+    // -----------------------------------------------------------------
+    // topology frame(frameType 7、TODO/067-A)
+    // -----------------------------------------------------------------
+
+    /// 実機 topology frame の生バイト列。**フォーマット定数**なのでリポに置いてよい
+    /// (実データの切り出しではない — 下の出典から手で組み直せる 12 バイト)。
+    ///
+    /// 出典 = `reference/20190315_patched/GetBench/src/get/daq/MemRead.cpp:362`
+    /// (`MemRead::sendTopology()`)。同じバイト列を reference/exp_data/2026 の
+    /// pedestal / pulser 両方の `_0000.graw` 先頭で実測済み(2026-08-18)。
+    ///
+    /// - `[0]=0x40` metaType(bit7=0 → big-endian、下位ニブル 0 → blkSize 1)
+    /// - `[3]=0x0C` frameSize = 12 blocks × 1 B
+    /// - `[4]=0x00` dataSource
+    /// - `[5..7]=0x0007` frameType 7
+    /// - `[8]=0x00` coboIdx / `[9]=0x0F` asadMask / `[10]=0x00` 2pMode
+    const REAL_TOPOLOGY_FRAME: [u8; 12] = [
+        0x40, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x07, 0x00, 0x00, 0x0f, 0x00, 0x00,
+    ];
+
+    /// 手計算の出典: 上のバイト列の `[8]/[9]/[10]` がそのまま coboIdx / asadMask / 2pMode。
+    /// asadMask=0x0F は「AsAd 0–3 の 4 枚が有効」(ELITPC の実運用構成)。
+    #[test]
+    fn parse_topology_reads_the_real_12_byte_frame() {
+        let t = parse_topology(&REAL_TOPOLOGY_FRAME).unwrap();
+        assert_eq!(t.cobo, 0);
+        assert_eq!(t.asad_mask, 0x0F);
+        assert!(!t.two_p_mode);
+        assert_eq!(t.active_asads(), 4, "0x0F = 4 枚有効");
+    }
+
+    /// 非対称な値でもフィールドの取り違えが起きないこと(全部 0/全部 1 の退化を避ける)。
+    /// 手計算: coboIdx=2 / asadMask=0x05(AsAd 0 と 2 の 2 枚)/ 2pMode=1。
+    #[test]
+    fn parse_topology_keeps_the_three_payload_fields_apart() {
+        let mut frame = REAL_TOPOLOGY_FRAME;
+        frame[8] = 2;
+        frame[9] = 0x05;
+        frame[10] = 1;
+        let t = parse_topology(&frame).unwrap();
+        assert_eq!((t.cobo, t.asad_mask, t.two_p_mode), (2, 0x05, true));
+        assert_eq!(t.active_asads(), 2);
+    }
+
+    /// topology 以外(データフレーム・短小・別の制御 frameType)は `None`。
+    #[test]
+    fn parse_topology_is_none_for_anything_that_is_not_frame_type_7() {
+        let h = HeaderFields::default();
+        assert_eq!(parse_topology(&make_cobo_frame(1, false, &h, &[])), None);
+        assert_eq!(parse_topology(&make_cobo_frame(2, false, &h, &[])), None);
+        assert_eq!(parse_topology(&make_cobo_frame(5, false, &h, &[])), None);
+        assert_eq!(parse_topology(&REAL_TOPOLOGY_FRAME[..11]), None); // 12 B 未満
+    }
+
+    /// Decoder は topology frame を **unsupported の内数** として別建てに数える
+    /// (`unsupported` の意味は変えない — 既存の可視化・SPEC 参照を壊さないため)。
+    #[test]
+    fn decoder_counts_the_topology_frame_separately_from_other_unsupported_frames() {
+        let mut dec = Decoder::new();
+        assert!(dec.decode(&REAL_TOPOLOGY_FRAME).is_none());
+        assert_eq!(dec.topology(), 1);
+        assert_eq!(dec.unsupported(), 1, "topology は unsupported の内数");
+        assert_eq!(dec.malformed(), 0);
+        assert_eq!(dec.frames(), 0);
+
+        // frameType 5(topology ではない未知の制御フレーム)は topology を進めない。
+        let h = HeaderFields::default();
+        assert!(dec.decode(&make_cobo_frame(5, false, &h, &[])).is_none());
+        assert_eq!(dec.topology(), 1);
+        assert_eq!(dec.unsupported(), 2);
     }
 
     // -----------------------------------------------------------------

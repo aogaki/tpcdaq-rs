@@ -48,7 +48,7 @@ use crate::config::{
     Config, DECODER_COMMAND_LISTEN, DECODER_SOURCE_ID, DEFAULT_DECODER_SEND_TIMEOUT_MS,
     DEFAULT_HEARTBEAT_MS,
 };
-use crate::decode::Decoder;
+use crate::decode::{parse_topology, Decoder};
 use crate::msg::{Batch, Fragment, Message, RawFrames};
 use crate::zmq_helper;
 
@@ -172,8 +172,13 @@ pub struct RunDecoder {
     /// unsupported / malformed のログはホットパスなので**初回だけ**出す
     /// (カウンタは常に進み metrics に出るので silent にはならない — receiver の
     /// `record_dropped_frame` と同じ流儀)。
+    /// topology frame(frameType 7)の受領数(TODO/067-A)。`unsupported` の内数。
+    /// CoBo は FDT データリンクの daqStart で 1 回だけ送るので、通常は run あたり
+    /// リンク数ぶん(= 1)になる。
+    topology_frames: u64,
     logged_unsupported: bool,
     logged_malformed: bool,
+    logged_topology: bool,
     logged_cobo_mismatch: bool,
     logged_heartbeat_abandoned: bool,
 }
@@ -214,8 +219,10 @@ impl RunDecoder {
             batches_abandoned: 0,
             cobo_mismatch: 0,
             errored: false,
+            topology_frames: 0,
             logged_unsupported: false,
             logged_malformed: false,
+            logged_topology: false,
             logged_cobo_mismatch: false,
             logged_heartbeat_abandoned: false,
         }
@@ -293,7 +300,24 @@ impl RunDecoder {
                     }
                 }
                 None if self.decoder.unsupported() > unsupported_before => {
-                    if !self.logged_unsupported {
+                    // topology frame(frameType 7)は CoBo が daqStart で必ず送る正常系。
+                    // run 先頭に 1 回しか来ないので payload をデコードして INFO に出す
+                    // (silent drop 禁止 — CLAUDE.md)。ログは run あたり初回だけ。
+                    if let Some(topology) = parse_topology(frame) {
+                        self.topology_frames += 1;
+                        if !self.logged_topology {
+                            self.logged_topology = true;
+                            info!(
+                                source_id,
+                                cobo = topology.cobo,
+                                asad_mask = format_args!("0x{:02x}", topology.asad_mask),
+                                active_asads = topology.active_asads(),
+                                two_p_mode = topology.two_p_mode,
+                                "decoder: CoBo topology frame received (frameType 7) — skipped, \
+                                 not an Error; it carries no event data (GET MemRead::sendTopology)"
+                            );
+                        }
+                    } else if !self.logged_unsupported {
                         self.logged_unsupported = true;
                         info!(
                             source_id,
@@ -490,6 +514,11 @@ impl RunDecoder {
         self.decoder.unsupported()
     }
 
+    /// 受領した topology frame(frameType 7)の数(TODO/067-A)。`unsupported` の内数。
+    pub fn topology_frames(&self) -> u64 {
+        self.topology_frames
+    }
+
     pub fn malformed(&self) -> u64 {
         self.decoder.malformed()
     }
@@ -543,6 +572,7 @@ impl RunDecoder {
             "batches_out": self.batches_out,
             "items_out": self.items_out,
             "unsupported": self.decoder.unsupported(),
+            "topology_frames": self.topology_frames,
             "malformed": self.decoder.malformed(),
             "seq_gaps": self.seq_gaps,
             "run_mismatches": self.run_mismatches,
@@ -1490,6 +1520,86 @@ mod tests {
             "Fragment 化されるのは frameType 1/2 のみ"
         );
         assert_eq!(c.frames_in(), 2, "入力フレーム数は跳ばした分も数える");
+    }
+
+    // -----------------------------------------------------------------
+    // topology frame(frameType 7、TODO/067-A — ELI-NP 地雷の除去)
+    // -----------------------------------------------------------------
+
+    /// 実機 topology frame の生バイト列(出典 = MemRead.cpp:362 の `sendTopology()`。
+    /// 同じ 12 B を reference/exp_data/2026 の pedestal / pulser 両方の `_0000.graw`
+    /// 先頭で実測、2026-08-18)。coboIdx=0 / asadMask=0x0F / 2pMode=0。
+    const REAL_TOPOLOGY_FRAME: [u8; 12] = [
+        0x40, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x07, 0x00, 0x00, 0x0f, 0x00, 0x00,
+    ];
+
+    /// 本ユニットの核心: **run 先頭に topology frame が来ても後続イベントが 1 件も欠けない**。
+    ///
+    /// 手計算のオラクル: 入力 5 フレーム = topology 1 + データ 4(eventIdx 1..=4、各 8 item)。
+    /// → frames_in=5 / pending=4 Fragment / items = 4 × 8 = 32 / topology_frames=1 /
+    ///   unsupported=1(topology は内数)/ malformed=0 / Error ラッチ無し。
+    #[test]
+    fn a_topology_frame_at_the_head_of_a_run_costs_no_events() {
+        let mut c = core(7, &[0]);
+        let now = Instant::now();
+        let frames = vec![
+            buf(&REAL_TOPOLOGY_FRAME),
+            buf(&frame_with_8_items(0, 1)),
+            buf(&frame_with_8_items(0, 2)),
+            buf(&frame_with_8_items(0, 3)),
+            buf(&frame_with_8_items(0, 4)),
+        ];
+        c.handle_batch(0, 7, 0, &frames, now);
+
+        assert_eq!(c.frames_in(), 5);
+        assert_eq!(
+            c.pending().len(),
+            4,
+            "topology の後ろの 4 イベントが 1 件も欠けない"
+        );
+        let event_idxs: Vec<u32> = c.pending().iter().map(|f| f.event_idx).collect();
+        assert_eq!(event_idxs, vec![1, 2, 3, 4], "順序も保たれる");
+        assert_eq!(c.topology_frames(), 1);
+        assert_eq!(c.unsupported(), 1, "topology は unsupported の内数");
+        assert_eq!(c.malformed(), 0);
+        assert!(!c.errored(), "topology frame は正常系(Error にしない)");
+    }
+
+    /// topology frame は `metrics` に専用フィールドとして出る(silent にしない — CLAUDE.md)。
+    #[test]
+    fn topology_frames_are_visible_in_metrics() {
+        let mut c = core(7, &[0]);
+        c.handle_batch(0, 7, 0, &[buf(&REAL_TOPOLOGY_FRAME)], Instant::now());
+        let metrics = c.metrics_json();
+        assert_eq!(metrics["topology_frames"], serde_json::json!(1));
+        assert_eq!(metrics["unsupported"], serde_json::json!(1));
+    }
+
+    /// topology 以外の未知 frameType は `topology_frames` を進めない(取り違えの防止)。
+    #[test]
+    fn other_control_frames_do_not_count_as_topology() {
+        let mut c = core(1, &[0]);
+        c.handle_batch(0, 1, 0, &[buf(&control_frame())], Instant::now());
+        assert_eq!(
+            c.unsupported(),
+            1,
+            "control_frame() は 12 B・frameType 7 だが payload を持たない合成"
+        );
+        // control_frame() は 12 B の frameType 7 なので topology として認識される。
+        assert_eq!(c.topology_frames(), 1);
+
+        // frameType 5 は topology ではない。
+        let mut c5 = core(1, &[0]);
+        let h_none = {
+            let mut b = vec![0u8; 12];
+            b[0] = 0x00;
+            b[3] = 12;
+            write_uint(&mut b, 5, 5, 2); // frameType 5
+            b
+        };
+        c5.handle_batch(0, 1, 0, &[buf(&h_none)], Instant::now());
+        assert_eq!(c5.unsupported(), 1);
+        assert_eq!(c5.topology_frames(), 0);
     }
 
     #[test]
