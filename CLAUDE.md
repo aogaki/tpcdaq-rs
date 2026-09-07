@@ -111,5 +111,5 @@ C++ サテライト(tools/): ROOT(root-sink)、ZeroC Ice(ecc-bridge、**encoding
 ## やらないこと
 
 - 制御プレーン(ECC/getHwServer/FW)を改変しない。Ice **クライアント**として話すだけ。
-- オンライン 3D/トラック再構成(R5 非スコープ)。TPCReco・オフライン解析チェーンに触らない(grawToEventTPC が我々の .graw を無改造で読めることで接続)。
+- オンラインの**正本**トラック再構成(R5 — **QA 目的のサンプリング再構成のみ SPEC §5.5/v1.25 でスコープ入り**(2026-09-02 裁定)、正本 TrackTree はオフライン)。TPCReco・オフライン解析チェーンに触らない(grawToEventTPC が我々の .graw を無改造で読めることで接続)。
 - TLS・認証の自前実装(SSH トンネル + 必要ならリバースプロキシ)。

@@ -73,7 +73,36 @@ Mikolaj 待ち(受け入れ試験 = `SIGMA_T=... SIGMA_L=... ./run_all.sh` で�
 縮退を破る道 = (a) D_L をガス物性から与え v_drift を決める(物理側相談)
 (b) パルサーで電子回路応答実測 + イオンテール追加(068 ゲイン表と同根 — 起票は保留)。
 CKW は 25 MHz 採用(一次資料 + χ² も同向)。ROOT 6.08⇄6.36 互換問題は Warsaw 残確認へ追記。
-[archive/066](archive/066_unfolding_spike.md) 結果節 + reference/_spike/unfold/FINDINGS.md が正。**[069_elinp_test_plan.md](069_elinp_test_plan.md)
+[archive/066](archive/066_unfolding_spike.md) 結果節 + reference/_spike/unfold/FINDINGS.md が正。
+~~070~~ **完了(同日)— docs/DRIFT_DIFFUSION_PRIMER_ja.md v1.0**(ドリフトケージ電圧と
+ディフュージョンの教育ノート。069 Phase 2.5 / 066 の実測との接続込み。
+[archive/070](archive/070_drift_primer_doc.md))。
+~~071~~ **完了(同日)— ログブック 5 年分(OCR 407 ページ)全数調査**: Sonnet 4 レーンで
+6 分類抽出 → 統合 `reference/logbook/_survey/SURVEY.md` v1.0。**HIGS 2026 運転条件が確定**
+(CO₂ 130 mbar / working point #3 = 255/310/1372V / E_drift 70 V/cm / **v_drift 0.390 cm/µs**)、
+これで **066 の厳密縮退が解消: σ_L = 0.94 [0.78,1.09] mm、拡散成長率は熱限界と 1% 一致**
+(CO₂ 冷たいガスの定量確認)。運転点マスタ表(#1〜#5)・DAQ 設定系譜(delay 1848 の出自)・
+069 向け運用知見(zCoBo 再起動手順 / DAQ 起動順 / **zCoBo v.4 の存在**)も回収。
+**要検証 2 件**: 実験側 GET「20190315_patched-v2」(hack 入り)と reference の同一性 /
+運転点表の原本目視(OCR 依存の数値を SPEC 昇格させる前提)。069 C-6 は軽量化済み。
+[archive/071](archive/071_logbook_survey.md) + SURVEY.md が正。
+**同日追記**: 気圧 130 mbar・working point #3 の HV は**ユーザー確認済み** → E_drift 70 V/cm
+確定、v_drift 0.390 は (p,E) で一意 = 実質確定(最終クロスチェックは 069 C-4)。
+~~072~~ **完了(同日)— docs/XCFG_TUNING_GUIDE_ja.md v1.0**(xcfg の 3 層構造・
+ワイルドカード継承・実際に触るノブ頻度順・チューニング実務ループ・既知の罠。
+065/071/066-068 の統合、[archive/072](archive/072_xcfg_tuning_guide.md))。
+**[073_trip_takehome_checklist.md](073_trip_takehome_checklist.md)(進行中)**: HIGS 出張の
+持ち帰りリスト。**#7/#8 済(2026-08-20 現地実測 → SPEC v1.24)**: データリンクは
+**1 本のみ**(`4.2:46005 ← 4.84:44951`、CoBo が接続する側 = SPEC v1.12 の実機初観測)、
+dataRouter = **FDT FrameStorage**(2026 運用も FDT 確定)。geometry .dat =
+reference/TPCReco latest 無改変(ユーザー確認)。
+**#1 も済(同日)— patched-v2 疑義決着**: reference/20190315_patched_v2 を全数 diff →
+**ソース差分は FrameStorage.{cpp,h} のみ**(env `GET_SPLIT_OUTPUT_BY_ASAD` の AsAd 分割
+hack)。**制御プレーンは同一 = 既存プロトコル検証は全て有効**。graw 命名 3 系統の出自も確定
+(`CoBo{K}_AsAd{A}` = dataRouter+env / `CoBo_ALL_AsAd_ALL` = env 無し / 素の `CoBo_` =
+GetController 内蔵 raw 保存)。残り = physics run 追加 / Magboltz / DCS 時系列 /
+ROOT・TPCReco 版 / Mikolaj 3 点。
+**原則 = 実験に触らない、コピーと観察のみ**。**[069_elinp_test_plan.md](069_elinp_test_plan.md)
 (DRAFT)を Fable が起草** — ELI-NP 実機テスト計画(Phase 0〜4 + 現地で確定させる問い Q1〜Q4。
 032/036/041/043/057/034/§13 の実機項目を全数集約。ユーザーレビュー待ち)。
 SPEC は **v1.22**(§13-7 制御プレーン注記)。なお topology frame はソース上 FDT 限定送出
@@ -240,7 +269,67 @@ SPEC は **v1.22**(§13-7 制御プレーン注記)。なお topology frame は�
 Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をここに積み、Fable セッション 1 回で
 まとめて消化する(運用ルールの正は CLAUDE.md「モデル使い分け」+ 037)。
 
-- (現在なし)
+- **[2026-09-02 起票] オンライントラック再構成のスコープ復活(SPEC §4.4 / §1012 の改訂可否)**
+
+  **発端(ユーザー提案)**: 本番の実験は α のみの検出になる見込み。「1 イベント = 1 トラック」
+  と決め打てば、トラック再構成込みで DAQ を作れるのではないか。
+
+  **現行 SPEC との衝突**: §4.4「R5 でオンライン再構成は非スコープ」/ §1012「旧 0x01
+  Event(3D 点群)は廃止(R5 非スコープ)」。復活させるならこの 2 箇所の改訂が要る。
+  ただし 2026-08-18 裁定(ELITPC 100 Hz は後回し・次の主軸は解析プロダクト)とは整合方向。
+
+  **新しい判断材料(~/Workspace/Higs/minitpc-analysis、2026-09-02 実測)**:
+  - `minitpc/simplefit.py`(228 行、Python/uproot+numpy)が **269 ev/s** — 目標 100 Hz に
+    対し 2.7 倍。TPCReco makeTrackTree は 1.2 ev/s。
+  - 中身は **ビュー毎 PCA → ±3σ バンド再選択 → 再フィット → z 3 mm スライス三角測量 →
+    3D PCA**。ミニマイザ・テンプレートフィット無し = per-event コストが決定的で上限が読める。
+  - 品質は TPCReco 同等以上(ヒット垂直残差中央値 5.6 mm vs 6.2、長さピーク IQR 31 mm
+    vs 41、成功率 100%)。検証記録 = `docs/simplefit-validation.md`。
+  - **頭尻は原理的に決まらない**(どの手法でも ~50%、封じ込め条件付きで 45%)。
+    100 mbar では α が止まらず Bragg ピークが存在しない(スタック dE/dx 平坦、
+    ユーザー確認済み)ため。
+
+  **Opus の推奨(裁定を仰ぐ対象)**:
+  1. **reco はモニタ系に置く**。トラックパラメータは導出量で run.root(PEventTPC)から
+     完全に再生成できる → 落としてよい = モニタ系の定義そのもの。保存系に入れると
+     reco の遅延・バグが graw-writer/root-sink へ背圧をかける(絶対ルール違反)。
+  2. **同じエンジンを 2 箇所に**: ①オンライン = 間引き + ドロップカウントで電場スキャン
+     4 指標(v_drift / 拡散幅 vs z / 電荷 vs z / charge-per-length)をライブ表示
+     ②run 終了後 = run.root を読む後段パスで正本 TrackTree(レート制約ゼロ・全イベント・
+     オフライン再走と完全一致)。両立で絶対ルールにも KISS にも触れない。
+  3. **「1 トラック」を焼き込まない** — ch 数と同じ扱いで設定側の仮説に(runs.yaml は既に
+     `reco: hypothesis: alpha` を持つ)。ELITPC は多分岐を含む(zCoBo FW README 自身が
+     MULTIPLICITY / 2-PROTON をトリガモードとして挙げる)。
+  4. **仮説違反は必ずカウントして可視化**(多重ブロブ / z スライス < 3 / 残差 RMS 大)。
+     silent failure 禁止則により、DAQ 化の瞬間に品質フラグが必須要件へ昇格する。
+  5. **頭尻は DAQ に入れない**(コイントス。方向は線源位置の事前情報を持つオフライン側)。
+
+  **着手前に必要な実測が 1 件**: 269 ev/s は hitDump 済みヒットに対する値。オンラインは
+  生 ADC からペデスタル減算 + ヒット検出が要り、そのコストは未測定(068 の per-channel
+  ベースライン表は利用可)。ここが支配的なら結論が変わりうる。
+
+  **裁定済み・SPEC 反映済み(Fable 2026-09-02、正 = SPEC v1.25 §5.5)**:
+  (a) **スコープ入り、ただし「QA 再構成」として** — R5 の非スコープは正本再構成について維持。
+  (b) **配置 = monitor(Rust)内の純関数モジュール。root-sink には入れない**(§5.1 の根拠 =
+  完全性は QA に不適用 → C3 分離が優先)。入力 = **既存 built_event PUB(§5.3、20 Hz 最新優先)**
+  で新規配線ゼロ。**事前スパイクは不要に格下げ**(20 Hz サンプリングで律速不能)— 受け入れ
+  基準「reco on/off で §12-8 と WS 配信が不変」に置換。mm は §4.4 将来条項(TPCReco 規約)を
+  本モジュール内限定で発動。0x01 は復活させず QA ヒストは 0x10/0x11 の id 20 番台
+  (「sampled」明示)、トラック重畳は必要時に 0x04 新設。
+  (c) **run.root 不変(friend tree 不可)・run<N>_monitor.root にも入れない**。正本 TrackTree =
+  オフライン minitpc-analysis(269 ev/s = run 1 本 1 分)。
+  拘束: ①1 トラック仮説は設定値(焼き込み禁止)②仮説違反 reject + カウント + status 表示
+  ③頭尻は実装しない ④Rust 移植は Python simplefit 正のフィクスチャ一致テスト(§4.5 型)。
+  **反映完了(2026-09-02 同日)**: SPEC v1.25(§5.5 新設 + §4.4 mm 例外 + §10.2 0x01
+  非復活 + 履歴)/ CLAUDE.md「やらないこと」R5 行 /
+  [074_qa_reco_monitor.md](074_qa_reco_monitor.md)(**DRAFT** — 着手はユーザー指示待ち)。
+
+- **[2026-09-03 裁定済み] macros/ 解析チェーンの DAQ 直結(SPEC v1.26 §6.7)**:
+  root-sink にオプション raw ツリー出力(`run{N}_raw.root` = macros/graw2root.C と同一契約、
+  生 ADC)。監査結果: **graw 側は無変更で互換**(バイト一致 + frameType 1 — graw2root.C は
+  tpcdaq-rs の .graw を今のまま読める)/ **ROOT 側は PEventTPC から生 ADC を復元できないため
+  root-sink 追加出力が唯一の道**。実装入口 =
+  [075_rawtree_output.md](075_rawtree_output.md)(READY — 着手指示待ち)。
 
 ## 保留・確認事項
 
@@ -256,6 +345,11 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 - **Warsaw 確認**: TPCReco 再配布許諾(020 — third_party/tpcreco 昇格の条件)/
   PROPOSAL v0.5 反映判断。
 - **物理屋向け資料・デモは UI + ファイルデータソース完成まで待つ**(ユーザー決定)。
+- **macros/ は将来配布予定(2026-09-03 ユーザー表明)**: スライド
+  (日本語版 Artifact 済み — 英語化して配布)+ マクロ一式。配布前チェック:
+  ①LICENSE 追加(graw2root.C は GET 非依存の自前デコードなので CeCILL 非汚染 = クリーン)
+  ②channel_map.csv の扱い(実 mini ジオメトリの派生物 — 同梱可否はコラボ判断。
+  代替 = mapDump で各自生成方式)③ビルド産物(*_C.so 等)を .gitignore へ。
 - 小粒フォローアップ: **2026-08-15 の 044 窓 + P4 でほぼ完済** — geometry 参照アクセサ(046)/
   quiesce=0 拒否(046)/ vcobo SIGINT(047)/ UI lazy チャンク(048)/ SPA deep link 404(052)。
   残: poisoned 時 metrics の `PoisonError::into_inner`(023 申し送り — 032 実施済み分以外の
@@ -266,6 +360,8 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 ## 運用メモ(常時適用はメモリ・CLAUDE.md 側が正)
 
 - C++ の make は必ず `-j`。
+- **IDE**: `.vscode/c_cpp_properties.json`(gitignore 内・ローカル)に ROOT include
+  (`/opt/ROOT/include`)+ C++17/libc++ を設定済み(2026-09-03 — macros/ の IntelliSense 用)。
 - **実 .graw + 実 mini ジオメトリの正しいペア**はメモリ参照(合成 fixture と混同しない)。
 - リプレイ経路のライブ起動レシピ = [archive/028_web_ui_monitor.md](archive/028_web_ui_monitor.md)
   の付録 A(実走で実証済み。落とし穴一覧つき)。

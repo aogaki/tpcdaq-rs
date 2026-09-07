@@ -28,3 +28,10 @@ ui/public/ui-config.json
 
 # macOS Spotlight — target/(7.8G)と ui/node_modules を延々索引させない(2026-08-14)
 .metadata_never_index
+macros/data
+*.d
+*.so
+*.pcm
+# Derived from the real detector geometry — local only, never commit
+macros/channel_map.csv
+macros/pads.csv

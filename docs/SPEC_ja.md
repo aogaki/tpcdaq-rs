@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.23(2026-08-18 — 実装の正本)**
+- **status**: **v1.26(2026-09-03 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -146,6 +146,35 @@
   per-REQ 60 s は正しく発火する(実測固定)。シーケンス全体は意図的に無期限
   (非冪等な歩きを途中放棄しない)— クライアント側タイムアウト + status ポーリングが
   正規の回復。`ecc command applied` ログに elapsed_ms を常設。
+  / **v1.26(2026-09-03)§6.7 raw ツリー出力を新設(オプション — Fable 裁定。発端 =
+  ユーザー要求「macros/ 解析チェーンを下流無変更で DAQ 直結、graw2root.C を不要に」)**:
+  root-sink に第 2 出力 `run{run:04}_raw.root`(TTree `raw` = macros/graw2root.C と同一契約、
+  生 ADC・FPN 込み・減算なし)。既定 off・mini プロファイルで on。PEventTPC(§6.4)と
+  §12-3 オラクルは不変(置き換えではなく追加)。受け入れ = 同一 run で graw2root.C 出力との
+  全エントリ一致。§6.5 表に 1 行追加。graw 側は無変更で互換と監査済み(§7 のバイト一致 +
+  frameType 1)。実装入口 = TODO/075。
+  / **v1.25(2026-09-02)§5.5 オンライン QA 再構成を新設(R5 の部分改訂 — Fable 裁定。
+  発端 = ユーザー提案「本番は α 単独 = 1 イベント 1 トラック決め打ちで reco 込み DAQ」)**:
+  モニタ系限定・monitor(Rust)内・既存 built_event PUB(§5.3、20 Hz)のサンプリングで
+  simplefit を Rust 移植(Python 実装が正、フィクスチャ一致)。正本 TrackTree はオフライン
+  (minitpc-analysis)維持、run.root / run<N>_monitor.root は不変。§4.4 に mm 例外
+  (TPCReco 規約・モジュール内限定)、§10.2 に 0x01 非復活を注記。判断材料 =
+  minitpc-analysis 実測(269 ev/s、頭尻 ~50% = 決定不能、100 mbar で Bragg 不在)。
+  実装入口 = TODO/074(DRAFT)。
+  / **v1.24(2026-08-20)§13-7 データリンク本数を実機実測でクローズ(TODO/073)**:
+  HIGS 2026 現地の run 中 netstat で **zCoBo→DataRouter のデータ接続は 1 本のみ**
+  (`4.2:46005 ← 4.84:44951`、CoBo がエフェメラルポートから接続する側 = 「リンクを張るのは
+  CoBo 自身」の実機初観測)。現地 dataRouter 引数 = `FDT FrameStorage`(2026 運用も FDT 確定。
+  単一リンク → AsAd 毎 4 ファイルの分割は dataRouter 側)。geometry .dat は
+  reference/TPCReco latest を無改変使用(ユーザー確認)。
+  **同日追補: patched-v2 疑義も決着(073 A-1)** — 実機 GET ツリー
+  (reference/20190315_patched_v2)との全数 diff で**ソース差分は FrameStorage.{cpp,h}
+  のみ**(env `GET_SPLIT_OUTPUT_BY_ASAD` による AsAd 毎ファイル分割 hack、2021-04-29)。
+  制御プレーン(ECC/MemRead/DataSender/getHwServer/MDaq/mfm)は同一 → **既存の
+  プロトコル検証は全て有効**。graw 命名 3 系統の出自確定: `CoBo{K}_AsAd{A}` =
+  dataRouter + env / `CoBo_ALL_AsAd_ALL` = 同 env 無し / 素の `CoBo_` = GetController
+  内蔵 raw 保存(TestController.cpp:389 — pedestal/pulser の単一ファイル形式。
+  topology frame 込みで書く理由もこれで説明)。
   / **v1.23(2026-08-18)実ストリーム 3 事実の取り込み(TODO/067 — 実 pedestal/pulser 全数照合)**:
   ①**frameType 1 を「実データ照合済み」へ格上げ**(v1.7 ②の「合成のみ」を上書き): 実 pulser
   (frameType 1 rev 5・itemSize 4)304 frames / 42,336,256 items を GET 純正 MFM ライブラリ
@@ -568,10 +597,12 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 ### 4.4 mm 非依存の原則
 
 - DAQ・モニタのホットパスは**ストリップ番号と time bucket のみ**を使い、mm へ変換しない
-  (R5 でオンライン再構成は非スコープ。ヒスト軸も strip/bucket)。
+  (R5: オンラインの**正本**再構成は非スコープ — QA 再構成の例外は §5.5/v1.25。ヒスト軸も strip/bucket)。
 - これにより strip_pitch 規約の不一致(TPCReco: `pad_size×1.5` vs rust_reference: `pad_size×√3/2`)は
   DAQ 層では**判断不要**になる。ヘッダスカラ(ANGLES 等)はメタデータとして保持し、UI の meta(§10.3)と
   JSONL(§9)へ素通しする。将来 mm が要る場合は TPCReco 規約を採る(オフライン整合が正)。
+- **(v1.25)将来条項の発動は §5.5 の QA 再構成モジュール(monitor 内)に限定**。同モジュールのみ
+  TPCReco 規約で mm を使う。DAQ・保存・§5.2 ヒストの hot path は引き続き strip/bucket のみ。
 
 ### 4.5 二重実装の一致テスト
 
@@ -668,6 +699,49 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 - 表示間隔・freeze は**クライアント側**(R9 確定義)。freeze は表示のみ停止し、DAQ・積算・保存に一切
   影響しない。UI 上も run Stop と明確に区別する。
 - PUB のギャップ(sequence_number)を数え、UI に「モニタ取りこぼし数」を表示(silent 禁止)。
+
+### 5.5 オンライン QA 再構成(v1.25 — R5 の部分改訂)
+
+**決定(Fable 2026-09-02、発端 = ユーザー提案)**: 本番実験は α 単独(1 イベント = 1 トラック)の
+見込みであることを受け、**モニタ系に限定したサンプリング・トラック再構成(QA 再構成)**を
+スコープに入れる。R5「オンライン再構成非スコープ」は**正本再構成について維持** — 正本の
+TrackTree はオフライン解析(minitpc-analysis、Higs 側リポ)が持ち、DAQ は QA 表示のみ。
+
+- **目的**: 電場スキャン 4 指標(v_drift = z 端点 / 拡散 = 幅 vs z / 付着 = 電荷 vs z /
+  ゲイン = charge/length)を run 中にライブ表示し、条件出しを「翌日の解析」から
+  「その場の作業」に変える(mini eTPC コミッショニングが直接の駆動要件)。
+- **配置 = monitor(Rust)内の純関数モジュール。root-sink には入れない。**
+  §5.1 がヒスト集計を root-sink に置いた根拠は完全性(全イベント積算)であり、QA 再構成は
+  統計量で足りて完全性を要求しない → C3「保存と可視化の分離」が優先する。
+- **入力 = 既存の built_event PUB(§5.3、`event_publish_hz` 既定 20 Hz、最新優先)**。
+  新規配線なし。欠落は既存 sequence ギャップで可視化済み。20 Hz × 1 h ≈ 7.2 万トラックで
+  QA 統計は十分。
+- **アルゴリズム = minitpc simplefit の Rust 移植**(ビュー毎 PCA → ±3σ バンド再選択 →
+  z スライス三角測量 → 3D PCA。ミニマイザなし = per-event コストが決定的)。
+  **Python 実装が正**とし、§4.5 の二重実装パターンでフィクスチャ一致テストを置く
+  (検証記録 = minitpc-analysis docs/simplefit-validation.md: 269 ev/s、
+  残差中央値 5.6 mm、TPCReco 同等以上)。
+- **拘束条件**:
+  1. **1 トラック仮説は設定値**(例 `hypothesis = "single_alpha"`)。コードへの焼き込み禁止
+     (ch 数と同格の不変条件。ELITPC は多分岐を含む — 該当イベントは reject でよいが、
+     多分岐を構造的に排除する設計は不可)。
+  2. **仮説違反は reject + カウント + status 表示**(多重ブロブ / z スライス < 3 /
+     残差 RMS 閾値超過)。silent 禁止。
+  3. **頭尻(head/tail)推定は実装しない** — 実測でどの手法も ~50%(100 mbar で α が
+     止まらず Bragg ピーク不在のため原理的に決定不能)。方向はオフラインが線源位置の
+     事前情報で決める。
+  4. **mm 変換は本モジュール内に限定**、規約は TPCReco(§4.4 の将来条項を発動)。
+  5. ベースライン: built_event は生 ADC(R13)。reco 用ベースラインの選択(per-channel 表
+     (068)か先頭 25-cell 平均か)はチケット時に決定。保存系・§5.2 ヒストへは不適用
+     (v1.18 裁定を維持)。
+- **出力**: QA 集計は WS 0x10/0x11 の **id 20 番台**(§5.2 の id 1–9 = root-sink
+  全イベント積算とは別空間。UI に「sampled」明示)。トラック重畳型(0x04)は必要時に起票。
+- **run.root は不変**(§6.4 の grawToEventTPC 互換 drop-in 等価は不可侵。friend tree も不可)。
+  **`run<N>_monitor.root` にも QA ヒストは入れない**(全イベント積算のみの原則を守る。
+  サンプル集計の永続化が欲しくなったら JSONL run サマリ(§9)で別途裁定)。
+- **受け入れ**: reco on/off で保存スループット(§12-8)と WS 配信(ドロップ・遅延)が
+  不変であることを計測で確認。事前スパイクは不要(20 Hz サンプリングでは Python 実測
+  3.7 ms/event ですら ~7% コア — 律速になり得ない)。
 
 ## 6. root-sink 仕様(C++、delila-rs root_sink 流用)
 
@@ -813,6 +887,7 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 |---|---|---|
 | イベント TTree | `run{run:04}.root`(rollover 時 `_0001` 付加) | 書き込み中は `run_inprogress_<unixtime>.root`、finalize で rename。異常終了は inprogress のまま残す(完全 run に化けない) |
 | モニタヒスト | `run{run:04}_monitor.root` | 全ソース EOS 後に書き出し。**EOS から 10 秒以内**(R10「速やかに」の数値化) |
+| raw ツリー(オプション) | `run{run:04}_raw.root` | v1.26 §6.7。既定 off。inprogress→rename 規則はイベント TTree と同一 |
 | 生 graw | `CoBo{K}_AsAd{A}_{TS}_{idx:04}.graw` | **実機 DataRouter 命名に完全一致**(§7)。run 番号は含まれない — 対応はディレクトリとログブックが持つ |
 | 非 AsAd 制御フレーム | `ctrl/CoBo{K}_{TS}_{idx:04}.graw` | v1.2。run ディレクトリ配下のサブディレクトリ(オフラインの glob からは見えない)。§7 |
 
@@ -834,6 +909,36 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
 **TPCReco 系(v1.8)**: ライセンス無指定のため**コミットしない**(§6.4 — ビルド時参照
 `TPCDAQ_TPCRECO_DIR`)。Warsaw の再配布許諾が得られたら `third_party/tpcreco/` へ
 昇格し、出典 URL + コミットハッシュ + 改変内容を NOTICE として付す。
+
+### 6.7 raw ツリー出力(v1.26 — mini 解析チェーン直結、オプション)
+
+**決定(Fable 2026-09-03、発端 = ユーザー要求)**: mini eTPC のスタンドアロン解析チェーン
+(`macros/` — graw2root.C → analyzeUVW.C → makeTracks.C。素の ROOT のみ・TPCReco 不要)を
+**下流無変更**で DAQ に直結するため、root-sink に**オプションの第 2 出力**
+`run{run:04}_raw.root` を追加する。有効時、graw2root.C(生 .graw → ROOT の変換ステップ)は
+不要になる。
+
+- **形式 = macros/graw2root.C の出力と同一契約**(= 下流 analyzeUVW.C の入力契約):
+  TTree `raw`(1 エントリ = 1 ビルド済みイベント、エントリ順 = emit 順 = event_idx 昇順 §6.3)
+  - `eventId/i` = ビルダの event_idx(= フレームヘッダ eventIdx)
+  - `eventTime/l` = イベント先頭フラグメント((cobo,asad) 昇順の先頭)の 48-bit CoBo タイムスタンプ
+  - `adc[4][68][512]/S` = **生 ADC(FPN 込み・減算なし — R13 と同じ生値)**。
+    リーフリストは観測 AsAd 数から実行時生成(`adc[{4×nAsad}][68][512]/S` — 焼き込み禁止。
+    mini = 1 AsAd で macros 契約と完全一致)。
+- **既定 off、設定で on**(mini プロファイルで on を想定)。**PEventTPC(§6.4)は不変** —
+  置き換えではなく追加。grawToEventTPC 互換オラクル(§12-3)に触れない。
+- **保存系**として扱う(意図的ドロップ禁止・書き込み失敗 = Error + カウント)。
+  incomplete イベントは届いた分で fill、欠損は 0(graw2root.C の memset 既定と同じ意味論)。
+  書き込みは**単一ライタ**(mini レート ≈ 28 MB/s @100 Hz は 1 スレッドで十分。
+  worker 分割(§6.5)には載せない — 下流が単一ファイル前提)。
+- **なぜ root-sink か**: PEventTPC はペデスタル減算済み・ジオメトリ適用済みで**生 ADC を
+  復元できない**(graw2root.C を PEventTPC 読みへ「適応」させる道は原理的に不成立)。
+  生波形とビルド済みイベントを同時に握るのは root-sink のみ。
+- **受け入れ(オラクル = graw2root.C そのもの)**: 同一 mini run について root-sink の
+  `run{N}_raw.root` と graw2root.C(同じ .graw)の tree `raw` が**全エントリ一致**
+  (eventId / eventTime / adc 全要素)。加えて §12-8 の変形(raw 出力 on/off で
+  PEventTPC 書き出しスループット不変)。
+- 実装入口 = TODO/075。
 
 ## 7. graw-writer 仕様
 
@@ -995,7 +1100,10 @@ fake-ECC servant(C++ 版のテストハーネス)相手の e2e を CI に置く(
 | 0x10 | `Histo1d` | `u16 id`, `u32 nbins`, `f32 xmin`, `f32 xmax`, `f32 × nbins` |
 | 0x11 | `Histo2d` | `u16 id`, `u16 nx`, `u16 ny`, `f32 xmin,xmax,ymin,ymax`, `f32 × nx×ny`(iy 外側 row-major) |
 
-- 旧 0x01 Event(3D 点群)は**廃止**(R5 非スコープ)。
+- 旧 0x01 Event(3D 点群)は**廃止**(R5 非スコープ)。**§5.5(v1.25)の QA 再構成でも
+  復活させない** — 中身が点群ではない。QA 集計は 0x10/0x11 の **id 20 番台**(発生源 = monitor、
+  sampled 明示)で運び、イベントディスプレイへのトラック重畳が必要になった時点で
+  0x04 `Track` を起票する。
 - ヒストの id は §5.2 の表と一致(1–3 が 2D、4–9 が 1D)。ビン値は f32 に落とす(表示専用。正値は
   monitor.root 側にある)。
 
