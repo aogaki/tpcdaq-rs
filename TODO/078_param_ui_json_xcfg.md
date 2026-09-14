@@ -90,17 +90,14 @@ reference/config の `configure-multiplicity.xcfg` は 2015-02 付の GET 標準
 ログブック 5 年分(071 SURVEY)にマルチプリシティ run の記録は無い → **zCoBo で使われた実績なし**。
 ECC はレジスタを書くが FW が無視する = **黙って効かないノブ**になる。
 
-**078 での扱い(裁定)**:
-1. `triggerMode` の enum は **FW が扱える値だけ**(external / onRequest / onSlowControl / periodically /
-   noTrigger)。`onMultiplicity*` と `*_2p` はテンプレートが capability を宣言したときだけ受理。
-2. マルチプリシティ / 2p のノブ群は**スキーマに入れるが firmware-gated**: テンプレートのメタデータ
-   `capabilities: { multiplicityTrigger: false, twoProtonMode: false }`(出典 = FW README)を UI が読み、
-   該当ノブを**灰色 + 理由表示**(「ZC706 FW 2018-10-31 は非対応」)にする。レンダラは capability が
-   false のときこれらの設定を**拒否**(silent no-op を作らない)。将来 FW(zCoBo v.4?)が対応したら
-   メタデータを立てるだけで有効化できる。
-3. **`TriggerInhibition`(channel)は通常ノブとして採用**(FW 非依存の AGET レジスタで hit register にも
+**078 での扱い(ユーザー裁定 2026-09-14「zCoBo で使えないものは要らない」)**:
+1. **マルチプリシティ / 2p のノブ群はスキーマに入れない**(firmware-gated 案は撤回 — KISS)。
+   `triggerMode` の enum は FW が扱える値だけ(external / onRequest / onSlowControl / periodically /
+   noTrigger)。`onMultiplicity*` / `*_2p` はスキーマ違反として拒否(テンプレートにある値は非管理ノブ
+   としてそのまま通る)。将来 FW が対応したら、そのときスキーマ版を上げて足す。
+2. **`TriggerInhibition`(channel)は通常ノブとして採用**(FW 非依存の AGET レジスタで hit register にも
    効く)。例外リストと組み合わせた**ノイズ ch のマスク**(068 の恒常異常 7 ch)の正規の道具。
-4. ソフト側のイベント棄却(decoder / root-sink での multiplicity カット等)は本ユニットの範囲外
+3. ソフト側のイベント棄却(decoder / root-sink での multiplicity カット等)は本ユニットの範囲外
    (保存系はロスレス — CLAUDE.md 絶対ルール。やるなら QA 再構成 074 のモニタ側で「印を付ける」まで)。
 - `exceptions[].at` は knob のスコープ**以上の粗さ**を許す(例: `{"asad":1}` だけなら AsAd1 の全 AGET
   全 ch に効く = xcfg の `<AsAd id="1"><Aget id="*"><channel id="*">`)。スコープより細かい指定
