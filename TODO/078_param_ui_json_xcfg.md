@@ -71,6 +71,37 @@
 
 - **含めない**(072 §3.5 の構成・識別子系): AsAd `isActive`(mini 1 / ELITPC 4)、readoutDepth、
   nbEvent、Module.frameType(deprecated)。これらは**テンプレート選択**(mini / elitpc)が運ぶ。
+
+### 2.1 マルチプリシティ系(ユーザー要望 2026-09-14「イベントリジェクションがあれば入れたい」— 調査結果)
+
+**GET/CoBo には存在する**(一次資料 = CoBoNode.cpp / CoBoConfigParser.cpp / 現行 xcfg):
+
+| 機能 | xcfg ノブ | 意味 |
+|---|---|---|
+| マルチプリシティトリガ | `triggerMode=onMultiplicity`、`multiplicityThreshold`(4 AsAd 合計)、`multWindowSize`(移動窓のサンプル数) | AGET のマルチプリシティ出力の合計が閾値を超えたら自己トリガ |
+| **2p(two-proton)モード = CoBo で唯一の「イベント棄却」** | `enableMem2pMode`(SCA を 256+256 に分割)、`multiplicityThreshold_2p`、`triggerDeadTime_2p`(第 2 トリガ受付開始)、`triggerTimeOut_2p`(**「この時間内に第 2 トリガが来なければ第 1 トリガはキャンセル」**= CoBoNode.cpp `setTriggerTimeOut2p`)、`triggerDelay_2p`、`triggerTime_2p`、`*_2p` トリガモード | 2 段トリガ。timeout で半イベントを捨てる |
+| chip 単位の除外 | AGET `suppressMultiplicity` | その chip をマルチプリシティ和から外す |
+| **ch 単位の除外** | channel `TriggerInhibition` = none / inhibit_trigger(マルチプリシティに寄与しない)/ inhibit_channel(マルチプリシティにも hit register にも寄与しない) | AGET レジスタ 10/11。hit register にも効く = **partial readout の対象からも外れる** |
+| ノイズ補正 | multiplicity moving average / deviation subtraction | AGET マルチプリシティ信号のベースライン補正 |
+
+**ただし我々の zCoBo FW では動かない**: `reference/ZC706_20181031_ELINP/docs/README.txt` §5 Limitations
+「The current firmware version does not handle triggering on MULTIPLICITY nor 2-PROTON mode.」
+reference/config の `configure-multiplicity.xcfg` は 2015-02 付の GET 標準サンプル(zCoBo 用ではない)、
+ログブック 5 年分(071 SURVEY)にマルチプリシティ run の記録は無い → **zCoBo で使われた実績なし**。
+ECC はレジスタを書くが FW が無視する = **黙って効かないノブ**になる。
+
+**078 での扱い(裁定)**:
+1. `triggerMode` の enum は **FW が扱える値だけ**(external / onRequest / onSlowControl / periodically /
+   noTrigger)。`onMultiplicity*` と `*_2p` はテンプレートが capability を宣言したときだけ受理。
+2. マルチプリシティ / 2p のノブ群は**スキーマに入れるが firmware-gated**: テンプレートのメタデータ
+   `capabilities: { multiplicityTrigger: false, twoProtonMode: false }`(出典 = FW README)を UI が読み、
+   該当ノブを**灰色 + 理由表示**(「ZC706 FW 2018-10-31 は非対応」)にする。レンダラは capability が
+   false のときこれらの設定を**拒否**(silent no-op を作らない)。将来 FW(zCoBo v.4?)が対応したら
+   メタデータを立てるだけで有効化できる。
+3. **`TriggerInhibition`(channel)は通常ノブとして採用**(FW 非依存の AGET レジスタで hit register にも
+   効く)。例外リストと組み合わせた**ノイズ ch のマスク**(068 の恒常異常 7 ch)の正規の道具。
+4. ソフト側のイベント棄却(decoder / root-sink での multiplicity カット等)は本ユニットの範囲外
+   (保存系はロスレス — CLAUDE.md 絶対ルール。やるなら QA 再構成 074 のモニタ側で「印を付ける」まで)。
 - `exceptions[].at` は knob のスコープ**以上の粗さ**を許す(例: `{"asad":1}` だけなら AsAd1 の全 AGET
   全 ch に効く = xcfg の `<AsAd id="1"><Aget id="*"><channel id="*">`)。スコープより細かい指定
   (triggerDelay を ch 単位等)はスキーマ違反として拒否する(黙って丸めない)。
