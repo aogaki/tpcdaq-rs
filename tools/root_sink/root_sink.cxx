@@ -6,7 +6,10 @@
 //   decoder --PUSH--> [ZMQ_PULL bind, RCVHWM 有限] --> 受信ループ(main スレッド)
 //        --> Channel<ZmqMsg>(有界・満杯なら push が待つ)--> 集計スレッド
 //        --> EventBuilder((run, event_idx) で束ね、event_idx 昇順で emit)
-//        --> Channel<RecordItem>(有界)--> **Recorder スレッド**(ROOT IO はここだけ)
+//        --> Channel<RecordItem>(有界)--> **Recorder スレッド**(PEventTPC の ROOT IO)
+//        --> Channel<RawItem>(有界、--raw-tree のときだけ)--> **raw スレッド**
+//            (生 ADC ツリー `run{run:04}_raw.root`。SPEC §6.7 / TODO/075 —— 2 本は
+//             ロックもキューも共有しない)
 //
 // 満杯の Channel が受信ループを止め、RCVHWM が埋まり、送り手の PUSH send がブロックする。
 // これが「保存系は絶対にデータを落とさない」の実装手段(CLAUDE.md / SPEC §1.4-2)。
@@ -51,6 +54,7 @@
 #include "eb_core.hpp"
 #include "monitor_hist.hpp"
 #include "monitor_pub.hpp"
+#include "raw_tree.hpp"
 #include "root_recorder.hpp"
 #include "rs_core.hpp"
 #include "tpc_wire.hpp"
@@ -207,6 +211,10 @@ Monitor g_mon;
 // print_counts_json から見えないタイミングは無い。
 std::atomic<rootsink::Recorder*> g_recorder{nullptr};
 
+// raw ツリー(SPEC §6.7、TODO/075)。Recorder と同じ理由で atomic に置く ——
+// fatal 時にも `raw_*` カウンタと root_files を JSON に出せるようにする。
+std::atomic<rootsink::RawTreeWriter*> g_raw{nullptr};
+
 // JSON 文字列値のエスケープ(パスに " や \ が入っても壊れた JSON を吐かない)。
 std::string json_escape(const std::string& s) {
   std::string out;
@@ -244,18 +252,29 @@ void print_counts_json(const Counts& c, const char* fatal) {
       (rec != nullptr) ? rec->frames_outside_geometry() : 0;
   // Recorder の worker 数(TODO/064)。--no-root では 0(Recorder が居ない)。
   const int recorder_workers = (rec != nullptr) ? rec->workers() : 0;
+  // raw ツリー(TODO/075、SPEC §6.7)。--raw-tree が無ければ 0 のまま。
+  rootsink::RawTreeWriter* raw = g_raw.load(std::memory_order_acquire);
+  const uint64_t raw_entries_written = (raw != nullptr) ? raw->entries_written() : 0;
+  const uint64_t raw_items_out_of_range = (raw != nullptr) ? raw->items_out_of_range() : 0;
+  const uint64_t raw_unexpected_fragments =
+      (raw != nullptr) ? raw->unexpected_fragments() : 0;
+
+  // ファイルの台帳は PEventTPC → raw の順に**同じ配列へ続けて**載せる(SPEC §6.7)。
+  std::vector<rootsink::RootFileRecord> files;
+  if (rec != nullptr) files = rec->files_snapshot();
+  if (raw != nullptr) {
+    const std::vector<rootsink::RootFileRecord> raw_files = raw->files_snapshot();
+    files.insert(files.end(), raw_files.begin(), raw_files.end());
+  }
   std::string files_json = "[";
-  if (rec != nullptr) {
-    const std::vector<rootsink::RootFileRecord> files = rec->files_snapshot();
-    for (std::size_t i = 0; i < files.size(); ++i) {
-      char buf[64];
-      if (i != 0) files_json += ",";
-      files_json += "{\"path\":\"";
-      files_json += json_escape(files[i].path);
-      std::snprintf(buf, sizeof(buf), "\",\"entries\":%" PRIu64 ",\"bytes\":%" PRIu64 "}",
-                    files[i].entries, files[i].bytes);
-      files_json += buf;
-    }
+  for (std::size_t i = 0; i < files.size(); ++i) {
+    char buf[64];
+    if (i != 0) files_json += ",";
+    files_json += "{\"path\":\"";
+    files_json += json_escape(files[i].path);
+    std::snprintf(buf, sizeof(buf), "\",\"entries\":%" PRIu64 ",\"bytes\":%" PRIu64 "}",
+                  files[i].entries, files[i].bytes);
+    files_json += buf;
   }
   files_json += "]";
 
@@ -271,6 +290,8 @@ void print_counts_json(const Counts& c, const char* fatal) {
       ",\"duplicate_event_ids\":%" PRIu64 ",\"channels_without_strip\":%" PRIu64
       ",\"charge_keys_out_of_range\":%" PRIu64 ",\"frames_outside_geometry\":%" PRIu64
       ",\"workers\":%d"
+      ",\"raw_tree\":%d,\"raw_entries_written\":%" PRIu64
+      ",\"raw_items_out_of_range\":%" PRIu64 ",\"raw_unexpected_fragments\":%" PRIu64
       ",\"snapshots_published\":%" PRIu64 ",\"events_published\":%" PRIu64
       ",\"publish_drops\":%" PRIu64 ",\"pub_bind_failed\":%d"
       ",\"root_files\":%s,\"fatal\":\"%s\"}\n",
@@ -280,6 +301,8 @@ void print_counts_json(const Counts& c, const char* fatal) {
       c.unexpected_sources, c.run_number_mismatch, entries_written, items_out_of_range,
       c.recorder_queue, duplicate_event_ids, channels_without_strip,
       charge_keys_out_of_range, frames_outside_geometry, recorder_workers,
+      (raw != nullptr) ? 1 : 0, raw_entries_written, raw_items_out_of_range,
+      raw_unexpected_fragments,
       g_mon.snapshots_published.load(std::memory_order_relaxed),
       g_mon.events_published.load(std::memory_order_relaxed),
       g_mon.publish_drops.load(std::memory_order_relaxed),
@@ -324,6 +347,9 @@ struct Options {
   // --recorder-workers(TODO/064): Recorder の worker 数。1 = 現行と完全同一。
   int recorder_workers = rootsink::kDefaultRecorderWorkers;
   bool no_root = false;
+  // --raw-tree(TODO/075、SPEC §6.7): 生 ADC の第 2 出力 `run{run:04}_raw.root`。
+  // **--no-root と独立** —— `--no-root --raw-tree` は raw だけ(ジオメトリ不要)。
+  bool raw_tree = false;
   // PEventTPC 出力(TODO/020、SPEC §6.4 v1.8 / v1.17)
   std::string geometry;  // --geometry(TTree を書くなら必須)
   tpcpevent::FillConfig fill;
@@ -342,7 +368,7 @@ void usage(const char* argv0) {
       "usage: %s [--bind ENDPOINT] [--rcvhwm N] [--queue N] [--throttle-ms N]\n"
       "       [--expect COBO:ASAD[,COBO:ASAD...]] [--build-timeout-ms N]\n"
       "       [--output-root DIR] [--max-root-bytes N] [--root-compression N]\n"
-      "       [--root-imt N] [--no-root]\n"
+      "       [--root-imt N] [--no-root] [--raw-tree]\n"
       "       [--geometry FILE.dat] [--pedestal-remove 0|1]\n"
       "       [--min-pedestal-cell N] [--max-pedestal-cell N]\n"
       "       [--min-signal-cell N] [--max-signal-cell N]\n"
@@ -373,6 +399,9 @@ void usage(const char* argv0) {
       "                    1 = one file per part (run0001.root, run0001_0001.root, ...).\n"
       "                    N > 1 = one file set per worker (run0001_w0.root, ...)\n"
       "  --no-root         do not write a TTree, only count (fast path for tests)\n"
+      "  --raw-tree        also write raw ADC to run{run:04}_raw.root (tree \"raw\",\n"
+      "                    the macros/graw2root.C format). Independent of --no-root\n"
+      "                    and of --geometry (SPEC 6.7). Default off\n"
       "  --geometry FILE   TPCReco geometry .dat, REQUIRED unless --no-root\n"
       "  --pedestal-remove 0|1\n"
       "                    subtract the per-event pedestal (default 1)\n"
@@ -501,6 +530,8 @@ Options parse_args(int argc, char** argv) {
           static_cast<int>(parse_positive("--recorder-workers", argv[++i]));
     } else if (a == "--no-root") {
       opt.no_root = true;
+    } else if (a == "--raw-tree") {
+      opt.raw_tree = true;
     } else if (a == "--geometry" && has_value) {
       opt.geometry = argv[++i];
     } else if (a == "--pedestal-remove" && has_value) {
@@ -598,10 +629,22 @@ struct RecordItem {
 
 using RecordChannel = rootsink::Channel<RecordItem>;
 
-// 組み上がったイベントを Recorder へ渡す(`rec` が nullptr = --no-root なら数えるだけ)。
+// 集計スレッド → raw スレッドの荷物(SPEC §6.7、TODO/075)。RecordItem と同じ
+// **in-band RunClose** の流儀 —— キューに残ったイベントを追い越して finalize しない。
+// PEventTPC 側とはキューもロックも共有しない(SPEC §5.1 と同じ流儀)。
+struct RawItem {
+  enum class Kind : uint8_t { Event, RunClose };
+  Kind kind = Kind::Event;
+  uint32_t run_number = 0;     // Kind::RunClose のとき有効
+  rootsink::BuiltEvent event;  // Kind::Event のとき有効
+};
+
+using RawChannel = rootsink::Channel<RawItem>;
+
+// 組み上がったイベントを Recorder / raw ライタへ渡す(どちらも nullptr なら数えるだけ)。
 // **push は満杯なら待つ** = 背圧。ここで捨てたらロスレス契約が崩れる(CLAUDE.md)。
 void absorb(std::vector<rootsink::BuiltEvent>&& built, const rootsink::EventBuilder& eb,
-            Counts& c, RecordChannel* rec) {
+            Counts& c, RecordChannel* rec, RawChannel* raw) {
   for (rootsink::BuiltEvent& ev : built) {
     // --- モニタ集計(TODO/022)---------------------------------------------
     // ロック中にやるのは配列加算だけ(SPEC §5.1)。直列化も送信もここではしない。
@@ -624,6 +667,19 @@ void absorb(std::vector<rootsink::BuiltEvent>&& built, const rootsink::EventBuil
       }
     }
     // --- 保存系(ロスレス)。push は満杯なら待つ = 背圧 --------------------
+    // raw ツリー(SPEC §6.7)も保存系。**rec への move より先に**渡す ——
+    // 有効時のコストは集計スレッドでの BuiltEvent 1 コピーのみ(rec が居なければ
+    // コピーすら要らない = そのまま move)。
+    if (raw != nullptr) {
+      RawItem item;
+      item.kind = RawItem::Kind::Event;
+      if (rec != nullptr) {
+        item.event = ev;  // PEventTPC 側にも要るのでコピー
+      } else {
+        item.event = std::move(ev);  // --no-root: raw だけなのでコピー不要
+      }
+      raw->push(std::move(item));
+    }
     if (rec != nullptr) {
       RecordItem item;
       item.kind = RecordItem::Kind::Event;
@@ -661,7 +717,7 @@ void absorb(std::vector<rootsink::BuiltEvent>&& built, const rootsink::EventBuil
 void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunState& run,
              rootsink::SeqCheck& seq, rootsink::EventBuilder& eb,
              std::vector<tpcwire::FragmentView>& frags, const Options& opt,
-             RecordChannel* rec) {
+             RecordChannel* rec, RawChannel* raw) {
   using namespace rootsink;
   using tpcwire::MsgKind;
 
@@ -758,7 +814,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
         }
         c.late_fragments = eb.late_fragments();
       }
-      absorb(eb.poll(tick), eb, c, rec);
+      absorb(eb.poll(tick), eb, c, rec, raw);
       c.run_number_mismatch = run.run_number_mismatch();
       break;
     }
@@ -782,7 +838,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
       if (ea == EosAction::Closed) {
         c.runs = run.runs_closed();
         // 組み上げ中の残りを全部出す(揃わなかったものは incomplete で —— 捨てない)。
-        absorb(eb.flush(), eb, c, rec);
+        absorb(eb.flush(), eb, c, rec, raw);
         // 残りを流し切った**あとに** finalize マーカーを流す(in-band = 追い越さない)。
         if (rec != nullptr) {
           RecordItem item;
@@ -800,6 +856,14 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
           // 保存側の詰まりで Publisher を巻き込まない(SPEC §5.1)。
           rec->push(std::move(item));
           c.recorder_queue = rec->size();
+        }
+        // raw ツリーの finalize も **in-band**(SPEC §6.7)—— eb.flush() の在庫を
+        // 流し切った後に流すので、残りのイベントを追い越して閉じることはない。
+        if (raw != nullptr) {
+          RawItem item;
+          item.kind = RawItem::Kind::RunClose;
+          item.run_number = run.run_number();
+          raw->push(std::move(item));
         }
         std::fprintf(stderr,
                      "root_sink: run %u closed (batches=%" PRIu64 " events_complete=%" PRIu64
@@ -993,6 +1057,8 @@ int main(int argc, char** argv) {
   // --geometry があれば読む —— ヒストは ROOT を書かなくても PUB で配れる(SPEC §5.3)。
   std::unique_ptr<rootsink::Recorder> recorder;
   std::unique_ptr<RecordChannel> rec_chan;
+  std::unique_ptr<rootsink::RawTreeWriter> raw_writer;  // --raw-tree(SPEC §6.7)
+  std::unique_ptr<RawChannel> raw_chan;
   std::unique_ptr<tpcgeo::Geometry> geometry;  // Recorder / HistAccumulator より長生き
   if (!opt.geometry.empty()) {
     try {
@@ -1015,9 +1081,13 @@ int main(int argc, char** argv) {
   g_mon.snapshot_hz = opt.snapshot_hz;
   g_mon.event_hz = opt.event_publish_hz;
 
-  if (!opt.no_root) {
+  // ROOT に触るスレッドが 1 本でも居るなら作法を通す(TTree を書くのは Recorder
+  // スレッドと raw スレッド —— どちらか一方だけでも必要、SPEC §6.7 v1.28)。
+  if (!opt.no_root || opt.raw_tree) {
     gROOT->SetBatch(kTRUE);
     ROOT::EnableThreadSafety();
+  }
+  if (!opt.no_root) {
     // TODO/054-B: バスケット圧縮の並列化。**内容は変わらない**(§6.4 v1.17 の受け入れは
     // PEventTPC の内容一致であって run.root のバイト一致ではない)。効きは限定的 ——
     // splitlevel 2 では payload が `myChargeMap` 1 ブランチに集まるので、ブランチ間
@@ -1037,6 +1107,18 @@ int main(int argc, char** argv) {
     // スレッドを起こす前に公開する(fatal 時の JSON から必ず見える)。
     g_recorder.store(recorder.get(), std::memory_order_release);
     rec_chan.reset(new RecordChannel(kRecorderQueue));
+  }
+
+  // raw ツリー(SPEC §6.7、TODO/075)。**--no-root と独立**、ジオメトリも要らない。
+  if (opt.raw_tree) {
+    rootsink::RawTreeConfig rawcfg;
+    rawcfg.output_root = opt.output_root;
+    rawcfg.compression = opt.root_compression;
+    rawcfg.expect = opt.expect;  // adc の段数 = 期待フラグメント集合の要素数
+    raw_writer.reset(new rootsink::RawTreeWriter(rawcfg));
+    // スレッドを起こす前に公開する(fatal 時の JSON から必ず見える)。
+    g_raw.store(raw_writer.get(), std::memory_order_release);
+    raw_chan.reset(new RawChannel(kRecorderQueue));
   }
 
   void* ctx = zmq_ctx_new();
@@ -1087,6 +1169,14 @@ int main(int argc, char** argv) {
                  opt.fill.min_pedestal_cell, opt.fill.max_pedestal_cell,
                  opt.fill.min_signal_cell, opt.fill.max_signal_cell);
   }
+  // 何を書くのかを黙って決めない(CLAUDE.md)。adc の段数は --expect 由来。
+  if (raw_writer) {
+    std::fprintf(stderr,
+                 "root_sink: writing raw TTree \"%s\" under %s (%s, single writer, "
+                 "no rollover)\n",
+                 rootsink::kRawTreeName, opt.output_root.c_str(),
+                 raw_writer->leaflist().c_str());
+  }
   // モニタ PUB の素性(TODO/022)。何を配るのかを黙って決めない —— CLAUDE.md。
   std::fprintf(stderr,
                "root_sink: monitor PUB bind %s (snapshot_hz=%u event_publish_hz=%u "
@@ -1126,6 +1216,35 @@ int main(int argc, char** argv) {
     });
   }
 
+  // raw スレッド(SPEC §6.7)。**単一ライタ + 有界キュー + in-band RunClose** ——
+  // Recorder スレッドとはロックもキューも共有しない(§5.1 と同じ流儀)。
+  std::thread raw_thread;
+  if (raw_writer) {
+    raw_thread = std::thread([&] {
+      RawItem item;
+      for (;;) {
+        const rootsink::PopResult pr = raw_chan->pop_for(item, kRecorderTickMs);
+        if (pr == rootsink::PopResult::Value) {
+          if (item.kind == RawItem::Kind::RunClose) {
+            raw_writer->close_run(item.run_number);
+          } else {
+            raw_writer->write(item.event, now_ms());
+          }
+          if (raw_writer->fatal_reason() != nullptr) {
+            // 保存系なので、書けないまま走り続けない(SPEC §6.7 → exit 5)。
+            fatal(counts, kExitRootIo, raw_writer->fatal_reason(),
+                  raw_writer->fatal_detail());
+          }
+        } else {
+          raw_writer->tick(now_ms());  // データが来なくても AutoSave は進む
+        }
+        if (pr == rootsink::PopResult::Closed) break;
+      }
+      // 停止時に run が finalize されていなければ inprogress のまま閉じる(SPEC §6.5)。
+      raw_writer->shutdown();
+    });
+  }
+
   // Publisher スレッド(PUB を所有。TODO/022 / SPEC §5.1)。
   std::thread publish_thread(publisher_thread, ctx, opt, recorder.get());
 
@@ -1141,10 +1260,11 @@ int main(int argc, char** argv) {
     for (;;) {
       const rootsink::PopResult pr = chan.pop_for(msg, kBuilderTickMs);
       if (pr == rootsink::PopResult::Value) {
-        consume(msg.data(), msg.size(), counts, run, seq, eb, frags, opt, rec_chan.get());
+        consume(msg.data(), msg.size(), counts, run, seq, eb, frags, opt, rec_chan.get(),
+                raw_chan.get());
       } else {
         // データが来なくても壁時計は進む —— アイドル中の build_timeout はここで働く。
-        absorb(eb.poll(now_ms()), eb, counts, rec_chan.get());
+        absorb(eb.poll(now_ms()), eb, counts, rec_chan.get(), raw_chan.get());
       }
       // status の材料を置き直す(Publisher が 1 Hz で読む。ロック中はコピーだけ)。
       update_status_material(run, counts);
@@ -1152,7 +1272,7 @@ int main(int argc, char** argv) {
     }
     // 停止時に組み上げ中だったイベントも数に出す(黙って消さない)。**書きもする** ——
     // run が閉じていないので finalize はしない = inprogress のまま残る(SPEC §6.5)。
-    absorb(eb.flush(), eb, counts, rec_chan.get());
+    absorb(eb.flush(), eb, counts, rec_chan.get(), raw_chan.get());
   });
 
   // 受信ループ(main スレッド)。ソケットを触るのはこのスレッドだけ。
@@ -1195,6 +1315,9 @@ int main(int argc, char** argv) {
     rec_chan->close();
   }
   if (record_thread.joinable()) record_thread.join();
+  // raw も同じ順(集計 → PEventTPC → raw)。在庫は捨てない = ロスレス(SPEC §6.7)。
+  if (raw_chan) raw_chan->close();
+  if (raw_thread.joinable()) raw_thread.join();
   // Publisher は最後に畳む(Recorder の atomic を読むので、Recorder より先に止める)。
   g_mon.stop.store(true, std::memory_order_relaxed);
   if (publish_thread.joinable()) publish_thread.join();

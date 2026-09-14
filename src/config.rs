@@ -259,6 +259,11 @@ pub struct RootSinkConfig {
     pub snapshot_hz: f64,
     pub event_publish_hz: f64,
     pub build_timeout_ms: u64,
+    /// raw ツリー出力(`run{run:04}_raw.root`)を有効にするか(SPEC §3.1 / §6.7 v1.28)。
+    /// 省略可、既定 false(root-sink 自体は §6.7 でオプション出力として定義。
+    /// TOML CLI 起動器はまだ無く、このキーは仕様どおりの受け口 — 075 B-1)。
+    #[serde(default)]
+    pub raw_tree: bool,
 }
 
 /// monitor 固有の設定(`[monitor]`)。すべて省略可で、SPEC §3.2 の既定が入る(026 で追記)。
@@ -997,6 +1002,62 @@ config_id = "elitpc"
         assert_eq!(config.monitor.ws_listen, "0.0.0.0:9001");
         assert_eq!(config.controller.rest_listen, "0.0.0.0:8090");
         assert_eq!(config.controller.config_id, "elitpc");
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    // --- 075 で足した `[root_sink] raw_tree`(SPEC §3.1 / §6.7 v1.28)---
+
+    /// minimal_toml の `[root_sink]` は既存 3 キーのみ(raw_tree は省略) → 既定 false。
+    #[test]
+    fn root_sink_raw_tree_defaults_to_false_when_omitted() {
+        let geometry = make_temp_geometry_file();
+        let config = parse(&minimal_toml(&geometry, "")).unwrap();
+
+        assert!(!config.root_sink.raw_tree);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    #[test]
+    fn root_sink_raw_tree_true_is_read() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = format!(
+            r#"
+[system]
+experiment = "mini_eTPC"
+output_root = "/data/tpcdaq"
+geometry = "{geometry}"
+
+[[cobo]]
+id = 0
+listen = "0.0.0.0:46005"
+data_sender_id = "CoBo[0]"
+
+[decoder]
+workers = 4
+
+[root_sink]
+snapshot_hz = 1.0
+event_publish_hz = 20.0
+build_timeout_ms = 1000
+raw_tree = true
+
+[monitor]
+ws_listen = "0.0.0.0:9000"
+
+[controller]
+rest_listen = "0.0.0.0:8080"
+passphrase = "change-me"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
+config_id = "default"
+"#,
+            geometry = geometry.display()
+        );
+
+        let config = parse(&toml_str).unwrap();
+
+        assert!(config.root_sink.raw_tree);
 
         let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
     }

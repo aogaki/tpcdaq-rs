@@ -33,6 +33,20 @@
 
 ## 次にやること(次セッションの入口)
 
+**2026-09-14(午後)~~075~~ 完了 — root-sink raw ツリー出力(SPEC v1.28 §6.7)**: `--raw-tree` /
+TOML `raw_tree` で `run{N}_raw.root`(macros/graw2root.C と同一契約)を第 2 出力として書く。
+2025 mini 実 run で **graw2root.C と 108 events / 0 differences**、§12-8 変形は N=4・224/672 Mbps で
+raw on/off 差 +0.3% / +0.2%。ゲート: test-root 170/99/**88(新規 test_raw_tree)**、cargo 472。
+mini の macros チェーンは DAQ 直結(graw2root.C は .graw 用に残る)。implementer 2 レーン並列
+(Opus C++ / Sonnet Rust)+ Fable レビュー、レビューで soak_harness の 2 倍カウント偽 FAIL を修正。
+[archive/075](archive/075_rawtree_output.md) 結果節が正。**Mac の ROOT は 6.40.04 に更新済み
+(SDKROOT=MacOSX27.sdk 必須、メモリ mac-root-cling-sdkroot)**。
+**同日、ユーザー質問「zCoBo を変えない限り Ice 版数問題から逃れられないか」への整理 → 縛りは 2 層
+(ワイヤ 1.0 = 板、バイナリ 3.7 = ECC の C++98)で、逃げ道は「ECC はソースから 3.7 で再ビルド、
+橋だけ Rust 化」。詳細調査 + 立案 = [076_rust_ice_client.md](076_rust_ice_client.md)(DRAFT、
+着手はユーザー判断待ち: 優先度 / 同期実装 / C++ 撤去時期)**。Mac 側の今朝の ecc_bridge(47200)は
+停止済み(計測とポート衝突したため)。GDED の getEccServer / ベンチスタックは SSH セッションで常駐中のまま。
+
 **2026-09-14 遠隔ベンチで実機初データ取得(Fable 5.1)**: DAQ ホスト GDED(daq@192.168.144.101、
 Ubuntu 24.04)に tpcdaq-rs をネイティブビルドし、実 ECC(getEccServer 20190315、ホストで
 ネイティブ起動)経由で **実 zCoBo + AsAd 内蔵パルサーから run 2 本(122 + 20 frames、
@@ -337,12 +351,11 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
   非復活 + 履歴)/ CLAUDE.md「やらないこと」R5 行 /
   [074_qa_reco_monitor.md](074_qa_reco_monitor.md)(**DRAFT** — 着手はユーザー指示待ち)。
 
-- **[2026-09-03 裁定済み] macros/ 解析チェーンの DAQ 直結(SPEC v1.26 §6.7)**:
-  root-sink にオプション raw ツリー出力(`run{N}_raw.root` = macros/graw2root.C と同一契約、
-  生 ADC)。監査結果: **graw 側は無変更で互換**(バイト一致 + frameType 1 — graw2root.C は
-  tpcdaq-rs の .graw を今のまま読める)/ **ROOT 側は PEventTPC から生 ADC を復元できないため
-  root-sink 追加出力が唯一の道**。実装入口 =
-  [075_rawtree_output.md](075_rawtree_output.md)(READY — 着手指示待ち)。
+- ~~**[2026-09-03 裁定済み] macros/ 解析チェーンの DAQ 直結(SPEC v1.26 §6.7)**~~ **完了
+  (2026-09-14、075 → archive、SPEC v1.28)**。監査結果(記録として保持): graw 側は無変更で互換 /
+  ROOT 側は PEventTPC から生 ADC を復元できないため root-sink 追加出力が唯一の道。
+- **[2026-09-14 起票・裁定待ち] ecc_bridge の Rust 化(Ice クライアント部分集合)** =
+  [076_rust_ice_client.md](076_rust_ice_client.md)(DRAFT、調査済み)。ユーザーに仰ぐ 3 点は同 md §6。
 
 ## 保留・確認事項
 
@@ -384,6 +397,8 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 000〜065 すべて [archive/](archive/) に結果節つきで格納(単位の詳細・テスト実測値・逸脱の裁定は
 すべて各 md の「結果」節が正)。
+直近(2026-09-14): **075** root-sink raw ツリー出力(macros チェーン直結、実データオラクル
+0 differences、§12-8 変形 ±0.3%)。
 直近(2026-08-18): **064** 並列 recorder = mini 100 events/s / **065** reference/config
 全数調査(現行実験 ECC 設定の生コピー — 現用 = trigDelay1748@25MHz・フル readout 確認、
 大半は ZC706 とバイト同一、physics xcfg は 2022 年以来 delay 以外不変)。

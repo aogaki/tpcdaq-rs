@@ -1,14 +1,15 @@
 # tools/root_sink/Makefile — root-sink(TODO/008 取り込み骨格 + 010 イベントビルダ
-#                             + 011/020 PEventTPC TTree 書き出し)。
+#                             + 011/020 PEventTPC TTree 書き出し + 075 raw ツリー)。
 #
 #   make            root_sink をビルド(libzmq + ROOT + TPCReco 参照)
 #   make test       **ROOT 非依存**の単体テスト 7 本をビルドして実行
 #   make test GOLDEN=/path/to/golden_stream.bin
 #                   適合性テストにフィクスチャを渡す(未指定なら SKIP)
-#   make test-root  Recorder / PEventTPC のテスト(ROOT リンク)—— test とは別立て
+#   make test-root  Recorder / PEventTPC / raw ツリーのテスト(ROOT リンク)
+#                   —— test とは別立て
 #   TPCDAQ_REAL_PEVENT=/path/PEventTPC_....root make test-root
 #                   実機オラクルとの構造一致も見る(未指定なら SKIP)
-#   make compare    比較ツール(compare_pevent)
+#   make compare    比較ツール(compare_pevent / compare_raw)
 #   make clean
 #
 # 純ヘッダ(tpc_wire.hpp / rs_core.hpp / eb_core.hpp / geo.hpp / monitor_hist.hpp /
@@ -68,7 +69,7 @@ GOLDEN ?=
 HEADERS   = tpc_wire.hpp rs_core.hpp eb_core.hpp check.hpp
 TESTS     = test_tpc_wire test_rs_core test_eb_core test_conformance test_geo \
             test_monitor_hist test_monitor_pub
-ROOTTESTS = test_recorder test_pevent
+ROOTTESTS = test_recorder test_pevent test_raw_tree
 
 .PHONY: all test test-root compare clean tpcreco-check
 
@@ -107,7 +108,7 @@ PEVENT_CFLAGS = $(TPCRECO_INC) $(BOOST_CFLAGS)
 PEVENT_DEPS   = pevent_fill.hpp geo.hpp $(TPCRECO_DICT)
 
 root_sink: root_sink.cxx tpc_wire.hpp rs_core.hpp eb_core.hpp root_recorder.hpp \
-           monitor_hist.hpp monitor_pub.hpp \
+           raw_tree.hpp monitor_hist.hpp monitor_pub.hpp \
            $(PEVENT_DEPS) | tpcreco-check
 	$(CXX) $(CXXFLAGS) $(ZMQ_CFLAGS) $(ROOT_CFLAGS) $(PEVENT_CFLAGS) \
 	  root_sink.cxx $(TPCRECO_DICT) $(TPCRECO_SRC) \
@@ -148,12 +149,27 @@ test_pevent: test_pevent.cxx root_recorder.hpp eb_core.hpp rs_core.hpp tpc_wire.
 	  test_pevent.cxx $(TPCRECO_DICT) $(TPCRECO_SRC) \
 	  $(ROOT_LIBS) $(LDFLAGS) -o $@
 
+# raw ADC ツリー(TODO/075、SPEC §6.7)。**TPCReco の辞書・ソースはリンクしない**
+# —— raw ツリーは PEventTPC もジオメトリも使わない。ただし raw_tree.hpp は
+# root_recorder.hpp の小道具(mkdir_p / run_dir_of / RootFileRecord / 定数)を
+# 再利用する(発注書 A-1)ので、**コンパイル時の include パスだけ** TPCReco が要る。
+test_raw_tree: test_raw_tree.cxx raw_tree.hpp root_recorder.hpp eb_core.hpp rs_core.hpp \
+               tpc_wire.hpp check.hpp monitor_hist.hpp pevent_fill.hpp geo.hpp \
+               | tpcreco-check
+	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) $(PEVENT_CFLAGS) \
+	  test_raw_tree.cxx $(ROOT_LIBS) $(LDFLAGS) -o $@
+
 # PEventTPC TTree の全値比較(TODO/020、SPEC §12-3 v1.8 の実データ照合に使う)。
 compare_pevent: compare_pevent.cxx $(PEVENT_DEPS) | tpcreco-check
 	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) $(PEVENT_CFLAGS) \
 	  compare_pevent.cxx $(TPCRECO_DICT) $(TPCRECO_SRC) $(ROOT_LIBS) $(LDFLAGS) -o $@
 
-compare: compare_pevent
+# raw ツリーの全値比較(TODO/075、SPEC §6.7 の受け入れ = graw2root.C 照合)。
+# **ROOT だけ** —— TPCReco も我々のヘッダも要らない(読むのは素の TTree)。
+compare_raw: compare_raw.cxx
+	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) compare_raw.cxx $(ROOT_LIBS) $(LDFLAGS) -o $@
+
+compare: compare_pevent compare_raw
 
 test: $(TESTS)
 	./test_tpc_wire
@@ -168,11 +184,12 @@ test: $(TESTS)
 # バイナリの再ビルド漏れを防ぐ(024 取り込みレビューで stale バイナリの偽 red を実測
 # — テストバイナリだけ新しく本体が古い、が起きない)。ROOT リンクは test-root 側の
 # 前提なのでここに置く(非 ROOT 環境の `make test` には影響しない)。
-test-root: $(ROOTTESTS) root_sink compare_pevent
+test-root: $(ROOTTESTS) root_sink compare_pevent compare_raw
 	./test_recorder
 	./test_pevent
+	./test_raw_tree
 
 clean:
-	rm -f root_sink $(TESTS) $(ROOTTESTS) compare_pevent \
+	rm -f root_sink $(TESTS) $(ROOTTESTS) compare_pevent compare_raw \
 	      $(TPCRECO_DICT) tpcrecodict_rdict.pcm libTPCReco.rootmap
 	rm -rf *.dSYM

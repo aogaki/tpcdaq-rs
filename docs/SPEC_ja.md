@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.27(2026-09-14 — 実装の正本)**
+- **status**: **v1.28(2026-09-14 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -151,6 +151,13 @@
   topology frame は来ない(decoder カウンタ 0)= 確定**、§13-5 実 ECC(20190315)をホストで
   ネイティブ起動し e2e 成立、§13-7 `extra_connections=0` 実測(mini)。初回 configure 7 s
   (261 s コールドスタートは再現せず)。データは frameType 2 rev 5(compact)278,784 B/frame。
+  / **v1.28(2026-09-14)§6.7 を実装前に精度上げ(TODO/075 着手、Fable)**: adc ブロック数は
+  「観測」ではなく**期待フラグメント集合(§6.3 `--expect`)から起動時に確定**(ブランチは最初の
+  イベントより前に要る。incomplete 先頭でも縮まない)/ 期待集合外フラグメントは書かずに数える /
+  inprogress 名 `run_raw_inprogress_<unixtime>.root` / **ロールオーバ無し**(下流 = 単一ファイル
+  契約)/ `--raw-tree` は `--no-root` と独立(raw のみ = ジオメトリ不要)/ 専用スレッド +
+  有界キュー(PEventTPC recorder と共有物なし)/ 終了 JSON の `raw_*` カウンタ / オラクル = 2025
+  mini 実 .graw(compact — graw2root.C は同日 frameType 2 対応済み)。§3.1 に `raw_tree` キー。
   / **v1.26(2026-09-03)§6.7 raw ツリー出力を新設(オプション — Fable 裁定。発端 =
   ユーザー要求「macros/ 解析チェーンを下流無変更で DAQ 直結、graw2root.C を不要に」)**:
   root-sink に第 2 出力 `run{run:04}_raw.root`(TTree `raw` = macros/graw2root.C と同一契約、
@@ -522,6 +529,7 @@ workers = 1                            # 予約(P5 実測まで単線 — 009。
 snapshot_hz = 1.0                      # ヒストスナップショット配信周期
 event_publish_hz = 20.0                # 最新 built event の配信上限
 build_timeout_ms = 1000                # フラグメント待ちタイムアウト(壁時計)
+raw_tree = false                       # §6.7 raw ツリー(run{N}_raw.root)。既定 off、mini で on 想定(v1.28)
 
 [monitor]
 ws_listen = "0.0.0.0:9000"
@@ -892,7 +900,7 @@ TrackTree はオフライン解析(minitpc-analysis、Higs 側リポ)が持ち�
 |---|---|---|
 | イベント TTree | `run{run:04}.root`(rollover 時 `_0001` 付加) | 書き込み中は `run_inprogress_<unixtime>.root`、finalize で rename。異常終了は inprogress のまま残す(完全 run に化けない) |
 | モニタヒスト | `run{run:04}_monitor.root` | 全ソース EOS 後に書き出し。**EOS から 10 秒以内**(R10「速やかに」の数値化) |
-| raw ツリー(オプション) | `run{run:04}_raw.root` | v1.26 §6.7。既定 off。inprogress→rename 規則はイベント TTree と同一 |
+| raw ツリー(オプション) | `run{run:04}_raw.root` | v1.26 §6.7。既定 off。書き込み中は `run_raw_inprogress_<unixtime>.root`、finalize で rename、異常終了は inprogress のまま(規則はイベント TTree と同一、名前空間だけ分ける)。**ロールオーバ無し**(v1.28) |
 | 生 graw | `CoBo{K}_AsAd{A}_{TS}_{idx:04}.graw` | **実機 DataRouter 命名に完全一致**(§7)。run 番号は含まれない — 対応はディレクトリとログブックが持つ |
 | 非 AsAd 制御フレーム | `ctrl/CoBo{K}_{TS}_{idx:04}.graw` | v1.2。run ディレクトリ配下のサブディレクトリ(オフラインの glob からは見えない)。§7 |
 
@@ -928,22 +936,38 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
   - `eventId/i` = ビルダの event_idx(= フレームヘッダ eventIdx)
   - `eventTime/l` = イベント先頭フラグメント((cobo,asad) 昇順の先頭)の 48-bit CoBo タイムスタンプ
   - `adc[4][68][512]/S` = **生 ADC(FPN 込み・減算なし — R13 と同じ生値)**。
-    リーフリストは観測 AsAd 数から実行時生成(`adc[{4×nAsad}][68][512]/S` — 焼き込み禁止。
-    mini = 1 AsAd で macros 契約と完全一致)。
-- **既定 off、設定で on**(mini プロファイルで on を想定)。**PEventTPC(§6.4)は不変** —
-  置き換えではなく追加。grawToEventTPC 互換オラクル(§12-3)に触れない。
-- **保存系**として扱う(意図的ドロップ禁止・書き込み失敗 = Error + カウント)。
+    リーフリストは**期待フラグメント集合(§6.3 `--expect`)の要素数 nAsad から起動時に生成**
+    (`adc[{4×nAsad}][68][512]/S` — 焼き込み禁止。mini = `0:0` の 1 要素で macros 契約と完全一致。
+    v1.28: 旧「観測 AsAd 数」は撤回 — ブランチは最初のイベントより前に要り、先頭が incomplete
+    でも配列が縮んではならない)。AsAd ブロックの順 = 期待集合の (cobo,asad) 昇順の順位。
+    **期待集合外の (cobo,asad) は書かずに数える**(`raw_unexpected_fragments`)。chan ≥ 68 の
+    item も同様(`raw_items_out_of_range`、Filler と同じ防御)。
+- **既定 off、設定で on**(mini プロファイルで on を想定。CLI `--raw-tree`、TOML `raw_tree`)。
+  **PEventTPC(§6.4)は不変** — 置き換えではなく追加。grawToEventTPC 互換オラクル(§12-3)に
+  触れない。**`--no-root` と独立**(v1.28): `--no-root --raw-tree` = raw のみ(ジオメトリ不要 —
+  macros チェーンだけを使う mini 運用の最小形)。
+- **保存系**として扱う(意図的ドロップ禁止。open / mkdir 失敗は PEventTPC と同じ
+  `fatal_reason` → exit 5 = 黙って書けないまま走り続けない。カウンタは終了 JSON の `raw_*`)。
   incomplete イベントは届いた分で fill、欠損は 0(graw2root.C の memset 既定と同じ意味論)。
-  書き込みは**単一ライタ**(mini レート ≈ 28 MB/s @100 Hz は 1 スレッドで十分。
-  worker 分割(§6.5)には載せない — 下流が単一ファイル前提)。
+  書き込みは**単一ライタ = 専用スレッド + 有界キュー(in-band RunClose)**(mini レート
+  ≈ 28 MB/s @100 Hz は 1 スレッドで十分。worker 分割(§6.5)には載せない — 下流が単一ファイル
+  前提。**ロールオーバも無し**(v1.28、同じ理由。10 分 run @100 Hz ≈ 16 GB 非圧縮 — ROOT は
+  単一ファイルで問題ない)。PEventTPC recorder スレッドとはロックもキューも共有しない
+  (§5.1 と同じ流儀)。有効時のコストは集計スレッドでの BuiltEvent 1 コピーのみ。
 - **なぜ root-sink か**: PEventTPC はペデスタル減算済み・ジオメトリ適用済みで**生 ADC を
   復元できない**(graw2root.C を PEventTPC 読みへ「適応」させる道は原理的に不成立)。
   生波形とビルド済みイベントを同時に握るのは root-sink のみ。
 - **受け入れ(オラクル = graw2root.C そのもの)**: 同一 mini run について root-sink の
   `run{N}_raw.root` と graw2root.C(同じ .graw)の tree `raw` が**全エントリ一致**
-  (eventId / eventTime / adc 全要素)。加えて §12-8 の変形(raw 出力 on/off で
-  PEventTPC 書き出しスループット不変)。
-- 実装入口 = TODO/075。
+  (eventId / eventTime / adc 全要素 — 比較器 `tools/root_sink/compare_raw`、負性対照つき)。
+  オラクル入力 = 2025 mini 実 .graw(`TPCDAQ_REAL_GRAW`、compact — graw2root.C は
+  2026-09-14 に frameType 2 対応済み。**2026 pulser は ELITPC 4 AsAd 単一ファイルなので
+  graw2root.C の 1 フレーム = 1 エントリと合わず、オラクルに使えない**)。
+  加えて §12-8 の変形(raw 出力 on/off で PEventTPC 書き出しスループット不変 ±5%)。
+- **実装・実測済み(2026-09-14、TODO/075 結果節が正)**: 2025 mini 実 run で graw2root.C と
+  `compared 108 events, 0 differences`(負性対照 1 difference)。§12-8 変形: N=4 で 224 Mbps /
+  672 Mbps とも raw on/off の差 +0.3% / +0.2%(ロスレスカウンタ全 0)。raw ファイルは 192 KB/event
+  (パルサー、ZLIB-1)= 100 Hz で 19 MB/s。CLI `--raw-tree`、TOML `raw_tree`。
 
 ## 7. graw-writer 仕様
 

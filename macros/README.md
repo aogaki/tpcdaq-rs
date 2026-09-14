@@ -15,6 +15,13 @@ or give it a text file (e.g. `rawFileList.dat`, one GRAW path per line,
 `#` comments) for arbitrary file sets. Uncleaned files are fine - topology
 frames are skipped wherever they appear.
 
+**Step 1 is optional when the data come from the tpcdaq-rs DAQ**: its
+root-sink started with `--raw-tree` writes `run{N}_raw.root` next to the
+run's `run{N}.root` in exactly this format (same tree `raw`, same branches,
+verified entry-by-entry against graw2root.C on a real mini run - SPEC §6.7).
+Feed that file straight into analyzeUVW.C. graw2root.C stays the tool for
+.graw files from any other source (GetController, old runs, other DAQs).
+
 | step | input | output | content |
 |---|---|---|---|
 | graw2root.C  | .graw       | `*_raw.root`    | tree `raw`: PURE lossless conversion - full waveforms `adc[4][68][512]`, eventId, 48-bit eventTime. No pedestal / threshold / geometry. Reads frameType 1 (2018, 4-byte items) and frameType 2 (rev 5 compact, 2-byte items — what tpcdaq-rs/zCoBo write today) |

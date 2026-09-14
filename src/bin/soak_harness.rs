@@ -96,6 +96,7 @@ mod args {
            --run-minutes <f64>      1 run の長さ 分(既定 10。graw_replay --laps-until-s に変換)\n\
            --runs <u64>             run 本数の上限(既定 なし = 時間で決まる。スモーク用)\n\
            --recorder-workers <u64> root_sink の並列 writer 数(既定 1 = 現行と同一。TODO/064)\n\
+           --raw-tree               root_sink に --raw-tree を渡す(既定 off。SPEC §6.7 / TODO/075)\n\
            --rss-limit-mib <u64>    1 プロセスの RSS 上限(既定 4096)\n\
            --metrics-interval-s <u64>  CSV サンプリング間隔 秒(既定 60)\n\
            --min-free-gib <u64>     走行中に守る空きディスクの床 GiB(既定 20)\n\
@@ -124,6 +125,8 @@ mod args {
         pub max_runs: Option<u64>,
         /// root_sink の `--recorder-workers`(TODO/064)。1 = 渡さない(既定と同じ)。
         pub recorder_workers: u64,
+        /// root_sink に `--raw-tree` を渡すか(既定 off = 渡さない、SPEC §6.7 / TODO/075)。
+        pub raw_tree: bool,
         pub rss_limit_mib: u64,
         pub metrics_interval_s: u64,
         pub min_free_gib: u64,
@@ -162,6 +165,7 @@ mod args {
         let mut run_minutes: f64 = 10.0;
         let mut max_runs: Option<u64> = None;
         let mut recorder_workers: u64 = 1;
+        let mut raw_tree = false;
         let mut rss_limit_mib: u64 = 4096;
         let mut metrics_interval_s: u64 = 60;
         let mut min_free_gib: u64 = 20;
@@ -202,6 +206,7 @@ mod args {
                 "--recorder-workers" => {
                     recorder_workers = positive_u64("--recorder-workers", &value()?)?
                 }
+                "--raw-tree" => raw_tree = true,
                 "--rss-limit-mib" => rss_limit_mib = positive_u64("--rss-limit-mib", &value()?)?,
                 "--metrics-interval-s" => {
                     metrics_interval_s = positive_u64("--metrics-interval-s", &value()?)?
@@ -233,6 +238,7 @@ mod args {
             run_seconds: run_minutes * 60.0,
             max_runs,
             recorder_workers,
+            raw_tree,
             rss_limit_mib,
             metrics_interval_s,
             min_free_gib,
@@ -1023,6 +1029,11 @@ fn start_stack(
     if cfg.recorder_workers > 1 {
         cmd.args(["--recorder-workers", &cfg.recorder_workers.to_string()]);
     }
+    // TODO/075 B-2: raw ツリー出力。**既定(off)では引数を渡さない** —— 現行と完全に同じ
+    // コマンドラインで走らせる(--recorder-workers と同じ「既定では渡さない」流儀)。
+    if cfg.raw_tree {
+        cmd.arg("--raw-tree");
+    }
     let mut root_sink = Proc::spawn("root_sink", log_dir, cmd)?;
     root_sink.wait_for_log("monitor PUB bind", Duration::from_secs(30))?;
     procs.push(root_sink);
@@ -1511,6 +1522,7 @@ fn one_run(
         begin.elapsed().as_secs_f64(),
         &pre_stop,
         cfg.recorder_workers,
+        cfg.raw_tree,
     )
 }
 
@@ -1530,6 +1542,7 @@ fn run_root_file_name(run: u32, recorder_workers: u64) -> String {
 }
 
 /// run 1 本分の照合(**合格したものだけ消す**)。
+#[allow(clippy::too_many_arguments)]
 fn verify_run(
     stack: &mut Stack,
     run: u32,
@@ -1538,6 +1551,7 @@ fn verify_run(
     seconds: f64,
     pre_stop: &Value,
     recorder_workers: u64,
+    raw_tree: bool,
 ) -> Result<RunResult, String> {
     let run_dir = stack.data_root.join(format!("run{run:04}"));
     let root_file = run_dir.join(run_root_file_name(run, recorder_workers));
@@ -1562,24 +1576,54 @@ fn verify_run(
         return Err(format!("{} が無い", root_file.display()));
     }
 
+    // TODO/075 B-2: `--raw-tree` のときは raw ツリー出力(SPEC §6.7)も揃っていること。
+    // 黙って通さない —— 無ければその run は FAIL。
+    if raw_tree {
+        let raw_file = run_dir.join(format!("run{run:04}_raw.root"));
+        if !raw_file.is_file() {
+            return Err(format!("{} が無い(--raw-tree)", raw_file.display()));
+        }
+    }
+
     // **ROOT は 1 GiB でパート分割される**(`run0001.root` / `run0001_0001.root` / …
     // —— 2026-08-15 実測。root_recorder のローテーション)。entries はパートの総和で見る。
+    // **raw ツリー(`run0001_raw.root`、TODO/075)は同じ prefix を持つが別の出力**なので
+    // PEventTPC の総和には入れず、`--raw-tree` のときだけ別途「1 ファイル = laps × 108」で
+    // 照合する(2026-09-14 の初回計測で 2 倍カウントの偽 FAIL を出した修正)。
     let prefix = run_dir.join(format!("run{run:04}")).display().to_string();
-    let entries: u64 = log_lines_containing(&sink_log, "finalized ")
+    let raw_suffix = format!("run{run:04}_raw.root");
+    let finalized_entries = |line: &String| -> u64 {
+        line.split_once('(')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let finalized_lines = log_lines_containing(&sink_log, "finalized ");
+    let entries: u64 = finalized_lines
         .iter()
-        .filter(|line| line.contains(&prefix))
-        .map(|line| {
-            line.split_once('(')
-                .and_then(|(_, rest)| rest.split_whitespace().next())
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0)
-        })
+        .filter(|line| line.contains(&prefix) && !line.contains(&raw_suffix))
+        .map(finalized_entries)
         .sum();
     if entries != laps * EVENTS_PER_LAP {
         return Err(format!(
             "run {run}: ROOT entries = {entries}(期待 {} = {laps} laps × {EVENTS_PER_LAP})",
             laps * EVENTS_PER_LAP
         ));
+    }
+    if raw_tree {
+        // raw ツリーも保存系 = ロスレス(SPEC §6.7)。PEventTPC と同じ件数でなければ不合格。
+        let raw_entries: u64 = finalized_lines
+            .iter()
+            .filter(|line| line.contains(&raw_suffix))
+            .map(finalized_entries)
+            .sum();
+        if raw_entries != laps * EVENTS_PER_LAP {
+            return Err(format!(
+                "run {run}: raw ツリー entries = {raw_entries}(期待 {} = {laps} laps × \
+                 {EVENTS_PER_LAP})",
+                laps * EVENTS_PER_LAP
+            ));
+        }
     }
 
     // ROOT(パート分割 + monitor.root)を除いた全ファイル = 生 graw + ctrl/。
@@ -2076,6 +2120,19 @@ mod tests {
         assert_eq!(run_root_file_name(1, 2), "run0001_w0.root");
         assert_eq!(run_root_file_name(1, 4), "run0001_w0.root");
         assert_eq!(run_root_file_name(12, 4), "run0012_w0.root");
+    }
+
+    /// `--raw-tree`(既定 off、SPEC §6.7 / TODO/075 B-2)。root_sink への既存コマンドラインを
+    /// 変えない流儀(`--recorder-workers` と同じ)を Args レベルでも確認する。
+    #[test]
+    fn raw_tree_flag_defaults_to_false_and_is_settable() {
+        let off =
+            args::parse(&["--mode".into(), "burst".into()]).expect("--mode burst だけは通るはず");
+        assert!(!off.raw_tree, "既定は off");
+
+        let on = args::parse(&["--mode".into(), "burst".into(), "--raw-tree".into()])
+            .expect("--raw-tree は値を取らないフラグ");
+        assert!(on.raw_tree);
     }
 
     /// 32 MiB を超える上昇は従来どおり不合格(フロアが実欠陥を隠さないこと)。
