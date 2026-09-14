@@ -52,6 +52,9 @@ C++ 撤去は実機動作確認後。**着手指示で Phase 0(Sonnet)+ Phase 1(
 **UI 相談(同日)**: 「信号が時間窓に収まっているか」を全チャンネル一括で見たい → **UVW Event
 Display(0x02)がそのまま答え**(同一タブに 3 面)。追加要望「272 ch × 512 の電子回路座標 2D を同じ
 タブに」= [077_asad_map_panel.md](077_asad_map_panel.md)(READY、Sonnet 半日、着手指示待ち)。
+**パラメータ設定 UI(同日)**: xcfg 直接編集ではなく **JSON を正として xcfg を生成**(ユーザー裁定:
+JSON / 078 / ノブは「一様値 + 例外リスト」— 隠れているが黙らない)=
+[078_param_ui_json_xcfg.md](078_param_ui_json_xcfg.md)(READY、≈ 2 週間、着手指示待ち)。
 
 **2026-09-14 遠隔ベンチで実機初データ取得(Fable 5.1)**: DAQ ホスト GDED(daq@192.168.144.101、
 Ubuntu 24.04)に tpcdaq-rs をネイティブビルドし、実 ECC(getEccServer 20190315、ホストで
