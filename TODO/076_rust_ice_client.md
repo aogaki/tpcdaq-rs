@@ -1,8 +1,16 @@
 # 076 — ecc-bridge の Rust 化(Ice クライアント部分集合の自前実装)
 
-**Status: DRAFT**(調査完了 + 立案 2026-09-14、Fable。**着手はユーザー指示待ち**。
+**Status: READY**(調査完了 + 立案 2026-09-14、Fable。**同日ユーザー裁定で §6 の 3 点が確定** —
+着手指示があれば Phase 0(Sonnet)と Phase 1(Opus)を並列で出す。
 発端 = ユーザー質問「zCoBo を変えない限り Ice の版数問題からは逃れられないか」→ 3 段の現実解のうち
 「2. ecc_bridge だけを Rust Ice クライアントに置換」の詳細調査依頼)
+
+**ユーザー裁定(2026-09-14)**:
+1. **優先度 = 新 DAQ 機で最初に試す 2 項目のうちの 1 つ**(「ROOT のインストール」と「本ユニットの
+   Rust bridge」)。→ 新 DAQ 機の初期設定より**前に**実装・宅内受け入れを済ませておく。
+2. **同期(シリアル)実装で可** — `std::net::TcpStream`、tokio 不要。
+3. **C++ bridge の撤去(Phase 3)は Rust bridge が実機でちゃんと動くと分かってから**。それまで
+   tools/ecc_bridge の C++ 一式は残す(fake_ecc は撤去後も残す)。
 
 ## 0. 結論(1 分で)
 
@@ -142,8 +150,11 @@ Rust 側の受け口は既にある: controller は JSON 契約の型と組み�
   green ③実 ECC 歩き(041 デモ: describe → … → stop → breakup → reset → reset、audit の
   `ecc_walk_back` が C++ 時と同一)④034 の連続 run(ACM アイドル切断 → 再接続の実証)。
 
-### Phase 3 — 切替と撤去(0.5 日)
+### Phase 3 — 切替と撤去(0.5 日、**実機で Rust bridge が動いてから** — ユーザー裁定 3)
 
+- 前提 = 新 DAQ 機(または GDED)で実 ECC + 実 zCoBo に対し Rust bridge で run 1 周(describe → … →
+  stop → breakup → reset → reset)が通り、audit の `ecc_walk_back` が C++ 時と同一であること。
+  それまで C++ bridge は残し、`TPCDAQ_ECC_BRIDGE_BIN` で切替可能な状態を保つ。
 - SPEC §1.1 コンポーネント表 / §8.2(「ecc-bridge(C++)」→ Rust、Ice 3.8 の記述を落とす)/
   CLAUDE.md(Tech Stack の Ice 行)/ docs/VIRTUAL_ZCOBO_ja.md §4.1 / 069 の起動手順 / メモリ。
 - tools/ecc_bridge から ecc_bridge.cpp・ecc_core.hpp・test_ecc_bridge.cpp・json_min.hpp・
@@ -176,12 +187,15 @@ Fable レビューはフェーズ境界 2 回(Phase 1 後 = ワイヤ、Phase 2 
 7. **ライセンス** — GET の .ice を読んで自前で書くのはプロトコル互換実装であり CeCILL コードの取り込み
    ではない(third_party 隔離不要)。op 名 / enum 名は API 事実。ice-rs(GPL)のコードは持ち込まない。
 
-## 6. ユーザーに仰ぐ判断
+## 6. ユーザーに仰いだ判断(2026-09-14 裁定済み — 冒頭の「ユーザー裁定」が正)
 
-1. **優先度**: 069 残 / 新 DAQ 機セットアップとの前後。**推奨 = 新 DAQ 機の初期設定の前**
-   (セットアップ手順から「Ice 3.8 を別途ビルド」が消える。ECC 用の 3.7 だけになる)。
-2. 同期実装(`std::net`)で良いか(controller は tokio だが bridge は別プロセスの逐次 REP — KISS)。
-3. C++ bridge の撤去タイミング(実機で 1 回通してから、を推奨)。
+1. ~~優先度~~ → **新 DAQ 機で最初に試す項目**(ROOT インストールと並ぶ)。宅内で先に仕上げる。
+2. ~~同期実装で良いか~~ → **同期(シリアル)で可**。
+3. ~~C++ 撤去のタイミング~~ → **Rust bridge の実機動作確認後**。
+
+新 DAQ 機の初期設定順(この裁定から導かれる形): Ubuntu 24.04 → Rust toolchain → **ROOT**(root_sink 用)
+→ **ECC = GET 20190315_patched をホストの Ice 3.7.x でソースビルド**(build_all.sh の Linux 版)→
+**Rust bridge(本ユニット)で実 ECC 歩き** → tpcdaq-rs フルスタック。Ice 3.8 は登場しない。
 
 ## 参照
 

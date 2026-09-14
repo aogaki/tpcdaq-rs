@@ -43,8 +43,9 @@ mini の macros チェーンは DAQ 直結(graw2root.C は .graw 用に残る)�
 (SDKROOT=MacOSX27.sdk 必須、メモリ mac-root-cling-sdkroot)**。
 **同日、ユーザー質問「zCoBo を変えない限り Ice 版数問題から逃れられないか」への整理 → 縛りは 2 層
 (ワイヤ 1.0 = 板、バイナリ 3.7 = ECC の C++98)で、逃げ道は「ECC はソースから 3.7 で再ビルド、
-橋だけ Rust 化」。詳細調査 + 立案 = [076_rust_ice_client.md](076_rust_ice_client.md)(DRAFT、
-着手はユーザー判断待ち: 優先度 / 同期実装 / C++ 撤去時期)**。Mac 側の今朝の ecc_bridge(47200)は
+橋だけ Rust 化」。詳細調査 + 立案 = [076_rust_ice_client.md](076_rust_ice_client.md)(**READY** —
+同日ユーザー裁定: 新 DAQ 機で最初に試す項目(ROOT インストールと並ぶ)/ 同期実装で可 /
+C++ 撤去は実機動作確認後。**着手指示で Phase 0(Sonnet)+ Phase 1(Opus)を並列に出す**)**。Mac 側の今朝の ecc_bridge(47200)は
 停止済み(計測とポート衝突したため)。GDED の getEccServer / ベンチスタックは SSH セッションで常駐中のまま。
 
 **2026-09-14 遠隔ベンチで実機初データ取得(Fable 5.1)**: DAQ ホスト GDED(daq@192.168.144.101、
@@ -354,8 +355,8 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 - ~~**[2026-09-03 裁定済み] macros/ 解析チェーンの DAQ 直結(SPEC v1.26 §6.7)**~~ **完了
   (2026-09-14、075 → archive、SPEC v1.28)**。監査結果(記録として保持): graw 側は無変更で互換 /
   ROOT 側は PEventTPC から生 ADC を復元できないため root-sink 追加出力が唯一の道。
-- **[2026-09-14 起票・裁定待ち] ecc_bridge の Rust 化(Ice クライアント部分集合)** =
-  [076_rust_ice_client.md](076_rust_ice_client.md)(DRAFT、調査済み)。ユーザーに仰ぐ 3 点は同 md §6。
+- **[2026-09-14 起票・同日裁定済み] ecc_bridge の Rust 化(Ice クライアント部分集合)** =
+  [076_rust_ice_client.md](076_rust_ice_client.md)(**READY**、3 点の裁定は同 md 冒頭。着手指示待ち)。
 
 ## 保留・確認事項
 
