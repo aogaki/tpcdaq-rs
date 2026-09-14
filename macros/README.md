@@ -17,7 +17,7 @@ frames are skipped wherever they appear.
 
 | step | input | output | content |
 |---|---|---|---|
-| graw2root.C  | .graw       | `*_raw.root`    | tree `raw`: PURE lossless conversion - full waveforms `adc[4][68][512]`, eventId, 48-bit eventTime. No pedestal / threshold / geometry |
+| graw2root.C  | .graw       | `*_raw.root`    | tree `raw`: PURE lossless conversion - full waveforms `adc[4][68][512]`, eventId, 48-bit eventTime. No pedestal / threshold / geometry. Reads frameType 1 (2018, 4-byte items) and frameType 2 (rev 5 compact, 2-byte items — what tpcdaq-rs/zCoBo write today) |
 | analyzeUVW.C | `*_raw.root` | `*_uvw.root`   | ALL analysis: pedestal, threshold, channel map, z scale; tree `uvw`: per-view charge, signal width, drift-slice charge centroids; histograms `hCharge`, `hWidth_U/V/W`; example UVW canvases |
 | makeTracks.C | `*_uvw.root` | `*_tracks.root` | tree `tracks`: straight-line 3D track per event (start/end, direction, length, charge, dEdx = charge/length) |
 
@@ -62,8 +62,9 @@ are shell syntax in zsh/bash: `root -l 'graw2root.C+O("file.graw")'`.
 
 ## Assumptions / caveats
 
-- Data format: CoBo **full readout**, frame revision 5, single AsAd
-  (mini-eTPC DAQ default). 12-byte topology frames are skipped automatically.
+- Data format: CoBo full readout, single AsAd; **frameType 1 (4-byte items) and
+  frameType 2 "compact" (2-byte items, per-AGET channel/cell cursors — same rule as
+  the tpcdaq-rs decoder)** are both decoded. 12-byte topology frames are skipped.
 - `channel_map.csv` maps (AGET, raw channel) to (view, strip position). It was
   generated from TPCReco's `geometry_mini_eTPC.dat` (tools/eventdisplay/mapDump);
   regenerate it if the pad plane or cabling changes.

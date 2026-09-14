@@ -129,3 +129,35 @@
 全項目の観測値を本チケット結果節に記録 → SPEC §13 の該当項目を「実測済み」へ改訂(Fable)→
 Warsaw 展開(P5)の前提が揃う。**1 項目でも黒なら現地で潰すか、要改修として持ち帰り
 チケット化してから離脱する**(「たぶん大丈夫」で帰らない)。
+
+## 結果(第 1 弾: 2026-09-14 遠隔ベンチ実測 — GDED + 実 zCoBo + AsAd 内蔵パルサー、Fable 5.1 主導)
+
+**構成**: DAQ ホスト GDED(Ubuntu 24.04、192.168.4.2/enp1s0f1 MTU 9000)上に tpcdaq-rs を
+ネイティブビルド(receiver/decoder/graw_writer/controller + 新規 `null_sink` = ROOT 不在の
+root-sink 代役)。実 ECC = getEccServer 20190315 をホストでネイティブ起動(sudo/Docker 不要、
+Ice 3.7.2 は VM から採取 — 手順はメモリ geteccserver-native-gded)。ecc_bridge は Mac 上、
+SSH 逆トンネル(GDED:47200 → Mac)で controller から到達。config_id =
+{describe=zCobo, prepare=pulser, configure=pulser}(`prepare-pulser.xcfg` は configure の写しを追加)。
+GET 純正 `getEccClient` で `asad-pulser-start -1000 1000`(triggerMode=onSlowControl)。
+
+| # | 項目 | 実測 | 判定 |
+|---|---|---|---|
+| 1 | NW 経路 | GDED→zCoBo(4.81) DF ping 8972 OK、1500 OK、リンク 1000Mb/s | ✅ |
+| 2 | listen-before-start | receiver `armed — listening` 11:06:13.316 → ECC start 11:06:20.56 → `CoBo connected peer=192.168.4.81:33145` | ✅ |
+| 3 | DataSender id / flowType | `CoBo[0]` + `TCP` で configure → Ready(2,275 ms) | ✅ |
+| 4 | topology frame(TCP) | decoder `topology_frames=0`、graw-writer `ctrl_frames=0`(run1/run2 とも) | ✅ **Q1: TCP では来ない** |
+| 5 | 初回 configure 所要 | describe 67 ms / prepare 4,896 ms / configure 2,275 ms / start 151 ms(run/start 全体 7 s) | ✅ **Q3: 261 s は再現せず** |
+| 6 | 歩き戻し | run2 の audit `ecc_walk_back = ["status->Ready","breakup->Prepared","reset->Described","reset->Idle"]` | ✅ |
+| 11 | start/stop 所要 | run/start 7 s・8 s、run/stop 3 s | ✅ |
+| 12 | stop 後リンク | `forced_eos:true` / `eos_closed:true` / reason normal(強制 EOS が正規経路として動作) | ✅(peer 観測は下記) |
+| 15 | データリンク本数 | `extra_connections=0`、`empty_connections=0`(2 run とも) | ✅ |
+
+**データ**: run1 = 122 frames / 34,011,648 B(= 122 × 278,784 ちょうど、~1 Hz pulser)、
+run2 = 20 frames / 20 s。フレーム = frameType **2 / rev 5(compact)**、metaType 0x08、
+278,784 B = 256 + 139,264 items × 2 B(全 ch 読み出し)。decoder `malformed=0`、
+`fragments_out = frames_in`、receiver `overflow_frames=0`、graw-writer `write_errors=0`。
+出力 = `out/run0001/CoBo0_AsAd0_2026-09-14T14:06:21.714_0000.graw`(実機命名)。
+ECC ログ副産物: AsAd 温度 Tint 28 °C / Text 29 °C(stop 時読み出し)。
+
+**未実施**: #7(連続 ×10)、#8/#9/#10、Phase 3 #13/#14/#16(オラクル照合は .graw を持ち帰り次第)、
+Phase 4。root-sink(ROOT)は GDED に無く未検証 — run.root 経路は次回。

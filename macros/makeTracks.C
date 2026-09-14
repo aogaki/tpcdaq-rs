@@ -35,6 +35,11 @@ const int    MIN_SLICES = 3;    // reject events with fewer 3D points
 void makeTracks(const char *uvwFile) {
   TFile in(uvwFile);
   TTree *tree = (TTree*)in.Get("uvw");
+  if (!tree) {
+    printf("no tree 'uvw' in %s - this macro takes the *_uvw.root "
+           "from analyzeUVW.C\n", uvwFile);
+    return;
+  }
   UInt_t eventId;
   std::vector<int> *slView = nullptr;
   std::vector<float> *slZ = nullptr, *slS = nullptr, *slQ = nullptr;

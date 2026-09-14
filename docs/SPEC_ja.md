@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.26(2026-09-03 — 実装の正本)**
+- **status**: **v1.27(2026-09-14 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -146,6 +146,11 @@
   per-REQ 60 s は正しく発火する(実測固定)。シーケンス全体は意図的に無期限
   (非冪等な歩きを途中放棄しない)— クライアント側タイムアウト + status ポーリングが
   正規の回復。`ecc command applied` ログに elapsed_ms を常設。
+  / **v1.27(2026-09-14)§13 に実機実測を反映(遠隔ベンチ: GDED + 実 zCoBo + AsAd 内蔵パルサー、
+  TODO/069 結果節)**: §13-1 MTU 9000 疎通実測、§13-4 `CoBo[0]`/`TCP` 実機確認 + **TCP 経路に
+  topology frame は来ない(decoder カウンタ 0)= 確定**、§13-5 実 ECC(20190315)をホストで
+  ネイティブ起動し e2e 成立、§13-7 `extra_connections=0` 実測(mini)。初回 configure 7 s
+  (261 s コールドスタートは再現せず)。データは frameType 2 rev 5(compact)278,784 B/frame。
   / **v1.26(2026-09-03)§6.7 raw ツリー出力を新設(オプション — Fable 裁定。発端 =
   ユーザー要求「macros/ 解析チェーンを下流無変更で DAQ 直結、graw2root.C を不要に」)**:
   root-sink に第 2 出力 `run{run:04}_raw.root`(TTree `raw` = macros/graw2root.C と同一契約、
@@ -1180,6 +1185,7 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
 ## 13. 実機検証項目リスト(P5/P6 で実測 — 「実測で決める」を決定として固定)
 
 1. **MTU 9000**: CoBo → スイッチ → 受信 NIC の全経路でジャンボフレーム疎通確認(P5 初日項目)。
+   **実測済み(v1.27、2026-09-14)**: GDED enp1s0f1(MTU 9000)→ zCoBo 4.81 へ DF ping 8972 OK。
 2. **NIC 構成**: mini は 1GbE で足りることの確認。ELITPC×100 Hz(合算 ~0.9 Gbit/s)向けに
    10GbE 化 or CoBo 毎 NIC 分離のどちらを採るかは **Warsaw 配備前の実測で決定**(receiver は CoBo 毎
    独立なのでどちらでも構造変更なし)。
@@ -1190,7 +1196,15 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
    DataLinkSet 例)で**文書確認済み**(2026-08-12)— 実機では最終確認のみ。なお同スクリプトの
    DataRouter は `type="FDT"`(NarvalActor 向け)であり、我々の `type="TCP"` は同 getHwServer が
    サポートする別 flowType — TCP 経路の実機疎通は P5 で必ず確認する。
+   **実機確認済み(v1.27、2026-09-14)**: `CoBo[0]` + `TCP` で configure → Ready(2,275 ms)、
+   zCoBo が DataLinkSet の 192.168.4.2:46005 へ接続(peer 192.168.4.81:33145)。**TCP 経路に
+   topology frame(frameType 7)は来ない** — decoder `topology_frames=0`、graw-writer
+   `ctrl_frames=0`(2 run、142 frames)。069 Q1 確定(MemRead.cpp の「FDT のみ送出」どおり)。
 5. **実 ECC**: 20190315_patched 版コンテナで e2e → 実機。
+   **実機 e2e 済み(v1.27)**: getEccServer 20190315 を DAQ ホスト(Ubuntu 24.04)で**ネイティブ起動**
+   (Boost 1.58 / Ice 3.7.2 / OpenSSL 1.0 をローカル展開、sudo 不要 — メモリ geteccserver-native-gded)。
+   controller → ecc_bridge → ECC → zCoBo で describe 67 ms / prepare 4.9 s / configure 2.3 s /
+   start 151 ms、2 run 目の歩き戻し `status→Ready, breakup→Prepared, reset→Described, reset→Idle`。
 6. **ディスク持続書き込み**: 実運用ストレージで 28 MB/s(mini)/ 111 MB/s(ELITPC)持続の実測。
 7. **2-CoBo ジオメトリ .dat**: **解消(v1.7)** — ELITPC 実データ(2022/2026)は
    coboIdx=0・asadIdx=0..3 の **1 論理 CoBo** であり、既存 ELITPC .dat(COBO 0・4 ASAD)が
@@ -1204,6 +1218,7 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
    同時 2 接続対応を要する — 現設計は 1 接続ずつ drain。その際は要改修として扱う)。
    **P5 初日の接続数目視は receiver の `extra_connections` カウンタで機械確認できる(v1.12)**
    (run 中 0 のままなら 1 リンク構成の実機確認完了。> 0 なら 2 接続構成 = 上記「要改修」シグナル)。
+   **mini で実測(v1.27)**: 2 run とも `extra_connections=0` / `empty_connections=0`。
    **制御プレーン側の注記(v1.22、TODO/065 — 実 ECC 設定の生コピー調査)**: 実験側の
    `describe-elitpc.xcfg`(2018 年、現行 GetSoftware_config にも同一で残存)は **CoBo 2
    インスタンス**(192.168.10.40 / 192.168.3.40)+ DataRouter 2 本(`CoBo[0]`→NarvalActor、

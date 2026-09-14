@@ -116,6 +116,13 @@ void analyzeUVW(const char *rawFile)
   // --- input / output ---------------------------------------------------------
   TFile in(rawFile);
   TTree *tree = (TTree *)in.Get("raw");
+  if (!tree) {
+    std::cout << "no tree 'raw' in " << rawFile
+              << " - this macro takes the *_raw.root from graw2root.C\n"
+                 "(a *_uvw.root is this macro's own OUTPUT; *_tracks.root goes "
+                 "to analyzeTracks.C)" << std::endl;
+    return;
+  }
   UInt_t eventId;
   static Short_t adc[4][68][512];
   tree->SetBranchAddress("eventId", &eventId);

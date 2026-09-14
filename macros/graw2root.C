@@ -7,8 +7,13 @@
 //
 // Standalone: NO GET software needed. CoBo full-readout frames (revision 5,
 // single AsAd) are decoded directly:
-//   * every frame: 256-byte big-endian header + 32-bit items
-//   * item bits:  [31:30]=AGET  [29:23]=channel  [22:14]=time cell  [11:0]=ADC
+//   * every frame: 256-byte big-endian header + items
+//   * frameType 1 (2018 full/partial readout): 32-bit items
+//       [31:30]=AGET  [29:23]=channel  [22:14]=time cell  [11:0]=ADC
+//   * frameType 2 (rev 5 "compact", what the zCoBo sends today): 16-bit items
+//       [15:14]=AGET  [11:0]=ADC; channel/cell are implicit - per AGET the items
+//       run channel 0..67 for cell 0, then cell 1, ... (same rule as the
+//       tpcdaq-rs decoder, which was checked against the GET MFM library)
 //   * 12-byte "topology" frames (written at every DAQ start) are skipped
 //
 // Output: ONE <run>_raw.root with TTree "raw" (one entry per event):
@@ -138,7 +143,7 @@ void graw2root(const std::string &input, Long64_t maxEvents = -1)
       const long blob = 1L << (hdr[0] & 0x0F);
       const long nbytes = ((hdr[1] << 16) | (hdr[2] << 8) | hdr[3]) * blob;
       const int ftype = (hdr[5] << 8) | hdr[6];
-      if (ftype != 1) {  // skip topology and other non-data frames
+      if (ftype != 1 && ftype != 2) {  // skip topology and other non-data frames
         f.seekg(nbytes - 12, std::ios::cur);
         continue;
       }
@@ -149,13 +154,34 @@ void graw2root(const std::string &input, Long64_t maxEvents = -1)
 
       // decode all items of this frame into the ADC array
       std::memset(adc, 0, sizeof(adc));
-      const long nItems = (nbytes - 256) / 4;
+      const int itemSize = (hdr[10] << 8) | hdr[11];  // 4 (type 1) or 2 (type 2)
+      if (itemSize != (ftype == 1 ? 4 : 2)) {
+        std::cout << "WARNING: frameType " << ftype << " with itemSize " << itemSize
+                  << " - skipping frame" << std::endl;
+        f.seekg(nbytes - 256, std::ios::cur);
+        continue;
+      }
+      const long nItems = (nbytes - 256) / itemSize;
       std::vector<unsigned char> buf(nbytes - 256);
       if (!f.read(reinterpret_cast<char *>(buf.data()), buf.size())) break;
-      for (long i = 0; i < nItems; ++i) {
-        const unsigned int w = (buf[4 * i] << 24) | (buf[4 * i + 1] << 16) |
-                               (buf[4 * i + 2] << 8) | buf[4 * i + 3];
-        adc[(w >> 30) & 0x3][(w >> 23) & 0x7F][(w >> 14) & 0x1FF] = w & 0xFFF;
+      if (ftype == 1) {
+        for (long i = 0; i < nItems; ++i) {
+          const unsigned int w = (buf[4 * i] << 24) | (buf[4 * i + 1] << 16) |
+                                 (buf[4 * i + 2] << 8) | buf[4 * i + 3];
+          adc[(w >> 30) & 0x3][(w >> 23) & 0x7F][(w >> 14) & 0x1FF] = w & 0xFFF;
+        }
+      } else {  // compact: channel/cell from per-AGET cursors
+        int chanCur[4] = {0, 0, 0, 0}, cellCur[4] = {0, 0, 0, 0};
+        for (long i = 0; i < nItems; ++i) {
+          const unsigned int w = (buf[2 * i] << 8) | buf[2 * i + 1];
+          const int a = (w >> 14) & 0x3;
+          if (chanCur[a] >= 68) {
+            chanCur[a] = 0;
+            ++cellCur[a];
+          }
+          if (cellCur[a] < 512) adc[a][chanCur[a]][cellCur[a]] = w & 0xFFF;
+          ++chanCur[a];
+        }
       }
       tree.Fill();
       if (++nEvents == maxEvents) break;

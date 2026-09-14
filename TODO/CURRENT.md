@@ -33,6 +33,19 @@
 
 ## 次にやること(次セッションの入口)
 
+**2026-09-14 遠隔ベンチで実機初データ取得(Fable 5.1)**: DAQ ホスト GDED(daq@192.168.144.101、
+Ubuntu 24.04)に tpcdaq-rs をネイティブビルドし、実 ECC(getEccServer 20190315、ホストで
+ネイティブ起動)経由で **実 zCoBo + AsAd 内蔵パルサーから run 2 本(122 + 20 frames、
+frameType 2 compact、欠損 0)**。069 Phase 1 #1–#5 / Phase 2 #6・#11 / Phase 3 #12・#15 を
+クローズ(結果節に転記、SPEC v1.27 §13 反映)。**Q1 = TCP に topology frame は来ない、
+Q3 = 261 s は再現せず 7 s** で確定。新 bin `null_sink`(ROOT 無しホスト用 root-sink 代役)。
+残: #7 連続 ×10、異常系(#8–#10, #13, #14)、#16 オラクル照合、root-sink 経路(GDED に ROOT
+無し)、Phase 4。**GDED 上の ECC/ベンチスタックは常駐中 — VM の GET 再開前に停止すること。**
+専用 DAQ 機の新設は Ubuntu 24.04 LTS を推奨済み(理由 = 本日の実測で全縛りが解ける)。
+再現手順 = メモリ geteccserver-native-gded。取得 .graw は compact なので macros/graw2root.C
+(frameType 1 専用)は要拡張 → 075 の価値上昇。
+
+
 **2026-08-18 ユーザー裁定: ELITPC 100 Hz の追求は本気で後回し**(コラボの誰も可能と
 思っておらず「やりすぎ」。mini 100 events/s = 064 で最低目標達成済み)。
 → **次の入口 = [066_unfolding_spike.md](066_unfolding_spike.md)(READY)**: Unfolding の
