@@ -46,7 +46,12 @@ mini の macros チェーンは DAQ 直結(graw2root.C は .graw 用に残る)�
 橋だけ Rust 化」。詳細調査 + 立案 = [076_rust_ice_client.md](076_rust_ice_client.md)(**READY** —
 同日ユーザー裁定: 新 DAQ 機で最初に試す項目(ROOT インストールと並ぶ)/ 同期実装で可 /
 C++ 撤去は実機動作確認後。**着手指示で Phase 0(Sonnet)+ Phase 1(Opus)を並列に出す**)**。Mac 側の今朝の ecc_bridge(47200)は
-停止済み(計測とポート衝突したため)。GDED の getEccServer / ベンチスタックは SSH セッションで常駐中のまま。
+停止済み(計測とポート衝突したため)。**GDED の getEccServer / ベンチスタック / getEccClient 残骸は
+同日夕方に PID 指定で停止済み**(VM の GET 再開に支障なし。127.0.0.1:47200 の sshd リモート転送
+リスナだけが残るが無害)。
+**UI 相談(同日)**: 「信号が時間窓に収まっているか」を全チャンネル一括で見たい → **UVW Event
+Display(0x02)がそのまま答え**(同一タブに 3 面)。追加要望「272 ch × 512 の電子回路座標 2D を同じ
+タブに」= [077_asad_map_panel.md](077_asad_map_panel.md)(READY、Sonnet 半日、着手指示待ち)。
 
 **2026-09-14 遠隔ベンチで実機初データ取得(Fable 5.1)**: DAQ ホスト GDED(daq@192.168.144.101、
 Ubuntu 24.04)に tpcdaq-rs をネイティブビルドし、実 ECC(getEccServer 20190315、ホストで
