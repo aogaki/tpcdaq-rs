@@ -1,115 +1,159 @@
-# 079 — スローコントロール: ガス圧(Bronkhorst EL-PRESS / ProPar)+ 環境(Arduino MKR1000 + ENV shield)
+# 079 — スローコントロール: ガス系(Bronkhorst FLOW-BUS: EL-FLOW MFC + EL-PRESS ×2)+ 環境(Arduino MKR1000 + ENV shield)
 
-**Status: DRAFT**(2026-09-15 起票、Fable。発端 = ユーザーが `reference/Arduino` と `reference/Bronkhorst` に
-資料を投入。**§3 の確認事項が埋まってから READY** — ユーザー裁定 2026-09-15「機種名などが判明してから実装」)
+**Status: READY**(2026-09-15 起票、Fable。同日 写真 5 枚(reference/Bronkhorst/IMG_3204–3208)で
+機種系列・接続形態が判明、Arduino は「温度を取るだけなので自前で書く」とユーザー裁定 → 着手条件
+「機種名などが判明してから」を満たしたので READY。**着手はユーザー指示待ち**。残る確認(§3)は
+着手を止めない — デフォルトで進めて現地 Phase 0 で確定する)
 
 ## 0. 結論(1 分で)
 
-- **どちらもベンダーの Windows ソフト無しで Linux から直接読める。**
-  Bronkhorst は RS232 の **ProPar ASCII**(38400 8N1、`:` 始まり CR 終わり、RD=04 / WR=01、
-  点対点なら node 128 で必ず応答)— Rust の `serialport` crate で数百行。Arduino MKR1000 は USB シリアル
-  (兼 WiFi)— ただし**現行の読み出しは LabVIEW 製の Windows .exe で、Arduino 側スケッチのソースが無い**
-  ので、自前スケッチ(JSON 1 行/秒)に置き換えるのが最短。
-- **受け皿は SPEC に既にある**: P6 の `psu`(HiVolta/HMP2020、source_id 200、logbook `psu` レコード、
-  §11 のトレンド表示)。これを **`slowctl` = 汎用スローコントロール(HV / ガス / 環境)** に一般化する。
-- **物理側の効き目**: 圧力は v_drift ∝ E/p の分母。run 毎に圧力を logbook に残せば、
-  analyzeUVW.C の `PRESSURE_MBAR` 定数を run 記録から引ける(今は手打ち)。
-- 見積もり ≈ **1.5 週間**(slowctl 骨格 + Bronkhorst ドライバ + fake + logbook 一般化 = Opus 3 日 /
-  Arduino スケッチ + ドライバ = Sonnet 1 日 / UI トレンド = Sonnet 2 日 / SPEC = Fable)。
+- **ガス系は Bronkhorst の FLOW-BUS ネットワーク**(RJ45 の「Ethernet ケーブル」= FLOW-BUS の
+  RS485 + 15–24 V 給電、Y アダプタ 7.03.241 でカスケード)。PC は **USB–RS232 変換 → 先頭機器の
+  9 ピン D-sub(ProPar ASCII 38400 8N1)** に入り、その機器が **local host** として FLOW-BUS 上の
+  全ノードへ中継する(9.17.024 §1.1 / §2 例 7 「Local host」、推奨 ≤ 10 台)。→ **DAQ 機からは
+  シリアルポート 1 本で 3 台すべて読める。** ベンダーソフト不要、Rust `serialport` + 数百行。
+- **機器(写真)**: ① EL-FLOW Select 質量流量計/制御器「MFC 1」 ② EL-PRESS 圧力計/制御器
+  「BPC NEW / PT-TPC」(BPC = back pressure controller → P-700 系) ③ EL-PRESS「TPC」(FLOW-BUS
+  ラベル、ノードアドレスのロータリ SW 付き)。**model key はノードから読む**(113/2 等、§2.2)ので
+  銘板の転記は不要。
+- **受け皿は SPEC に既にある**: `slowctl`(§1.1 v1.29、旧 psu。source_id 200、logbook レコード、§11
+  トレンド)。**読み取り・記録・アラームのみ**(§1.5 安全境界、裁定済み)。
+- **物理側の効き目**: 圧力は v_drift ∝ E/p の分母。run 毎の圧力を logbook に残せば analyzeUVW.C の
+  `PRESSURE_MBAR` 定数を run 記録から引ける(今は手打ち)。流量(MFC)はガス交換の健全性の指標。
+- 見積もり ≈ **1.5 週間 + 現地 Phase 0 半日**(§4)。
 
-## 1. 資料の中身(reference/ — gitignore、コミット不可)
+## 1. 資料と現物
 
-### Arduino(1 MB)
+### 1.1 写真からの機器特定(reference/Bronkhorst/IMG_3204–3208、2026-09-15)
+| 写真 | 機器 | 読めたこと |
+|---|---|---|
+| 3204 | **EL-FLOW Select** mass flow meter/controller、手書きタグ「MFC 1」 | 側面 9 ピン D-sub にケーブル、上面 RJ45(FLOW-BUS)。ラボ型 MBC。Identification number は 7(DMFC)のはず |
+| 3205 | **Bronkhorst 7.03.241 Modular Y-adapter cable** | FLOW-BUS の RJ45 二又(9.17.024 §2.3.1)。これが「カスケード」の実体 |
+| 3206 | **EL-PRESS**「BPC NEW / PT-TPC」+ 後方に **EL-PRESS**「TPC」(FLOW-BUS ラベル、`ADDRESS 00 = SOFT-ADDRESS` の LSD/MSD ロータリ SW)、Y アダプタ ×2 | BPC = back pressure controller(P-700 系、9.17.101 §1.3.3)。「TPC」は計測のみ(P-500)か制御器かは 113/12 で判別。左の黒赤の箱(ADJ/CAL ダイヤル)は Bronkhorst ではない(真空ゲージヘッドらしい、未確認) |
+| 3207 | ラック上の他機器: NTRON Microx O₂ 計(322 ppm)、Michell Easidew 露点計(−61.9 °Cdp)、青表示「10.0 mBar」パネル(機種不明)、Agilent AGD-100 真空ゲージ表示(タグ VPT 101) | **本チケットの対象外**(候補として §6 に記録) |
+| 3208 | **Pfeiffer Vacuum DualGauge**(前面 USB → TPG 36x 系) | 対象外(§6) |
+
+### 1.2 接続トポロジ(ユーザー申告 2026-09-15 + 9.17.024 / 9.17.101 で裏取り)
+```
+DAQ 機 --USB--> USB-RS232(9.09.122 相当) --T-part 7.03.366--> [先頭機器 D-sub: RS232/ProPar 38400 8N1]
+                                                                    | 先頭機器 = FLOW-BUS "local host"
+                                                                    RJ45 --Y 7.03.241-- RJ45 --Y-- RJ45 ... (RS485 187.5 kbaud + 給電)
+                                                                    MFC1 / BPC / TPC(各ノード 3..120)、末端に終端(黒)
+```
+- **ノード指定**: RS232 直結の先頭機器は **node 128** で必ず応答(9.17.027 §3.2、実アドレス非依存)。
+  他機は **FLOW-BUS ノードアドレス**(3…120、ロータリ 00 = ソフト設定、既定 3)で指定 —
+  local host が中継する。FLOW-BUS は **マルチマスタ・トークンリング**(9.17.024 §2)。
+- **罠 3 つ**(9.17.101 §3.6.2): (a) D-sub が RS485(FLOW-BUS/Modbus)側に設定されていると RS232 に
+  **応答しない** → 多機能スイッチ 12–16 s で configuration mode(RS232 38400)。(b) RS232 は **10 m 制限**
+  (38400 baud)。(c) RJ45 チェーンは**給電も兼ねる**(コネクタ定格 1.5 A)— 抜き差しで他機が落ちる。
+- **未確定(現地 Phase 0 で決める)**: どの機器が先頭(D-sub にケーブルが刺さっているのは写真では MFC1 と
+  BPC の 2 台)、各ノード番号、**いまその RS232 の相手はどの PC か**(FlowSuite/FlowPlot の Windows
+  ノート?)→ §1.5 の単一マスタ問題の解き方が決まる。
+
+### 1.3 Arduino(1 MB)
 - **MKR1000**(SAMD21 + WiFi)+ **MKR ENV Shield ASX00011**(温度・湿度・気圧・照度・UV)。
   ELI-NP の A. State → T. Roman のメール(2021-11-16)で購入(cleste.ro)。
-- `MKR1000 + ENV Shield.exe` = **LabVIEW ビルドの Windows アプリ**(`.ini` は LabVIEW ランタイム設定、
-  `.aliases` は `My Computer=localhost`)。**Arduino スケッチのソースは無い** → 現行のワイヤ
-  プロトコル(USB シリアルか WiFi TCP か、フォーマット)は不明。
+- 現行 = LabVIEW 製 Windows .exe(`MKR1000 + ENV Shield.exe`)、スケッチのソース無し。
+  **ユーザー裁定 2026-09-15: 温度を取るだけなので自前スケッチで置き換える**(§2.3)。
 
-### Bronkhorst(145 MB、マニュアルのみ)
-- **EL-PRESS シリーズ**(9.17.101、2023): P-5xx 圧力計 / P-6xx forward / P-7xx back-pressure /
-  P-8xx process 制御器。2–100 mbar … 8–400 bar。**標準 = RS232(ProPar)+ アナログ(0–5/0–10 V、
-  0/4–20 mA)**、オプションで FLOW-BUS / Modbus / PROFIBUS / EtherCAT 等。
-- **RS232 / ProPar**(9.17.027): 38400 8N1、ASCII `:` + len + node + data + CR(2 桁 HEX 化)、
-  enhanced binary(DLE STX …)もあり。node 3–120、**点対点なら 128 で応答**。コマンド 00 status /
-  01 WR(status 返る)/ 04 RD。chaining 可。エラー `:01xx`。
-- FLOW-BUS(9.17.024)/ E-8000 電源・表示・RS232 ハブ(9.17.076)/ FlowDDE / FlowPlot / FlowSuite
-  (Windows 用ツール)/ LabVIEW ドライバ。+「English Bronkhorst manuals」= 全製品のカタログ的一式。
-- **機種(model key)・ノード番号・接続形態(直 RS232 / USB 変換 9.09.122 / E-8000 経由)は資料に無い。**
-  ログブック 5 年分に Bronkhorst の記載は無し(CO₂ 130 mbar **流通運転**、NIM 電源投入が圧力計に
-  干渉した事例 p.352–353 のみ = 071 SURVEY)。
+### 1.4 マニュアル(reference/Bronkhorst、gitignore)
+- 9.17.101 EL-PRESS(§1.3 系列、§2.8 RS232 接続部品、§3.6 通信、§3.7 パラメータ)、9.17.027 RS232/ProPar
+  (§3 プロトコル、§3.9 実例 = ゴールデン、付録 FlowDDE 値表)、9.17.024 FLOW-BUS(§2 配線・終端・
+  local host、§4 アドレス)、9.17.023 汎用デジタル計器(**§4–§8 パラメータ表 = process/param の正**)、
+  9.17.011 RS232/FLOW-BUS interface box(今回は不使用)。
+- ログブック 5 年分に Bronkhorst の記載は無し(CO₂ 130 mbar **流通運転**、NIM 電源投入が圧力計に干渉した
+  事例 p.352–353 のみ = 071 SURVEY)。
 
-## 1.5 安全境界(**裁定済み 2026-09-15、SPEC v1.29 §11 に明文化**。発端 = ユーザー提起「制御を web 越しに誰でも触れるのは問題」)
+## 1.5 安全境界(**裁定済み 2026-09-15、SPEC v1.29 §11**)
 
 - **web 操作面(controller REST / UI)= DAQ の run 制御と監視のみ。物理的作動(HV / ガス圧 setpoint /
-  バルブ)は web に経路を作らない。** 根拠 = SPEC §3.1 の token + passphrase は「事故防止であり認証では
-  ない」、TLS/認証は自前実装しない方針(CLAUDE.md)。ガス圧・HV は物理的に壊せる。
-- したがって **DAQ 統合はモニタ(読み取り・記録・アラーム)のみ**。これは冗長ではなく、価値のある部分
-  (run 毎の圧力 → v_drift、漏れ検知、logbook 自動記録)は全部読み取りで済む。setpoint の変更は
-  実験構成の切替時(130 / 190 / 250 mbar)だけで稀。
-- **本当の衝突点 = RS232 ProPar は master 1 つ**(点対点)。制御プログラムと監視プログラムを別々に
-  立てると同じポートを取り合う。解は 2 つ、どちらも web には載せない:
-  1. **制御は機器側の既存手段**(E-8000 パネル / FlowSuite on Windows ノート)、DAQ は読むだけ(推奨、
-     開発ゼロ)。FlowSuite を繋ぐ間は slowctl を止める運用ルール。
-  2. **slowctl がポートを専有**し、制御は **Unix ドメインソケット / 127.0.0.1 の CLI** からだけ受ける
-     (controller / UI に制御 API を作らない)。スクリプトでの圧力スキャン等が必要になったら。
-- HV(P6)も同じ規則: DAQ は監視 + TRIP 記録、電圧設定はベンダー GUI をローカルで。
-- **SPEC v1.29 §11 に明文化済み**(§1.1 の psu 行も slowctl・監視のみに改訂、CLAUDE.md「やらないこと」に追記)。
+  流量 setpoint / バルブ)は web に経路を作らない。** DAQ 統合は**モニタ(読み取り・記録・アラーム)のみ**。
+- **衝突点 = RS232 ProPar のマスタは 1 本**(先頭機器の D-sub 1 口)。解は 2 つ、どちらも web には載せない:
+  1. **制御は既存手段**(FlowSuite の Windows ノート等)、DAQ は読むだけ。**FLOW-BUS はマルチマスタ**
+     なので、DAQ 用に**別の機器の D-sub を第 2 の local host** として使えば Windows 側を抜かずに済む
+     可能性がある(9.17.024 は禁止していない — **現地 Phase 0 で実証**。ダメなら運用ルール「FlowSuite を
+     繋ぐ間は slowctl を止める」)。
+  2. **slowctl がポートを専有**し、setpoint は **Unix ドメインソケット / 127.0.0.1 の CLI** からだけ。
+- HV(P6)も同じ規則。
 
-## 2. 設計(案 — §1.5 により **読み取りのみ**。setpoint 書きは選択肢 2 を採るときだけ)
+## 2. 設計(読み取りのみ)
 
-### 2.1 component `slowctl`(Rust / tokio、SPEC §1.1 の psu 行を置換)
-- TOML `[[slowctl.device]]`: `type = "bronkhorst_propar" | "arduino_env" | "hivolta" | "hmp2020"`、
-  `port = "/dev/ttyUSB0"`、`node = 128`、`poll_hz = 1`、`channels = [{name, unit, lo, hi}]`。
-- ドライバ trait: `poll() -> Result<Vec<Sample{device, channel, value, unit, ts}>>`。読み出し失敗は
-  **数えて可視化**(silent 禁止)、再接続はドライバ内。
-- 出力 3 系統(すべて既存の口):
-  (a) **logbook**(§9): `psu` レコード型を **`slow`** に一般化(`device / channel / event / values`)。
-  1 Hz の全サンプルは書かない — **変化閾値 or 60 s 毎 + ALARM/RECOVER イベント**。
-  (b) **status PUB**(source_id 200 系、§3.2)→ monitor → WS(status JSON に `slow: {...}` を載せる、
-  新バイナリ型は作らない)→ UI トレンド(ECharts、§11 に既に「レート/PSU トレンド」の枠)。
-  (c) **run_start / run_stop レコード**に直近値と run 平均(`gas_pressure_mbar` 等)を載せる。
-- アラーム: `[lo, hi]` 逸脱で `event: "ALARM"` + status バッジ。**DAQ は止めない**(止めるかは §3-3)。
+### 2.1 component `slowctl`(Rust / tokio、SPEC §1.1)
+- TOML `[[slowctl.device]]`: `type = "bronkhorst_flowbus" | "arduino_env" | "hivolta" | "hmp2020"`、
+  `port = "/dev/ttyUSB0"`、`poll_hz = 1`、`nodes = "scan" | [3, 4, 5]`、`alarms = [{node, channel, lo, hi}]`。
+- ドライバ trait: `poll() -> Result<Vec<Sample{device, node, channel, value, unit, ts}>>`。読み出し失敗・
+  CRC/フォーマット違反・タイムアウトは**数えて可視化**(silent 禁止)、再接続はドライバ内。
+- 出力 3 系統(すべて既存の口): (a) **logbook**(§9): `psu` レコード型を **`slow`** に一般化
+  (`device / node / channel / event / values`)。1 Hz 全サンプルは書かない — **変化閾値 or 60 s 毎 +
+  ALARM/RECOVER**。(b) **status PUB**(source_id 200、§3.2)→ monitor → WS(status JSON に `slow: {...}`、
+  新バイナリ型は作らない)→ UI トレンド(ECharts、§11)。(c) **run_start / run_stop** に直近値と run 平均
+  (`gas_pressure_mbar`、`gas_flow_mln_min` 等 — 単位は機器から読んだ文字列をそのまま)。
+- アラーム: `[lo, hi]` 逸脱 + 機器の Alarm info(1/20)≠ 0 で `event: "ALARM"` + status バッジ。
+  **DAQ は止めない**(既定。§3-3)。
 
-### 2.2 Bronkhorst ドライバ(ProPar ASCII、読みのみで開始)
-| パラメータ | process/param(FLOW-BUS 表記、**EL-PRESS §4 で要照合**) | 型 | 用途 |
-|---|---|---|---|
-| Measure | 1/0 | uint(32000 = 100 %) | 圧力(容量比) |
-| Setpoint | 1/1 | uint | 現在の設定値(読むだけ) |
-| fMeasure | 33/0 | float | 圧力(工学単位) |
-| Capacity / Capacity unit | 1/13 / 1/31 | float / string | 単位・レンジの自動取得(焼き込み禁止) |
-| Serial number / model | 113/3 等 | string | 識別(logbook に残す) |
-- `B`(secured)パラメータと Control Mode には触らない。setpoint 書きは UI 要件が出てから(§3-3)。
-- テスト = **pty 上の fake ProPar 応答器**(マニュアル §3.9 の例文をゴールデンに、エラー `:01xx` と
-  タイムアウトも)。実機受け入れ = FlowSuite の表示値と 1 分間一致。
+### 2.2 Bronkhorst ドライバ(ProPar ASCII、local host 経由で全ノード)
+- **起動時 node scan**: 128(先頭)+ 3…120 を順に ping(Identification number 読み)。応答したノードごとに
+  下表の識別群を読み、logbook `slow` の `event: "IDENT"` に残す。以後 1 Hz で計測群を**チェーン要求
+  1 本/ノード**(9.17.027 §3.7 chaining)。
+- パラメータ(**9.17.023 §4–§8 で照合済み**、process/param、FlowDDE 番号は参考):
 
-### 2.3 Arduino ドライバ + スケッチ
-- **自前スケッチ**(`tools/arduino_env/env_json.ino`、Arduino_MKRENV ライブラリ)が USB シリアル 115200 に
-  **JSON 1 行/秒**(`{"t_c":..,"rh":..,"p_hpa":..,"lux":..,"uva":..,"uvb":..}`)。WiFi は使わない(KISS、
-  ネットワーク設定不要)。LabVIEW アプリは置き換え(Windows 依存を切る)。
+| 名前 | proc/par | 型 | DDE | 用途 |
+|---|---|---|---|---|
+| Identification number | 113/12 | u8 | 175 | 7 DMFC / 8 DMFM / 9 DEPC / 10 DEPM — 機器種別の判定 |
+| BHT model number | 113/2 | string | 91 | model key(例 `F-201CV-5K0-AAD-33-V`、9.17.027 §3.9) |
+| Serial number | 113/3 | string[20] | 92 | 識別 |
+| Firmware version | 113/5 | string[6] | 105 | 識別 |
+| User tag | 113/6 | string[16] | 115 | 現場名(「MFC 1」等が入っていれば拾う) |
+| Capacity 100 % | 1/13 | float | 21 | レンジ(焼き込み禁止) |
+| Capacity unit | 1/31 | string[7] | 129 | 単位文字列(`mbar` / `mln/min` …) |
+| Fluid name | 1/17 | string[10] | 25 | 較正ガス(CO₂ か) |
+| Sensor type | 1/14 | u8 | 22 | 0 圧力(制御器)/ 128 圧力(センサ)… |
+| **fMeasure** | 33/0 | float | 205 | **計測値(工学単位 = Capacity unit)** |
+| fSetpoint | 33/3 | float | 206 | 現在の設定値(読むだけ) |
+| Measure / Setpoint | 1/0, 1/1 | u16(32000 = 100 %) | 8, 9 | 整数版(照合用) |
+| Valve output | 114/1 | u32 | 55 | バルブ開度(制御器のみ) |
+| Temperature | 33/7 | float | 142 | センサ温度(MBC3) |
+| Alarm info | 1/20 | u8 bitmask | 28 | 0x04 min / 0x08 max / 0x80 HW 等 |
+| Control mode | 1/4 | u8 | 12 | 読むだけ(0 = bus setpoint, 3 = valve closed …) |
+- **書かない**: Setpoint / fSetpoint / Control mode / `B` secured 群。ドライバの型で書き込み API を持たない。
+- テスト = **pty 上の fake ProPar 応答器**(9.17.027 §3.9 の実例を hex のままゴールデンに、エラー `:01xx`、
+  タイムアウト、node scan で無応答ノードを飛ばす)。実機受け入れ = FlowSuite / 前面表示と 1 分間一致。
+- 参考実装: Bronkhorst 公式の Python `bronkhorst-propar`(PyPI)。**Phase 0 の現地 node scan と
+  ゴールデン採取に使う**(コードは持ち込まない — ライセンスと codec の食い違いはテストで検出)。
+
+### 2.3 Arduino ドライバ + スケッチ(自前、裁定済み)
+- `tools/arduino_env/env_json.ino`(Arduino_MKRENV ライブラリ)が USB シリアル 115200 に **JSON 1 行/秒**
+  (`{"t_c":..,"rh":..,"p_hpa":..,"lux":..,"uva":..,"uvb":..}`)。WiFi は使わない(KISS)。
 - ドライバは行を読んで Sample に変換するだけ。フォーマット違反は数える。
 
-## 3. 確認事項(ユーザー / ELI-NP に聞くこと — READY の条件)
-1. **Bronkhorst の機種**(銘板 model key、P-5xx 計測のみか P-6xx/7xx 制御器か)、**接続**(RS232 直 /
-   USB 変換 / E-8000 経由)、ノード番号、いま設定に使っているソフト(FlowSuite?)。DAQ 機まで
-   RS232-USB で届くか(10 m 制限)。
-2. **Arduino**: 現行スケッチのソースは入手できるか(T. Roman / A. State)。無ければ自前で書き直してよいか。
-   設置場所と目的(検出器近傍の室温・気圧? 大気圧はガス圧の補正に使う?)。
-3. **圧力の用途**: §1.5 により記録のみ(web から setpoint は触らない)。制御は選択肢 1(機器側)か 2(ローカル CLI)か。ALARM で run を止めるか(現状案 = 止めない)。
-4. HV(HiVolta / HMP2020、P6)との統合順序(同じ slowctl に載せる前提)。
+## 3. 確認事項(着手は止めない — 既定で進め、現地で確定)
+1. ~~Bronkhorst の機種・接続~~ → **判明**(§1.1–1.2)。残: 先頭機器・ノード番号(Phase 0 で scan)、
+   **RS232 の現在の相手 PC**(第 2 local host が使えるかで運用が変わる、§1.5)。
+2. ~~Arduino スケッチ~~ → **自前で書く**(裁定)。残: 設置場所(検出器近傍? 室温・大気圧の用途)。
+3. ALARM で run を止めるか → **既定: 止めない**(記録 + バッジ)。
+4. HV(HiVolta / HMP2020、P6)との統合順序 → **既定: ガス系を先に、HV は同じ slowctl に後乗せ**。
 
-## 4. 見積もり
-| 部分 | モデル | 日数 |
-|---|---|---|
-| slowctl 骨格(TOML / LogPost / status)+ logbook `slow` 一般化 + controller の run 記録拡張 | Opus | 2 |
-| Bronkhorst ProPar ドライバ + pty fake + 単体 | Opus | 1 |
-| Arduino スケッチ + ドライバ + 単体 | Sonnet | 1 |
-| UI トレンド(ECharts、§11)+ status バッジ | Sonnet | 2 |
-| SPEC §1.1 / §2.3 / §3 / §9 / §11 改訂 + レビュー | Fable | — |
+## 4. フェーズと見積もり
+| Phase | 内容 | モデル | 日数 |
+|---|---|---|---|
+| 0 | **現地**: DAQ 機に USB-RS232、`bronkhorst-propar` で node scan → 各ノードの識別群 + 計測値を hex ダンプ(reference/ にゴールデン、リポには合成 fixture のみ)。第 2 local host の可否も試す | ユーザー + Sonnet(手順書) | 0.5 |
+| 1 | ProPar ASCII codec(encode/decode、chaining、`:01xx`)+ pty fake + node scan。9.17.027 §3.9 の実例で縛る | Sonnet | 1 |
+| 2 | slowctl 骨格(TOML / driver trait / LogPost / status PUB)+ logbook `slow` 一般化 + controller の run 記録拡張 | Opus | 2 |
+| 3 | Arduino スケッチ + ドライバ + 単体 | Sonnet | 1 |
+| 4 | UI トレンド(ECharts、§11)+ status バッジ + ALARM 表示 | Sonnet | 2 |
+| — | SPEC §1.1 / §2.3 / §3 / §9 / §11 改訂 + フェーズ境界レビュー | Fable | — |
+
+Phase 1 は Phase 0 を待たずに着手できる(マニュアルの実例がゴールデン)。Phase 0 は新 DAQ 機のセットアップ
+(076 §6 の順序)に相乗り。
 
 ## 5. 参照
-- reference/Bronkhorst/917101-Manual-EL-PRESS.pdf(§2.8 通信、§4 パラメータ)、917027-Manual-RS232-interface.pdf
-  (§3 ProPar)、917024(FLOW-BUS)、917076(E-8000)。
+- reference/Bronkhorst/IMG_3204–3208.jpeg(現物)、917101(EL-PRESS)、917027(RS232/ProPar)、917024(FLOW-BUS)、
+  `English Bronkhorst manuals/917023`(パラメータ表)、917011(RS232/FLOW-BUS box、不使用)。
 - reference/Arduino/(購入メール、LabVIEW アプリ)。MKR ENV Shield: https://docs.arduino.cc/hardware/mkr-env-shield
-- SPEC §1.1(psu)、§2.3(LogPost)、§3.2(source_id 200)、§9.2(`psu` レコード)、§11(トレンド)。
+- SPEC §1.1(slowctl)、§2.3(LogPost)、§3.2(source_id 200)、§9.2(`psu` → `slow`)、§11(トレンド・安全境界)。
 - 071 SURVEY(CO₂ 130 mbar 流通運転、圧力計への電源干渉 p.352–353)。
+
+## 6. 対象外だが見えた機器(将来の slowctl 候補、起票は要望が出てから)
+- Pfeiffer DualGauge(TPG 36x 系、RS232/USB/Ethernet の ASCII プロトコル)— 真空側の圧力。
+- NTRON Microx O₂ 計、Michell Easidew 露点計、Agilent AGD-100、青表示「10.0 mBar」パネル — 接続口
+  (4–20 mA / RS232 / RS485)は現地確認が要る。O₂・露点はガス純度の指標なので価値は高い。

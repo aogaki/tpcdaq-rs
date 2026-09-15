@@ -55,11 +55,12 @@ Display(0x02)がそのまま答え**(同一タブに 3 面)。追加要望「272
 **パラメータ設定 UI(同日)**: xcfg 直接編集ではなく **JSON を正として xcfg を生成**(ユーザー裁定:
 JSON / 078 / ノブは「一様値 + 例外リスト」— 隠れているが黙らない)=
 [078_param_ui_json_xcfg.md](078_param_ui_json_xcfg.md)(READY、≈ 2 週間、着手指示待ち)。
-**2026-09-15 スローコントロール資料(reference/Arduino, reference/Bronkhorst)**: Bronkhorst EL-PRESS は
-RS232/ProPar で Linux から直接読める、Arduino MKR1000 + ENV shield は LabVIEW 製 Windows アプリで読んでいて
-スケッチのソースが無い → `slowctl`(P6 psu の一般化)として
-[079_slow_control_gas_env.md](079_slow_control_gas_env.md)(**DRAFT** — 機種・接続・用途の確認事項 4 点が
-埋まったら READY)。
+**2026-09-15 スローコントロール(reference/Arduino, reference/Bronkhorst)**: 写真 5 枚で判明 —
+ガス系は **Bronkhorst FLOW-BUS**(EL-FLOW Select「MFC 1」+ EL-PRESS「BPC」「TPC」、RJ45 Y アダプタ
+7.03.241 でカスケード)、PC は USB-RS232 → 先頭機器 D-sub(ProPar 38400)→ **local host が全ノードを中継**
+= シリアル 1 本で 3 台読める。Arduino は自前スケッチ(裁定)。`slowctl`(P6 psu の一般化、**監視のみ**)=
+[079_slow_control_gas_env.md](079_slow_control_gas_env.md)(**READY**、≈ 1.5 週 + 現地 Phase 0 半日、
+着手指示待ち。Phase 1 codec は現地を待たず Sonnet に出せる)。
 
 **2026-09-14 遠隔ベンチで実機初データ取得(Fable 5.1)**: DAQ ホスト GDED(daq@192.168.144.101、
 Ubuntu 24.04)に tpcdaq-rs をネイティブビルドし、実 ECC(getEccServer 20190315、ホストで
