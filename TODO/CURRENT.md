@@ -33,11 +33,13 @@
 
 ## 次にやること(次セッションの入口)
 
-**2026-09-15 プログラム票 [080_mini_experiment_readiness.md](080_mini_experiment_readiness.md)(DRAFT)**:
+**2026-09-15 プログラム票 [080_mini_experiment_readiness.md](080_mini_experiment_readiness.md)(READY、同日裁定 5 点)**:
 ユーザー方針「Mikolaj は mini にかかりっきり、次実験も mini → こちらでやれることをやりまくる」を受け、
 TODO + archive を棚卸しして A 本番機 / B 運転面 / C スローコントロール / D 較正・解析プロダクト(Warsaw
-待ち 3 点の自前化)/ E 073 残骸 の 5 群 + Wave 1〜4 の推奨順に整理。**§3 の 5 点(実験の時期・遠隔 run
-可否・新 DAQ 機時期・HV 機種・優先順位)の裁定で READY**。073 は #5 済(ROOT 6.08.06 / TPCReco =
+待ち 3 点の自前化)/ E 073 残骸 の 5 群 + Wave 1〜4 の推奨順に整理。**裁定: 実験 = ¹⁰B ターゲット + γ → α(時期未定)、
+遠隔 run は大抵可、新 DAQ 機は来週から、HV = HiVolta、優先順位は案どおり**。**別リポ ~/test/gas-pressure-test(Geant4 +
+Garfield++)の `_raw.root` が 075 raw ツリーと同一契約 = シミュと DAQ が同じ解析チェーンに乗る(080 D-8)**。
+Wave 1(今週)= A-1 新機手順書(Fable)/ 077 / 079-1 / 076-0+1 / 較正表ツール / runs.yaml / RUNBOOK 骨子 — **着手指示待ち**。073 は #5 済(ROOT 6.08.06 / TPCReco =
 reference)、残りは 080 §1-E に吸収 — archive はユーザー指示待ち。
 
 **2026-09-14(午後)~~075~~ 完了 — root-sink raw ツリー出力(SPEC v1.28 §6.7)**: `--raw-tree` /

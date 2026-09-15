@@ -1,10 +1,10 @@
 # 080 — 次の mini TPC 実験に向けた「自前で詰め切る」プログラム(Mikolaj 非依存)
 
-**Status: DRAFT**(2026-09-15 起票 Fable。発端 = ユーザー方針「Mikolaj は mini TPC にかかりっきり、
+**Status: READY**(2026-09-15 起票 Fable。発端 = ユーザー方針「Mikolaj は mini TPC にかかりっきり、
 次の実験でも mini を使う → 逆にこちらでやれることをやりまくる TODO を作りたい」。
-**§3 の 5 点(時期・遠隔可否・新 DAQ 機・HV 機種・優先順位)をユーザーが裁定したら READY**。
-本票はプログラム(束)であり、実行は既存チケット(074/076/077/078/079)と本票から切り出す
-新規ユニットで行う — 連番ユニットの粒度ルールは変えない)
+**同日ユーザー裁定 5 点(§3)で READY**。本票はプログラム(束)であり、実行は既存チケット
+(074/076/077/078/079)と本票から切り出す新規ユニットで行う — 連番ユニットの粒度ルールは変えない。
+**着手は Wave 単位でユーザー指示**)
 
 ## 0. 前提(棚卸し 2026-09-15、TODO + archive 000–075 + CURRENT 保留/Fable 待ち + WARSAW_PLAN §6–7)
 
@@ -18,8 +18,18 @@
   実証、メモリ geteccserver-native-gded)。GDED に ROOT は無い。**新 DAQ 機(Ubuntu 24.04 LTS)を新設予定**。
 - 現地が要るのは「ケーブルを挿す」(079 Phase 0)と「線源・ガスを入れて run する」(C-3〜C-5)だけ。
   それ以外は Mac(開発・リプレイ・仮想スタック)と GDED(実機 run、内蔵パルサー)で進む。
-- 実験本番の前提(runs.yaml、メモリ minitpc-analysis-pipeline): CO₂ 100 mbar / 80 V/cm →
-  **v_drift ≈ 0.579 cm/µs**。ジオメトリ .dat の既定 0.724 のままだと **z スケールが 1.25 倍ずれる**(B-4 の動機)。
+- **実験(ユーザー 2026-09-15)**: チャンバー内に **¹⁰B ターゲット**を置き γ 線を当て、出てくる **α を計測**。時期未定。
+  いまは線源(²²⁸Th 密閉線源)を外して**バックグラウンド測定中**、遠隔で大抵のことは可能。
+- **ガス圧の検討は別リポ `~/test/gas-pressure-test`**(Geant4 + Garfield++ + AGET 応答、CO₂ 140–300 mbar を
+  スキャン中、²²⁸Th スペクトル・窓薄膜・GEM 実効ゲイン 3600 較正済み)。**Stage 4 の出力 `_raw.root` は
+  075 の raw ツリーと同一契約**(`eventId/i`、`eventTime/l`、`adc[4][68][512]/S`)で、我々の macros を
+  `external/tpcdaq-macros/` として使っている → **シミュレーションと DAQ が同じ解析チェーンに乗る**。
+  含意: ①074 QA reco のフィクスチャに真値付き合成 raw が使える ②D-5 Unfolding の順方向応答
+  (Magboltz 拡散 ⊗ AGET 整形 223 ns)は既にある ③運転圧は run 毎に変わりうる(100 → 140–300 mbar)ので
+  **B-4 の v_drift 自動導出は必須**(.dat の 0.724 焼き込みだと z スケールが圧に追随しない)。
+- **新 DAQ 機は来週からインストール・セットアップ開始**(ユーザー 2026-09-15)→ A-1 手順書は今週。
+- **mini の HV も HiVolta**(ユーザー 2026-09-15)→ C-3 は HiVolta 1 種で済む。通信仕様(マニュアル or
+  既存クライアントコード)を reference/HiVolta に置くのが前提(いまは無い)。
 
 ## 1. 項目(実験で困ることから逆算。★ = 今すぐ・誰も待たない)
 
@@ -45,7 +55,7 @@
 |---|---|---|---|---|
 | C-1 | **079 Phase 1–2**(ProPar codec + slowctl 骨格 + logbook `slow`)。Phase 0(node scan)は現地でケーブルを挿すとき | 079 READY | Sonnet(★)+ Opus | 3 日 |
 | C-2 | 079 Phase 3 Arduino 自前スケッチ + ドライバ | 079 | Sonnet(MKR1000 が手元にあれば Mac で) | 1 日 |
-| C-3 | **HV 監視**(mini の HV 機種を確認 → HiVolta / HMP2020 ドライバ、TRIP 記録) | SPEC §13-8(P6) | 機種判明後 | 2 日 |
+| C-3 | **HV 監視**(HiVolta — mini も同機種、裁定 2026-09-15。TCP :1470、LOCAL モードで無干渉・単一接続専有を確認して読むだけ、TRIP 記録) | SPEC §13-8(P6) | 通信仕様が reference/HiVolta に来たら Opus | 2 日 |
 | C-4 | UI トレンド(圧力・流量・HV・環境)+ ALARM バッジ | 079 Phase 4 | Sonnet | 2 日 |
 
 ### D. 較正・解析プロダクト(Warsaw 待ち 3 点の自前化 — 059 優先順位 Unfolding > ゲイン正規化 > ZS)
@@ -58,6 +68,7 @@
 | D-5 | **イオンテールモデル + Unfolding 本実装**(066(b) 後半。応答 = C-2 の電子回路応答 ⊗ 拡散 ⊗ イオンテール、逆問題として ROOT プロダクトに追加) | 066 裁定、059 ① | D-3/D-4 の後、Fable 設計 → Opus | 2 週 |
 | D-6 | **logbook JSONL → minitpc-analysis `runs.yaml` 生成**(run 条件の唯一の情報源を DAQ 側に。Higs リポは読み取り専用なので出力ファイルを渡すだけ) | メモリ minitpc-analysis-pipeline、SPEC §9 | Sonnet(★) | 半日 |
 | D-7 | macros 配布準備(LICENSE / channel_map.csv の扱い / ビルド産物 .gitignore) | CURRENT 保留 | Sonnet | 半日 |
+| D-8 | **シミュレーション ↔ DAQ の契約共有**: gas-pressure-test の `_raw.root` を tpcdaq の合成フィクスチャ供給元にする(074 の真値付きテスト、D-5 の応答カーネル、B-4 の v_drift 照合 = Magboltz vs `0.7233×E/p`)。raw ツリー契約(SPEC §6.7)を変えるときは両リポ同時 | ~/test/gas-pressure-test、075 | Fable(契約)+ Sonnet(フィクスチャ生成手順) | 半日 |
 
 ### E. 073 の残骸(現地フェーズ終了 → 本票で吸収、073 は結果節付きで archive)
 - **済**: #1 patched-v2 差分 / #7 netstat / #8 dataRouter / **#5(ROOT 6.08.06 想定どおり、TPCReco = reference と同一 — ユーザー確認 2026-09-15)**。
@@ -69,20 +80,21 @@
 
 ## 2. 推奨順(案 — §3 の裁定で組み替える)
 
-- **Wave 1(今すぐ、並列、誰も待たない)**: B-2 077 / C-1 079 Phase 1 / A-2 076 Phase 0+1 / D-1 較正表ツール / D-6 runs.yaml 生成 /
-  069 0-5 mini ジオメトリ切替スモーク / A-1 手順書 + B-5 RUNBOOK 骨子(Fable)。
+- **Wave 1(今週、並列、誰も待たない)**: **A-1 手順書(Fable、新機が来週なので最優先)** / B-2 077 / C-1 079 Phase 1 /
+  A-2 076 Phase 0+1(新機で最初に試す — 076 裁定)/ D-1 較正表ツール / D-6 runs.yaml 生成 / D-8 契約共有 /
+  069 0-5 mini ジオメトリ切替スモーク / B-5 RUNBOOK 骨子(Fable)。
   → Sonnet 3〜4 レーン + Opus 1 レーン、Fable レビューはフェーズ境界 1 回ずつ。
-- **Wave 2(GDED が空いているとき)**: D-3 パルサースキャン(遠隔)/ A-3 069 残 / A-4 復旧リハーサル。
+- **Wave 2(GDED が空いているとき — 「大抵のことは可能」)**: D-3 パルサースキャン(遠隔)/ A-3 069 残 / A-4 復旧リハーサル。
   並行して Mac で B-1 078 と B-4 run 条件 → v_drift。
-- **Wave 3(新 DAQ 機が来たら)**: A-1 実施 / 076 実機検証 → C++ ecc_bridge 撤去 / 069 Phase 4 / 079 Phase 0(ケーブル)/ C-3 HV。
-- **Wave 4(線源データが取れたら)**: D-4 → D-5 Unfolding / B-3 074 QA reco(D-4 のデータで受け入れ)。
+- **Wave 3(来週〜、新 DAQ 機)**: A-1 実施(ROOT → ECC 3.7 → tpcdaq-rs)/ 076 実機検証 → C++ ecc_bridge 撤去 / 069 Phase 4 / 079 Phase 0(ケーブル)/ C-3 HV。
+- **Wave 4(線源を戻して run できたら)**: D-4 → D-5 Unfolding / B-3 074 QA reco(D-4 のデータ + D-8 の合成 raw で受け入れ)。
 
-## 3. ユーザーに仰ぐこと(READY の条件)
-1. **実験の時期と内容**(α 線源のみか、ビームか、期間)→ Wave の締切と Wave 4 の現実性。
-2. **mini は今 ELI-NP で zCoBo に繋がっていて、ガス・線源入りで遠隔 run が可能か**(D-3 は内蔵パルサーなので可。D-4 は検出器側の状態次第)。
-3. **新 DAQ 機の見込み時期**(Wave 3 の位置)。
-4. **mini の HV 機種**(C-3)。
-5. **優先順位の修正**(特に B-1 078 の 2 週間を Wave 1 に上げるか、D 群を先にするか)。
+## 3. ユーザー裁定(2026-09-15 — READY の根拠)
+1. **実験**: 時期未定。チャンバー内の ¹⁰B ターゲットに γ 線 → 放出 α を計測。ガス圧の検討は `~/test/gas-pressure-test`。
+2. **遠隔 run**: いまは線源を外してバックグラウンド測定中だが、**大抵のことは可能**(D-3 は即、D-4 は線源を戻すとき)。
+3. **新 DAQ 機**: **来週からインストール・セットアップ開始**(Wave 3 = 来週)。
+4. **HV**: mini も **HiVolta**。
+5. **優先順位**: 変更なし(§2 の案どおり)。
 
 ## 4. 見積もり(合計、直列換算)
 Wave 1 ≈ 1.5 週(並列なら 3〜4 日)/ Wave 2 ≈ 2.5 週(078 支配)/ Wave 3 ≈ 1 週 + 新機待ち / Wave 4 ≈ 3 週。
