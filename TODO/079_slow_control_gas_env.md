@@ -83,6 +83,14 @@ DAQ 機 --USB--> USB-RS232(9.09.122 相当) --T-part 7.03.366--> [先頭機器 D
   `port = "/dev/ttyUSB0"`(シリアル系: Bronkhorst / Arduino / **HMP2020 = HO720 USB CDC、LAN 無し — 2026-09-15 現物確認**)
   or `addr = "192.168.x.y:1470"`(HiVolta TCP)、`poll_hz = 1`、`nodes = "scan" | [3, 4, 5]`、`alarms = [{node, channel, lo, hi}]`。
   **シリアルポートは udev で固定名**(`/dev/serial/by-id/…`)にして取り違えを防ぐ(DAQ 機に USB シリアルが 3 本並ぶ)。
+- **ポートの取り違え対策(設計既定、2026-09-15)**: ①TOML は `/dev/ttyUSBn` を書かず `/dev/serial/by-id/`(個体シリアル
+  番号入りの symlink、Ubuntu 標準 udev が自動生成)を書く。同型で個体シリアルが無いアダプタ(安物 PL2303 等)は
+  `/dev/serial/by-path/`(USB の物理ポート位置で固定)にする。②**open 時に必ず機器に名乗らせて照合**する —
+  ProPar は node 128 に 113/3 serial + 113/12 種別、SCPI は `*IDN?`、Arduino は JSON 行の `"dev":"mkr_env"` — 期待した
+  型でなければ **エラーとして数えて再試行**(silent 禁止)。これで列挙順が変わっても誤読しない。
+- **HiVolta は Ethernet(TCP :1470)を既定**(USB は仮想 COM 9600 baud も可だが、①ケーブル長・ハブに縛られず
+  ②シリアルの本数を増やさず ③DAQ 機以外からも読めるので Ethernet を採る)。**USB は CAEN 純正 GUI が TCP を
+  専有するときの逃げ道**として残す(DT1415ET 取説: TCP は同時 1 クライアント想定 — PROPOSAL §R12)。
 - ドライバ trait: `poll() -> Result<Vec<Sample{device, node, channel, value, unit, ts}>>`。読み出し失敗・
   CRC/フォーマット違反・タイムアウトは**数えて可視化**(silent 禁止)、再接続はドライバ内。
 - 出力 3 系統(すべて既存の口): (a) **logbook**(§9): `psu` レコード型を **`slow`** に一般化
