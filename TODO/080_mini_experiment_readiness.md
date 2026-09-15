@@ -34,9 +34,12 @@
   `#LOC:ERR` = **監視は LOCAL のまま無干渉**、STATUS bit 3 OVC / 4 OVV / 5 UNV、`PAR:BDILK` interlock。
   + GET-AS-002-0004 AsAd Power Supply & Monitoring = AsAd 側の電圧系 VDD/VDD1 3.3 V、VDD2 2.5 V、VDD3 1.5 V、
   リモートセンシング必須)/ `reference/HMP2020/`(HAMEG HMP シリーズ SCPI Programmers Manual + R&S HMP ユーザーマニュアル、
-  公開 PDF を取得。LAN = HO732、**SCPI raw socket :5025**、`INST:NSEL n` → `MEAS:VOLT?` / `MEAS:CURR?`、`OUTP?`、
-  `STAT:QUES:ISUM<n>:COND?`、`SYST:MIX` で前面パネル併用。HMP2020 は ch 1–2 のみ)。
-  073 #7 の netstat では **LV SCPI が .20/.21:5025 = HMP が 2 台 LAN 接続**で稼働していた。
+  公開 PDF を取得。**mini の HMP2020 は現物確認で LAN ポート無し = 標準 HO720(RS-232 / USB)**(ユーザー 2026-09-15)。
+  → 接続は **USB(CDC = 仮想 COM、Linux では /dev/ttyACM*。USB-TMC クラスでも可)か RS-232**(CTS/RTS ハンドシェイク推奨、
+  無しなら 50–100 ms の間隔)。コマンドは同じ: `INST:NSEL n` → `MEAS:VOLT?` / `MEAS:CURR?`、`OUTP?`、
+  `STAT:QUES:ISUM<n>:COND?`、終端 LF か CR-LF、`SYST:MIX` で前面パネル併用。HMP2020 は ch 1–2 のみ。
+  073 #7 の netstat の LV SCPI(.20/.21:5025)は ELITPC 側の別個体(HO732 付き)で、mini の個体とは別。
+  DAQ 機には **USB-B ケーブル 1 本**(Bronkhorst の USB-RS232 と並んでシリアル 2 本目)。
 
 ## 1. 項目(実験で困ることから逆算。★ = 今すぐ・誰も待たない)
 
@@ -62,7 +65,7 @@
 |---|---|---|---|---|
 | C-1 | **079 Phase 1–2**(ProPar codec + slowctl 骨格 + logbook `slow`)。Phase 0(node scan)は現地でケーブルを挿すとき | 079 READY | Sonnet(★)+ Opus | 3 日 |
 | C-2 | 079 Phase 3 Arduino 自前スケッチ + ドライバ | 079 | Sonnet(MKR1000 が手元にあれば Mac で) | 1 日 |
-| C-3 | **HV / LV 監視**: HiVolta DT1415ET(TCP :1470 ASCII、LOCAL のまま `$CMD:MON` で読むだけ、STATUS の OVC/OVV/UNV/TRIP と interlock を記録)+ **R&S HMP2020**(AsAd 電源、SCPI :5025、`MEAS:VOLT?/CURR?` + `OUTP?`、ch 毎の V/I と出力 ON/OFF を記録)。どちらも書き込み API を持たない | SPEC §13-8(P6)、reference/HiVolta、reference/HMP2020 | Opus(★ 資料は揃った。fake は TCP 応答器で縛れる) | 2 + 1 日 |
+| C-3 | **HV / LV 監視**: HiVolta DT1415ET(TCP :1470 ASCII、LOCAL のまま `$CMD:MON` で読むだけ、STATUS の OVC/OVV/UNV/TRIP と interlock を記録)+ **R&S HMP2020**(AsAd 電源、**HO720 = USB CDC / RS-232 のシリアル SCPI**、`MEAS:VOLT?/CURR?` + `OUTP?`、ch 毎の V/I と出力 ON/OFF を記録)。どちらも書き込み API を持たない | SPEC §13-8(P6)、reference/HiVolta、reference/HMP2020 | Opus(★ 資料は揃った。fake は TCP 応答器 / pty で縛れる — 079 の ProPar fake と同じ流儀) | 2 + 1 日 |
 | C-4 | UI トレンド(圧力・流量・HV・環境)+ ALARM バッジ | 079 Phase 4 | Sonnet | 2 日 |
 
 ### D. 較正・解析プロダクト(Warsaw 待ち 3 点の自前化 — 059 優先順位 Unfolding > ゲイン正規化 > ZS)

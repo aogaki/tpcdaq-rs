@@ -80,7 +80,9 @@ DAQ 機 --USB--> USB-RS232(9.09.122 相当) --T-part 7.03.366--> [先頭機器 D
 
 ### 2.1 component `slowctl`(Rust / tokio、SPEC §1.1)
 - TOML `[[slowctl.device]]`: `type = "bronkhorst_flowbus" | "arduino_env" | "hivolta" | "hmp2020"`、
-  `port = "/dev/ttyUSB0"`、`poll_hz = 1`、`nodes = "scan" | [3, 4, 5]`、`alarms = [{node, channel, lo, hi}]`。
+  `port = "/dev/ttyUSB0"`(シリアル系: Bronkhorst / Arduino / **HMP2020 = HO720 USB CDC、LAN 無し — 2026-09-15 現物確認**)
+  or `addr = "192.168.x.y:1470"`(HiVolta TCP)、`poll_hz = 1`、`nodes = "scan" | [3, 4, 5]`、`alarms = [{node, channel, lo, hi}]`。
+  **シリアルポートは udev で固定名**(`/dev/serial/by-id/…`)にして取り違えを防ぐ(DAQ 機に USB シリアルが 3 本並ぶ)。
 - ドライバ trait: `poll() -> Result<Vec<Sample{device, node, channel, value, unit, ts}>>`。読み出し失敗・
   CRC/フォーマット違反・タイムアウトは**数えて可視化**(silent 禁止)、再接続はドライバ内。
 - 出力 3 系統(すべて既存の口): (a) **logbook**(§9): `psu` レコード型を **`slow`** に一般化
