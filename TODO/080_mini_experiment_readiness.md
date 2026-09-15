@@ -57,7 +57,7 @@
 | B-1 | **078 パラメータ UI(JSON → xcfg)+ ラン種別プリセット**(pedestal / pulser / 較正ランプ / physics を 1 クリックで。072 §3.3–3.4 の 3 相 ConfigId 組) | 078 READY | Opus レーン A 先行(★) | 2 週 |
 | B-2 | **077 AsAd 272×512 2D** | 077 READY | Sonnet(★) | 半日 |
 | B-3 | **074 QA 再構成(simplefit → monitor)**: 電場スキャン 4 指標をライブ表示 = 条件出しを「その場」に | 074 DRAFT、SPEC §5.5 | Fable 発注書化 → Opus | 1 週 |
-| B-4 | **run 条件の自動記録 + v_drift 導出**: 圧力(079)+ HV 設定(手入力 or C-3)→ `v_drift = 0.7233 × E/p`(CO₂、SURVEY §2)を run_start に書き、monitor/macros の z スケールが run 条件から決まるようにする(.dat の 0.724 焼き込み事故の防止) | メモリ minitpc-analysis-pipeline、SPEC §9 | Opus(小) | 1 日 |
+| B-4 | **run 条件の自動記録 + v_drift 導出**: 圧力(079)+ HV 設定(手入力 or C-3)→ `v_drift = 0.7233 × E/p`(CO₂、SURVEY §2)を run_start に書き、monitor/macros の z スケールが run 条件から決まるようにする(.dat の 0.724 焼き込み事故の防止)。**併せて f_sample・triggerDelay から「窓の深さ [mm] = 512 / f_sample × v_drift」と「トリガ前/後の配分」を導出して run_start とステータスに出す**(2026-09-15 の質問: 100 mbar / 1600 V / 25 MHz では窓 119 mm < ドリフト 200 mm — 圧を上げるほど悪化するので、078 のプリセットは (p, E) と (f_sample, delay) を組で持つ)。monitor には **窓端クリップ率**(cell 0 / 511 にヒットが掛かるイベントの割合)をカウンタで出す(silent 禁止) | メモリ minitpc-analysis-pipeline、SPEC §9、072 §3.1–3.2 | Opus(小) | 1.5 日 |
 | B-5 | **RUNBOOK_ja.md**: 起動/停止順序(SURVEY §4)、zCoBo 再起動、復旧、ラン手順(pedestal → pulser → physics)、チェックリスト、069 0-3 のリハーサル記録 | 069 0-3、071 SURVEY §4、072 §4 | Fable 骨子(★)→ Sonnet 肉付け | 1 日 |
 
 ### C. スローコントロール(監視のみ、SPEC §11 安全境界)
