@@ -29,7 +29,7 @@
 |---|---|---|
 | 3204 | **EL-FLOW Select** mass flow meter/controller、手書きタグ「MFC 1」 | 側面 9 ピン D-sub にケーブル、上面 RJ45(FLOW-BUS)。ラボ型 MBC。Identification number は 7(DMFC)のはず |
 | 3205 | **Bronkhorst 7.03.241 Modular Y-adapter cable** | FLOW-BUS の RJ45 二又(9.17.024 §2.3.1)。これが「カスケード」の実体 |
-| 3206 | **EL-PRESS**「BPC NEW / PT-TPC」+ 後方に **EL-PRESS**「TPC」(FLOW-BUS ラベル、`ADDRESS 00 = SOFT-ADDRESS` の LSD/MSD ロータリ SW)、Y アダプタ ×2 | BPC = back pressure controller(P-700 系、9.17.101 §1.3.3)。「TPC」は計測のみ(P-500)か制御器かは 113/12 で判別。左の黒赤の箱(ADJ/CAL ダイヤル)は Bronkhorst ではない(真空ゲージヘッドらしい、未確認) |
+| 3206 | **EL-PRESS**「BPC NEW / PT-TPC」+ 後方に **EL-PRESS**「TPC」(FLOW-BUS ラベル、`ADDRESS 00 = SOFT-ADDRESS` の LSD/MSD ロータリ SW)、Y アダプタ ×2 | BPC = back pressure controller(P-700 系、9.17.101 §1.3.3)。「TPC」は計測のみ(P-500)か制御器かは 113/12 で判別。左の黒赤の箱 = **Pfeiffer ActiveLine ゲージヘッド**(ユーザー確認 2026-09-15。黒筐体・赤天面、Hirschmann ロック螺子付コネクタ、ピン押し「ADJ」+ 16 進ロータリ「CAL」。系列は §6 の判別手順で確定) |
 | 3207 | ラック上の他機器: NTRON Microx O₂ 計(322 ppm)、Michell Easidew 露点計(−61.9 °Cdp)、青表示「10.0 mBar」パネル(機種不明)、Agilent AGD-100 真空ゲージ表示(タグ VPT 101) | **本チケットの対象外**(候補として §6 に記録) |
 | 3208 | **Pfeiffer Vacuum DualGauge**(前面 USB → TPG 36x 系) | 対象外(§6) |
 
@@ -152,8 +152,35 @@ Phase 1 は Phase 0 を待たずに着手できる(マニュアルの実例が�
 - reference/Arduino/(購入メール、LabVIEW アプリ)。MKR ENV Shield: https://docs.arduino.cc/hardware/mkr-env-shield
 - SPEC §1.1(slowctl)、§2.3(LogPost)、§3.2(source_id 200)、§9.2(`psu` → `slow`)、§11(トレンド・安全境界)。
 - 071 SURVEY(CO₂ 130 mbar 流通運転、圧力計への電源干渉 p.352–353)。
+- Pfeiffer: TPG 361/362 取説(ajvs.com/library/Manual_Instructions_TPG361_TPG362_…pdf)、同 Communication Protocol
+  (ajvs.com/library/Pfeiffer_Operating_instructions_TPG361_TPG362_…Communication_Protocol.pdf)、TPR 280 取説
+  (mpi-hd.mpg.de/gerda/TG04_TECHNICAL/manuals/bg805178be_d_web.pdf)。PDF は reference/ に置く(コミット不可)。
 
-## 6. 対象外だが見えた機器(将来の slowctl 候補、起票は要望が出てから)
-- Pfeiffer DualGauge(TPG 36x 系、RS232/USB/Ethernet の ASCII プロトコル)— 真空側の圧力。
-- NTRON Microx O₂ 計、Michell Easidew 露点計、Agilent AGD-100、青表示「10.0 mBar」パネル — 接続口
-  (4–20 mA / RS232 / RS485)は現地確認が要る。O₂・露点はガス純度の指標なので価値は高い。
+## 6. Pfeiffer DualGauge(TPG 361/362)— **Phase 5(条件付き)**
+
+**動機**: EL-PRESS はフルスケール比精度(±0.5 % FS 級 → 130 mbar で ≈ 4 %)。v_drift ∝ E/p なので
+「run 記録の圧から v_drift を引く」には足りない。ゲージヘッドが **CMR(隔膜、0.2 % of reading)か
+APR(ピエゾ、ガス種非依存)なら、そちらが圧の正**になる。TPR/PCR/PKR(Pirani 系)は 100 mbar 超で
+ガス種依存かつ粗い(TPR 280: ±15 % Rd @ 1e-3…100 mbar)ので見送り。
+
+**系列の判別(現地、1 分)**: DualGauge の「Measurement channel」ボタンを押すと 4 秒間ゲージ識別が出る
+(TPG 361/362 取説 Fig. 26: `TPR/PCR`、`IKR`、`PKR`、`PBR`、`IMR`、`CMR/APR`、`NO IDENT`)。シリアルなら
+`TID` で同じ文字列。ヘッド側面の銘板(`TPR 280` / `APR 262` / `CMR 361` 等と PT R2x xxx 品番)でも可。
+写真 3208 は ch1 = 0.0 mbar(排気中の 1000 hPa FS 隔膜計なら整合、Pirani なら不整合 — これも判別材料)。
+写真 3207 の青表示「10.0 mBar」パネルも同型の Pfeiffer コントローラに見える(2 台目?)。
+
+**通信(TPG 361/362 Communication Protocol BG 5510 BEN/D、取説 §4.6、2026-09-15 確認)**:
+- 口 = 背面 **Ethernet RJ45**(`ETH` で DHCP/静的 IP)/ **RS-485**(M12 5 極、FTDI 仮想 COM)/ USB-B。
+  Ethernet が最短(ケーブル 1 本、DAQ LAN に乗せる。TCP ポート番号は取説で要確認)。
+- 8N1、ホスト → `PR1<CR>` → 装置 `<ACK><CR><LF>` → ホスト `<ENQ>` → 装置 `a,sx.xxxxEsxx<CR><LF>`
+  (a: 0 OK / 1 underrange / 2 overrange / 3 sensor error / 4 off / 5 no sensor / 6 ident error)。
+  `PRX` で 2 ch 同時、`TID` で識別、`UNI` で単位、`ERR` でエラー語、`COM` で連続出力(使わない、ポーリングで十分)。
+- ドライバ = `type = "pfeiffer_tpg36x"`、`addr = "tcp://host:port" | "/dev/ttyUSBn"`、1 Hz で `PRX` + 起動時 `TID`/`UNI`。
+  status ≠ 0 は値を捨てずに **status 付きで記録**(silent 禁止)。テスト = TCP/pty の fake(ACK/ENQ 手順 +
+  status 1–6 + NAK)。**Sonnet 半日**。
+
+**着手条件**: 判別が `CMR/APR` のとき。`TPR/PCR` 等なら Phase 5 は起票しない(監視用途なら EL-PRESS で足りる)。
+
+## 7. 対象外だが見えた機器(将来候補、起票は要望が出てから)
+- NTRON Microx O₂ 計、Michell Easidew 露点計、Agilent AGD-100 — 接続口(4–20 mA / RS232 / RS485)は
+  現地確認が要る。O₂・露点はガス純度の指標なので価値は高い。
