@@ -33,6 +33,13 @@
 
 ## 次にやること(次セッションの入口)
 
+**2026-09-15 プログラム票 [080_mini_experiment_readiness.md](080_mini_experiment_readiness.md)(DRAFT)**:
+ユーザー方針「Mikolaj は mini にかかりっきり、次実験も mini → こちらでやれることをやりまくる」を受け、
+TODO + archive を棚卸しして A 本番機 / B 運転面 / C スローコントロール / D 較正・解析プロダクト(Warsaw
+待ち 3 点の自前化)/ E 073 残骸 の 5 群 + Wave 1〜4 の推奨順に整理。**§3 の 5 点(実験の時期・遠隔 run
+可否・新 DAQ 機時期・HV 機種・優先順位)の裁定で READY**。073 は #5 済(ROOT 6.08.06 / TPCReco =
+reference)、残りは 080 §1-E に吸収 — archive はユーザー指示待ち。
+
 **2026-09-14(午後)~~075~~ 完了 — root-sink raw ツリー出力(SPEC v1.28 §6.7)**: `--raw-tree` /
 TOML `raw_tree` で `run{N}_raw.root`(macros/graw2root.C と同一契約)を第 2 出力として書く。
 2025 mini 実 run で **graw2root.C と 108 events / 0 differences**、§12-8 変形は N=4・224/672 Mbps で
