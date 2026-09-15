@@ -15,7 +15,7 @@
 - **機器(写真)**: ① EL-FLOW Select 質量流量計/制御器「MFC 1」 ② EL-PRESS 圧力計/制御器
   「BPC NEW / PT-TPC」(BPC = back pressure controller → P-700 系) ③ EL-PRESS「TPC」(FLOW-BUS
   ラベル、ノードアドレスのロータリ SW 付き)。**model key はノードから読む**(113/2 等、§2.2)ので
-  銘板の転記は不要。
+  銘板の転記は不要。**圧の正はこの EL-PRESS**(±0.5 % FS 級で十分 — ガスエンジニア裁定、§6)。
 - **受け皿は SPEC に既にある**: `slowctl`(§1.1 v1.29、旧 psu。source_id 200、logbook レコード、§11
   トレンド)。**読み取り・記録・アラームのみ**(§1.5 安全境界、裁定済み)。
 - **物理側の効き目**: 圧力は v_drift ∝ E/p の分母。run 毎の圧力を logbook に残せば analyzeUVW.C の
@@ -156,30 +156,13 @@ Phase 1 は Phase 0 を待たずに着手できる(マニュアルの実例が�
   (ajvs.com/library/Pfeiffer_Operating_instructions_TPG361_TPG362_…Communication_Protocol.pdf)、TPR 280 取説
   (mpi-hd.mpg.de/gerda/TG04_TECHNICAL/manuals/bg805178be_d_web.pdf)。PDF は reference/ に置く(コミット不可)。
 
-## 6. Pfeiffer DualGauge(TPG 361/362)— **Phase 5(条件付き)**
+## 6. Pfeiffer DualGauge — **見送り(裁定 2026-09-15)**
 
-**動機**: EL-PRESS はフルスケール比精度(±0.5 % FS 級 → 130 mbar で ≈ 4 %)。v_drift ∝ E/p なので
-「run 記録の圧から v_drift を引く」には足りない。ゲージヘッドが **CMR(隔膜、0.2 % of reading)か
-APR(ピエゾ、ガス種非依存)なら、そちらが圧の正**になる。TPR/PCR/PKR(Pirani 系)は 100 mbar 超で
-ガス種依存かつ粗い(TPR 280: ±15 % Rd @ 1e-3…100 mbar)ので見送り。
-
-**系列の判別(現地、1 分)**: DualGauge の「Measurement channel」ボタンを押すと 4 秒間ゲージ識別が出る
-(TPG 361/362 取説 Fig. 26: `TPR/PCR`、`IKR`、`PKR`、`PBR`、`IMR`、`CMR/APR`、`NO IDENT`)。シリアルなら
-`TID` で同じ文字列。ヘッド側面の銘板(`TPR 280` / `APR 262` / `CMR 361` 等と PT R2x xxx 品番)でも可。
-写真 3208 は ch1 = 0.0 mbar(排気中の 1000 hPa FS 隔膜計なら整合、Pirani なら不整合 — これも判別材料)。
-写真 3207 の青表示「10.0 mBar」パネルも同型の Pfeiffer コントローラに見える(2 台目?)。
-
-**通信(TPG 361/362 Communication Protocol BG 5510 BEN/D、取説 §4.6、2026-09-15 確認)**:
-- 口 = 背面 **Ethernet RJ45**(`ETH` で DHCP/静的 IP)/ **RS-485**(M12 5 極、FTDI 仮想 COM)/ USB-B。
-  Ethernet が最短(ケーブル 1 本、DAQ LAN に乗せる。TCP ポート番号は取説で要確認)。
-- 8N1、ホスト → `PR1<CR>` → 装置 `<ACK><CR><LF>` → ホスト `<ENQ>` → 装置 `a,sx.xxxxEsxx<CR><LF>`
-  (a: 0 OK / 1 underrange / 2 overrange / 3 sensor error / 4 off / 5 no sensor / 6 ident error)。
-  `PRX` で 2 ch 同時、`TID` で識別、`UNI` で単位、`ERR` でエラー語、`COM` で連続出力(使わない、ポーリングで十分)。
-- ドライバ = `type = "pfeiffer_tpg36x"`、`addr = "tcp://host:port" | "/dev/ttyUSBn"`、1 Hz で `PRX` + 起動時 `TID`/`UNI`。
-  status ≠ 0 は値を捨てずに **status 付きで記録**(silent 禁止)。テスト = TCP/pty の fake(ACK/ENQ 手順 +
-  status 1–6 + NAK)。**Sonnet 半日**。
-
-**着手条件**: 判別が `CMR/APR` のとき。`TPR/PCR` 等なら Phase 5 は起票しない(監視用途なら EL-PRESS で足りる)。
+ガスエンジニアの見解(ユーザー経由): Pfeiffer のゲージは真空用で **100–200 mbar では役に立たない**。
+また EL-PRESS の **±0.5 % FS 級(130 mbar で ≈ 4 %)はこの分野では非常に良い精度**。
+→ **圧の正 = EL-PRESS の fMeasure(33/0)**。run 記録・v_drift の引き当てもこれを使う。Pfeiffer ドライバは
+起票しない(調査した TPG 361/362 プロトコル要点は履歴 `0da03dc` に残っている。必要になれば掘り出す)。
+黒赤の箱 = Pfeiffer ActiveLine ゲージヘッド(系列未確定、確定させる必要なし)。
 
 ## 7. 対象外だが見えた機器(将来候補、起票は要望が出てから)
 - NTRON Microx O₂ 計、Michell Easidew 露点計、Agilent AGD-100 — 接続口(4–20 mA / RS232 / RS485)は
