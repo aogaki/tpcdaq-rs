@@ -113,3 +113,4 @@ C++ サテライト(tools/): ROOT(root-sink)、ZeroC Ice(ecc-bridge、**encoding
 - 制御プレーン(ECC/getHwServer/FW)を改変しない。Ice **クライアント**として話すだけ。
 - オンラインの**正本**トラック再構成(R5 — **QA 目的のサンプリング再構成のみ SPEC §5.5/v1.25 でスコープ入り**(2026-09-02 裁定)、正本 TrackTree はオフライン)。TPCReco・オフライン解析チェーンに触らない(grawToEventTPC が我々の .graw を無改造で読めることで接続)。
 - TLS・認証の自前実装(SSH トンネル + 必要ならリバースプロキシ)。
+- **物理的作動(HV 電圧設定・ガス圧 setpoint・バルブ)を web 操作面に載せない**(SPEC §11 安全境界 v1.29、2026-09-15 裁定)。DAQ のスローコントロールは監視・記録・アラームのみ。作動はローカル(機器側 GUI / localhost 限定 CLI)。

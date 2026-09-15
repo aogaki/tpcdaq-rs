@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.28(2026-09-14 — 実装の正本)**
+- **status**: **v1.29(2026-09-15 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -151,6 +151,7 @@
   topology frame は来ない(decoder カウンタ 0)= 確定**、§13-5 実 ECC(20190315)をホストで
   ネイティブ起動し e2e 成立、§13-7 `extra_connections=0` 実測(mini)。初回 configure 7 s
   (261 s コールドスタートは再現せず)。データは frameType 2 rev 5(compact)278,784 B/frame。
+  / **v1.29(2026-09-15)安全境界を明文化(§11、ユーザー裁定 — TODO/079 の発端)**: web 操作面(controller REST / UI)は DAQ の run 制御と監視のみ。**物理的作動(HV・ガス圧 setpoint・バルブ)は web に経路を作らず、ローカル限定**。§1.1 の psu 行を「監視のみ」に改め、名称を slowctl(HV / ガス / 環境の汎用スローコントロール)へ。根拠 = token + passphrase は事故防止であって認証ではない(§3.1)、TLS/認証は自前実装しない。
   / **v1.28(2026-09-14)§6.7 を実装前に精度上げ(TODO/075 着手、Fable)**: adc ブロック数は
   「観測」ではなく**期待フラグメント集合(§6.3 `--expect`)から起動時に確定**(ブランチは最初の
   イベントより前に要る。incomplete 先頭でも縮まない)/ 期待集合外フラグメントは書かずに数える /
@@ -262,7 +263,7 @@
 | monitor | Rust | 1 | root-sink の PUB を購読し WS へ変換する**ゲートウェイ**(集計しない)。ジオメトリで UVW グリッド化(§5.4) |
 | controller | Rust | 1 | run 制御オーケストレーション、REST API、操作権トークン、run 番号採番、**JSONL 単一ライタ**(§8, §9) |
 | ecc-bridge | C++ | 1 | Ice クライアント(encoding 1.1 固定)。JSON REQ/REP ↔ ECC(§8.2) |
-| psu | Rust | 1 | (P6)HiVolta/HMP2020 のポーリングと制御。TRIP を controller へ投稿 |
+| slowctl(旧 psu) | Rust | 1 | (P6 / TODO/079)HiVolta/HMP2020・ガス圧(Bronkhorst)・環境(Arduino)の**監視のみ**(ポーリング、TRIP/ALARM を controller へ投稿、run 記録に直近値)。**setpoint 等の物理的作動は載せない**(§11 安全境界、v1.29) |
 
 - ドメイン核(framer / decode / geometry / ビルダ判定)は IO 非依存の純ロジックとして分離
   (root_sink の `eb_core.hpp`/`sink_core.hpp` 純ヘッダ方式、C++ 版 tpcdaq の pure-core と同じ流儀)。
@@ -1178,6 +1179,8 @@ Angular + Angular Material(delila-rs operator UI と同一スタック)。ビュ
   インタラクション(重ね描き/グリッド、チャンネル選択、間引き)は ECharts/自前 canvas が適する。
 - P3 起票時の確認項目: ①1 Hz redraw でのズーム状態保持(painter `updateObject` + redraw)、
   ②JSROOT ダークモードの Grafana 風ページへの馴染み、③ライセンス最終確認(MIT のはず)。
+
+**安全境界(v1.29、ユーザー裁定 2026-09-15)**: web 操作面(controller REST / UI)が持てるのは **DAQ の run 制御と監視だけ**。**物理的に壊せる作動 — HV の電圧設定、ガス圧の setpoint、バルブ — は web に経路を作らない**(controller にも UI にも API を置かない)。それらは機器側の手段(ベンダー GUI・フロントパネル)か、DAQ 機上の **localhost / Unix ドメインソケット限定の CLI** で、物理的にその場にいる人だけが行う。根拠: 操作権 token + passphrase は事故防止であり認証ではない(§3.1)、TLS/認証は自前実装しない方針。DAQ 側のスローコントロール(§1.1 slowctl)は読み取り・記録・アラームに徹する。
 
 デザイン規律: Atlassian Design 準拠、モニタは Grafana 風ダーク。破壊的操作は確認パターン。
 freeze は表示のみで、run Stop と視覚的に混同させないこと(§5.4)。
