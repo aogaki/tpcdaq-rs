@@ -55,6 +55,11 @@ Display(0x02)がそのまま答え**(同一タブに 3 面)。追加要望「272
 **パラメータ設定 UI(同日)**: xcfg 直接編集ではなく **JSON を正として xcfg を生成**(ユーザー裁定:
 JSON / 078 / ノブは「一様値 + 例外リスト」— 隠れているが黙らない)=
 [078_param_ui_json_xcfg.md](078_param_ui_json_xcfg.md)(READY、≈ 2 週間、着手指示待ち)。
+**2026-09-15 スローコントロール資料(reference/Arduino, reference/Bronkhorst)**: Bronkhorst EL-PRESS は
+RS232/ProPar で Linux から直接読める、Arduino MKR1000 + ENV shield は LabVIEW 製 Windows アプリで読んでいて
+スケッチのソースが無い → `slowctl`(P6 psu の一般化)として
+[079_slow_control_gas_env.md](079_slow_control_gas_env.md)(**DRAFT** — 機種・接続・用途の確認事項 4 点が
+埋まったら READY)。
 
 **2026-09-14 遠隔ベンチで実機初データ取得(Fable 5.1)**: DAQ ホスト GDED(daq@192.168.144.101、
 Ubuntu 24.04)に tpcdaq-rs をネイティブビルドし、実 ECC(getEccServer 20190315、ホストで
