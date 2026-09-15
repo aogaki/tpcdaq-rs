@@ -1,7 +1,7 @@
 # 079 — スローコントロール: ガス圧(Bronkhorst EL-PRESS / ProPar)+ 環境(Arduino MKR1000 + ENV shield)
 
 **Status: DRAFT**(2026-09-15 起票、Fable。発端 = ユーザーが `reference/Arduino` と `reference/Bronkhorst` に
-資料を投入。**§3 の確認事項が埋まってから READY**)
+資料を投入。**§3 の確認事項が埋まってから READY** — ユーザー裁定 2026-09-15「機種名などが判明してから実装」)
 
 ## 0. 結論(1 分で)
 
