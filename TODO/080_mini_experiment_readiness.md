@@ -28,8 +28,15 @@
   (Magboltz 拡散 ⊗ AGET 整形 223 ns)は既にある ③運転圧は run 毎に変わりうる(100 → 140–300 mbar)ので
   **B-4 の v_drift 自動導出は必須**(.dat の 0.724 焼き込みだと z スケールが圧に追随しない)。
 - **新 DAQ 機は来週からインストール・セットアップ開始**(ユーザー 2026-09-15)→ A-1 手順書は今週。
-- **mini の HV も HiVolta**(ユーザー 2026-09-15)→ C-3 は HiVolta 1 種で済む。通信仕様(マニュアル or
-  既存クライアントコード)を reference/HiVolta に置くのが前提(いまは無い)。
+- **mini の HV も HiVolta、AsAd 電源も同じ R&S HMP2020**(ユーザー 2026-09-15)。**資料は揃った(同日)**:
+  `reference/HiVolta/`(CAEN DT1415ET 取説 rev16 — `~/Workspace/TPC/TechnicalReports/HiVolta CAEN.pdf` から複写。
+  ASCII プロトコル §Remote Control: `$CMD:MON,CH:X,PAR:VMON|IMON|STATUS` → `#CMD:OK,VAL:*;*;…`、SET は LOCAL で
+  `#LOC:ERR` = **監視は LOCAL のまま無干渉**、STATUS bit 3 OVC / 4 OVV / 5 UNV、`PAR:BDILK` interlock。
+  + GET-AS-002-0004 AsAd Power Supply & Monitoring = AsAd 側の電圧系 VDD/VDD1 3.3 V、VDD2 2.5 V、VDD3 1.5 V、
+  リモートセンシング必須)/ `reference/HMP2020/`(HAMEG HMP シリーズ SCPI Programmers Manual + R&S HMP ユーザーマニュアル、
+  公開 PDF を取得。LAN = HO732、**SCPI raw socket :5025**、`INST:NSEL n` → `MEAS:VOLT?` / `MEAS:CURR?`、`OUTP?`、
+  `STAT:QUES:ISUM<n>:COND?`、`SYST:MIX` で前面パネル併用。HMP2020 は ch 1–2 のみ)。
+  073 #7 の netstat では **LV SCPI が .20/.21:5025 = HMP が 2 台 LAN 接続**で稼働していた。
 
 ## 1. 項目(実験で困ることから逆算。★ = 今すぐ・誰も待たない)
 
@@ -55,7 +62,7 @@
 |---|---|---|---|---|
 | C-1 | **079 Phase 1–2**(ProPar codec + slowctl 骨格 + logbook `slow`)。Phase 0(node scan)は現地でケーブルを挿すとき | 079 READY | Sonnet(★)+ Opus | 3 日 |
 | C-2 | 079 Phase 3 Arduino 自前スケッチ + ドライバ | 079 | Sonnet(MKR1000 が手元にあれば Mac で) | 1 日 |
-| C-3 | **HV 監視**(HiVolta — mini も同機種、裁定 2026-09-15。TCP :1470、LOCAL モードで無干渉・単一接続専有を確認して読むだけ、TRIP 記録) | SPEC §13-8(P6) | 通信仕様が reference/HiVolta に来たら Opus | 2 日 |
+| C-3 | **HV / LV 監視**: HiVolta DT1415ET(TCP :1470 ASCII、LOCAL のまま `$CMD:MON` で読むだけ、STATUS の OVC/OVV/UNV/TRIP と interlock を記録)+ **R&S HMP2020**(AsAd 電源、SCPI :5025、`MEAS:VOLT?/CURR?` + `OUTP?`、ch 毎の V/I と出力 ON/OFF を記録)。どちらも書き込み API を持たない | SPEC §13-8(P6)、reference/HiVolta、reference/HMP2020 | Opus(★ 資料は揃った。fake は TCP 応答器で縛れる) | 2 + 1 日 |
 | C-4 | UI トレンド(圧力・流量・HV・環境)+ ALARM バッジ | 079 Phase 4 | Sonnet | 2 日 |
 
 ### D. 較正・解析プロダクト(Warsaw 待ち 3 点の自前化 — 059 優先順位 Unfolding > ゲイン正規化 > ZS)
