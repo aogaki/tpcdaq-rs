@@ -25,6 +25,7 @@ Feed that file straight into analyzeUVW.C. graw2root.C stays the tool for
 | step | input | output | content |
 |---|---|---|---|
 | rateVsTime.C | .graw       | `*_rate.root/.png` | header-only scan (no waveforms): event rate vs time (bin width in s), inter-event Δt (linear + log10), DAQ restarts marked. CoBo timestamp = 10 ns ticks (checked against wall clock). Fast: 10k frames in seconds |
+| chargeVsTime.C | `*_uvw.root` + `*_raw.root` | `*_charge_vs_time.root/.png` | joins per-event charge (analyzeUVW) with the CoBo timestamp (graw2root): median charge / hits per time bin, early-vs-late charge spectra, rate. Tells a counting effect (decaying source) from a signal effect (attachment, gain) |
 | graw2root.C  | .graw       | `*_raw.root`    | tree `raw`: PURE lossless conversion - full waveforms `adc[4][68][512]`, eventId, 48-bit eventTime. No pedestal / threshold / geometry. Reads frameType 1 (2018, 4-byte items) and frameType 2 (rev 5 compact, 2-byte items — what tpcdaq-rs/zCoBo write today) |
 | analyzeUVW.C | `*_raw.root` | `*_uvw.root`   | ALL analysis: pedestal, threshold, channel map, z scale; tree `uvw`: per-view charge, signal width, drift-slice charge centroids; histograms `hCharge`, `hWidth_U/V/W`; example UVW canvases |
 | makeTracks.C | `*_uvw.root` | `*_tracks.root` | tree `tracks`: straight-line 3D track per event (start/end, direction, length, charge, dEdx = charge/length) |
