@@ -41,7 +41,10 @@ TODO + archive を棚卸しして A 本番機 / B 運転面 / C スローコン�
 Garfield++)の `_raw.root` が 075 raw ツリーと同一契約 = シミュと DAQ が同じ解析チェーンに乗る(080 D-8)**。
 **Wave 1 着手(2026-09-17、ユーザー「進められる話を進めたい」)**: 6 レーン並列(worktree 隔離) — 077(Sonnet)/ 079 Phase 1
 (Sonnet、079 §2.5)/ [081_calib_tables.md](081_calib_tables.md)(Sonnet)/ [082_logbook_to_runs_yaml.md](082_logbook_to_runs_yaml.md)
-(Sonnet)/ 076 Phase 0(Sonnet)+ Phase 1(Opus)。Fable = A-1 新機手順書 + RUNBOOK 骨子 + 完了時レビュー・マージ。073 は #5 済(ROOT 6.08.06 / TPCReco =
+(Sonnet)/ 076 Phase 0(Sonnet)+ Phase 1(Opus)。Fable = A-1 新機手順書 + RUNBOOK 骨子 + 完了時レビュー・マージ。
+**進捗(同日)**: 077 マージ `3a973f7`(demo 目視待ち)/ 076 Phase 0 マージ `cad5a4c` / ~~082~~ 完了 `96e0997` → archive /
+docs: [NEW_DAQ_SETUP_ja.md](../docs/NEW_DAQ_SETUP_ja.md) v0.1 + [RUNBOOK_ja.md](../docs/RUNBOOK_ja.md) v0.1(`b818730`)。
+~~081~~ 完了 `87a65da` → archive(pedestal 1088 ch 全数一致、cargo 514)。残 = 079-1 / 076-1(ゴールデン一致テスト追加中)。073 は #5 済(ROOT 6.08.06 / TPCReco =
 reference)、残りは 080 §1-E に吸収 — archive はユーザー指示待ち。
 
 **2026-09-14(午後)~~075~~ 完了 — root-sink raw ツリー出力(SPEC v1.28 §6.7)**: `--raw-tree` /

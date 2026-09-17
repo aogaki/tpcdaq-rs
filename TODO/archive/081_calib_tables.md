@@ -1,6 +1,6 @@
 # 081 — 較正表ツール `calib`(pedestal / pulser run → per-channel JSON)
 
-**Status: READY**(2026-09-17 起票 Fable、080 D-1。068 のサーベイコード `reference/_spike/asset_survey`
+**Status: COMPLETED**(2026-09-17 実装 Sonnet レーン → Fable レビュー → main マージ `87a65da`。起票同日 Fable、080 D-1。068 のサーベイコード `reference/_spike/asset_survey`
 (HEAD 凍結 worktree に path 依存するスパイク)を**リポ本体の bin に昇格**して、実験中に毎回同じ表が出るようにする)
 
 ## 目的
@@ -45,3 +45,20 @@ pedestal run と pulser run(実機 .graw、AsAd 毎ファイル)から **per-cha
 
 - 閾値の xcfg への流し込み(078)、ゲイン正規化の適用(D-2)、ROOT 出力、サンプリング。
 - `reference/_spike/asset_survey` の削除・変更(参照のみ。worktree 依存なので触らない)。
+
+## 結果(2026-09-17、Mac、main `87a65da`)
+
+- 実装: `src/calib/{mod,pedestal,pulser,table}.rs`(≈1,010 行)+ `src/bin/calib.rs`(128 行)、本体 `Framer` / `Decoder` 直(高速経路なし)。
+  出力 JSON = `{meta, channels[]}`、(asad, aget, ch) 昇順、`meta` に k / MAD / 入力一覧 / イベント数 / 日付 / 版。
+- テスト: **cargo test(main)514 passed / 0 failed**(レーン内では 468 → 482、+14: unit 8 / `tests/calib_synthetic.rs` 4 /
+  `tests/calib_real_graw.rs` 2 env-gated)。`cargo fmt --check` / `cargo clippy --tests -- -D warnings` clean。
+- 実データ回帰(`TPCDAQ_EXP_DATA_2026`、run は `run_ledger.csv` で選定): pedestal `2026-08-16T17:37:09.555`(467 events)→
+  **`B_pedestal_channel_stats.csv` と 1088 ch 全数一致、max diff mean 5.0e-5 / rms 5.0e-5 ADC**。pulser `2026-08-17T08:09:11.852`
+  (76 events)→ 1088 ch 全数照合、**max diff 8.63 ADC = 0.27 %**(定義差: 本ツールは per-event 中央値、068 CSV は `amp_mean` の平均 —
+  Fable 裁定: **中央値を採用**(外れ値に頑健)、0.27 % は統計量の差として期待どおり。相対ゲイン(`C_pulser_gain_map.csv`)の
+  照合は D-2 の適用時に)。所要: release で pedestal 7.7 s / pulser 0.2 s、**debug `cargo test` では pedestal 233 s**(env 無しでは
+  スキップされるので既定のテスト時間には影響しない。最適化は発注どおり見送り — 必要になれば release プロファイルで回す)。
+- 裁定した記述漏れ: `saturated` = 飽和率 ≥ 0.5(068: FPN 98.7 % / 信号 0 %)/ `runs` = そのチャンネルが含まれた入力ファイル数
+  (ファイル名からのラン推定はしない)/ merge は両方に存在する ch のみ、片側欠落は stderr 警告 — いずれも承認。
+- 使い方: `calib pedestal <graw...> --out pedestal.json` / `calib pulser <graw...> --out pulser.json` /
+  `calib merge pedestal.json pulser.json --out calib.json --k 5`。
