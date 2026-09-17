@@ -208,3 +208,18 @@ Phase 1 は Phase 0 を待たずに着手できる(マニュアルの実例が�
 ## 7. 対象外だが見えた機器(将来候補、起票は要望が出てから)
 - NTRON Microx O₂ 計、Michell Easidew 露点計、Agilent AGD-100 — 接続口(4–20 mA / RS232 / RS485)は
   現地確認が要る。O₂・露点はガス純度の指標なので価値は高い。
+
+## 結果(Phase 1 — ProPar codec / link / fake、2026-09-17、Sonnet レーン → main `617ab71`)
+
+- 実装: `src/slowctl/{mod,propar,link,fake}.rs`(919 + 336 + 165 行)、`Cargo.toml` に feature `slowctl-fake`(依存追加なし)。
+  書き込みコマンド(01)は型として存在しない。`link.rs` は `Read + Write` ジェネリック(serialport は Phase 2 で差す)。
+- テスト: **cargo test(main)578 → 614 passed / 0 failed**(レーン内 472 → 508、+36: propar 28 / link 5 / fake 3)。fmt / clippy clean。
+  ゴールデン = 9.17.027 §3.9 の実例 7 種(measure p.24 / fmeasure p.24 / capacity unit p.26 / fluid name p.25 / serial number p.30 /
+  valve output p.26 / iostatus p.31、hex を一字も変えず)+ エラー表 `:01xx` 全 7 種(p.13)+ status 表(p.17)+ 3 値 chaining
+  (§3.7/§3.8 のビット配置から手計算)+ 壊れ行 6 種 + fake 経由の node scan(応答 3 / 無応答 2、カウンタまで断定)。
+- 承認した逸脱: ①`parse_reply(line, request)` — Float と Long がワイヤ上同じ型タグ(40h)で行だけでは復号不能 ②index は常に
+  FBnr(§3.8 の注記)③decode は chain ビット駆動で process byte 省略の有無を自動判定、encode は常に process byte を起こす。
+- **マニュアルの不備(実装に反映せず、現地 Phase 0 で確認)**: §3.9.9 の hex に `no1` 混入 / §3.9.6 はページ跨ぎで崩れ /
+  §3.9.5 の fmeasure・valve output の Answer が node 03(消し忘れ)/ **serial number の Answer は長さバイト 00 のまま 11 B の
+  実データが続く**(実機の挙動か誤植か不明 — node scan で 113/3 を読んで確かめる)。
+- Phase 2(slowctl 骨格、Opus)の入口: `ProParLink::new(port)` に `serialport` の `Box<dyn SerialPort>`(Read + Write)を渡すだけ。
