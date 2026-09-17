@@ -44,7 +44,9 @@ Garfield++)の `_raw.root` が 075 raw ツリーと同一契約 = シミュと D
 (Sonnet)/ 076 Phase 0(Sonnet)+ Phase 1(Opus)。Fable = A-1 新機手順書 + RUNBOOK 骨子 + 完了時レビュー・マージ。
 **進捗(同日)**: 077 マージ `3a973f7`(demo 目視待ち)/ 076 Phase 0 マージ `cad5a4c` / ~~082~~ 完了 `96e0997` → archive /
 docs: [NEW_DAQ_SETUP_ja.md](../docs/NEW_DAQ_SETUP_ja.md) v0.1 + [RUNBOOK_ja.md](../docs/RUNBOOK_ja.md) v0.1(`b818730`)。
-~~081~~ 完了 `87a65da` → archive(pedestal 1088 ch 全数一致、cargo 514)。076 Phase 1 マージ `9fe6c2f`(cargo **578**、ゴールデン 9 本全一致)。079 Phase 1 マージ `617ab71`(cargo **614**)。残 = 077 の demo 目視のみ。**次 = 076 Phase 2**(Ecc プロキシ + core 移植 + bridge bin、Opus)。073 は #5 済(ROOT 6.08.06 / TPCReco =
+~~081~~ 完了 `87a65da` → archive(pedestal 1088 ch 全数一致、cargo 514)。076 Phase 1 マージ `9fe6c2f`(cargo **578**、ゴールデン 9 本全一致)。079 Phase 1 マージ `617ab71`(cargo **614**)。**SPEC v1.30**(`55a632a`)。残 = 077 の demo 目視(ユーザー、demo 起動中)のみ → archive。
+**Wave 1 完了後の次**: 076 Phase 2(Ecc プロキシ + core 移植 + bridge bin、Opus)/ 079 Phase 2(slowctl 骨格、Opus)/ 078(Opus レーン A)/ D-3 パルサースキャン(GDED)/ 新機セットアップ(来週)。
+レーン運用の教訓: Agent の worktree は古いベースで切られることがある → 発注時に「`git merge --ff-only main` してから着手」を明記(メモリ agent-worktree-stale-base)。**次 = 076 Phase 2**(Ecc プロキシ + core 移植 + bridge bin、Opus)。073 は #5 済(ROOT 6.08.06 / TPCReco =
 reference)、残りは 080 §1-E に吸収 — archive はユーザー指示待ち。
 
 **2026-09-14(午後)~~075~~ 完了 — root-sink raw ツリー出力(SPEC v1.28 §6.7)**: `--raw-tree` /
