@@ -35,3 +35,4 @@ macros/data
 # Derived from the real detector geometry — local only, never commit
 macros/channel_map.csv
 macros/pads.csv
+.angular/

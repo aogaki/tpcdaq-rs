@@ -48,3 +48,7 @@ pub mod monitor;
 
 /// JSONL ログブック → minitpc-analysis `runs.yaml` 生成(純関数)。TODO/082。
 pub mod runs_yaml;
+
+/// 較正表ツール `calib`(pedestal / pulser run → per-channel の baseline/noise/gain/flags)。
+/// TODO/081。068 のサーベイスパイク(`reference/_spike/asset_survey`)の定義を再実装で踏襲する。
+pub mod calib;
