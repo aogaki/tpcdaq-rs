@@ -8,10 +8,18 @@
  */
 import { createHistogram } from 'jsroot/core';
 
-import type { Histo1dMessage, Histo2dMessage, UvwMessage, WsHeader } from '../ws/wire';
+import type {
+  Histo1dMessage,
+  Histo2dMessage,
+  UvwMessage,
+  WaveformsMessage,
+  WsHeader,
+} from '../ws/wire';
 import {
   HISTO_ROWS,
   PLANE_NAMES,
+  asadEventMismatch,
+  asadPanelSpec,
   buildPanelObject,
   histoPanelSpec,
   panelDrawOption,
@@ -338,5 +346,100 @@ describe('描画オプション(log 切替)', () => {
     expect(panelDrawOption(uvw, true)).toBe('colz;logz;nostat');
     expect(panelDrawOption(histo1d, false)).not.toContain('nostat');
     expect(panelDrawOption(histo1d, true)).not.toContain('nostat');
+  });
+});
+
+describe('077: 0x03 Waveforms → TH2D(AsAd 電子回路座標。ジオメトリなし、転置なし)', () => {
+  // 非対称: nAget=2, nCh=2, nBuckets=2(4 channel × 2 bucket)。
+  // channel = aget*nCh+ch(0..3)。058 と同じ数値(100,140/200,210/300,302)を使い、
+  // 4本目の channel は全セル 0(読み出しの無い channel の確認、028/058 と同じ規則)。
+  //   channel0(aget0,ch0): [100,140] → baseline=(100+140)/2=120 → -20, +20
+  //   channel1(aget0,ch1): [200,210] → baseline=205           → -5,  +5
+  //   channel2(aget1,ch0): [300,302] → baseline=301           → -1,  +1
+  //   channel3(aget1,ch1): [0,0]     → baseline=0(未読)        →  0,   0
+  const message: WaveformsMessage = {
+    kind: 'waveforms',
+    header: { msgType: 0x03, incomplete: false, runNumber: 7, eventNumber: 42 },
+    cobo: 0,
+    asad: 1,
+    nAget: 2,
+    nCh: 2,
+    nBuckets: 2,
+    adc: new Uint16Array([100, 140, 200, 210, 300, 302, 0, 0]),
+  };
+
+  it('x = time bucket 0..nBuckets、y = channel 0..nAget*nCh(どちらもメッセージ由来・転置なし)', () => {
+    const histo = buildPanelObject(createHistogram, message, asadPanelSpec(0, 1));
+    expect(histo.fXaxis.fNbins).toBe(2); // nBuckets
+    expect(histo.fXaxis.fXmin).toBe(0);
+    expect(histo.fXaxis.fXmax).toBe(2);
+    expect(histo.fYaxis.fNbins).toBe(4); // nAget*nCh(手計算: 2*2=4)
+    expect(histo.fYaxis.fXmin).toBe(0);
+    expect(histo.fYaxis.fXmax).toBe(4);
+    expect(histo.fName).toBe('AsadCobo0Asad1');
+  });
+
+  it('adc[(aget*nCh+ch)*nBuckets+bucket] - baseline(channel) が fArray[(channel+1)*(nBuckets+2)+bucket+1] に入る', () => {
+    const histo = buildPanelObject(createHistogram, message, asadPanelSpec(0, 1));
+    // 手計算: fNcells = (2+2)*(4+2) = 24、行の刻み = nBuckets + 2 = 4
+    expect(histo.fNcells).toBe(24);
+    expect(histo.fArray[5]).toBe(-20); // channel0, bucket0
+    expect(histo.fArray[6]).toBe(20); // channel0, bucket1
+    expect(histo.fArray[9]).toBe(-5); // channel1, bucket0
+    expect(histo.fArray[10]).toBe(5); // channel1, bucket1
+    expect(histo.fArray[13]).toBe(-1); // channel2, bucket0
+    expect(histo.fArray[14]).toBe(1); // channel2, bucket1
+    expect(histo.fArray[17]).toBe(0); // channel3(未読), bucket0
+    expect(histo.fArray[18]).toBe(0); // channel3(未読), bucket1
+  });
+
+  it('負値は 0 に切り上げない(058 と同じ規則をここでも適用)', () => {
+    const histo = buildPanelObject(createHistogram, message, asadPanelSpec(0, 1));
+    const negatives = [...Array(histo.fNcells).keys()].filter((i) => histo.fArray[i] < 0);
+    // 手計算: channel0/1/2 の bucket0 の 3 セルが負(-20 / -5 / -1)。
+    expect(negatives).toEqual([5, 9, 13]);
+  });
+
+  it('(b) nAget/nCh/nBuckets はメッセージ由来(焼き込みなし)', () => {
+    const other: WaveformsMessage = {
+      ...message,
+      nAget: 1,
+      nCh: 1,
+      nBuckets: 5,
+      adc: new Uint16Array([1, 2, 3, 4, 5]),
+    };
+    const histo = buildPanelObject(createHistogram, other, asadPanelSpec(0, 1));
+    expect(histo.fXaxis.fNbins).toBe(5); // nBuckets
+    expect(histo.fYaxis.fNbins).toBe(1); // nAget*nCh = 1*1
+  });
+
+  it('asadPanelSpec は cobo/asad をタイトルに埋め込み、y 軸は AGET×68+ch の説明文', () => {
+    const spec = asadPanelSpec(0, 0);
+    expect(spec.title).toBe('AsAd cobo0/asad0 — raw ADC (baseline-subtracted)');
+    expect(spec.xTitle).toBe('time bucket');
+    expect(spec.yTitle).toBe('AGET×68 + ch');
+
+    const other = asadPanelSpec(2, 3);
+    expect(other.title).toBe('AsAd cobo2/asad3 — raw ADC (baseline-subtracted)');
+    expect(other.name).toBe('AsadCobo2Asad3');
+  });
+
+  it('draw option は Uvw と同じ(2D 系 = colz;nostat)', () => {
+    expect(panelDrawOption(message, false)).toBe('colz;nostat');
+    expect(panelDrawOption(message, true)).toBe('colz;logz;nostat');
+  });
+});
+
+describe('077 (c): AsAd の event# が UVW の表示中 event# と食い違う場合の可視化', () => {
+  it('番号が同じなら不一致ではない', () => {
+    expect(asadEventMismatch(42, 42)).toBe(false);
+  });
+
+  it('番号が違えば不一致(0x03 が drop-oldest で落ちた等)', () => {
+    expect(asadEventMismatch(41, 42)).toBe(true);
+  });
+
+  it('UVW 側がまだ何も表示していない(null)ときは不一致と判定しない', () => {
+    expect(asadEventMismatch(41, null)).toBe(false);
   });
 });
