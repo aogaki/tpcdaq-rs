@@ -475,7 +475,11 @@ impl Reply {
                 out.write_byte(ReplyStatus::UserException.as_byte());
                 let mut slice = OutputStream::new();
                 // compact format(Ice 3.7 の既定): slice 1 枚・slice size なし。
-                slice.write_byte(SLICE_FLAG_IS_LAST_SLICE | SLICE_FLAG_HAS_TYPE_ID_STRING);
+                // flags は **0x20(IS_LAST_SLICE のみ)** — 実 ECC(3.7.11)の
+                // CmdException 実バイトがこれ(tests/fixtures/ice/README.md)。
+                // 例外 slice の type id は flags のビットに関係なく常に平文字列で
+                // 続く(type-id のビットは class インスタンス専用)。
+                slice.write_byte(SLICE_FLAG_IS_LAST_SLICE);
                 slice.write_string(type_id)?;
                 slice.write_bytes(body);
                 out.write_encapsulation(slice.as_bytes())?;
@@ -544,7 +548,10 @@ pub const SLICE_FLAG_IS_LAST_SLICE: u8 = 0x20;
 /// その後ろの生バイトを取り出す。
 ///
 /// - 例外 slice の type id は **常に string**(Ice 自身の decoder も flags の
-///   type-id ビットを見ずに string を読む)。compact / sliced のどちらでも同じ。
+///   type-id ビットを見ずに string を読む。type-id のビットは class インスタンス
+///   専用)。compact / sliced のどちらでも同じ。実 ECC 3.7.11 の CmdException は
+///   **flags=0x20(IS_LAST_SLICE のみ)なのに type id 文字列が続く** —
+///   tests/fixtures/ice/real_ecc_describe_cmdexception_rep.bin が一次証拠。
 /// - `SLICE_FLAG_HAS_SLICE_SIZE`(sliced format)なら type id の後ろに int32 の
 ///   slice size が入るので読み飛ばす。**size の数え方(自分自身を含むか)には
 ///   解釈幅があるため、読み飛ばしの寸法には使わない** — メンバはそのまま続く。
@@ -779,10 +786,12 @@ mod tests {
     }
 
     /// compact format(Ice 3.7 の既定): slice は 1 枚、slice size なし。
+    /// 実 ECC 3.7.11 の flags は **0x20**(type-id ビットは立たないのに type id
+    /// 文字列が続く — Phase 0 ゴールデンで確定)。
     #[test]
     fn a_user_exception_in_compact_format_yields_the_type_id_and_the_members() {
         let mut payload = Vec::new();
-        payload.push(SLICE_FLAG_IS_LAST_SLICE | SLICE_FLAG_HAS_TYPE_ID_STRING); // 0x21
+        payload.push(SLICE_FLAG_IS_LAST_SLICE); // 0x20 — 実 ECC の実バイト
         payload.push(CMD_EXCEPTION.len() as u8); // 25 = 0x19
         payload.extend_from_slice(CMD_EXCEPTION.as_bytes());
         payload.extend_from_slice(&[0x04, b'b', b'o', b'o', b'm']); // reason = "boom"
@@ -790,6 +799,23 @@ mod tests {
         let (type_id, body) = parse_user_exception(&payload).unwrap();
         assert_eq!(type_id, CMD_EXCEPTION);
         assert_eq!(body, vec![0x04, b'b', b'o', b'o', b'm']);
+    }
+
+    /// type-id ビットが立っていても解釈は変わらない(ビットを見ずに string を読む)。
+    #[test]
+    fn a_user_exception_with_a_type_id_flag_bit_parses_the_same_way() {
+        for flags in [
+            SLICE_FLAG_IS_LAST_SLICE | SLICE_FLAG_HAS_TYPE_ID_STRING, // 0x21
+            SLICE_FLAG_IS_LAST_SLICE | SLICE_FLAG_HAS_TYPE_ID_INDEX,  // 0x22
+        ] {
+            let mut payload = vec![flags, CMD_EXCEPTION.len() as u8];
+            payload.extend_from_slice(CMD_EXCEPTION.as_bytes());
+            payload.extend_from_slice(&[0x04, b'b', b'o', b'o', b'm']);
+
+            let (type_id, body) = parse_user_exception(&payload).unwrap();
+            assert_eq!(type_id, CMD_EXCEPTION);
+            assert_eq!(body, vec![0x04, b'b', b'o', b'o', b'm']);
+        }
     }
 
     /// sliced format: slice size 付き(TODO/076 §2.2 の「両対応」)。
