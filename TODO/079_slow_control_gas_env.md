@@ -136,6 +136,37 @@ DAQ 機 --USB--> USB-RS232(9.09.122 相当) --T-part 7.03.366--> [先頭機器 D
   (`{"t_c":..,"rh":..,"p_hpa":..,"lux":..,"uva":..,"uvb":..}`)。WiFi は使わない(KISS)。
 - ドライバは行を読んで Sample に変換するだけ。フォーマット違反は数える。
 
+## 2.5 Phase 1 発注(ProPar codec + fake + node scan — Sonnet、2026-09-17 着手)
+
+**範囲 = 純粋なコーデックと同期リンク。シリアルポートも tokio も component 配線も入れない**(Phase 2)。
+
+- `src/slowctl/mod.rs`(`pub mod propar; pub mod link;`)+ `src/lib.rs` に `pub mod slowctl;`。
+- `src/slowctl/propar.rs` — **IO 無し**の純関数:
+  - `Request { node: u8, items: Vec<ReadItem{process:u8, param:u8, ty: ParType}> }` → ASCII 行
+    (`:` + 2 桁 hex ×N + `\r\n`。長さ・node・command 04(read)・chaining のビット規則は 9.17.027 §3.5–3.7)。
+    書き込み(command 01)は**作らない**(型として存在させない — §1.5)。
+  - `parse_reply(line) -> Result<Reply, ProParError>`: `:01xx` エラー(コード表 §3.6)、length 不一致、
+    hex 不正、node 不一致は全て `Err`(silent 禁止)。値の型 = u8 / u16 / u32 / f32(IEEE、big-endian)/
+    string(長さ付き)。**chaining の複数値**を順に返す。
+  - 便利関数: `ident_request(node)`(113/12 u8, 113/2 string, 113/3 string, 113/5 string, 113/6 string)、
+    `capacity_request(node)`(1/13 f32, 1/31 string, 1/17 string, 1/14 u8)、`measure_request(node)`
+    (33/0 f32, 33/3 f32, 1/0 u16, 1/1 u16, 114/1 u32, 33/7 f32, 1/20 u8, 1/4 u8)。
+- `src/slowctl/link.rs` — 同期リンク `ProParLink<T: Read + Write>`: `exchange(&Request) -> Result<Reply>`
+  (1 行送って `\r\n` まで読む。`T` のタイムアウトは呼び出し側が設定 — 後で `serialport` がそのまま入る)、
+  `scan(nodes: impl Iterator<Item=u8>) -> Vec<(u8, Ident)>`(無応答 = タイムアウト `Err` はスキップして数える)。
+  カウンタ `LinkStats { ok, timeout, malformed, node_mismatch }` を持ち、`Display` で 1 行に出す。
+- **fake** `src/slowctl/fake.rs`(`#[cfg(any(test, feature = "slowctl-fake"))]`): `FakeProPar` = `Read + Write`
+  を実装するインメモリ応答器。ノード表 `{node → {(process,param) → 値}}` を持ち、`node 128` は先頭ノードとして
+  応答、未知ノードは無応答(EOF ではなく `WouldBlock`/タイムアウト相当)、故意のエラー応答・壊れ行・遅延を
+  設定できる。
+- **テスト(TDD、`cargo test slowctl`)**: ①9.17.027 §3.9 の実例をそのまま hex ゴールデンに(reference/Bronkhorst/
+  917027-Manual-RS232-interface.pdf を `pdftotext -layout` で読む。serial number / capacity unit / fluid name /
+  measure の例。**文面の hex 文字列を一字も変えずに定数化**)②エラー表 `:01xx` 全コード ③float の
+  big-endian 復号(手計算値)④chaining の 3 値 ⑤fake 経由の node scan(3 ノード + 無応答 2 ノード、
+  カウンタの値まで断定)⑥壊れ行(長さ矛盾、奇数 hex、CR 無し)は `Err` で、カウンタ `malformed` が増える。
+- **やらないこと**: 書き込みコマンド、serialport 依存の追加、slowctl コンポーネント本体、TOML、logbook。
+- 完了条件: `cargo fmt && cargo clippy --tests -- -D warnings && cargo test` green、テスト数の増分を結果節に。
+
 ## 3. 確認事項(着手は止めない — 既定で進め、現地で確定)
 1. ~~Bronkhorst の機種・接続~~ → **判明**(§1.1–1.2)。残: 先頭機器・ノード番号(Phase 0 で scan)、
    **RS232 の現在の相手 PC**(第 2 local host が使えるかで運用が変わる、§1.5)。

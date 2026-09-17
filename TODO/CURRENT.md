@@ -39,7 +39,9 @@ TODO + archive を棚卸しして A 本番機 / B 運転面 / C スローコン�
 待ち 3 点の自前化)/ E 073 残骸 の 5 群 + Wave 1〜4 の推奨順に整理。**裁定: 実験 = ¹⁰B ターゲット + γ → α(時期未定)、
 遠隔 run は大抵可、新 DAQ 機は来週から、HV = HiVolta、優先順位は案どおり**。**別リポ ~/test/gas-pressure-test(Geant4 +
 Garfield++)の `_raw.root` が 075 raw ツリーと同一契約 = シミュと DAQ が同じ解析チェーンに乗る(080 D-8)**。
-Wave 1(今週)= A-1 新機手順書(Fable)/ 077 / 079-1 / 076-0+1 / 較正表ツール / runs.yaml / RUNBOOK 骨子 — **着手指示待ち**。073 は #5 済(ROOT 6.08.06 / TPCReco =
+**Wave 1 着手(2026-09-17、ユーザー「進められる話を進めたい」)**: 6 レーン並列(worktree 隔離) — 077(Sonnet)/ 079 Phase 1
+(Sonnet、079 §2.5)/ [081_calib_tables.md](081_calib_tables.md)(Sonnet)/ [082_logbook_to_runs_yaml.md](082_logbook_to_runs_yaml.md)
+(Sonnet)/ 076 Phase 0(Sonnet)+ Phase 1(Opus)。Fable = A-1 新機手順書 + RUNBOOK 骨子 + 完了時レビュー・マージ。073 は #5 済(ROOT 6.08.06 / TPCReco =
 reference)、残りは 080 §1-E に吸収 — archive はユーザー指示待ち。
 
 **2026-09-14(午後)~~075~~ 完了 — root-sink raw ツリー出力(SPEC v1.28 §6.7)**: `--raw-tree` /
