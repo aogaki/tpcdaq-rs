@@ -139,6 +139,8 @@ export class JsrootPanel implements OnDestroy {
         return `${message.nx} × ${message.ny}`;
       case 'uvw':
         return `${message.nStrips} strips × ${message.nBuckets} buckets`;
+      case 'waveforms':
+        return `${message.nAget * message.nCh} ch × ${message.nBuckets} buckets`;
     }
   });
 

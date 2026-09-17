@@ -29,7 +29,7 @@
  * ch 数・ビン数・面の本数は**すべてメッセージ由来**(プロジェクト不変条件)。
  */
 
-import type { Histo1dMessage, Histo2dMessage, UvwMessage } from '../ws/wire';
+import type { Histo1dMessage, Histo2dMessage, UvwMessage, WaveformsMessage } from '../ws/wire';
 
 /** JSROOT のヒストオブジェクトのうち、ここで触る分だけ。 */
 export interface RootAxis {
@@ -67,8 +67,8 @@ export interface PanelSpec {
   readonly yTitle: string;
 }
 
-/** 1 枚のパネルに描けるメッセージ(9 ヒスト + イベント表示の Uvw)。 */
-export type PanelMessage = Histo1dMessage | Histo2dMessage | UvwMessage;
+/** 1 枚のパネルに描けるメッセージ(9 ヒスト + イベント表示の Uvw + 077 の AsAd Waveforms)。 */
+export type PanelMessage = Histo1dMessage | Histo2dMessage | UvwMessage | WaveformsMessage;
 
 /** SPEC §10.2: plane 0=U, 1=V, 2=W。 */
 export const PLANE_NAMES = ['U', 'V', 'W'] as const;
@@ -136,6 +136,16 @@ export function uvwPanelSpec(planeIndex: number): PanelSpec {
   };
 }
 
+/** イベント表示(0x02 Uvw)の下の 4 枚目 — AsAd 電子回路座標(077)。軸は共通で x = time bucket / y = AGET×nCh+ch。 */
+export function asadPanelSpec(cobo: number, asad: number): PanelSpec {
+  return {
+    name: `AsadCobo${cobo}Asad${asad}`,
+    title: `AsAd cobo${cobo}/asad${asad} — raw ADC (baseline-subtracted)`,
+    xTitle: 'time bucket',
+    yTitle: 'AGET×68 + ch',
+  };
+}
+
 /** メッセージの種類で分けて JSROOT オブジェクトを組み立てる。 */
 export function buildPanelObject(
   create: HistFactory,
@@ -149,6 +159,8 @@ export function buildPanelObject(
       return buildHisto2d(create, message, spec);
     case 'uvw':
       return buildUvw(create, message, spec);
+    case 'waveforms':
+      return buildAsad(create, message, spec);
   }
 }
 
@@ -276,4 +288,53 @@ function buildUvw(create: HistFactory, message: UvwMessage, spec: PanelSpec): Ro
   }
   histo.fEntries = sum;
   return histo;
+}
+
+/**
+ * `0x03 Waveforms` → TH2D(077: モニタタブ 4 枚目、AsAd 1 枚の電子回路座標)。
+ * 軸は **x = time bucket 0..nBuckets、y = channel 0..nAget*nCh**(ジオメトリを通さないので
+ * 転置は不要 — ワイヤは既に aget-major = channel-major、strip のような並べ替えは無い)。
+ * ch 数・AGET 数・bucket 数は**すべてメッセージ由来**(プロジェクト不変条件)。
+ *
+ * 値は `adc - baseline(channel)`(058 と同じ規則。先頭 25 cell 平均、負値保持)。
+ * FPN・未マップ ch もそのまま見える(ジオメトリを一切適用しない)。
+ */
+function buildAsad(create: HistFactory, message: WaveformsMessage, spec: PanelSpec): RootHisto {
+  const { nAget, nCh, nBuckets } = message;
+  const nChannels = nAget * nCh;
+  const histo = create('TH2D', nBuckets, nChannels);
+  applySpec(histo, spec);
+  histo.fXaxis.fXmin = 0;
+  histo.fXaxis.fXmax = nBuckets;
+  histo.fYaxis.fXmin = 0;
+  histo.fYaxis.fXmax = nChannels;
+
+  const stride = nBuckets + 2;
+  let sum = 0;
+  // ワイヤは channel-major(`idx = channel*nBuckets + bucket`、channel = aget*nCh+ch)、
+  // ROOT も channel が外側(y)— strip のような転置は不要。
+  for (let channel = 0; channel < nChannels; channel++) {
+    const src = channel * nBuckets;
+    const baseline = stripBaseline(message.adc, src, nBuckets);
+    const dst = (channel + 1) * stride + 1;
+    for (let b = 0; b < nBuckets; b++) {
+      const value = message.adc[src + b] - baseline;
+      histo.fArray[dst + b] = value;
+      sum += value;
+    }
+  }
+  histo.fEntries = sum;
+  return histo;
+}
+
+/**
+ * 077(4): AsAd パネルの event# が、UVW 側の**表示中**の event# と食い違うかどうか。
+ *
+ * 0x03 は帯域制御のため drop-oldest(§10.3)なので、UVW(0x02)より古いイベントの
+ * まま止まることがある —— silent にせず `≠ UVW` を出すための判定(表示側は
+ * この bool を見てラベルを出すだけ)。UVW 側がまだ何も表示していない(`null`)ときは
+ * 比較対象が無いので不一致とは判定しない。
+ */
+export function asadEventMismatch(asadEventNumber: number, uvwEventNumber: number | null): boolean {
+  return uvwEventNumber !== null && asadEventNumber !== uvwEventNumber;
 }
