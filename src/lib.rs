@@ -45,3 +45,7 @@ pub mod controller;
 
 /// monitor コンポーネント(root-sink PUB 購読 → 表示変換 → WS 配信)。SPEC §5.3/§5.4/§10。(026 で実装)
 pub mod monitor;
+
+/// 較正表ツール `calib`(pedestal / pulser run → per-channel の baseline/noise/gain/flags)。
+/// TODO/081。068 のサーベイスパイク(`reference/_spike/asset_survey`)の定義を再実装で踏襲する。
+pub mod calib;
