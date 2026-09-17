@@ -8,10 +8,14 @@
 //!
 //! # 対応表(発注書 082 の入出力節)
 //!
-//! - `run_id` / `files` の `<TS>` は **`run_stop.files` の graw ファイル名**
-//!   (`CoBo{K}_AsAd{A}_{TS}_{idx}.graw`、CLAUDE.md の命名規約)から取る。
-//!   `run_stop` が無い(進行中/クラッシュ)run は `run_start.ts` からオフセットを落として
-//!   代用する。
+//! - `run_id` は **`run_stop.files` の graw ファイル名**
+//!   (`CoBo{K}_AsAd{A}_{TS}_{idx}.graw`、CLAUDE.md の命名規約)から取った `<TS>`。
+//!   `files` は同じファイルの**親ディレクトリ名**(`graw_writer::run_dir` が作る
+//!   `<output_root>/run{NNNN}/` — 実機では複数 AsAd が数 ms ずつ違う TS を持つので
+//!   glob に TS を埋め込むと一部の AsAd を取りこぼす。082 レビュー 2026-09-17 で修正)
+//!   を `data_root` の下に付け直した `CoBo*_AsAd*_*.graw`。
+//!   `run_stop` が無い(進行中/クラッシュ)、または AsAd graw が 1 本も見つからない場合は
+//!   `run_start.ts` からオフセットを落とした値で TS ベースの glob に後退する。
 //! - `n_events` = `run_stop.counters.events_built`(取得できれば)、無ければ
 //!   `frames` の合計。
 //! - `geometry` = `run_start.geometry.path` のベースネーム。
@@ -50,10 +54,9 @@ pub struct Defaults {
     pub gas: Option<String>,
     pub temperature_k: Option<f64>,
     pub sampling_rate_mhz: Option<f64>,
-    /// 発注書の例 TOML には載っているが、出力節は `geometry:` の出典を
-    /// `run_start.geometry.path` のベースネームと明記しており、この値の参照先が
-    /// 無い。パースはして(未知キー扱いで弾かない)、出力には使わない
-    /// (082 の疑問点 — 最終報告参照)。
+    /// **無視される**: `geometry:` の出典は常に `run_start.geometry.path` が正で、
+    /// この値は使わない。発注書の例 TOML の書き漏れと裁定された(082 レビュー
+    /// 2026-09-17)。未知キー扱いで弾かないためだけにパースする。
     pub geometry: Option<String>,
     pub hypothesis: Option<String>,
     /// `[runs.<N>]` の run 番号 → 上書き。
@@ -291,6 +294,27 @@ fn asad_graw_ts(path: &str) -> Option<String> {
     Some(parts[2].to_string())
 }
 
+/// [`asad_graw_ts`] に加えて、その run の**ディレクトリ名**(親ディレクトリの
+/// basename)も返す(082 レビュー 2026-09-17、実バグ修正)。
+///
+/// 実機では `graw_writer::run_dir`(`<output_root>/run{NNNN}/`)が示すとおり、
+/// 同一 run の AsAd 毎ファイルは同じディレクトリに揃うが **TS は接続確立ごとに
+/// 数 ms ずつ異なる**(実測: `reference/exp_data/2026` の 4 AsAd 組で
+/// `...37.043` / `...37.046` / `...37.048` / `...37.051`)。TS を glob に埋め込むと
+/// 他の AsAd を取りこぼすので、`files` の glob は **run ディレクトリ単位**にする。
+/// `path` が絶対パス(実機は `output_root` が絶対なので常にそう)でも、ここで返すのは
+/// 末尾のディレクトリ名(basename)だけ —— `data_root` と結合したときに絶対パスの
+/// 二重結合にならないようにするため。
+fn asad_graw_ts_and_run_dir_name(path: &str) -> Option<(String, Option<String>)> {
+    let ts = asad_graw_ts(path)?;
+    let run_dir_name = std::path::Path::new(path)
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string());
+    Some((ts, run_dir_name))
+}
+
 /// `run_start.ts`(RFC3339・ミリ秒・オフセット付き、固定 29 バイト —
 /// `crate::logbook` テストの `looks_like_rfc3339_millis_with_offset` と同じ前提)から
 /// オフセットを落として、ファイル名 TS 形式(`YYYY-MM-DDTHH:MM:SS.mmm`、23 バイト)にする。
@@ -335,6 +359,8 @@ struct RunStopSnapshot {
     n_events: u64,
     /// `run_stop.files` から抽出できた AsAd graw の TS(見つからなければ `None`)。
     ts_from_files: Option<String>,
+    /// 同じファイルの run ディレクトリ名(`files` の glob 用。見つからなければ `None`)。
+    run_dir_name: Option<String>,
 }
 
 /// `logbook.jsonl` の行列(ファイル順のまま)+ 条件ファイルから `RunsDoc` を組み立てる。
@@ -392,7 +418,13 @@ pub fn build_runs_doc(
                         let n_events = counters
                             .events_built
                             .unwrap_or_else(|| counters.frames.values().sum());
-                        let ts_from_files = files.iter().find_map(|f| asad_graw_ts(&f.path));
+                        let matched = files
+                            .iter()
+                            .find_map(|f| asad_graw_ts_and_run_dir_name(&f.path));
+                        let (ts_from_files, run_dir_name) = match matched {
+                            Some((ts, dir)) => (Some(ts), dir),
+                            None => (None, None),
+                        };
                         if ts_from_files.is_none() {
                             warnings.push(format!(
                                 "run {run}: no CoBo*_AsAd*_<ts>_*.graw entry in run_stop.files; \
@@ -403,6 +435,7 @@ pub fn build_runs_doc(
                             reason: reason.clone(),
                             n_events,
                             ts_from_files,
+                            run_dir_name,
                         });
                     }
                     None => {
@@ -438,18 +471,24 @@ pub fn build_runs_doc(
 fn build_entry(run: u32, acc: RunAcc, defaults: &Defaults, data_root: &str) -> RunEntry {
     let geometry = basename(&acc.geometry_path);
 
-    let (ts, n_events) = match &acc.stop {
+    let (ts, n_events, run_dir_name) = match &acc.stop {
         Some(stop) => {
             let ts = stop
                 .ts_from_files
                 .clone()
                 .unwrap_or_else(|| ts_without_offset(&acc.start_ts));
-            (ts, stop.n_events)
+            (ts, stop.n_events, stop.run_dir_name.clone())
         }
-        None => (ts_without_offset(&acc.start_ts), 0),
+        None => (ts_without_offset(&acc.start_ts), 0, None),
     };
 
-    let files = format!("{data_root}/CoBo*_{ts}_*.graw");
+    // run ディレクトリ名が分かれば **ディレクトリ単位**の glob(複数 AsAd が数 ms
+    // ずつ違う TS を持っても全部拾える —— 082 レビュー 2026-09-17 の修正)。
+    // 分からなければ(run_stop 無し/AsAd graw 不在)従来どおり TS ベースの glob に後退する。
+    let files = match run_dir_name {
+        Some(dir) => format!("{data_root}/{dir}/CoBo*_AsAd*_*.graw"),
+        None => format!("{data_root}/CoBo*_{ts}_*.graw"),
+    };
 
     let over = defaults.runs.get(&run);
     let pressure_mbar = over.and_then(|o| o.pressure_mbar);
@@ -526,12 +565,31 @@ fn yaml_opt_str(s: &Option<String>) -> String {
     }
 }
 
+/// f64 の「素直な表記」— **整数値でも小数点を落とさない**(`100.0` であって `100`
+/// ではない。既存 runs.yaml と型を揃えるため — `100` のままだと `yaml.safe_load` が
+/// `int` にしてしまう。082 レビュー 2026-09-17)。
+///
+/// Rust の `{}`(Display)は整数値の f64 を小数点抜きで出す
+/// (実測: `100.0_f64` → `"100"`、rustc で確認済み)ので、`.` が無ければ `.0` を足す。
+/// 非有限値(NaN/inf、通常のデータでは出ない)はそのまま返す(壊れた表記を作らない)。
+fn format_f64(v: f64) -> String {
+    if !v.is_finite() {
+        return format!("{v}");
+    }
+    let s = format!("{v}");
+    if s.contains('.') {
+        s
+    } else {
+        format!("{s}.0")
+    }
+}
+
 /// `unknown_comment` は `drift_velocity_cm_us` の `null` にだけ `# unknown` を付ける
 /// (発注書: 「それ以外は null とコメント `# unknown` で埋める」— この 1 フィールドの
 /// 話であり、他の数値フィールドの null には付けない)。
 fn yaml_opt_f64(value: Option<f64>, unknown_comment: bool) -> String {
     match value {
-        Some(v) => format!("{v}"),
+        Some(v) => format_f64(v),
         None if unknown_comment => "null   # unknown".to_string(),
         None => "null".to_string(),
     }
@@ -730,7 +788,10 @@ mod tests {
         ];
         let defaults = spec_defaults();
 
-        let (doc, warnings) = build_runs_doc(&lines, &defaults, "/data/tpcdaq/run57");
+        // data_root = 出力ルート(logbook.jsonl の親ディレクトリ相当)。run 固有の
+        // サブディレクトリ("run57")は run_stop.files から自動で足される(082 レビュー
+        // 2026-09-17 の修正 —— 以前は呼び手が data_root に run57 まで含める必要があった)。
+        let (doc, warnings) = build_runs_doc(&lines, &defaults, "/data/tpcdaq");
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
 
         let yaml = render(&doc);
@@ -739,13 +800,13 @@ mod tests {
         // frames 合計 = 3852 + 3849 = 7701。
         // drift_velocity 手計算: E = 1600/20 = 80 V/cm、0.7233*80/100 = 0.57864 →
         // 4 桁丸め 0.5786(発注書のオラクル値そのもの)。
-        // pressure_mbar/drift_hv_V/sampling_rate_MHz は整数値の f64 なので Rust の
-        // Display は小数点以下を出さない(100.0 → "100"、実測: rustc で確認済み)。
+        // pressure_mbar/drift_hv_V/sampling_rate_MHz は整数値の f64 だが、既存 runs.yaml と
+        // 型を揃えるため常に小数点を出す(100.0/1600.0/25.0 —— 082 レビュー 2026-09-17)。
         assert_eq!(
             yaml,
             "runs:\n\
              \x20 - run_id: \"2026-08-12T18:00:00.050\"\n\
-             \x20   files: \"/data/tpcdaq/run57/CoBo*_2026-08-12T18:00:00.050_*.graw\"\n\
+             \x20   files: \"/data/tpcdaq/run57/CoBo*_AsAd*_*.graw\"\n\
              \x20   format: \"graw\"\n\
              \x20   n_events: 7701\n\
              \x20   geometry: \"geometry_mini_eTPC.dat\"\n\
@@ -753,17 +814,91 @@ mod tests {
              \x20     hypothesis: \"alpha\"\n\
              \x20   conditions:\n\
              \x20     gas: \"CO2\"\n\
-             \x20     pressure_mbar: 100\n\
+             \x20     pressure_mbar: 100.0\n\
              \x20     temperature_K: 293.15\n\
-             \x20     drift_hv_V: 1600\n\
+             \x20     drift_hv_V: 1600.0\n\
              \x20     drift_velocity_cm_us: 0.5786\n\
-             \x20     sampling_rate_MHz: 25\n\
+             \x20     sampling_rate_MHz: 25.0\n\
              \x20   source:\n\
              \x20     primary: \"Am (5.5 MeV alpha), on beam-entrance axis\"\n\
              \x20     background: \"alphas from welds, emitted from everywhere on the chamber\"\n\
              \x20   notes: >\n\
              \x20     gas test; beam tuned, 4 Hz\n"
         );
+    }
+
+    /// 082 レビュー(2026-09-17)実バグ修正: 4 AsAd がそれぞれ数 ms 違う TS を持つ実機の
+    /// 姿(値の出典 = `reference/exp_data/2026` の 4 AsAd 組の実測: `...37.043` /
+    /// `...37.046` / `...37.048` / `...37.051`)。TS を glob に埋め込むと AsAd1-3 を
+    /// 取りこぼすので、`files` は run ディレクトリ単位の glob(`CoBo*_AsAd*_*.graw`)に
+    /// なり、`run_id` は最初にマッチした AsAd0 の TS を使う。
+    #[test]
+    fn files_glob_covers_all_asads_by_directory_even_when_their_ts_differ_by_a_few_ms() {
+        let mut frames = BTreeMap::new();
+        frames.insert("0".to_string(), 100u64);
+        let lines = vec![
+            spec_run_start_line(),
+            LogbookLine {
+                ts: "2026-09-02T07:47:38.000+00:00".to_string(),
+                seq: 1044,
+                record: LogbookRecord::RunStop {
+                    actor: "controller".to_string(),
+                    run: 57,
+                    duration_s: 1.0,
+                    ok: true,
+                    reason: "normal".to_string(),
+                    forced_eos: true,
+                    eos_closed: true,
+                    counters: Counters {
+                        events_built: None,
+                        events_incomplete: None,
+                        late_fragments: None,
+                        frames,
+                        overflow_frames: Some(0),
+                        malformed: Some(0),
+                    },
+                    files: vec![
+                        OutputFile {
+                            path:
+                                "/data/tpcdaq/run0057/CoBo0_AsAd0_2026-09-02T07:47:37.043_0000.graw"
+                                    .to_string(),
+                            bytes: 1,
+                        },
+                        OutputFile {
+                            path:
+                                "/data/tpcdaq/run0057/CoBo0_AsAd1_2026-09-02T07:47:37.046_0000.graw"
+                                    .to_string(),
+                            bytes: 1,
+                        },
+                        OutputFile {
+                            path:
+                                "/data/tpcdaq/run0057/CoBo0_AsAd2_2026-09-02T07:47:37.048_0000.graw"
+                                    .to_string(),
+                            bytes: 1,
+                        },
+                        OutputFile {
+                            path:
+                                "/data/tpcdaq/run0057/CoBo0_AsAd3_2026-09-02T07:47:37.051_0000.graw"
+                                    .to_string(),
+                            bytes: 1,
+                        },
+                    ],
+                },
+            },
+        ];
+        let defaults = Defaults::default();
+
+        let (doc, warnings) = build_runs_doc(&lines, &defaults, "/data/tpcdaq");
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(doc.runs.len(), 1);
+        let entry = &doc.runs[0];
+
+        // run_id は最初にマッチした AsAd0 の TS(発注書「run_id は従来どおり最初の
+        // ファイルの TS」)。
+        assert_eq!(entry.run_id, "2026-09-02T07:47:37.043");
+        // files は TS を含まない run ディレクトリ単位の glob —— AsAd1-3 の別 TS でも
+        // 全部拾える。
+        assert_eq!(entry.files, "/data/tpcdaq/run0057/CoBo*_AsAd*_*.graw");
     }
 
     // -------------------------------------------------------------
@@ -787,7 +922,7 @@ mod tests {
             runs: BTreeMap::new(),
         };
 
-        let (doc, warnings) = build_runs_doc(&lines, &defaults, "/data/tpcdaq/run57");
+        let (doc, warnings) = build_runs_doc(&lines, &defaults, "/data/tpcdaq");
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         let yaml = render(&doc);
 
@@ -825,7 +960,7 @@ mod tests {
             runs,
         };
 
-        let (doc, _warnings) = build_runs_doc(&lines, &defaults, "/data/tpcdaq/run57");
+        let (doc, _warnings) = build_runs_doc(&lines, &defaults, "/data/tpcdaq");
         assert_eq!(doc.runs.len(), 1);
         assert_eq!(doc.runs[0].drift_velocity_cm_us, None);
     }
@@ -1056,6 +1191,57 @@ source = { primary = "Am (5.5 MeV alpha)", background = "welds" }
             asad_graw_ts("run57/ctrl/CoBo0_2026-08-12T18:00:00.010_0000.graw"),
             None
         );
+    }
+
+    /// 082 レビュー 2026-09-17: run ディレクトリ名は basename だけ(絶対パスの親を
+    /// 丸ごと持ち帰らない —— data_root との結合で二重にならないため)。
+    #[test]
+    fn asad_graw_ts_and_run_dir_name_extracts_both_from_an_absolute_path() {
+        assert_eq!(
+            asad_graw_ts_and_run_dir_name(
+                "/data/tpcdaq/run0057/CoBo0_AsAd0_2026-09-02T07:47:37.043_0000.graw"
+            ),
+            Some((
+                "2026-09-02T07:47:37.043".to_string(),
+                Some("run0057".to_string())
+            ))
+        );
+    }
+
+    #[test]
+    fn asad_graw_ts_and_run_dir_name_extracts_both_from_a_relative_path() {
+        assert_eq!(
+            asad_graw_ts_and_run_dir_name("run57/CoBo0_AsAd0_2026-08-12T18:00:00.050_0000.graw"),
+            Some((
+                "2026-08-12T18:00:00.050".to_string(),
+                Some("run57".to_string())
+            ))
+        );
+    }
+
+    #[test]
+    fn asad_graw_ts_and_run_dir_name_is_none_for_ctrl_probe_filenames() {
+        assert_eq!(
+            asad_graw_ts_and_run_dir_name("run57/ctrl/CoBo0_2026-08-12T18:00:00.010_0000.graw"),
+            None
+        );
+    }
+
+    // -------------------------------------------------------------
+    // format_f64(082 レビュー 2026-09-17: 整数値でも小数点を落とさない)。
+    // -------------------------------------------------------------
+
+    #[test]
+    fn format_f64_always_shows_a_decimal_point_even_for_whole_numbers() {
+        assert_eq!(format_f64(100.0), "100.0");
+        assert_eq!(format_f64(1600.0), "1600.0");
+        assert_eq!(format_f64(25.0), "25.0");
+    }
+
+    #[test]
+    fn format_f64_leaves_an_already_fractional_value_untouched() {
+        assert_eq!(format_f64(293.15), "293.15");
+        assert_eq!(format_f64(0.5786), "0.5786");
     }
 
     #[test]
