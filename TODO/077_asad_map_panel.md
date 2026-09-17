@@ -1,6 +1,7 @@
 # 077 — モニタタブに AsAd 電子回路座標 2D(272 ch × 512)を追加
 
-**Status: READY**(2026-09-14 起票、Fable。**着手はユーザー指示待ち**。
+**Status: MERGED**(2026-09-17 実装 Sonnet レーン → Fable レビュー → main へマージ `3a973f7`。**残 = demo 目視(受け入れ 2 項目目)**、
+076 Phase 0 レーンが 46002 を使い終わってから Fable が実施 → COMPLETED/archive。2026-09-14 起票、Fable。
 発端 = ユーザー: 「信号が時間窓に収まっているか」の確認はチップ毎の波形表示だと選択を変えている間に
 次のイベントが来る → **UVW Event Display(0x02)がまさにそれで、同一タブに 3 面が並ぶので解決**。
 「しいて言えば 272 ch × 512 の 2D が同じタブで同時に見えれば最高」)
@@ -55,3 +56,20 @@ TS 150〜200 行 + テスト 100 行。Sonnet 半日。Fable レビューは完�
   を受ける。ローカル/LAN 前提で問題ないが、WS 送信キューは drop-oldest(§10.3)なので落ちた分は
   4 の整合表示で見える。
 - FPN 行のガイド線は付けない(平坦な行として自然に見える)。必要なら後続。
+
+## 結果(第 1 弾: 実装 + 単体、2026-09-17)
+
+- 実装(Sonnet、worktree ブランチ `worktree-agent-a6bae87d89abaff69`、コミット `9393714`)→ Fable レビュー → main マージ `3a973f7`。
+  変更は ui/ の 6 ファイル(+290/−10): `root-histo.ts`(`WaveformsMessage` を `PanelMessage` に、`asadPanelSpec` /
+  `buildAsad`(channel-major、y = aget×nCh + ch、`stripBaseline` 再利用、負値保持)/ `asadEventMismatch`)、
+  `jsroot-panel.ts`(`shape()` の `case 'waveforms'`)、`monitor-view.{ts,html,scss}`(`ws.setWaveforms(true/false)`、
+  `updateWaveformCache` 再利用、`asadPanels` computed、`≠ UVW` バッジ、`.grid-asad` auto-fit)。
+- テスト(main、Mac、2026-09-17): `npm test -- --watch=false` → **Test Files 14 passed / 1 skipped、Tests 201 passed /
+  5 skipped(206)**(変更前 192 → +9: 発注書 5 の (a) bin 位置と値の手計算オラクル・負値保持、(b) nAget/nCh/nBuckets が
+  メッセージ由来、(c) event# 一致 / 不一致 / UVW 未表示)。`npm run build` green(monitor-view lazy chunk 58.4 kB、
+  Initial total 501.5 kB = 変更前と同一)。prettier 全 green。
+- レビュー所見(Fable): 逸脱なし。y 軸タイトル `AGET×68 + ch` は固定文字列(68 = AGET のハード不変量、bin 計算は
+  `message.nCh` 由来)— 許容。パネル順は (cobo, asad) 昇順。ラベル(event# / ≠ UVW)は DisplayClock の刻みで、描画は
+  JsrootPanel の同じ刻みで進む(UVW と同じ流儀)。
+- **未実施**: reference/_spike/demo(mini 1 枚 / `TPCDAQ_DEMO_PROFILE=elitpc` 4 枚)での目視 + スクリーンショット、
+  パルサー実データで FPN 行が平坦に見えること。SPEC §10.3 / §5.4 の改訂(v1.30 でまとめて)。
