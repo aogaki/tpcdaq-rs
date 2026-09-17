@@ -58,3 +58,33 @@
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+// 077: AsAd 枚数はメッセージ由来(mini = 1、ELITPC = 4)なので、列数は焼き込まず
+// auto-fit で横並びにする(枚数が増えても折り返すだけ)。
+.grid-asad {
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+}
+
+.asad-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.25rem;
+}
+
+.asad-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.mismatch {
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  border: 1px solid #ffb74d;
+  color: #ffb74d;
+  font-weight: 600;
+}
