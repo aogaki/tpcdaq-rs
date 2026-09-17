@@ -138,3 +138,12 @@
 - 機構: EXO-200, *Measurements of the ion fraction and mobility of α and β decay products in liquid xenon*(arXiv:1506.00317)—
   壊変直後の娘核がイオンとして電場でカソードへ運ばれる割合と移動度。MIMAC, *First detection of tracks of radon progeny recoils*
   (arXiv:1504.05865)— ガス TPC でカソード上の娘核の反跳飛跡を観測。
+- **注意(ユーザー指摘 2026-09-17)**: 上の較正線源の文献は意図的に放出させる**開放型**(電着)線源。**密閉 α 線源(窓付き ²²⁸Th)から
+  thoron が漏れてガス TPC を汚す**ことを直接扱った論文は見つかっていない。近いのは: 密閉 ²²⁶Ra 線源のラドン漏れ検査
+  (radon photography、Health Physics 1969 — 密閉線源はラドンで漏れる前提の検査法)、試料の thoron 放出をチャンバー内で直接測る
+  手法(*Direct in-chamber ²²⁰Rn emanation measurements for rare-event physics experiments*, JINST 21 (2026) P03027、arXiv:2601.12622)、
+  ²¹²Pb ジェネレータの thoron 漏れ(放射線安全の論文)。物理的には α 線源の窓は µm 級で気密ではなく、ISO 2919 の拭き取り試験
+  (< 200 Bq)は気密の保証ではない。**本件の直接証拠は自分のデータ**(除去後の娘核だけで 0.14 Hz)。
+- **thoron を直接測る手**: ²²⁰Rn → ²¹⁶Po(0.15 s)の**遅延同時計数**(同じ場所で 2 本の α が ~0.1–0.5 s 差)がガス中 thoron の指紋
+  (XENON100 が使った方法)。現行 DAQ は 0.76 s のデッドタイムで 2 本目を落とすので見えない — **tpcdaq-rs(デッドタイム無し)なら
+  数えられる**。線源在室中に数時間 run すれば放出率が出る。
