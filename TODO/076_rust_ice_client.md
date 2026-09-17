@@ -206,3 +206,16 @@ Fable レビューはフェーズ境界 2 回(Phase 1 後 = ワイヤ、Phase 2 
   MDaq/src/mdaq/utl/CmdException.ice、MDaq/src/mdaq/hw/Control.ice
 - 現行実装: tools/ecc_bridge/{ecc_bridge.cpp, ecc_core.hpp, fake_ecc.cpp}、SPEC §8.2、
   docs/VIRTUAL_ZCOBO_ja.md §4.1/§4.2、メモリ geteccserver-native-gded
+
+## 結果(Phase 0 — ゴールデン採取、2026-09-17、Sonnet レーン → main `cad5a4c`)
+
+- `tests/fixtures/ice/`: 9 op × {req,rep}(fake_ecc、Ice 3.8.2)+ `validate_connection.bin` / `close_connection.bin` +
+  実 ECC(3.7.11、reference/_spike ビルド)の `real_ecc_{ice_ping,describe_cmdexception,getstatus}_{req,rep}.bin` +
+  `real_ecc_validate_connection.bin`。README に採取手順・requestId・注釈付き hexdump。タップ = `tools/ecc_bridge/tap_ice.py`
+  (asyncio、`annotate` サブコマンド)+ `tap_drive_{fake,real}.py`(pyzmq)。既存 C++ 無変更、`make test` 457 / e2e 52 green。
+- 確定事実: **`ice_ping` = mode 2(Idempotent)、context 空**(3.7/3.8 同一)/ StateMachine 8 op = mode 0 / configure の
+  XML 283 B で 0xFF+int32 形式を踏む / ValidateConnection は最初の要求前に必ず来る / CloseConnection はクライアント側
+  `Communicator::destroy()` で 1 回観測(サーバ発は未観測)/ **CmdException = status 1、単一 compact スライス、flags 0x20
+  (IS_LAST のみ)+ type-id 文字列 `::mdaq::utl::CmdException` + reason 文字列**(Ice は例外スライスの type-id を常に
+  文字列で書く — フラグビットは class 用。Fable 裁定)/ 実 ECC の getStatus out = `01 01` = {Idle, WhenDescribe}。
+- §5 リスク 1(1.1 例外の実バイト)・3(ice_ping の mode)はこれで解消。

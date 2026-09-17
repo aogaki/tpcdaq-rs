@@ -1,6 +1,6 @@
 # 082 — `logbook2runs`: JSONL ログブック → minitpc-analysis `runs.yaml` 生成
 
-**Status: READY**(2026-09-17 起票 Fable、080 D-6。run 条件の唯一の情報源を DAQ の logbook に寄せ、解析側
+**Status: COMPLETED**(2026-09-17 実装 Sonnet レーン → Fable レビュー 2 点差し戻し → main マージ `96e0997`。起票同日 Fable、080 D-6。run 条件の唯一の情報源を DAQ の logbook に寄せ、解析側
 (別リポ `~/Workspace/Higs/minitpc-analysis`、**このセッションから書き換え禁止 — 読むだけ**)の `runs/runs.yaml` を
 手打ちでなく生成する)
 
@@ -57,3 +57,19 @@
 
 - Higs リポへの書き込み、runs.yaml の既存エントリ(2026-09-01/02)の再現(手打ちの注釈は再現対象外)、
   PEventTPC 形式の `format: peventtpc` 判定以外の解析側ロジック。
+
+## 結果(2026-09-17、Mac、main `96e0997`)
+
+- 実装: `src/runs_yaml.rs`(純関数 + TOML defaults + 寛容な JSONL リーダ、≈1,100 行)、`src/bin/logbook2runs.rs`(205 行)。
+  依存追加なし(YAML は固定スキーマ用の自前エミッタ)。
+- テスト: **cargo test 472 → 500 passed / 0 failed**(runs_yaml 23 + bin args 5)。`cargo fmt --check` / `cargo clippy --tests -- -D warnings` clean。
+  文字列ゴールデン(SPEC §9.2 の run_start/run_stop 例 + comment)、v_drift 100 mbar / 1600 V → 0.5786、null 経路、壊れ末尾行、
+  **4 AsAd で TS が数 ms ずれる run_stop.files**(実機命名の実例 …37.043/.046/.048/.051 をそのまま)。
+- 実ファイル: `reference/_spike/demo/out/data/logbook_BC_saved.jsonl`(041 実証時の run 3 組)→ 3 run 分の YAML、
+  `python3 -c "import yaml; yaml.safe_load(...)"` OK、`pressure_mbar` 等は float。
+- レビュー(Fable)で直した 2 点: ①f64 は整数値でも `.0`(型を既存 runs.yaml に揃える)②**`files` の glob に TS を含めると
+  複数 AsAd を取りこぼす実バグ** → run ディレクトリ単位 `<data-root>/run{NNNN}/CoBo*_AsAd*_*.graw` に変更(`graw_writer::run_dir` と整合)。
+- 承認した逸脱: 入力は `LogbookLine`(comment を run に紐付けるため)/ 戻りは `(RunsDoc, Vec<String>)` で警告を可視化 /
+  source は文字列 or `{primary, background}` テーブル(untagged)/ 文字列は全て二重引用符 / notes は `"; "` 結合。
+- 使い方: `logbook2runs <logbook.jsonl> [--defaults runs_defaults.toml] [--out runs.yaml] [--data-root <dir>]`。
+  圧力・HV は 079/B-4 が logbook に載るまで defaults TOML の `[runs.N]` で与える。
