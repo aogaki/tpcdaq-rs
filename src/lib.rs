@@ -45,3 +45,6 @@ pub mod controller;
 
 /// monitor コンポーネント(root-sink PUB 購読 → 表示変換 → WS 配信)。SPEC §5.3/§5.4/§10。(026 で実装)
 pub mod monitor;
+
+/// JSONL ログブック → minitpc-analysis `runs.yaml` 生成(純関数)。TODO/082。
+pub mod runs_yaml;
