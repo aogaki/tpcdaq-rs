@@ -45,3 +45,6 @@ pub mod controller;
 
 /// monitor コンポーネント(root-sink PUB 購読 → 表示変換 → WS 配信)。SPEC §5.3/§5.4/§10。(026 で実装)
 pub mod monitor;
+
+/// Ice クライアント(プロトコル 1.0 / エンコーディング 1.1 の部分集合)。SPEC §8.2。(076 で実装)
+pub mod ice;
