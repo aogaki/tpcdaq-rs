@@ -219,3 +219,23 @@ Fable レビューはフェーズ境界 2 回(Phase 1 後 = ワイヤ、Phase 2 
   (IS_LAST のみ)+ type-id 文字列 `::mdaq::utl::CmdException` + reason 文字列**(Ice は例外スライスの type-id を常に
   文字列で書く — フラグビットは class 用。Fable 裁定)/ 実 ECC の getStatus out = `01 01` = {Idle, WhenDescribe}。
 - §5 リスク 1(1.1 例外の実バイト)・3(ice_ping の mode)はこれで解消。
+
+## 結果(Phase 1 — `src/ice/`、2026-09-17、Opus レーン → main `9fe6c2f`)
+
+- 実装: `src/ice/{mod,error,codec,proto,client}.rs`(実装 ≈1,140 行 + 同ファイル内テスト ≈1,040 行)+ `tests/ice_golden.rs`(363 行)。
+  同期 `std::net::TcpStream`、依存追加なし、`unsafe` 無し、production に `.unwrap()` 無し。`MAX_MESSAGE_SIZE` 16 MiB の安全弁、
+  `set_nodelay(true)`、ヘッダ検査は Ice 本体と同じ厳しさ(protocol 1.0 / ヘッダ encoding 1.0 / 非圧縮のみ)。
+- テスト: **cargo test(main)514 → 578 passed / 0 failed / 1 ignored**(ice 単体 55 + ゴールデン 9)。fmt / clippy clean。
+  TDD: proto 23 / client 12 は `unimplemented!()` で赤を実測してから緑、codec は変異(`< 255` → `<= 255`)で噛み合いを実証。
+- **手書きの期待バイトは実機と全一致**: `tests/ice_golden.rs` は初回で 9 本とも緑。12 リクエスト(9 op + 実 ECC 3 本)を
+  `Request::to_bytes` で完全再現、11 リプライを parse/往復、実 ECC の CmdException(115 B)も `Reply::parse → to_bytes` で
+  バイト往復。変異(ice_ping を Normal に)で落ちることも確認。
+- 実機に合わせた修正 1 箇所: compact 例外の builder flags `0x21 → 0x20`(decoder は元から「type-id ビットを見ず常に文字列」で正)。
+- 公開 API(Phase 2 が使う): `IceConnection::connect(SocketAddr, Duration)` / `invoke(&Identity, op, OperationMode, params) ->
+  Result<Vec<u8>, IceError>`(params・戻りとも encapsulation の中身)、`OutputStream` / `InputStream`、
+  `IceError { Local(Connect|Lost|Protocol(String)), UserException{type_id, body}, RequestFailed{kind, identity, facet, operation},
+  Unknown{kind, message} }`。
+- 承認した逸脱: LocalError に原因文字列 / ReplyStatus 再利用 / invoke の戻りは中身 / connect は SocketAddr / 再接続・再送は
+  **Phase 2 のプロキシの責務**(CloseConnection 受信 = 未 dispatch の旨をエラー文字列に残す)。
+- Phase 2 へ: State(7)/ Error(10)の値表(ゴールデンは `02 00` = Described/NoErr、`01 01` = Idle/WhenDescribe の 2 点)、
+  サーバ発 CloseConnection(ACM)は未観測 → 034 連続 run で実証、sliced 例外の実バイトは未採取(読み飛ばしは実装済み)。
