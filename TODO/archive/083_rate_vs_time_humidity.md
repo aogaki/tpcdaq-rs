@@ -119,3 +119,22 @@
   読み出し可能なプログラマブル判別器)に替えるか、少なくとも閾値を RUNBOOK に手書きで残す ②パッド電荷を基準に turn-on を測る
   (閾値 2 点以上で run)③実験の α はエネルギーが分布するので、トリガ効率のエネルギー依存を事前に持つこと。
   tpcdaq-rs 側: NIM は読めないので slowctl の対象外。閾値は logbook のコメント/run 条件(080 B-4)として人が入れる。
+
+## 追記 5(2026-09-17、文献 — ²²⁸Th 線源からの thoron 放出と娘核のプレートアウト)
+
+用語: この現象は文献では「radon progeny plate-out」「radon progeny recoils(RPR)」「surface α background from radon daughters」。
+- Lang et al., *A ²²⁰Rn source for the calibration of low-background experiments*, JINST 11 (2016) P04004(arXiv:1602.01138)—
+  電着 ²²⁸Th 線源は ²²⁰Rn を効率よく放出、娘(²¹²Pb…)が検出器内面に付く。放出率の測定法も。
+- XENON100, *Results from a calibration of XENON100 using a source of dissolved radon-220*, PRD 95 (2017) 072008(arXiv:1611.03585)—
+  ²¹²Pb が検出器全体に広がり、線源を閉じた後は ²¹²Pb の寿命で減って 1 週間以内に背景以下。²²²Rn の残留増加は無し。
+- LZ, *Design, implementation and performance of the LZ calibration systems*(arXiv:2406.12874)— ²²⁸Th 電着ディスクの ²²⁰Rn 発生器、
+  娘核は壊変前に表面に蓄積。
+- Baudis et al., *Production and characterization of ²²⁸Th calibration sources with low neutron emission for GERDA*, JINST 10 (2015)
+  P12005(arXiv:1508.05731)— 封入線源でも thoron 放出が測れる(封入品質の指標)。
+- **低圧ガス TPC の直接の類例 = DRIFT-II**(CS₂ 40 Torr、中央カソード): *Radon in the DRIFT-II directional dark matter TPC:
+  emanation, detection and mitigation*(arXiv:1407.3938)、*Reducing DRIFT backgrounds with a submicron aluminized-Mylar cathode*
+  (arXiv:1502.03535)、*Long-term study of backgrounds in DRIFT-II*(arXiv:1307.5525)— 材料由来の ²²²Rn/²²⁰Rn の娘がカソードに
+  プレートアウトし、そこからの反跳・α(RPR)が主要背景。カソード材の薄膜化で軽減。
+- 機構: EXO-200, *Measurements of the ion fraction and mobility of α and β decay products in liquid xenon*(arXiv:1506.00317)—
+  壊変直後の娘核がイオンとして電場でカソードへ運ばれる割合と移動度。MIMAC, *First detection of tracks of radon progeny recoils*
+  (arXiv:1504.05865)— ガス TPC でカソード上の娘核の反跳飛跡を観測。
