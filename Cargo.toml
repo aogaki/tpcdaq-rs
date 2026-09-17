@@ -37,6 +37,11 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zmq = "0.10"
 
+# slowctl の FakeProPar(TODO/079 §2.5)をテスト以外からも使えるようにする明示フラグ。
+# 既定では cfg(test) のみで有効(features は付けない)。
+[features]
+slowctl-fake = []
+
 # CLAUDE.md Coding Standards: `.unwrap()` 禁止(production)。
 # テストコード側は各テストモジュールで `#[allow(clippy::unwrap_used)]` する。
 [lints.clippy]

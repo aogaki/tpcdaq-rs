@@ -45,3 +45,7 @@ pub mod controller;
 
 /// monitor コンポーネント(root-sink PUB 購読 → 表示変換 → WS 配信)。SPEC §5.3/§5.4/§10。(026 で実装)
 pub mod monitor;
+
+/// スローコントロール(ガス系 Bronkhorst ProPar / 環境 Arduino、監視のみ)。SPEC §1.1。
+/// Phase 1 は ProPar コーデック + 同期リンクのみ(TODO/079 §2.5)。
+pub mod slowctl;
