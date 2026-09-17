@@ -71,5 +71,7 @@ TS 150〜200 行 + テスト 100 行。Sonnet 半日。Fable レビューは完�
 - レビュー所見(Fable): 逸脱なし。y 軸タイトル `AGET×68 + ch` は固定文字列(68 = AGET のハード不変量、bin 計算は
   `message.nCh` 由来)— 許容。パネル順は (cobo, asad) 昇順。ラベル(event# / ≠ UVW)は DisplayClock の刻みで、描画は
   JsrootPanel の同じ刻みで進む(UVW と同じ流儀)。
-- **未実施**: reference/_spike/demo(mini 1 枚 / `TPCDAQ_DEMO_PROFILE=elitpc` 4 枚)での目視 + スクリーンショット、
-  パルサー実データで FPN 行が平坦に見えること。SPEC §10.3 / §5.4 の改訂(v1.30 でまとめて)。
+- SPEC §5.4 / §10.3 / 履歴を **v1.30** で改訂済み(2026-09-17)。
+- demo 目視: headless Chrome の自動撮影はデータ到着前に閉じてしまい判定不能(monitor ログには monitor タブからの
+  `subscribe … waveforms: true` が出ており購読配線は実証)。**2026-09-17 10:40 から demo スタック(mini、2 Hz ループ、
+  1 時間 run)を立てたままにしてユーザーの目視を依頼** → 結果を追記して archive。

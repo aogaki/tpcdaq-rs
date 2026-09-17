@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.29(2026-09-15 — 実装の正本)**
+- **status**: **v1.30(2026-09-17 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -151,6 +151,7 @@
   topology frame は来ない(decoder カウンタ 0)= 確定**、§13-5 実 ECC(20190315)をホストで
   ネイティブ起動し e2e 成立、§13-7 `extra_connections=0` 実測(mini)。初回 configure 7 s
   (261 s コールドスタートは再現せず)。データは frameType 2 rev 5(compact)278,784 B/frame。
+  / **v1.30(2026-09-17)Wave 1 反映(TODO/080)**: §5.4 に **AsAd 電子回路座標パネル**(TODO/077 — monitor タブの Event Display の下、(cobo,asad) 毎 nAget×nCh × nBuckets の 2D、0x03 由来)を追加、§10.3 の 0x03 購読条件を「波形ビュー**または monitor タブ**」に改訂。§6.7 に **raw ツリー契約の共有**(ガス圧シミュレーション gas-pressure-test の Stage 4 が同一契約で `_raw.root` を書き macros を共有 — 契約変更は両リポ同時、合成 raw は §5.5 QA 再構成のフィクスチャ供給元、080 D-8)を明記。
   / **v1.29(2026-09-15)安全境界を明文化(§11、ユーザー裁定 — TODO/079 の発端)**: web 操作面(controller REST / UI)は DAQ の run 制御と監視のみ。**物理的作動(HV・ガス圧 setpoint・バルブ)は web に経路を作らず、ローカル限定**。§1.1 の psu 行を「監視のみ」に改め、名称を slowctl(HV / ガス / 環境の汎用スローコントロール)へ。根拠 = token + passphrase は事故防止であって認証ではない(§3.1)、TLS/認証は自前実装しない。
   / **v1.28(2026-09-14)§6.7 を実装前に精度上げ(TODO/075 着手、Fable)**: adc ブロック数は
   「観測」ではなく**期待フラグメント集合(§6.3 `--expect`)から起動時に確定**(ブランチは最初の
@@ -713,6 +714,11 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
 - 表示間隔・freeze は**クライアント側**(R9 確定義)。freeze は表示のみ停止し、DAQ・積算・保存に一切
   影響しない。UI 上も run Stop と明確に区別する。
 - PUB のギャップ(sequence_number)を数え、UI に「モニタ取りこぼし数」を表示(silent 禁止)。
+- **AsAd 電子回路座標パネル(v1.30、TODO/077)**: monitor タブの Event Display(U/V/W)の下に、**(cobo,asad) 毎**の
+  2D(y = aget×nCh + ch、x = time bucket、値 = 表示専用のベースライン減算後生 ADC — 先頭 25 cell 平均、負値保持)を
+  4 枚目として並べる。データは既存の 0x03 Waveforms(ジオメトリ非適用なので FPN・未マップ ch・dead ch も見える)。
+  枚数・ch 数・bucket 数はメッセージ由来。0x03 は drop-oldest なので、UVW 側と event# が違うときは **`≠ UVW` を明示**
+  (silent 禁止)。刻み・freeze は Event Display と共通。
 
 ### 5.5 オンライン QA 再構成(v1.25 — R5 の部分改訂)
 
@@ -969,6 +975,11 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
   `compared 108 events, 0 differences`(負性対照 1 difference)。§12-8 変形: N=4 で 224 Mbps /
   672 Mbps とも raw on/off の差 +0.3% / +0.2%(ロスレスカウンタ全 0)。raw ファイルは 192 KB/event
   (パルサー、ZLIB-1)= 100 Hz で 19 MB/s。CLI `--raw-tree`、TOML `raw_tree`。
+- **契約の共有(v1.30、TODO/080 D-8)**: ガス圧シミュレーション `~/test/gas-pressure-test`(Geant4 + Garfield++ + AGET
+  応答、別リポ)の Stage 4 は**この節と同一契約**(`eventId/i`、`eventTime/l`、`adc[4][68][512]/S`)で `_raw.root` を書き、
+  `macros/` を `external/tpcdaq-macros/` として共有する。**契約を変えるときは両リポを同時に直す**。シミュレーションの
+  合成 raw(真値付き)は §5.5 QA 再構成のフィクスチャ供給元であり、順方向応答(Magboltz 拡散 ⊗ AGET 整形)は
+  Unfolding(WARSAW_PLAN §7)の応答カーネルの出所になる。
 
 ## 7. graw-writer 仕様
 
@@ -1144,7 +1155,7 @@ fake-ECC servant(C++ 版のテストハーネス)相手の e2e を CI に置く(
 | `meta` | S→C(接続時・run 変化時) | `{nBuckets, planes: {U,V,W}, geometry, anglesDeg, detector, cobos, run}` |
 | `status` | S→C(1 Hz) | §5.3 の status + `{monitorGaps, clients, wsDropped}` |
 | `run` | S→C(遷移時) | `{state, run, ts}` |
-| `subscribe` | C→S | `{"streams": ["uvw","waveforms","histos","status"]}` — 既定は waveforms **以外** ON(帯域制御。波形ビューを開いたクライアントだけが 0x03 を受ける) |
+| `subscribe` | C→S | `{"streams": ["uvw","waveforms","histos","status"]}` — 既定は waveforms **以外** ON(帯域制御。**波形ビューまたは monitor タブ**(v1.30、§5.4 AsAd パネル)を開いたクライアントだけが 0x03 を受ける) |
 
 - 操作(cmd/ack)は WS に**載せない**(C++ 版からの変更)。操作は controller REST(§8.1)に一本化。
 - サーバの送信キューは live(0x02/0x03/0x10/0x11)= drop-oldest + カウント、JSON 制御 = reliable
