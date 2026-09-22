@@ -29,16 +29,26 @@ pub const SCHEMA_ID: &str = "tpcdaq-params/1";
 pub enum KnobKind {
     /// 整数。`min`/`max` は xcfg の `range="[min, max]"`。
     Int { min: Option<i64>, max: Option<i64> },
+    /// 整数の離散集合(xcfg の `range="{a, b, c}"`)。
+    IntEnum(&'static [i64]),
+    /// 実数。`min`/`max` は xcfg の `range="[min, max]"`。
+    Real { min: Option<f64>, max: Option<f64> },
     /// 実数の離散集合。
     RealEnum(&'static [f64]),
     /// 文字列の離散集合。
     StrEnum(&'static [&'static str]),
+    /// 真偽値(xcfg は `true`/`false`)。
+    Bool,
+    /// **合成ノブ**: JSON の 1 つの値(モード名)から xcfg のテキストを引く対応表。
+    /// 同じ JSON キーを持つ [`KnobSpec`] が複数あり、各々が別の要素に書く。
+    Derived(&'static [(&'static str, &'static str)]),
 }
 
 /// 1 ノブの定義(JSON のキー ↔ xcfg 上の位置)。
 #[derive(Debug, Clone, Copy)]
 pub struct KnobSpec {
-    /// JSON のキー。
+    /// JSON のキー。入れ子は `.` 区切り(`"pulser.enabled"` = `{"pulser":{"enabled":…}}`)。
+    /// **合成ノブ(`readout`)では同じ名前のエントリが複数ある**。
     pub name: &'static str,
     /// xcfg 上でその値が住む階層。
     pub scope: Scope,
@@ -114,11 +124,129 @@ pub const KNOBS: &[KnobSpec] = &[
         // 078 §2.1 裁定 2: ノイズ ch のマスクの正規の道具(FW 非依存)。
         kind: KnobKind::StrEnum(&["inhibit_channel", "inhibit_trigger", "none"]),
     },
+    // --- 2026-09-22 のレビュー裁定で追加した 4 ノブ ---
+    KnobSpec {
+        name: "peakingTime_ns",
+        // **AGET スコープ**(表は channel と書いていたが実物は chip 単位のレジスタ)。
+        // 要素名の綴りは GET 側のまま(`peackingTime`)。
+        scope: Scope::Aget,
+        suffix: &["Global", "Reg1", "peackingTime"],
+        kind: KnobKind::IntEnum(PEAKING_TIME_NS),
+    },
+    // `readout` = 合成ノブ。full / partial が**同じ JSON キー**から 2 要素に展開される。
+    // 値は実テンプレート 2 本の差分から: full = configure-physics、partial = configure-pulser。
+    KnobSpec {
+        name: "readout",
+        scope: Scope::Aget,
+        suffix: &["Global", "Reg1", "isAllChannelRead"],
+        kind: KnobKind::Derived(&[("full", "true"), ("partial", "false")]),
+    },
+    KnobSpec {
+        name: "readout",
+        scope: Scope::Aget,
+        suffix: &["Global", "Reg1", "isFPNRead"],
+        kind: KnobKind::Derived(&[("full", "true"), ("partial", "false")]),
+    },
+    // `zeroSuppression` は JSON では 1 つのオブジェクトだが、xcfg では**スコープが違う 2 要素**。
+    // 例外は threshold にだけ意味がある(enabled は CoBo スコープなので `at` は必ず細かすぎ → 拒否)。
+    KnobSpec {
+        name: "zeroSuppression.enabled",
+        scope: Scope::Cobo,
+        suffix: &["Module", "enableZeroSuppression"],
+        kind: KnobKind::Bool,
+    },
+    KnobSpec {
+        name: "zeroSuppression.threshold",
+        scope: Scope::Channel,
+        suffix: &["zeroSuppressionThreshold"],
+        kind: KnobKind::Int {
+            min: Some(0),
+            max: Some(4095),
+        },
+    },
+    // `pulser` は **CoBo スコープ**の `Instance.Generator`(AsAd の Generator ではない)。
+    KnobSpec {
+        name: "pulser.enabled",
+        scope: Scope::Cobo,
+        suffix: &["Generator", "periodicModeEnabled"],
+        kind: KnobKind::Bool,
+    },
+    KnobSpec {
+        name: "pulser.voltage_mV",
+        scope: Scope::Cobo,
+        suffix: &["Generator", "amplitudeStart"],
+        // GET 側 `CoBoConfigParser::asadPulserVoltage_mV` は amplitudeStart をそのまま
+        // 「出力電圧と基準電圧(Vref=1102mV)の差 [mV]」として使う(int16 に切り捨て)。
+        // → JSON の `voltage_mV` は換算なしの同値。
+        kind: KnobKind::Real {
+            min: Some(-1000.0),
+            max: Some(1000.0),
+        },
+    },
+    KnobSpec {
+        name: "pulser.period_ms",
+        scope: Scope::Cobo,
+        suffix: &["Generator", "period_ms"],
+        kind: KnobKind::Int {
+            min: Some(0),
+            max: None,
+        },
+    },
 ];
 
-/// 名前からノブ定義を引く。
+/// AGET の peaking time の許容値 [ns]。
+///
+/// **GET の AGET 仕様の 16 値**(実 xcfg の `range` 属性がそのまま列挙しているもの:
+/// `<peackingTime unit="ns" range="{70, 117, 232, …, 1014}">`)。テンプレートから実行時に
+/// 読まず、ここを唯一の定義とする(`tests/params_render.rs` がフィクスチャの range 属性と
+/// 一致することを確かめる)。実テンプレートに現れる値は 232(physics / pedestals 計 4 本)と
+/// 1014(configure-pulser)。
+pub const PEAKING_TIME_NS: &[i64] = &[
+    70, 117, 232, 280, 334, 383, 502, 541, 568, 632, 721, 760, 831, 870, 976, 1014,
+];
+
+/// 名前からノブ定義を引く(合成ノブでは最初のエントリ)。
 pub fn knob_spec(name: &str) -> Option<&'static KnobSpec> {
     KNOBS.iter().find(|k| k.name == name)
+}
+
+/// その JSON キーを持つ全エントリ(合成ノブは複数)。
+pub fn knob_specs(name: &str) -> impl Iterator<Item = &'static KnobSpec> + '_ {
+    KNOBS.iter().filter(move |k| k.name == name)
+}
+
+/// 例外の粗さ判定に使うスコープの深さ。合成ノブでは**一番浅いエントリ**に合わせる
+/// (深い方だけに例外を付けても、浅い方が一様値のままでは意味が壊れるため)。
+pub fn knob_scope_depth(name: &str) -> Option<usize> {
+    knob_specs(name).map(|spec| spec.scope.depth()).min()
+}
+
+/// JSON の `knobs` から `.` 区切りの名前で値を引く。
+pub fn lookup_knob<'a>(knobs: &'a BTreeMap<String, Value>, name: &str) -> Option<&'a Value> {
+    let mut parts = name.split('.');
+    let first = parts.next()?;
+    let mut value = knobs.get(first)?;
+    for part in parts {
+        value = value.get(part)?;
+    }
+    Some(value)
+}
+
+/// JSON の `knobs` に実際に入っている葉の名前を `.` 区切りで集める(未知キー検出用)。
+fn leaf_names(value: &Value, prefix: &str, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let name = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{prefix}.{key}")
+                };
+                leaf_names(child, &name, out);
+            }
+        }
+        _ => out.push(prefix.to_string()),
+    }
 }
 
 /// スキーマ違反(400 で返す想定 — レーン B)。**黙って丸めない**(CLAUDE.md)。
@@ -305,15 +433,17 @@ impl Params {
 
         // 一様値: 全ノブが揃っていること + 未知キーが無いこと。
         for spec in KNOBS {
-            let value = raw
-                .knobs
-                .get(spec.name)
-                .ok_or_else(|| ParamsError::MissingKnob {
+            let value =
+                lookup_knob(&raw.knobs, spec.name).ok_or_else(|| ParamsError::MissingKnob {
                     knob: spec.name.to_string(),
                 })?;
             check_value(spec, value)?;
         }
-        for name in raw.knobs.keys() {
+        let mut names = Vec::new();
+        for (key, value) in &raw.knobs {
+            leaf_names(value, key, &mut names);
+        }
+        for name in &names {
             if knob_spec(name).is_none() {
                 return Err(ParamsError::UnknownKnob { knob: name.clone() });
             }
@@ -331,12 +461,13 @@ impl Params {
                 });
             }
             let at_depth = exception.at.depth();
-            if at_depth > spec.scope.depth() {
+            let scope_depth = knob_scope_depth(&exception.knob).unwrap_or(spec.scope.depth());
+            if at_depth > scope_depth {
                 return Err(ParamsError::ExceptionTooFine {
                     knob: exception.knob.clone(),
                     at: exception.at.to_string(),
                     at_depth,
-                    scope_depth: spec.scope.depth(),
+                    scope_depth,
                 });
             }
             check_value(spec, &exception.value)?;
@@ -372,7 +503,7 @@ impl Params {
     /// 有効値(表示用)。**JSON 内で完結**する most specific wins(078 §3-4)。
     /// CompoundConfig の継承解決を Rust に再実装しない — 管理ノブは JSON が正。
     pub fn effective_value(&self, knob: &str, asad: u32, aget: u32, ch: u32) -> Option<&Value> {
-        let uniform = self.knobs.get(knob)?;
+        let uniform = lookup_knob(&self.knobs, knob)?;
         let mut best: Option<(usize, &Value)> = None;
         for exception in &self.exceptions {
             if exception.knob != knob {
@@ -396,11 +527,11 @@ impl Params {
 /// 値を xcfg に書くテキストにする(型ごとの整形)。
 pub fn value_to_xcfg_text(spec: &KnobSpec, value: &Value) -> Result<String, ParamsError> {
     match spec.kind {
-        KnobKind::Int { .. } => value
+        KnobKind::Int { .. } | KnobKind::IntEnum(_) => value
             .as_i64()
             .map(|v| v.to_string())
             .ok_or_else(|| bad_type(spec, value, "integer")),
-        KnobKind::RealEnum(_) => value
+        KnobKind::Real { .. } | KnobKind::RealEnum(_) => value
             .as_f64()
             .map(format_real)
             .ok_or_else(|| bad_type(spec, value, "real")),
@@ -408,6 +539,28 @@ pub fn value_to_xcfg_text(spec: &KnobSpec, value: &Value) -> Result<String, Para
             .as_str()
             .map(|s| s.to_string())
             .ok_or_else(|| bad_type(spec, value, "string")),
+        KnobKind::Bool => value
+            .as_bool()
+            .map(|v| v.to_string())
+            .ok_or_else(|| bad_type(spec, value, "bool")),
+        KnobKind::Derived(table) => {
+            let mode = value
+                .as_str()
+                .ok_or_else(|| bad_type(spec, value, "string"))?;
+            table
+                .iter()
+                .find(|(json, _)| *json == mode)
+                .map(|(_, text)| (*text).to_string())
+                .ok_or_else(|| ParamsError::NotInEnum {
+                    knob: spec.name.to_string(),
+                    value: mode.to_string(),
+                    allowed: table
+                        .iter()
+                        .map(|(json, _)| *json)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                })
+        }
     }
 }
 
@@ -443,6 +596,31 @@ fn check_value(spec: &KnobSpec, value: &Value) -> Result<(), ParamsError> {
                 });
             }
         }
+        KnobKind::IntEnum(allowed) => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| bad_type(spec, value, "integer"))?;
+            if !allowed.contains(&v) {
+                return Err(ParamsError::NotInEnum {
+                    knob: spec.name.to_string(),
+                    value: v.to_string(),
+                    allowed: format!("{allowed:?}"),
+                });
+            }
+        }
+        KnobKind::Real { min, max } => {
+            let v = value
+                .as_f64()
+                .ok_or_else(|| bad_type(spec, value, "real"))?;
+            if min.map(|m| v < m).unwrap_or(false) || max.map(|m| v > m).unwrap_or(false) {
+                return Err(ParamsError::OutOfRange {
+                    knob: spec.name.to_string(),
+                    value: format_real(v),
+                    min: min.map(|m| m as i64),
+                    max: max.map(|m| m as i64),
+                });
+            }
+        }
         KnobKind::RealEnum(allowed) => {
             let v = value
                 .as_f64()
@@ -454,6 +632,15 @@ fn check_value(spec: &KnobSpec, value: &Value) -> Result<(), ParamsError> {
                     allowed: format!("{allowed:?}"),
                 });
             }
+        }
+        KnobKind::Bool => {
+            if !value.is_boolean() {
+                return Err(bad_type(spec, value, "bool"));
+            }
+        }
+        KnobKind::Derived(_) => {
+            // 対応表に無いモード名はここで NotInEnum になる(変換と同じ検査)。
+            value_to_xcfg_text(spec, value)?;
         }
         KnobKind::StrEnum(allowed) => {
             let v = value
@@ -477,18 +664,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_knob_name_is_unique_and_has_a_suffix() {
+    fn knob_names_repeat_only_for_composite_knobs_and_targets_are_unique() {
         for (i, spec) in KNOBS.iter().enumerate() {
             assert!(!spec.suffix.is_empty(), "{} has no suffix", spec.name);
-            assert!(
-                KNOBS
-                    .iter()
-                    .skip(i + 1)
-                    .all(|other| other.name != spec.name),
-                "duplicate knob {}",
-                spec.name
-            );
+
+            for other in KNOBS.iter().skip(i + 1) {
+                if other.name == spec.name {
+                    // 名前が重複してよいのは合成ノブ(`readout`)だけ。
+                    assert!(
+                        matches!(spec.kind, KnobKind::Derived(_))
+                            && matches!(other.kind, KnobKind::Derived(_)),
+                        "duplicate knob {} は合成ノブ(Derived)でなければならない",
+                        spec.name
+                    );
+                }
+                // 2 つのノブが同じ要素に書いてはいけない(後勝ちの silent な上書きになる)。
+                assert!(
+                    !(other.scope == spec.scope && other.suffix == spec.suffix),
+                    "{} と {} が同じ要素に書こうとしている",
+                    spec.name,
+                    other.name
+                );
+            }
         }
+    }
+
+    /// 入れ子キー(`pulser.enabled` など)は `.` 区切りで引ける。
+    #[test]
+    fn nested_knob_names_are_looked_up_through_the_dotted_path() {
+        let knobs: BTreeMap<String, Value> =
+            serde_json::from_str(r#"{"pulser":{"enabled":true,"period_ms":200},"gain":"120fC"}"#)
+                .expect("fixture json");
+
+        assert_eq!(
+            lookup_knob(&knobs, "pulser.enabled"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(lookup_knob(&knobs, "gain"), Some(&Value::from("120fC")));
+        assert_eq!(lookup_knob(&knobs, "pulser.voltage_mV"), None);
+    }
+
+    /// 合成ノブのスコープ深さは**一番浅いエントリ**(例外の粗さ判定に使う)。
+    #[test]
+    fn a_composite_knob_uses_the_shallowest_scope_for_the_exception_check() {
+        assert_eq!(knob_scope_depth("readout"), Some(Scope::Aget.depth()));
+        assert_eq!(knob_scope_depth("zeroSuppression.enabled"), Some(0));
+        assert_eq!(knob_scope_depth("zeroSuppression.threshold"), Some(3));
+        assert_eq!(knob_scope_depth("nope"), None);
     }
 
     #[test]

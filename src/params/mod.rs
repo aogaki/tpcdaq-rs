@@ -17,5 +17,6 @@ pub mod schema;
 pub use paths::{knob_path, Scope};
 pub use render::{render, Rendered};
 pub use schema::{
-    knob_spec, At, Exception, KnobKind, KnobSpec, Params, ParamsError, KNOBS, SCHEMA_ID,
+    knob_spec, knob_specs, At, Exception, KnobKind, KnobSpec, Params, ParamsError, KNOBS,
+    PEAKING_TIME_NS, SCHEMA_ID,
 };

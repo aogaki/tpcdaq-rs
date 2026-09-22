@@ -8,7 +8,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use tpcdaq::params::{render, Params, ParamsError};
+use tpcdaq::params::{render, Params, ParamsError, PEAKING_TIME_NS};
 
 fn fixture(name: &str) -> String {
     let path = format!(
@@ -35,8 +35,21 @@ fn params_json(knobs_and_exceptions: &str) -> String {
     )
 }
 
-/// 全ノブをテンプレートの現行値にしたうえで、一部だけ差し替えるための素。
-const KNOBS_TEMPLATE_VALUES: &str = r#""knobs":{"triggerDelay":1748,"writingClockFrequency_MHz":25.0,"triggerMode":"external","globalThreshold":1,"lsbThreshold":15,"gain":"120fC","triggerInhibition":"none"}"#;
+/// 全ノブ(11 個 = 葉 13 個)をテンプレートの現行値にしたうえで、一部だけ差し替えるための素。
+/// `KNOBS_BODY` は `{}` を含まないので `format!` で包んで使う(`replace("}")` の誤爆を避ける)。
+const KNOBS_BODY: &str = r#""triggerDelay":1748,"writingClockFrequency_MHz":25.0,"triggerMode":"external","globalThreshold":1,"lsbThreshold":15,"gain":"120fC","triggerInhibition":"none","peakingTime_ns":232,"readout":"full","zeroSuppression":{"enabled":false,"threshold":600},"pulser":{"enabled":false,"voltage_mV":-1000.0,"period_ms":1000}"#;
+
+/// `"knobs":{…}` の形。
+fn knobs_template_values() -> String {
+    format!(r#""knobs":{{{KNOBS_BODY}}}"#)
+}
+
+/// 現行値の一部を差し替えた `"knobs":{…}`。
+fn knobs_with(from: &str, to: &str) -> String {
+    let body = KNOBS_BODY.replace(from, to);
+    assert_ne!(body, KNOBS_BODY, "差し替え対象 {from} が見つからない");
+    format!(r#""knobs":{{{body}}}"#)
+}
 
 // ---------------------------------------------------------------------
 // §5-1 往復
@@ -63,7 +76,7 @@ fn changing_one_knob_changes_exactly_one_value_in_the_template() {
     let template = template_mini();
     let json = params_json(&format!(
         r#"{}, "exceptions":[]"#,
-        KNOBS_TEMPLATE_VALUES.replace("\"triggerDelay\":1748", "\"triggerDelay\":2000")
+        knobs_with("\"triggerDelay\":1748", "\"triggerDelay\":2000")
     ));
     let params = Params::from_json_str(&json).unwrap();
 
@@ -83,7 +96,7 @@ fn the_asad_generator_trigger_delay_is_a_different_knob_and_stays_untouched() {
     let template = template_mini();
     let json = params_json(&format!(
         r#"{}, "exceptions":[]"#,
-        KNOBS_TEMPLATE_VALUES.replace("\"triggerDelay\":1748", "\"triggerDelay\":2000")
+        knobs_with("\"triggerDelay\":1748", "\"triggerDelay\":2000")
     ));
     let params = Params::from_json_str(&json).unwrap();
 
@@ -105,7 +118,8 @@ fn the_asad_generator_trigger_delay_is_a_different_knob_and_stays_untouched() {
 fn stale_explicit_overrides_of_managed_knobs_are_removed() {
     let template = fixture("template_stale_overrides.xcfg");
     let params = Params::from_json_str(&params_json(&format!(
-        r#"{KNOBS_TEMPLATE_VALUES}, "exceptions":[]"#
+        r#"{}, "exceptions":[]"#,
+        knobs_template_values()
     )))
     .unwrap();
 
@@ -148,6 +162,43 @@ fn stale_explicit_overrides_of_managed_knobs_are_removed() {
     assert_eq!(rendered.xml.matches("<LSBThresholdValue").count(), 1);
     assert_eq!(rendered.xml.matches("<Gain").count(), 1);
 
+    // 2026-09-22 に追加した 4 ノブの仕込み(5〜8)も消えている。
+    assert!(
+        !rendered
+            .xml
+            .contains("<peackingTime unit=\"ns\">70</peackingTime>"),
+        "Aget[1] の peackingTime 70 が残っている"
+    );
+    assert!(
+        !rendered
+            .xml
+            .contains("<isAllChannelRead>false</isAllChannelRead>"),
+        "Aget[1] の isAllChannelRead false が残っている"
+    );
+    assert!(
+        !rendered
+            .xml
+            .contains("<zeroSuppressionThreshold>11</zeroSuppressionThreshold>"),
+        "channel[4] の zeroSuppressionThreshold 11 が残っている"
+    );
+    assert!(
+        !rendered
+            .xml
+            .contains("<enableZeroSuppression>true</enableZeroSuppression>"),
+        "Instance[0] の enableZeroSuppression true が残っている"
+    );
+    assert!(
+        !rendered
+            .xml
+            .contains("<periodicModeEnabled>true</periodicModeEnabled>"),
+        "Instance[0] の periodicModeEnabled true が残っている"
+    );
+    assert_eq!(rendered.xml.matches("<peackingTime").count(), 1);
+    assert_eq!(rendered.xml.matches("<isAllChannelRead").count(), 1);
+    assert_eq!(rendered.xml.matches("<zeroSuppressionThreshold").count(), 1);
+    assert_eq!(rendered.xml.matches("<enableZeroSuppression").count(), 1);
+    assert_eq!(rendered.xml.matches("<periodicModeEnabled").count(), 1);
+
     // 非管理ノブは無傷(明示ノードそのものは消さない — 空になっても残す)。
     assert!(rendered.xml.contains("<coboId>1</coboId>"));
     assert!(rendered
@@ -166,7 +217,8 @@ fn stale_explicit_overrides_of_managed_knobs_are_removed() {
 fn an_exception_at_the_knob_scope_is_written_as_an_explicit_node() {
     let template = template_mini();
     let json = params_json(&format!(
-        r#"{KNOBS_TEMPLATE_VALUES}, "exceptions":[{{"at":{{"asad":1,"aget":0,"ch":3}},"knob":"lsbThreshold","value":3,"note":"noisy channel (068 #4)"}}]"#
+        r#"{}, "exceptions":[{{"at":{{"asad":1,"aget":0,"ch":3}},"knob":"lsbThreshold","value":3,"note":"noisy channel (068 #4)"}}]"#,
+        knobs_template_values()
     ));
     let params = Params::from_json_str(&json).unwrap();
 
@@ -196,7 +248,8 @@ fn an_exception_at_the_knob_scope_is_written_as_an_explicit_node() {
 fn an_exception_coarser_than_the_knob_scope_expands_to_explicit_nodes() {
     let template = template_mini();
     let json = params_json(&format!(
-        r#"{KNOBS_TEMPLATE_VALUES}, "exceptions":[{{"at":{{"asad":1}},"knob":"lsbThreshold","value":7}}]"#
+        r#"{}, "exceptions":[{{"at":{{"asad":1}},"knob":"lsbThreshold","value":7}}]"#,
+        knobs_template_values()
     ));
     let params = Params::from_json_str(&json).unwrap();
 
@@ -227,7 +280,8 @@ fn an_exception_coarser_than_the_knob_scope_expands_to_explicit_nodes() {
 #[test]
 fn an_exception_finer_than_the_knob_scope_is_rejected() {
     let json = params_json(&format!(
-        r#"{KNOBS_TEMPLATE_VALUES}, "exceptions":[{{"at":{{"asad":1}},"knob":"triggerDelay","value":800}}]"#
+        r#"{}, "exceptions":[{{"at":{{"asad":1}},"knob":"triggerDelay","value":800}}]"#,
+        knobs_template_values()
     ));
 
     let err = Params::from_json_str(&json).unwrap_err();
@@ -242,7 +296,8 @@ fn an_exception_finer_than_the_knob_scope_is_rejected() {
 #[test]
 fn an_exception_target_that_is_not_a_prefix_is_rejected() {
     let json = params_json(&format!(
-        r#"{KNOBS_TEMPLATE_VALUES}, "exceptions":[{{"at":{{"ch":3}},"knob":"lsbThreshold","value":3}}]"#
+        r#"{}, "exceptions":[{{"at":{{"ch":3}},"knob":"lsbThreshold","value":3}}]"#,
+        knobs_template_values()
     ));
 
     let err = Params::from_json_str(&json).unwrap_err();
@@ -257,7 +312,8 @@ fn an_exception_target_that_is_not_a_prefix_is_rejected() {
 #[test]
 fn an_empty_exception_target_is_rejected() {
     let json = params_json(&format!(
-        r#"{KNOBS_TEMPLATE_VALUES}, "exceptions":[{{"at":{{}},"knob":"lsbThreshold","value":3}}]"#
+        r#"{}, "exceptions":[{{"at":{{}},"knob":"lsbThreshold","value":3}}]"#,
+        knobs_template_values()
     ));
 
     let err = Params::from_json_str(&json).unwrap_err();
@@ -274,7 +330,8 @@ fn an_empty_exception_target_is_rejected() {
 fn an_exception_target_absent_from_the_template_is_rejected() {
     let template = template_mini();
     let json = params_json(&format!(
-        r#"{KNOBS_TEMPLATE_VALUES}, "exceptions":[{{"at":{{"asad":7}},"knob":"lsbThreshold","value":3}}]"#
+        r#"{}, "exceptions":[{{"at":{{"asad":7}},"knob":"lsbThreshold","value":3}}]"#,
+        knobs_template_values()
     ));
     let params = Params::from_json_str(&json).unwrap();
 
@@ -290,10 +347,11 @@ fn an_exception_target_absent_from_the_template_is_rejected() {
 #[test]
 fn effective_value_resolution_prefers_the_most_specific_exception() {
     let json = params_json(&format!(
-        r#"{KNOBS_TEMPLATE_VALUES}, "exceptions":[
+        r#"{}, "exceptions":[
             {{"at":{{"asad":1}},"knob":"lsbThreshold","value":7}},
             {{"at":{{"asad":1,"aget":0,"ch":3}},"knob":"lsbThreshold","value":3}}
-        ]"#
+        ]"#,
+        knobs_template_values()
     ));
     let params = Params::from_json_str(&json).unwrap();
 
@@ -333,7 +391,7 @@ fn out_of_range_and_unknown_enum_values_are_rejected() {
     // globalThreshold の range は [0, 7](xcfg 実物)。
     let too_big = params_json(&format!(
         r#"{}, "exceptions":[]"#,
-        KNOBS_TEMPLATE_VALUES.replace("\"globalThreshold\":1", "\"globalThreshold\":8")
+        knobs_with("\"globalThreshold\":1", "\"globalThreshold\":8")
     ));
     assert!(matches!(
         Params::from_json_str(&too_big).unwrap_err(),
@@ -343,7 +401,7 @@ fn out_of_range_and_unknown_enum_values_are_rejected() {
     // Gain の enum は {10pC, 120fC, 1pC, 240fC}。
     let bad_gain = params_json(&format!(
         r#"{}, "exceptions":[]"#,
-        KNOBS_TEMPLATE_VALUES.replace("\"gain\":\"120fC\"", "\"gain\":\"5pC\"")
+        knobs_with("\"gain\":\"120fC\"", "\"gain\":\"5pC\"")
     ));
     assert!(matches!(
         Params::from_json_str(&bad_gain).unwrap_err(),
@@ -353,7 +411,7 @@ fn out_of_range_and_unknown_enum_values_are_rejected() {
     // triggerMode は zCoBo FW が扱える 5 値だけ(§2.1 裁定 1)。
     let mult = params_json(&format!(
         r#"{}, "exceptions":[]"#,
-        KNOBS_TEMPLATE_VALUES.replace(
+        knobs_with(
             "\"triggerMode\":\"external\"",
             "\"triggerMode\":\"onMultiplicity\""
         )
@@ -366,7 +424,7 @@ fn out_of_range_and_unknown_enum_values_are_rejected() {
     // writingClockFrequency_MHz は enum {12.5, 25, 50, 100}。
     let odd_clock = params_json(&format!(
         r#"{}, "exceptions":[]"#,
-        KNOBS_TEMPLATE_VALUES.replace(
+        knobs_with(
             "\"writingClockFrequency_MHz\":25.0",
             "\"writingClockFrequency_MHz\":33.0"
         )
@@ -388,10 +446,8 @@ fn a_missing_or_unknown_knob_is_rejected() {
     ));
 
     // 078 §2.1 裁定 1: multiplicity / 2p 系はスキーマ違反として拒否する。
-    let unknown = params_json(&format!(
-        r#"{}, "exceptions":[]"#,
-        KNOBS_TEMPLATE_VALUES.replace("}", r#","multiplicityThreshold":50}"#)
-    ));
+    let knobs = format!(r#""knobs":{{{KNOBS_BODY},"multiplicityThreshold":50}}"#);
+    let unknown = params_json(&format!(r#"{knobs}, "exceptions":[]"#));
     assert!(matches!(
         Params::from_json_str(&unknown).unwrap_err(),
         ParamsError::UnknownKnob { .. }
@@ -401,7 +457,8 @@ fn a_missing_or_unknown_knob_is_rejected() {
 #[test]
 fn an_exception_on_an_unknown_knob_is_rejected() {
     let json = params_json(&format!(
-        r#"{KNOBS_TEMPLATE_VALUES}, "exceptions":[{{"at":{{"asad":1}},"knob":"peakingTime_ns","value":117}}]"#
+        r#"{}, "exceptions":[{{"at":{{"asad":1}},"knob":"multiplicityThreshold","value":50}}]"#,
+        knobs_template_values()
     ));
 
     assert!(matches!(
@@ -413,7 +470,8 @@ fn an_exception_on_an_unknown_knob_is_rejected() {
 #[test]
 fn an_exception_value_is_range_checked_like_the_uniform_value() {
     let json = params_json(&format!(
-        r#"{KNOBS_TEMPLATE_VALUES}, "exceptions":[{{"at":{{"asad":1,"aget":0,"ch":3}},"knob":"lsbThreshold","value":16}}]"#
+        r#"{}, "exceptions":[{{"at":{{"asad":1,"aget":0,"ch":3}},"knob":"lsbThreshold","value":16}}]"#,
+        knobs_template_values()
     ));
 
     assert!(matches!(
@@ -432,7 +490,7 @@ fn an_exception_value_is_range_checked_like_the_uniform_value() {
 /// 期待値の出典:
 /// ```text
 /// $ shasum -a 256 tests/fixtures/params/params_roundtrip.json
-/// c751017e7f55c3ec202394059514c4360de8e23bb2587bc13f72b15c6eba34ee
+/// 4228b96fd7539f7e4bdbe6d2a8a1477edbee90ca9a857d7ba6a57b491c8bf083
 /// ```
 #[test]
 fn the_config_id_is_the_template_stem_plus_the_json_hash() {
@@ -441,14 +499,14 @@ fn the_config_id_is_the_template_stem_plus_the_json_hash() {
 
     let rendered = render(&params, &template).unwrap();
 
-    assert_eq!(rendered.config_id, "mini-fixture__c751017e");
+    assert_eq!(rendered.config_id, "mini-fixture__4228b96f");
     assert_eq!(
         rendered.configure_file_name,
-        "configure-mini-fixture__c751017e.xcfg"
+        "configure-mini-fixture__4228b96f.xcfg"
     );
     assert_eq!(
         rendered.prepare_file_name,
-        "prepare-mini-fixture__c751017e.xcfg"
+        "prepare-mini-fixture__4228b96f.xcfg"
     );
 }
 
@@ -457,12 +515,13 @@ fn the_config_id_is_the_template_stem_plus_the_json_hash() {
 fn the_config_id_changes_when_the_json_changes() {
     let template = template_mini();
     let a = Params::from_json_str(&params_json(&format!(
-        r#"{KNOBS_TEMPLATE_VALUES}, "exceptions":[]"#
+        r#"{}, "exceptions":[]"#,
+        knobs_template_values()
     )))
     .unwrap();
     let b = Params::from_json_str(&params_json(&format!(
         r#"{}, "exceptions":[]"#,
-        KNOBS_TEMPLATE_VALUES.replace("\"triggerDelay\":1748", "\"triggerDelay\":1749")
+        knobs_with("\"triggerDelay\":1748", "\"triggerDelay\":1749")
     )))
     .unwrap();
 
@@ -471,4 +530,210 @@ fn the_config_id_changes_when_the_json_changes() {
 
     assert_ne!(ra.config_id, rb.config_id);
     assert_eq!(ra.config_id, render(&a, &template).unwrap().config_id);
+}
+
+// ---------------------------------------------------------------------
+// 2026-09-22 レビュー裁定で追加した 4 ノブ
+// ---------------------------------------------------------------------
+
+/// `peakingTime_ns` は **AGET スコープ**(§2 表の channel は誤り)。要素名は GET の綴り。
+#[test]
+fn peaking_time_is_an_aget_scope_knob_with_the_get_spelling() {
+    let template = template_mini();
+    let json = params_json(&format!(
+        r#"{}, "exceptions":[{{"at":{{"asad":1,"aget":1}},"knob":"peakingTime_ns","value":117}}]"#,
+        knobs_with("\"peakingTime_ns\":232", "\"peakingTime_ns\":334")
+    ));
+    let params = Params::from_json_str(&json).unwrap();
+
+    let rendered = render(&params, &template).unwrap();
+
+    // 一様値は `*` ノードで属性ごと保たれる。
+    assert!(rendered.xml.contains(
+        "<peackingTime unit=\"ns\" range=\"{70, 117, 232, 280, 334, 383, 502, 541, 568, 632, 721, 760, 831, 870, 976, 1014}\">334</peackingTime>"
+    ));
+    // 例外は AsAd[1]/Aget[1] の明示ノードへ(AGET スコープなので展開は起きない)。
+    let asad1 = rendered.xml.split("<AsAd id=\"1\">").nth(1).unwrap();
+    assert!(asad1.contains("<peackingTime>117</peackingTime>"));
+    assert_eq!(rendered.xml.matches("<peackingTime").count(), 2);
+}
+
+/// AGET 仕様の 16 値だけを受ける。定数表 `PEAKING_TIME_NS` が唯一の定義で、
+/// テンプレートの `range` 属性と一致することをここで確かめる(焼き込みの検算)。
+#[test]
+fn the_peaking_time_table_matches_the_template_range_attribute() {
+    let template = template_mini();
+    let range: String = PEAKING_TIME_NS
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    assert!(
+        template.contains(&format!("range=\"{{{range}}}\"")),
+        "PEAKING_TIME_NS がテンプレートの range と違う: {range}"
+    );
+
+    // 16 値に無い 200 ns は拒否。
+    let bad = params_json(&format!(
+        r#"{}, "exceptions":[]"#,
+        knobs_with("\"peakingTime_ns\":232", "\"peakingTime_ns\":200")
+    ));
+    assert!(matches!(
+        Params::from_json_str(&bad).unwrap_err(),
+        ParamsError::NotInEnum { .. }
+    ));
+}
+
+/// `readout` は**合成ノブ**: 1 つの JSON 値が AGET の 2 要素に展開される。
+/// 値の出典は実テンプレート 2 本の差分(full = configure-physics、partial = configure-pulser)。
+#[test]
+fn readout_partial_flips_both_aget_elements() {
+    let template = template_mini();
+
+    let full = Params::from_json_str(&params_json(&format!(
+        r#"{}, "exceptions":[]"#,
+        knobs_template_values()
+    )))
+    .unwrap();
+    let rendered_full = render(&full, &template).unwrap();
+    assert!(rendered_full
+        .xml
+        .contains("<isAllChannelRead>true</isAllChannelRead>"));
+    assert!(rendered_full.xml.contains("<isFPNRead>true</isFPNRead>"));
+
+    let partial = Params::from_json_str(&params_json(&format!(
+        r#"{}, "exceptions":[]"#,
+        knobs_with("\"readout\":\"full\"", "\"readout\":\"partial\"")
+    )))
+    .unwrap();
+    let rendered_partial = render(&partial, &template).unwrap();
+    assert!(rendered_partial
+        .xml
+        .contains("<isAllChannelRead>false</isAllChannelRead>"));
+    assert!(rendered_partial
+        .xml
+        .contains("<isFPNRead>false</isFPNRead>"));
+    // full との差はこの 2 要素だけ(非管理ノブは無傷)。
+    assert_eq!(
+        rendered_partial.xml,
+        rendered_full
+            .xml
+            .replace(
+                "<isAllChannelRead>true</isAllChannelRead>",
+                "<isAllChannelRead>false</isAllChannelRead>"
+            )
+            .replace(
+                "<isFPNRead>true</isFPNRead>",
+                "<isFPNRead>false</isFPNRead>"
+            )
+    );
+}
+
+#[test]
+fn an_unknown_readout_mode_is_rejected() {
+    let json = params_json(&format!(
+        r#"{}, "exceptions":[]"#,
+        knobs_with("\"readout\":\"full\"", "\"readout\":\"zeroSuppressed\"")
+    ));
+    assert!(matches!(
+        Params::from_json_str(&json).unwrap_err(),
+        ParamsError::NotInEnum { .. }
+    ));
+}
+
+/// `zeroSuppression` は JSON では 1 オブジェクトだが、xcfg ではスコープの違う 2 要素。
+/// 例外は threshold(channel)にだけ意味があり、enabled(CoBo)への例外は拒否される。
+#[test]
+fn zero_suppression_is_two_knobs_with_different_scopes() {
+    let template = template_mini();
+    let json = params_json(&format!(
+        r#"{}, "exceptions":[{{"at":{{"asad":0,"aget":1,"ch":2}},"knob":"zeroSuppression.threshold","value":42}}]"#,
+        knobs_with(
+            "\"zeroSuppression\":{\"enabled\":false,\"threshold\":600}",
+            "\"zeroSuppression\":{\"enabled\":true,\"threshold\":700}"
+        )
+    ));
+    let params = Params::from_json_str(&json).unwrap();
+
+    let rendered = render(&params, &template).unwrap();
+
+    assert!(rendered
+        .xml
+        .contains("<enableZeroSuppression>true</enableZeroSuppression>"));
+    assert!(rendered
+        .xml
+        .contains("<zeroSuppressionThreshold range=\"[0, 4095]\">700</zeroSuppressionThreshold>"));
+    assert!(rendered
+        .xml
+        .contains("<zeroSuppressionThreshold>42</zeroSuppressionThreshold>"));
+
+    // enabled は CoBo スコープ = どんな `at` もスコープより細かい → 拒否。
+    let bad = params_json(&format!(
+        r#"{}, "exceptions":[{{"at":{{"asad":0}},"knob":"zeroSuppression.enabled","value":true}}]"#,
+        knobs_template_values()
+    ));
+    assert!(matches!(
+        Params::from_json_str(&bad).unwrap_err(),
+        ParamsError::ExceptionTooFine { .. }
+    ));
+}
+
+/// `pulser` は **CoBo スコープ**の `Instance.Generator`(AsAd の Generator ではない)。
+/// `voltage_mV` は `amplitudeStart` と同値(GET の `asadPulserVoltage_mV` がそのまま読む)。
+#[test]
+fn pulser_fields_go_to_the_cobo_generator() {
+    let template = template_mini();
+    let json = params_json(&format!(
+        r#"{}, "exceptions":[]"#,
+        knobs_with(
+            "\"pulser\":{\"enabled\":false,\"voltage_mV\":-1000.0,\"period_ms\":1000}",
+            "\"pulser\":{\"enabled\":true,\"voltage_mV\":-300.0,\"period_ms\":200}"
+        )
+    ));
+    let params = Params::from_json_str(&json).unwrap();
+
+    let rendered = render(&params, &template).unwrap();
+
+    assert!(rendered
+        .xml
+        .contains("<periodicModeEnabled>true</periodicModeEnabled>"));
+    assert!(rendered.xml.contains(
+        "<amplitudeStart unit=\"mV\" range=\"[-1000.0, 1000.0]\">-300.0</amplitudeStart>"
+    ));
+    assert!(rendered
+        .xml
+        .contains("<period_ms unit=\"ms\">200</period_ms>"));
+    // AsAd 配下の Generator(isCalibMode / triggerDelay)は触らない。
+    assert!(rendered.xml.contains("<isCalibMode>false</isCalibMode>"));
+    assert_eq!(rendered.xml.matches("<periodicModeEnabled").count(), 1);
+}
+
+/// pulser の電圧は xcfg の range [-1000, 1000] mV の外を拒否する。
+#[test]
+fn a_pulser_voltage_outside_the_xcfg_range_is_rejected() {
+    let json = params_json(&format!(
+        r#"{}, "exceptions":[]"#,
+        knobs_with("\"voltage_mV\":-1000.0", "\"voltage_mV\":-1200.0")
+    ));
+    assert!(matches!(
+        Params::from_json_str(&json).unwrap_err(),
+        ParamsError::OutOfRange { .. }
+    ));
+}
+
+/// 入れ子キーの打ち間違いは弾く(黙って既定値にしない)。
+#[test]
+fn a_misspelled_nested_knob_key_is_rejected() {
+    let json = params_json(&format!(
+        r#"{}, "exceptions":[]"#,
+        knobs_with("\"period_ms\":1000", "\"periodMs\":1000")
+    ));
+    let err = Params::from_json_str(&json).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ParamsError::MissingKnob { .. } | ParamsError::UnknownKnob { .. }
+        ),
+        "unexpected error: {err}"
+    );
 }

@@ -2,11 +2,15 @@
 <Setup id="Conditions">
 	<!-- 078 §3-1 の除去規則の負性テスト用フィクスチャ。
 	     template_mini.xcfg と同じ構造に、**管理ノブを明示 id ノードで上書きしている箇所**を
-	     4 か所仕込んである(現行の実テンプレートには無いが、Warsaw 側の改訂で入り得る形):
+	     8 か所仕込んである(現行の実テンプレートには無いが、Warsaw 側の改訂で入り得る形):
 	       1. Instance[0]/Module/triggerDelay = 999        (CoBo スコープ)
 	       2. AsAd[*]/Aget[1]/Global/Reg1/GlobalThresholdValue = 6  (AGET スコープ)
 	       3. AsAd[*]/Aget[*]/channel[4]/LSBThresholdValue = 0      (channel スコープ)
 	       4. AsAd[1]/Aget[0]/channel[3]/{LSBThresholdValue,Gain}   (channel スコープ、深い明示)
+	       5. AsAd[*]/Aget[1]/Global/Reg1/peackingTime = 70         (AGET、2026-09-22 追加ノブ)
+	       6. AsAd[*]/Aget[1]/Global/Reg1/isAllChannelRead = false   (readout の合成先)
+	       7. AsAd[*]/Aget[*]/channel[4]/zeroSuppressionThreshold = 11 (channel)
+	       8. Instance[0]/{Module/enableZeroSuppression, Generator/periodicModeEnabled} (CoBo)
 	     除去を省くと、これらが JSON の一様値に勝ってしまう。 -->
 	<ECC>
 		<DataMonitor>true</DataMonitor>
@@ -68,6 +72,7 @@
 					<channel id="3" />
 					<channel id="4">
 						<LSBThresholdValue>0</LSBThresholdValue>
+						<zeroSuppressionThreshold>11</zeroSuppressionThreshold>
 					</channel>
 					<channel id="5" />
 				</Aget>
@@ -76,6 +81,8 @@
 					<Global>
 						<Reg1>
 							<GlobalThresholdValue>6</GlobalThresholdValue>
+							<peackingTime unit="ns">70</peackingTime>
+							<isAllChannelRead>false</isAllChannelRead>
 						</Reg1>
 					</Global>
 				</Aget>
@@ -100,7 +107,11 @@
 		<Instance id="0">
 			<Module>
 				<triggerDelay unit="10ns">999</triggerDelay>
+				<enableZeroSuppression>true</enableZeroSuppression>
 			</Module>
+			<Generator>
+				<periodicModeEnabled>true</periodicModeEnabled>
+			</Generator>
 		</Instance>
 		<Instance id="1">
 			<Module>

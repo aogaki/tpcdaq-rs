@@ -113,13 +113,20 @@ fn the_rendered_xcfg_resolves_to_the_json_values_for_every_instance() {
             "globalThreshold": 3,
             "lsbThreshold": 12,
             "gain": "240fC",
-            "triggerInhibition": "none"
+            "triggerInhibition": "none",
+            "peakingTime_ns": 502,
+            "readout": "partial",
+            "zeroSuppression": {"enabled": true, "threshold": 700},
+            "pulser": {"enabled": true, "voltage_mV": -300.0, "period_ms": 200}
         },
         "exceptions": [
             {"at": {"asad": 1}, "knob": "lsbThreshold", "value": 7, "note": "AsAd1 全体"},
             {"at": {"asad": 1, "aget": 0, "ch": 3}, "knob": "lsbThreshold", "value": 3},
             {"at": {"asad": 0, "aget": 1, "ch": 4}, "knob": "triggerInhibition", "value": "inhibit_channel"},
-            {"at": {"asad": 1, "aget": 1}, "knob": "globalThreshold", "value": 6}
+            {"at": {"asad": 1, "aget": 1}, "knob": "globalThreshold", "value": 6},
+            {"at": {"asad": 0, "aget": 1}, "knob": "peakingTime_ns", "value": 117},
+            {"at": {"asad": 0}, "knob": "readout", "value": "full", "note": "合成ノブ × 粗い例外"},
+            {"at": {"asad": 1, "aget": 0, "ch": 2}, "knob": "zeroSuppression.threshold", "value": 42}
         ]
     }"#;
     let params = Params::from_json_str(json).unwrap();
@@ -127,8 +134,9 @@ fn the_rendered_xcfg_resolves_to_the_json_values_for_every_instance() {
     let path = write_temp("mini_rendered.xcfg", &rendered.xml);
 
     let checked = check_all_instances(&bin, &path, &params, &rendered.xml, &["0", "1"]);
-    // 2 CoBo instance × (CoBo 3 + AsAd2×AGET2×(AGET 1 + ch6×channel 3)) = 2 × (3 + 4 × 19) = 158
-    assert_eq!(checked, 158, "照合したインスタンス数");
+    // KNOBS のエントリは CoBo 7 / AGET 4 / channel 4(合成ノブ readout は 2 エントリ)。
+    // 2 CoBo instance × (7 + 4×(2 AsAd × 2 AGET) + 4×(2 × 2 × 6 ch)) = 2 × (7 + 16 + 96) = 238
+    assert_eq!(checked, 238, "照合したインスタンス数");
     eprintln!("params_ccfg_oracle: mini fixture で {checked} インスタンスを照合");
 }
 
@@ -169,6 +177,30 @@ fn the_stale_explicit_override_wins_in_the_template_and_is_gone_after_rendering(
         )
         .to_string(),
         knob_path("0", Scope::Channel, &["1", "0", "3"], &["Gain"]).to_string(),
+        // 2026-09-22 に追加した 4 ノブの仕込み(5〜8)。
+        knob_path(
+            "0",
+            Scope::Aget,
+            &["0", "1"],
+            &["Global", "Reg1", "peackingTime"],
+        )
+        .to_string(),
+        knob_path(
+            "0",
+            Scope::Aget,
+            &["0", "1"],
+            &["Global", "Reg1", "isAllChannelRead"],
+        )
+        .to_string(),
+        knob_path(
+            "0",
+            Scope::Channel,
+            &["0", "0", "4"],
+            &["zeroSuppressionThreshold"],
+        )
+        .to_string(),
+        knob_path("0", Scope::Cobo, &[], &["Module", "enableZeroSuppression"]).to_string(),
+        knob_path("0", Scope::Cobo, &[], &["Generator", "periodicModeEnabled"]).to_string(),
     ];
 
     // 罠が本物であることを一次資料で確認する。
@@ -176,14 +208,17 @@ fn the_stale_explicit_override_wins_in_the_template_and_is_gone_after_rendering(
     let before_values: Vec<&str> = before.iter().map(|(_, v)| v.as_str()).collect();
     assert_eq!(
         before_values,
-        vec!["999", "6", "0", "2", "1pC"],
+        vec!["999", "6", "0", "2", "1pC", "70", "false", "11", "true", "true"],
         "テンプレートの明示ノードが勝つ(= 除去規則が必要な理由)"
     );
 
     // 生成物では一様値に戻る。
     let json = r#"{"schema":"tpcdaq-params/1","template":"configure-mini-fixture.xcfg",
         "knobs":{"triggerDelay":1748,"writingClockFrequency_MHz":25.0,"triggerMode":"external",
-        "globalThreshold":1,"lsbThreshold":15,"gain":"120fC","triggerInhibition":"none"},
+        "globalThreshold":1,"lsbThreshold":15,"gain":"120fC","triggerInhibition":"none",
+        "peakingTime_ns":232,"readout":"full",
+        "zeroSuppression":{"enabled":false,"threshold":600},
+        "pulser":{"enabled":false,"voltage_mV":-1000.0,"period_ms":1000}},
         "exceptions":[]}"#;
     let params = Params::from_json_str(json).unwrap();
     let rendered = render(&params, &template).unwrap();
@@ -191,7 +226,10 @@ fn the_stale_explicit_override_wins_in_the_template_and_is_gone_after_rendering(
 
     let after = resolve_all(&bin, &rendered_path, &trap_paths);
     let after_values: Vec<&str> = after.iter().map(|(_, v)| v.as_str()).collect();
-    assert_eq!(after_values, vec!["1748", "1", "15", "15", "120fC"]);
+    assert_eq!(
+        after_values,
+        vec!["1748", "1", "15", "15", "120fC", "232", "true", "600", "false", "false"]
+    );
 }
 
 /// 実テンプレート(env、リポ外)での全数照合。ELITPC 実寸 = 1,088 ch。
@@ -217,13 +255,20 @@ fn the_real_template_resolves_to_the_json_values_for_every_instance() {
             "globalThreshold": 1,
             "lsbThreshold": 15,
             "gain": "120fC",
-            "triggerInhibition": "none"
+            "triggerInhibition": "none",
+            "peakingTime_ns": 232,
+            "readout": "full",
+            "zeroSuppression": {"enabled": false, "threshold": 600},
+            "pulser": {"enabled": false, "voltage_mV": -1000.0, "period_ms": 1000}
         },
         "exceptions": [
             {"at": {"asad": 2, "aget": 3, "ch": 47}, "knob": "lsbThreshold", "value": 4},
             {"at": {"asad": 2, "aget": 3, "ch": 47}, "knob": "triggerInhibition", "value": "inhibit_channel"},
             {"at": {"asad": 3}, "knob": "gain", "value": "240fC"},
-            {"at": {"asad": 0, "aget": 2}, "knob": "globalThreshold", "value": 5}
+            {"at": {"asad": 0, "aget": 2}, "knob": "globalThreshold", "value": 5},
+            {"at": {"asad": 1, "aget": 2}, "knob": "peakingTime_ns", "value": 1014},
+            {"at": {"asad": 0}, "knob": "readout", "value": "partial"},
+            {"at": {"asad": 3, "aget": 0, "ch": 11}, "knob": "zeroSuppression.threshold", "value": 4095}
         ]
     }"#;
     let params = Params::from_json_str(json).unwrap();
@@ -257,7 +302,11 @@ fn the_real_template_round_trips_byte_for_byte() {
             "globalThreshold": 1,
             "lsbThreshold": 15,
             "gain": "120fC",
-            "triggerInhibition": "none"
+            "triggerInhibition": "none",
+            "peakingTime_ns": 232,
+            "readout": "full",
+            "zeroSuppression": {"enabled": false, "threshold": 600},
+            "pulser": {"enabled": false, "voltage_mV": -1000.0, "period_ms": 1000}
         },
         "exceptions": []
     }"#;

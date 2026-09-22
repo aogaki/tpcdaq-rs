@@ -47,10 +47,12 @@ Node[CoBo].Instance[0].AsAd[1].Aget[2].channel[5].LSBThresholdValue
 ## 2. 照合結果(サマリ)
 
 - 照合したノブ: **11**(§2 の表 10 個 + §2.1 裁定 2 の `TriggerInhibition`)
-- 実装: **7**
-- 食い違い → 未実装・Fable 待ち: **4**(`peakingTime_ns` / `readout` / `zeroSuppression` / `pulser`)
+- 初回(2026-09-22 午前)で位置が一致 → そのまま実装: **7**(§3)
+- 表と食い違ったので一旦保留 → **同日のレビュー裁定で位置を確定して実装: 4**(§4)
+- **2026-09-22 時点で 11 ノブすべて実装済み**(JSON の葉は 13 個 —
+  `zeroSuppression` が 2、`pulser` が 3 に分かれるため)
 
-## 3. 実装するノブ(7)
+## 3. 初回の照合で位置が一致したノブ(7)
 
 `現行値` は physics 25 MHz テンプレート(既定テンプレート)の値。
 
@@ -74,31 +76,50 @@ Node[CoBo].Instance[0].AsAd[1].Aget[2].channel[5].LSBThresholdValue
   箇所は 5 本のテンプレートのどれにも無い**(除去規則 §3-1 は現行テンプレートでは no-op だが、
   将来のテンプレート改訂に対する保険として必須 → 負性テストを合成フィクスチャで持つ)。
 
-## 4. 食い違い(実装せず、Fable の裁定待ち)
+## 4. 表と食い違ったノブ(2026-09-22 のレビュー裁定で位置を確定し、実装済み)
 
-### 4-1. `peakingTime_ns` — スコープと要素名が違う
+### 4-1. `peakingTime_ns` — スコープと要素名が違う → **AGET スコープで実装**
 
 - 078 §2 表: スコープ channel / `Aget/channel/peakingTime`
 - 実物: **AGET スコープ**の `Global.Reg1.peackingTime`(**GET 側のスペルは `peackingTime`**)、
-  `unit="ns"`、range `{70, 117, 232, 280, 334, 383, 502, 541, 568, 632, 721, 760, 831, 870, 976, 1014}`、現行値 232。
-- channel 配下に peaking time 相当の要素は**無い**(AGET レジスタ 1 = chip 単位のため)。
-- 影響: スコープが channel → AGET に変わると、例外リストの粒度(`at` の最細が `aget`)が変わる。
-  JSON のキー名を `peakingTime_ns` のままにするか、xcfg のスペル(`peackingTime`)に寄せるかも要裁定。
+  `unit="ns"`、range `{70, 117, 232, 280, 334, 383, 502, 541, 568, 632, 721, 760, 831, 870, 976, 1014}`。
+  channel 配下に peaking time 相当の要素は**無い**(AGET レジスタ 1 = chip 単位のため)。
+- **裁定(2026-09-22)**: AGET スコープで実装。JSON のキーは `peakingTime_ns` のまま、
+  xcfg の要素名は GET の綴り(`peackingTime`)のまま。例外は AGET 粒度まで(`at` は `{asad, aget}`)。
+- 値域は `src/params/schema.rs` の定数 `PEAKING_TIME_NS` = **AGET 仕様の 16 値**
+  (実 xcfg の `range` 属性がそのまま列挙しているもの)。テンプレートから実行時に読まない。
+  `tests/params_render.rs::the_peaking_time_table_matches_the_template_range_attribute` が
+  定数表とフィクスチャの `range` 属性の一致を確かめる。
+- 実テンプレートに現れる値: **232**(configure-physics 25/12.5 MHz + configure-pedestals 2 本)、
+  **1014**(configure-pulser)。
 
-### 4-2. `readout` — 単一パスが無い合成ノブ
+### 4-2. `readout` — 合成ノブ。**差分に現れた 2 要素だけを管理する**
 
-- 078 §2 表: CoBo / `CoBo/Module/…`(= isAllChannelRead + isFPNRead + hit register の合成)
-- 実物: 3 要素が**別スコープに分かれている**:
-  - `Module.enableWriteHittedregister`(CoBo、physics=true / pedestals=**false**)
-  - `Global.Reg1.isAllChannelRead`(**AGET**、true)
-  - `Global.Reg1.isFPNRead`(**AGET**、true)
-  - 加えて channel 単位の `Reading`(range `{always, never, only_if_hit}`、現行 always)が
-    `isAllChannelRead=false` かつ `enableWriteHittedregister=true` のときだけ効く(xcfg のコメント)。
-- `full` / `partial` の 2 値がこの 4 要素にどう写るか(partial のとき `Reading` をどうするか、
-  `enableWriteHittedregister` を CoBo 一様にするか)は**発注書に書かれていない設計分岐**なので、
-  勝手に決めない。加えて 078 §7 の「partial にすると frameType が 1 に変わる」警告の扱いも要裁定。
+裁定(2026-09-22)は「`full` = `configure-physics-…_trigDelay1748.xcfg` の値、
+`partial` = `configure-pulser.xcfg` の値を**差分から取る**」。候補 4 要素の実測:
 
-### 4-3. `zeroSuppression` — enabled と threshold のスコープが違う
+| 要素 | スコープ | physics(= full) | pulser(= partial) | 管理 |
+|---|---|---|---|---|
+| `Module.enableWriteHittedregister` | CoBo | true | true | **しない** |
+| `Global.Reg1.isAllChannelRead` | AGET | true | **false** | する |
+| `Global.Reg1.isFPNRead` | AGET | true | **false** | する |
+| `channel.Reading` | channel | always | always | **しない** |
+
+- **差分に現れたのは AGET の 2 要素だけ**。`enableWriteHittedregister` と `Reading` は 2 本で同値なので、
+  「差分から取る」方法ではモード依存の値が得られない。
+- さらに `enableWriteHittedregister` は **configure-pedestals 2 本では `false`**。
+  もし「full なら true」と一様に書くと、pedestals テンプレートを選んだ run の挙動を**勝手に変えて**しまう
+  (往復のバイト一致も壊れる)。よって管理対象から外し、テンプレート由来のままにした。
+- `Reading` は xcfg のコメントどおり `isAllChannelRead=false` かつ `enableWriteHittedregister=true` の
+  ときだけ効く別軸の方針(ch ごとの読み出し条件)。pulser テンプレートでも `always` のまま。
+- 実装: 同じ JSON キー `readout` を持つ [`KnobSpec`] が 2 つあり(`isAllChannelRead` / `isFPNRead`)、
+  `full → true` / `partial → false` の対応表で展開する。
+- **要確認(Fable)**: 上の 2 要素を管理対象から外した判断。もし `enableWriteHittedregister` も
+  readout ノブに含めたいなら、pedestals テンプレートの `false` をどう扱うか(= テンプレート毎に
+  full の意味が違う)を決める必要がある。
+- 067 の注意(partial にすると frameType が 1 に変わる)は UI 側(レーン C)の表示事項として残る。
+
+### 4-3. `zeroSuppression` — enabled と threshold のスコープが違う → **内部で 2 ノブ**
 
 - 078 §2 表: CoBo / `CoBo/Module/enableZeroSuppression + zeroSuppressionThreshold`
 - 実物:
@@ -107,10 +128,15 @@ Node[CoBo].Instance[0].AsAd[1].Aget[2].channel[5].LSBThresholdValue
   - **`zeroSuppressionThreshold` は CoBo に無く、channel スコープ**(`channel[c].zeroSuppressionThreshold`、
     range `[0, 4095]`、現行 600)。xcfg のコメントも「Threshold for each channel is defined by
     parameter Aget.channel.zeroSuppressionThreshold」と明記。
-- 1 つの JSON ノブが 2 スコープにまたがると、例外リストの意味(`{"asad":1}` で threshold だけ効く?)が
-  発注書の「ノブ = 1 スコープ」モデルから外れる → 分割するか複合のままにするかは裁定事項。
+- **裁定(2026-09-22)**: JSON の形は `{"enabled": bool, "threshold": int}` のまま、**内部では 2 ノブ**。
+  - `zeroSuppression.enabled` → `Module.enableZeroSuppression`(CoBo スコープ)
+  - `zeroSuppression.threshold` → `channel[c].zeroSuppressionThreshold`(channel スコープ、range [0,4095])
+  - 例外は `"knob": "zeroSuppression.threshold"` にだけ付けられる。`zeroSuppression.enabled` は
+    CoBo スコープなので、どんな `at` も「スコープより細かい」= スキーマ違反として拒否される
+    (特別扱いのコードは要らない)。
+- `Module.zeroSuppressionInverted` は**管理しない**(表にも無く、5 本とも false)。
 
-### 4-4. `pulser` — スコープが AsAd ではなく CoBo
+### 4-4. `pulser` — スコープが AsAd ではなく CoBo → **CoBo スコープで実装**
 
 - 078 §2 表: AsAd / `AsAd/Generator/…`
 - 実物: 2 つの `Generator` がある。
@@ -120,10 +146,21 @@ Node[CoBo].Instance[0].AsAd[1].Aget[2].channel[5].LSBThresholdValue
     `poissonModeEnabled` / `defaultVoltage` / `externalTriggerMode`
   - `Node[CoBo].Instance[i].AsAd[a].Generator`(AsAd スコープ)= `isCalibMode` / `injectValue`
     (range `{11pF, 1pF}`)/ `triggerDelay`(WCK periods) — **{enabled, voltage, period} は無い**
-- つまり JSON の `pulser.{enabled, voltage_mV, period_ms}` は AsAd ではなく **CoBo スコープ**。
-  さらに configure-pulser.xcfg は `Global.Reg1.TestModeSelection=functionality` と
-  channel の `isSelectedforTestMode=true` も併せて変えている(= パルサ運用はこの 3 系統の組)。
-  「pulser を 1 ノブにまとめたときスコープと随伴ノブをどうするか」は裁定事項。
+- **裁定(2026-09-22)**: **CoBo スコープ**の `Instance.Generator` に 3 フィールドを写す。
+  - `pulser.enabled` → `Generator.periodicModeEnabled`
+  - `pulser.voltage_mV` → `Generator.amplitudeStart`(range [-1000.0, 1000.0] mV)
+  - `pulser.period_ms` → `Generator.period_ms`
+- **単位換算は不要(同値)**。一次資料 `GetBench/src/get/rc/CoBoConfigParser.cpp:1074`
+  `CoBoConfigParser::asadPulserVoltage_mV` は `Generator.amplitudeStart` をそのまま
+  「出力電圧と基準電圧(Vref = 1102 mV)の差 [mV]」として返す(`int16_t` に切り捨て)。
+  xcfg の属性も `unit="mV"`、078 §2 の JSON 例の `-1000` もテンプレートの `-1000.0` と一致する。
+  → **JSON のキー名は `voltage_mV` のまま**(`amplitude` への改名は不要)。
+  小数を書いても GET 側で整数 mV に切り捨てられる点だけ注意。
+- `Global.Reg1.TestModeSelection`(pulser では `functionality`)と
+  `channel.isSelectedforTestMode`(pulser では `true`)、`Generator.defaultVoltage` は
+  **管理しない = テンプレート由来のまま**。**パルサ run はテンプレートとして
+  `configure-pulser.xcfg` を選ぶ運用**(JSON でパルサを「入れる」のではなく、
+  パルサ用テンプレートに切り替えて `pulser.*` を微調整する)。
 
 ## 5. describe 相について
 
@@ -176,7 +213,35 @@ JSON の意味(「AsAd1 全体」)は変わらず、`Params::effective_value` �
 **変わるのは生成 xcfg の形だけ**。ELITPC 実寸での実測: 4 例外(うち 1 つが AsAd 全体の gain =
 272 ノードに展開)で 831 行 → 1,668 行(44 KB → 62 KB)。
 
-**要裁定(Fable)**: 078 §2 の「`{"asad":1}` だけなら … `<AsAd id="1"><Aget id="*"><channel id="*">`」
-という記述は**実機の解決器と合わない**ので SPEC §3 に写さないこと。
-(a) 今の展開方式でよいか、(b) 粗い例外自体を禁止して `at` はノブのスコープ丁度のみ許すか、
-(c) 骨組み(空の明示ノード)を `AsAd[1]` 配下に複製する方式(ノード数は減るが探索の細部に依存)か。
+**裁定済み(2026-09-22 レビュー)**: 選択肢 **(a) = 直積への展開**で確定。
+078 §2 の「`{"asad":1}` だけなら … `<AsAd id="1"><Aget id="*"><channel id="*">`」という記述は
+**実機の解決器と合わない**ので、SPEC §3 にはこの節の方式(展開)を写す。
+生成物が大きくなるのは許容(JSON の意味は不変)。
+
+## 7. 実装済みノブ一覧(JSON キー → xcfg。2026-09-22 時点)
+
+`src/params/schema.rs` の `KNOBS` が唯一の定義。スコープ深さ = CoBo 0 / AsAd 1 / AGET 2 / channel 3。
+`exceptions[].at` はこの深さ**以下**(= 同じか粗い)だけ許され、粗い場合は実在 id の直積に展開される(§6)。
+
+| JSON キー | スコープ | xcfg(スコープノードからの相対) | 型・許容値 |
+|---|---|---|---|
+| `triggerDelay` | CoBo | `Module.triggerDelay` | int ≥ 0(unit 10ns) |
+| `writingClockFrequency_MHz` | CoBo | `Module.writingClockFrequency` | {12.5, 25, 50, 100} |
+| `triggerMode` | CoBo | `Module.triggerMode` | {external, noTrigger, onRequest, onSlowControl, periodically} |
+| `zeroSuppression.enabled` | CoBo | `Module.enableZeroSuppression` | bool |
+| `pulser.enabled` | CoBo | `Generator.periodicModeEnabled` | bool |
+| `pulser.voltage_mV` | CoBo | `Generator.amplitudeStart` | real [-1000, 1000] |
+| `pulser.period_ms` | CoBo | `Generator.period_ms` | int ≥ 0 |
+| `globalThreshold` | AGET | `Global.Reg1.GlobalThresholdValue` | int [0, 7] |
+| `peakingTime_ns` | AGET | `Global.Reg1.peackingTime` | `PEAKING_TIME_NS` の 16 値 |
+| `readout` | AGET | `Global.Reg1.isAllChannelRead` + `Global.Reg1.isFPNRead` | {full, partial} |
+| `lsbThreshold` | channel | `LSBThresholdValue` | int [0, 15] |
+| `gain` | channel | `Gain` | {10pC, 120fC, 1pC, 240fC} |
+| `triggerInhibition` | channel | `TriggerInhibition` | {inhibit_channel, inhibit_trigger, none} |
+| `zeroSuppression.threshold` | channel | `zeroSuppressionThreshold` | int [0, 4095] |
+
+**管理しない = テンプレート由来のまま**の主なもの(意図的): `Module.enableWriteHittedregister`、
+`channel.Reading`、`Module.zeroSuppressionInverted`、`Global.Reg1.TestModeSelection`、
+`channel.isSelectedforTestMode`、`Generator.defaultVoltage`、`Module.coboId` / `nbEvent` /
+`readoutDepth` / `frameType`、`AsAd.Control.isActive`、`AsAd.Generator.*`、PLL / CircularBuffer /
+Monitoring / InspectionLines / LEMO / Alarms、`Node[Mutant]` 配下すべて。

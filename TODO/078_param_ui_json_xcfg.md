@@ -264,3 +264,48 @@ TPCDAQ_XCFG_TEMPLATE=/Users/aogaki/Workspace/tpcdaq-rs/reference/config/configur
 
 - §5-3(実 ECC で describe→prepare→configure)、§5-4(REST/UI)、§5-5(実データへの反映)は
   レーン B/C/実機作業。レーン A の範囲外。
+
+### 追記(同日レビュー裁定の反映 — 未実装 4 ノブの実装、2026-09-22)
+
+レビューで逸脱 1 は選択肢 **a**(粗い例外はテンプレート実在 id の直積へ展開)で確定、
+逸脱 2–7 は承認、未実装 4 ノブは位置を裁定のうえ実装 —— として追加実装した。
+
+- **テスト数: 645 → 655 passed / 0 failed / 1 ignored**(レーン A 全体では 614 → 655、+41)。
+  `cargo fmt && cargo clippy --tests -- -D warnings && cargo test` green。
+- **ノブ: 7 → 11 実装(JSON の葉は 13)**。`docs/PARAMS_KNOBS_ja.md` §4 に裁定後の位置、
+  §7 に一覧表(JSON キー → xcfg)を追加。
+- **オラクル照合(新ノブ込み)**: 合成フィクスチャ **238 インスタンス**(158 → 238)、
+  **実テンプレート 4,423 インスタンス**(3,283 → 4,423 = CoBo 7 + AGET 4×16 + channel 4×1,088)、
+  いずれも全数一致。除去規則の負性テストも罠を 5 → **10 パス**に増やし、
+  テンプレートでは `999/6/0/2/1pC/70/false/11/true/true` が勝つ → 生成物では
+  `1748/1/15/15/120fC/232/true/600/false/false` に戻ることをオラクルで確認。
+  実テンプレートの往復は 11 ノブでも**バイト一致**のまま。
+
+#### 各ノブの実装位置(裁定どおり)
+
+| JSON | スコープ | xcfg | 備考 |
+|---|---|---|---|
+| `peakingTime_ns` | AGET | `Global.Reg1.peackingTime` | 綴りは GET のまま。値域は定数 `PEAKING_TIME_NS`(AGET 仕様 16 値)。実テンプレートの出現値は 232(physics/pedestals)と 1014(pulser) |
+| `readout` | AGET | `Global.Reg1.isAllChannelRead` + `isFPNRead` | full=true,true / partial=false,false |
+| `zeroSuppression.enabled` | CoBo | `Module.enableZeroSuppression` | 例外は付けられない(スコープが CoBo) |
+| `zeroSuppression.threshold` | channel | `channel.zeroSuppressionThreshold` | 例外はここにだけ |
+| `pulser.enabled` / `.voltage_mV` / `.period_ms` | CoBo | `Generator.periodicModeEnabled` / `amplitudeStart` / `period_ms` | `TestModeSelection` と `isSelectedforTestMode` は触らない |
+
+#### 追加で承認が必要な逸脱(2 点)
+
+8. **`readout` は 4 要素ではなく 2 要素だけ管理**。裁定の方法(「実テンプレート 2 本の差分から取る」)で
+   実測したところ、差分に現れたのは `isAllChannelRead`(true→false)と `isFPNRead`(true→false)の
+   **AGET 2 要素だけ**で、`Module.enableWriteHittedregister`(physics も pulser も true)と
+   `channel.Reading`(どちらも always)は差分に現れない。さらに
+   **`enableWriteHittedregister` は configure-pedestals 2 本では `false`** なので、「full なら true」と
+   一様に書くと pedestals テンプレートの挙動を勝手に変え、往復のバイト一致も壊れる。
+   よってこの 2 要素は非管理(テンプレート由来)のままにした。表は PARAMS_KNOBS_ja.md §4-2。
+9. **`pulser.voltage_mV` は換算なしで `amplitudeStart` と同値**と確定(名前は `voltage_mV` のまま、
+   §2 の JSON 例から落とす必要はない)。根拠: `CoBoConfigParser::asadPulserVoltage_mV`
+   (GetBench/src/get/rc/CoBoConfigParser.cpp:1074)が `amplitudeStart` をそのまま
+   「出力電圧と基準電圧(Vref=1102 mV)の差 [mV]」として返す(int16 に切り捨て)+ xcfg の
+   `unit="mV"` + テンプレート値 -1000.0 が §2 の例 `-1000` と一致。
+   なお `peakingTime_ns` の値域は「16 値のうち実テンプレートに現れる値だけ」と読むと
+   実質 {232}(+pulser の 1014)になり実験切替級ノブとして使えないため、**AGET 仕様の 16 値**
+   (= xcfg の `range` 属性そのもの)を定数表とし、テンプレートの `range` と一致することを
+   テストで検算する形にした。

@@ -23,7 +23,10 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use super::paths::{Scope, AGET, ASAD, CHANNEL, COBO, INSTANCE, NODE, STAR};
-use super::schema::{knob_spec, value_to_xcfg_text, At, KnobSpec, Params, ParamsError, KNOBS};
+use super::schema::{
+    knob_spec, knob_specs, lookup_knob, value_to_xcfg_text, At, KnobSpec, Params, ParamsError,
+    KNOBS,
+};
 
 /// 生成結果。configure と prepare は**同内容**(078 §3-3)。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,10 +51,8 @@ pub fn render(params: &Params, template_xml: &str) -> Result<Rendered, ParamsErr
         check_exception_targets(&ids, params)?;
 
         for spec in KNOBS {
-            let value = params
-                .knobs
-                .get(spec.name)
-                .ok_or_else(|| ParamsError::MissingKnob {
+            let value =
+                lookup_knob(&params.knobs, spec.name).ok_or_else(|| ParamsError::MissingKnob {
                     knob: spec.name.to_string(),
                 })?;
             let text = value_to_xcfg_text(spec, value)?;
@@ -75,13 +76,18 @@ pub fn render(params: &Params, template_xml: &str) -> Result<Rendered, ParamsErr
         // この探索を成り立たせるため。
         // よって、スコープより粗い `at` はテンプレートに実在する id の直積に展開する。
         for exception in &params.exceptions {
-            let spec = knob_spec(&exception.knob).ok_or_else(|| ParamsError::UnknownKnob {
-                knob: exception.knob.clone(),
-            })?;
-            let text = value_to_xcfg_text(spec, &exception.value)?;
-            for target in ids.expand(&exception.at, spec, &exception.knob)? {
-                let target: Vec<&str> = target.iter().map(String::as_str).collect();
-                write_knob(cobo, spec, &target, &text)?;
+            if knob_spec(&exception.knob).is_none() {
+                return Err(ParamsError::UnknownKnob {
+                    knob: exception.knob.clone(),
+                });
+            }
+            // 合成ノブ(`readout`)は 1 つの例外が複数の要素に効く。
+            for spec in knob_specs(&exception.knob) {
+                let text = value_to_xcfg_text(spec, &exception.value)?;
+                for target in ids.expand(&exception.at, spec, &exception.knob)? {
+                    let target: Vec<&str> = target.iter().map(String::as_str).collect();
+                    write_knob(cobo, spec, &target, &text)?;
+                }
             }
         }
     }
