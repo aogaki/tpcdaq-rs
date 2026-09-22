@@ -22,6 +22,7 @@ use tpcdaq::monitor::{
     SaturationPayload, StatusPayload,
 };
 use tpcdaq::msg::{self, Fragment};
+use tpcdaq::slowctl::{Sample as SlowSample, SlowCounters, SlowPayload};
 
 /// 合成ジオメトリ(リポ内フィクスチャ。実 .dat は入れない — CLAUDE.md)。
 /// U 最大 4 / V 最大 3 / W 最大 4、AUX 2 本、cobo0・asad0 のみ。
@@ -30,6 +31,9 @@ const GEOMETRY: &str = "tests/fixtures/geometry_mini_reduced.dat";
 
 /// root-sink のモニタ PUB の source_id(SPEC §3.2 v1.9)。
 const MONITOR_SOURCE_ID: u32 = 101;
+
+/// slowctl の status PUB の source_id(SPEC §3.2 v1.31)。
+const SLOWCTL_SOURCE_ID: u32 = 200;
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -63,11 +67,15 @@ impl Publisher {
 
     /// SPEC §2.2 のエンベロープ(positional array(5))+ §5.3 の map 形式ペイロード。
     fn send_payload(&mut self, run: u32, payload: &[u8]) {
+        self.send_payload_from(MONITOR_SOURCE_ID, run, payload);
+    }
+
+    fn send_payload_from(&mut self, source_id: u32, run: u32, payload: &[u8]) {
         let mut out = vec![0x81]; // fixmap(1)
         out.extend_from_slice(&[0xa4, b'D', b'a', b't', b'a']); // "Data"
         out.push(0x95); // fixarray(5)
         for value in [
-            u64::from(MONITOR_SOURCE_ID),
+            u64::from(source_id),
             u64::from(run),
             self.seq,
             1_755_000_000_000_000_000 + self.seq,
@@ -117,6 +125,32 @@ impl Publisher {
             whatever: 1,
         };
         self.send_payload(run, &rmp_serde::to_vec_named(&payload).unwrap());
+    }
+
+    /// slowctl の kind=`slow`(SPEC §2.3 v1.31、source_id 200)。
+    fn slow(&mut self, value: f64) {
+        let payload = SlowPayload {
+            kind: "slow".to_string(),
+            ts_ms: 1_758_000_000_000,
+            samples: vec![SlowSample {
+                device: "gas".to_string(),
+                node: Some(4),
+                param: "fmeasure".to_string(),
+                value,
+                unit: "mbar".to_string(),
+                ts_ms: 1_758_000_000_000,
+                alarm: false,
+            }],
+            counters: SlowCounters {
+                poll_ok: 5,
+                ..SlowCounters::default()
+            },
+        };
+        self.send_payload_from(
+            SLOWCTL_SOURCE_ID,
+            0,
+            &rmp_serde::to_vec_named(&payload).unwrap(),
+        );
     }
 
     /// seq を `n` 個進める(= n 通落ちたことにする)。
@@ -197,6 +231,15 @@ struct Monitor {
 
 impl Monitor {
     async fn start(sub_endpoint: &str, live_queue: usize) -> Monitor {
+        Monitor::start_with_slow(sub_endpoint, live_queue, None).await
+    }
+
+    /// `[monitor] slow_sub` あり版(SPEC §3.1 v1.31)。同じ SUB に 2 本目を connect する。
+    async fn start_with_slow(
+        sub_endpoint: &str,
+        live_queue: usize,
+        slow_sub: Option<&str>,
+    ) -> Monitor {
         let params = MonitorParams {
             sub_endpoint: sub_endpoint.to_string(),
             ws_listen: "127.0.0.1:0".to_string(), // 動的ポート
@@ -204,6 +247,7 @@ impl Monitor {
             live_queue,
             detector: "mini_eTPC_test".to_string(),
             cobos: vec![0],
+            slow_sub: slow_sub.map(str::to_string),
         };
         let (shutdown, shutdown_rx) = broadcast::channel(1);
         let (bound_tx, bound_rx) = oneshot::channel();
@@ -334,6 +378,69 @@ async fn warm_up(publisher: &mut Publisher, client: &mut Client, run: u32) -> se
         }
     }
     panic!("monitor never forwarded a status to the WS client");
+}
+
+// =====================================================================
+// 0. slowctl の同梱(SPEC §3.1 / §10.3 v1.31)
+// =====================================================================
+
+/// `slow_sub` 無しなら status JSON は**従来と完全に同一**(`slow` キーが無い)。
+#[tokio::test]
+async fn without_a_slow_sub_the_status_json_has_no_slow_key() {
+    let mut publisher = Publisher::bind();
+    let monitor = Monitor::start(&publisher.endpoint, 64).await;
+    let mut client = Client::connect(&monitor).await;
+    let _ = client.next_json("meta", RECV_TIMEOUT).await;
+
+    let status = warm_up(&mut publisher, &mut client, 7).await;
+    assert!(
+        status.get("slow").is_none(),
+        "購読していないのに slow が出た: {status}"
+    );
+    monitor.stop().await;
+}
+
+/// `slow_sub` を足すと、**同じ SUB ソケット**の 2 本目から来た `slow` が status に同梱される。
+///
+/// 上流が 2 本になると libzmq の fair-queue 飢餓(TODO/013)が効きうるので、この試験は
+/// 「root-sink の status を流し続けながら slowctl も届く」ことを見る。
+#[tokio::test]
+async fn a_slow_sub_adds_the_latest_slow_payload_to_the_status_json() {
+    let mut publisher = Publisher::bind();
+    let mut slow_publisher = Publisher::bind();
+    let monitor =
+        Monitor::start_with_slow(&publisher.endpoint, 64, Some(&slow_publisher.endpoint)).await;
+    let mut client = Client::connect(&monitor).await;
+    let _ = client.next_json("meta", RECV_TIMEOUT).await;
+    warm_up(&mut publisher, &mut client, 7).await;
+
+    // slowctl の 1 通を流し、以後の status に載るまで status を叩き続ける。
+    slow_publisher.slow(130.5);
+    let mut seen = None;
+    for _ in 0..40 {
+        publisher.status(7, "running");
+        let status = client.next_json("status", Duration::from_millis(300)).await;
+        if status.get("slow").is_some() {
+            seen = Some(status);
+            break;
+        }
+        slow_publisher.slow(130.5);
+    }
+    let status = seen.expect("status never carried the slow payload");
+    assert_eq!(status["slow"]["kind"], "slow");
+    assert_eq!(status["slow"]["samples"][0]["device"], "gas");
+    assert_eq!(status["slow"]["samples"][0]["node"], 4);
+    assert_eq!(status["slow"]["samples"][0]["param"], "fmeasure");
+    assert_eq!(status["slow"]["samples"][0]["value"], 130.5);
+    assert_eq!(status["slow"]["samples"][0]["unit"], "mbar");
+    assert_eq!(status["slow"]["counters"]["poll_ok"], 5);
+    // §5.3 の status 側は何も変わっていない。
+    assert_eq!(status["run"], 7);
+    assert_eq!(status["state"], "running");
+    // 2 ソースの seq を混ぜていない(混ぜると巨大なギャップに見える)。
+    assert_eq!(status["monitorGaps"], 0, "{status}");
+
+    monitor.stop().await;
 }
 
 // =====================================================================

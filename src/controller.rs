@@ -1411,6 +1411,64 @@ pub struct Controller {
     session: Mutex<Option<Session>>,
     run: Mutex<RunState>,
     log_posts: Arc<LogPostCounters>,
+    /// slowctl の直近値(SPEC §9.2 v1.31: `run_start` / `run_stop` の `slow`)。
+    /// キーは `"<device>/<node>/<param>"`(node 無しは `"-"`)。LogPost スレッドが書き、
+    /// run の開閉で読む。**run 平均は作らない**(発注書 §2.6-7)。
+    slow_latest: Arc<Mutex<SlowLatest>>,
+}
+
+/// `run_start.slow` / `run_stop.slow` の中身(SPEC §9.2 v1.31)。
+pub type SlowLatest = BTreeMap<String, SlowLatestValue>;
+
+/// その 1 要素。`ts` は controller がログブック行に打つのと同じ書式(SPEC §9.1)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SlowLatestValue {
+    pub value: f64,
+    pub unit: String,
+    pub ts: String,
+}
+
+/// `slow` レコード 1 本から直近値マップを更新する(純関数 —— テストが直接叩ける)。
+///
+/// 対象は **VALUE / ALARM / RECOVER** だけ(SPEC §9.2)。IDENT は文字列、ERROR は
+/// カウンタなので「直近値」ではない。`values` の形が違う行は**黙って捨てずに** `false` を
+/// 返して呼び手が数えられるようにする。
+pub fn apply_slow_record(latest: &mut SlowLatest, record: &LogbookRecord, ts: &str) -> bool {
+    let LogbookRecord::Slow {
+        device,
+        node,
+        event,
+        values,
+        ..
+    } = record
+    else {
+        return false;
+    };
+    if !matches!(event.as_str(), "VALUE" | "ALARM" | "RECOVER") {
+        return false;
+    }
+    let Some(map) = values.as_object() else {
+        return false;
+    };
+    let mut applied = false;
+    for (param, entry) in map {
+        let (Some(value), Some(unit)) = (
+            entry.get("value").and_then(serde_json::Value::as_f64),
+            entry.get("unit").and_then(serde_json::Value::as_str),
+        ) else {
+            continue;
+        };
+        latest.insert(
+            crate::slowctl::latest_key(device, *node, param),
+            SlowLatestValue {
+                value,
+                unit: unit.to_string(),
+                ts: ts.to_string(),
+            },
+        );
+        applied = true;
+    }
+    applied
 }
 
 /// 毒された Mutex でも controller を止めない(中身は controller 自身が作ったものだけで、
@@ -1445,11 +1503,24 @@ impl Controller {
             session: Mutex::new(None),
             run: Mutex::new(RunState::default()),
             log_posts: Arc::new(LogPostCounters::default()),
+            slow_latest: Arc::new(Mutex::new(SlowLatest::new())),
         })
     }
 
     pub fn params(&self) -> &ControllerParams {
         &self.params
+    }
+
+    /// `run_start` / `run_stop` に載せる slowctl の直近値(SPEC §9.2 v1.31)。
+    ///
+    /// 1 本も受け取っていなければ `None` = **フィールドごと省略**(slowctl が動いて
+    /// いないことと「全部 0」を混同しない —— SPEC の nullable 規律)。
+    fn slow_snapshot(&self) -> Option<Value> {
+        let latest = lock(&self.slow_latest);
+        if latest.is_empty() {
+            return None;
+        }
+        serde_json::to_value(&*latest).ok()
     }
 
     // ---- ログブック ----
@@ -1901,6 +1972,7 @@ fn start_run_blocking(
                 operator: operator.to_string(),
                 comment: comment.to_string(),
                 expected_fragments,
+                slow: controller.slow_snapshot(),
             });
             controller.audit(
                 "run/start",
@@ -2127,6 +2199,7 @@ fn stop_run_blocking(controller: &Controller, operator: &str, active: Option<Act
         eos_closed: report.eos_closed,
         counters: report.counters.clone(),
         files: report.files.clone(),
+        slow: controller.slow_snapshot(),
     });
     controller.audit(
         "run/stop",
@@ -2291,6 +2364,7 @@ fn spawn_log_post_thread(
     bind: String,
     logbook: Arc<Mutex<LogbookWriter>>,
     counters: Arc<LogPostCounters>,
+    slow_latest: Arc<Mutex<SlowLatest>>,
     stop: Arc<AtomicBool>,
 ) -> Result<(std::thread::JoinHandle<()>, String), ControllerError> {
     let context = zmq::Context::new();
@@ -2336,6 +2410,13 @@ fn spawn_log_post_thread(
                 };
                 match serde_json::from_slice::<LogbookRecord>(&message) {
                     Ok(record) => {
+                        // SPEC §9.2 v1.31: slowctl の VALUE/ALARM/RECOVER は run_start /
+                        // run_stop に載せる直近値でもある。ログブックへ書く前に拾う
+                        // (書き込みが失敗しても「今の圧力」は失わない)。
+                        if matches!(record, LogbookRecord::Slow { .. }) {
+                            let ts = crate::logbook::now_rfc3339_millis();
+                            apply_slow_record(&mut lock(&slow_latest), &record, &ts);
+                        }
                         let mut writer = lock(&logbook);
                         match writer.append(record) {
                             Ok(_) => {
@@ -2418,6 +2499,7 @@ pub async fn run_controller(
         log_pull_bind,
         Arc::clone(&controller.logbook),
         Arc::clone(&controller.log_posts),
+        Arc::clone(&controller.slow_latest),
         Arc::clone(&stop_flag),
     )?;
 
@@ -3432,6 +3514,79 @@ mod tests {
             run_start_config_fields(&per_phase_ids()),
             ("pulser".to_string(), Some(per_phase_ids()))
         );
+    }
+
+    /// SPEC §9.2 v1.31: `slow` の VALUE/ALARM/RECOVER だけが直近値になる。
+    /// キーは `"<device>/<node>/<param>"`、node 無しは `"-"`。
+    #[test]
+    fn only_measured_slow_events_become_the_run_record_snapshot() {
+        let mut latest = SlowLatest::new();
+        let ts = "2026-09-22T10:00:00.000+03:00";
+
+        let value = LogbookRecord::Slow {
+            actor: "slowctl".to_string(),
+            device: "gas".to_string(),
+            node: Some(4),
+            event: "VALUE".to_string(),
+            values: json!({"fmeasure": {"value": 130.5, "unit": "mbar"}}),
+        };
+        assert!(apply_slow_record(&mut latest, &value, ts));
+        assert_eq!(latest["gas/4/fmeasure"].value, 130.5);
+        assert_eq!(latest["gas/4/fmeasure"].unit, "mbar");
+        assert_eq!(latest["gas/4/fmeasure"].ts, ts);
+
+        // node 無しの機器(Arduino 等)は `-`。
+        let nodeless = LogbookRecord::Slow {
+            actor: "slowctl".to_string(),
+            device: "env".to_string(),
+            node: None,
+            event: "ALARM".to_string(),
+            values: json!({"t_c": {"value": 31.0, "unit": "degC"}}),
+        };
+        assert!(apply_slow_record(&mut latest, &nodeless, ts));
+        assert_eq!(latest["env/-/t_c"].value, 31.0);
+
+        // IDENT(文字列)と ERROR(カウンタ)は直近値ではない —— 取り込まない。
+        let ident = LogbookRecord::Slow {
+            actor: "slowctl".to_string(),
+            device: "gas".to_string(),
+            node: Some(4),
+            event: "IDENT".to_string(),
+            values: json!({"model": "F-201CV"}),
+        };
+        assert!(!apply_slow_record(&mut latest, &ident, ts));
+        let error = LogbookRecord::Slow {
+            actor: "slowctl".to_string(),
+            device: "gas".to_string(),
+            node: None,
+            event: "ERROR".to_string(),
+            values: json!({"poll_err": 3}),
+        };
+        assert!(!apply_slow_record(&mut latest, &error, ts));
+
+        // slow 以外のレコードも無視(誤って run 記録に混ぜない)。
+        assert!(!apply_slow_record(&mut latest, &sample_comment(), ts));
+        assert_eq!(latest.len(), 2);
+
+        // 新しい VALUE は上書きする(直近値であって履歴ではない)。
+        let newer = LogbookRecord::Slow {
+            actor: "slowctl".to_string(),
+            device: "gas".to_string(),
+            node: Some(4),
+            event: "VALUE".to_string(),
+            values: json!({"fmeasure": {"value": 131.0, "unit": "mbar"}}),
+        };
+        assert!(apply_slow_record(&mut latest, &newer, "later"));
+        assert_eq!(latest["gas/4/fmeasure"].value, 131.0);
+        assert_eq!(latest["gas/4/fmeasure"].ts, "later");
+    }
+
+    fn sample_comment() -> LogbookRecord {
+        LogbookRecord::Comment {
+            actor: "ui".to_string(),
+            author: "aogaki".to_string(),
+            text: "beam tuned".to_string(),
+        }
     }
 
     /// DataLinkSet の形(SPEC §8.2 の実機の罠: `CoBo[k]` 形式・大文字 `TCP`)。

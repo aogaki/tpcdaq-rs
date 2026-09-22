@@ -47,8 +47,41 @@ pub const DEFAULT_CONTROLLER_EOS_QUIESCE_MS: u64 = 500;
 /// decoder の Batch source_id(SPEC §3.2 の source_id 表)。
 pub const DECODER_SOURCE_ID: u32 = 100;
 
-/// psu の Batch source_id(SPEC §3.2 の source_id 表、P6)。
-pub const PSU_SOURCE_ID: u32 = 200;
+/// slowctl の Batch source_id(SPEC §3.2 の source_id 表 v1.31、旧 psu)。
+pub const SLOWCTL_SOURCE_ID: u32 = 200;
+
+/// slowctl の status PUB bind の既定(SPEC §3.2 v1.31)。
+pub const DEFAULT_SLOWCTL_STATUS_PUB: &str = "tcp://*:47006";
+
+/// slowctl → controller の LogPost PUSH 接続先の既定
+/// ([`DEFAULT_CONTROLLER_LOG_PULL_BIND`] の connect 側表記)。
+pub const DEFAULT_CONTROLLER_LOG_PUSH_ENDPOINT: &str = "tcp://127.0.0.1:47005";
+
+/// 全デバイス共通の読み出し周期の既定(Hz、SPEC §3.1)。
+pub const DEFAULT_SLOWCTL_POLL_HZ: f64 = 1.0;
+
+/// 値が動かなくても logbook `slow` VALUE を書く間隔の既定(秒、SPEC §3.1 / §9.2)。
+pub const DEFAULT_SLOWCTL_LOG_EVERY_S: u64 = 60;
+
+/// TOML で受け付けるデバイス種別(SPEC §3.1 の列挙そのもの)。
+pub const SLOWCTL_DEVICE_TYPES: &[&str] = &[
+    "bronkhorst_flowbus",
+    "arduino_env",
+    "hivolta",
+    "hmp2020",
+    "fake",
+];
+
+/// シリアルポートを `addr`(TCP)ではなく `port` で指定する種別。
+const SLOWCTL_SERIAL_TYPES: &[&str] = &["bronkhorst_flowbus", "arduino_env", "hmp2020", "fake"];
+
+/// 取り違えに強いポート名か(TODO/079 §2.1: udev の by-id、無ければ by-path)。
+///
+/// **判定だけ**を返す純関数。偽でも起動は止めない(Mac 開発機に by-id は無い)—— 警告の
+/// 出し所は [`resolve`]。
+pub fn is_stable_serial_port(port: &str) -> bool {
+    port.starts_with("/dev/serial/by-id/") || port.starts_with("/dev/serial/by-path/")
+}
 
 /// コンポーネント REP ポートの receiver 区画(SPEC §3.2: `receiver k = 47110 + k`)。
 pub const RECEIVER_COMMAND_PORT_BASE: u32 = 47110;
@@ -168,6 +201,9 @@ pub enum ConfigError {
 
     #[error("invalid [controller] setting: {0}")]
     InvalidController(String),
+
+    #[error("invalid [slowctl] setting: {0}")]
+    InvalidSlowctl(String),
 }
 
 // ---------------------------------------------------------------------
@@ -185,6 +221,53 @@ pub struct Config {
     pub root_sink: RootSinkConfig,
     pub monitor: MonitorConfig,
     pub controller: ControllerConfig,
+    /// `[slowctl]`(SPEC §3.1 v1.31)。**セクションごと省略可** —— 省略 = slowctl を走らせない
+    /// (既存の実運用 TOML が無変更で読める)。
+    pub slowctl: Option<SlowctlConfig>,
+}
+
+/// `[slowctl]`(SPEC §3.1 v1.31、TODO/079)。**監視・記録・アラームのみ** ——
+/// setpoint を書くキーは存在しない(SPEC §11 の安全境界)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlowctlConfig {
+    /// status PUB の bind(既定 [`DEFAULT_SLOWCTL_STATUS_PUB`])。
+    pub status_pub: String,
+    /// controller のログ投稿 PULL への PUSH 接続先(既定
+    /// [`DEFAULT_CONTROLLER_LOG_PUSH_ENDPOINT`])。SPEC §3.1 の例には無いが、
+    /// ポートを**コードに焼き込まない**ため設定で上書きできる形にしてある。
+    pub log_push: String,
+    /// 全デバイス共通の読み出し周期(Hz)。
+    pub poll_hz: f64,
+    /// 値が動かなくても VALUE を書く間隔(秒、SPEC §9.2)。
+    pub log_every_s: u64,
+    /// `[[slowctl.device]]`。
+    pub device: Vec<SlowDeviceConfig>,
+}
+
+/// `[[slowctl.device]]` 1 台分(SPEC §3.1)。
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SlowDeviceConfig {
+    /// `bronkhorst_flowbus` / `arduino_env` / `hivolta` / `hmp2020` / `fake`。
+    #[serde(rename = "type")]
+    pub device_type: String,
+    /// logbook / status の `device`。
+    pub name: String,
+    /// シリアル系の口(`/dev/serial/by-id/…`。`fake` はスクリプトファイルのパス)。
+    #[serde(default)]
+    pub port: Option<String>,
+    /// TCP 系(HiVolta)の口。
+    #[serde(default)]
+    pub addr: Option<String>,
+    /// FLOW-BUS のノード指定(`"scan"` か明示リスト)。
+    #[serde(default)]
+    pub nodes: crate::slowctl::NodesSpec,
+    /// 空でなければ open 時に機器の serial と照合する(TODO/079 §2.1)。
+    #[serde(default)]
+    pub expect_serial: String,
+    /// `[lo, hi]` 逸脱の監視規則。
+    #[serde(default)]
+    pub alarms: Vec<crate::slowctl::AlarmRule>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -278,6 +361,9 @@ pub struct MonitorConfig {
     pub geometry: PathBuf,
     /// live 送信キューの段数(既定 [`DEFAULT_MONITOR_LIVE_QUEUE`])。
     pub live_queue: usize,
+    /// slowctl の status PUB への SUB 接続先(SPEC §3.1 v1.31)。
+    /// **省略 = 購読しない**(WS の `status` JSON に `slow` は出ない = 従来と同一)。
+    pub slow_sub: Option<String>,
 }
 
 /// ECC の ConfigId(SPEC §3.1 / §8.2 v1.13)。
@@ -385,6 +471,19 @@ struct RawConfig {
     root_sink: RootSinkConfig,
     monitor: RawMonitor,
     controller: RawController,
+    #[serde(default)]
+    slowctl: Option<RawSlowctl>,
+}
+
+/// `[slowctl]` の TOML そのまま(079 Phase 2)。
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawSlowctl {
+    status_pub: Option<String>,
+    log_push: Option<String>,
+    poll_hz: Option<f64>,
+    log_every_s: Option<u64>,
+    device: Vec<SlowDeviceConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -444,6 +543,9 @@ struct RawMonitor {
     geometry: Option<PathBuf>,
     #[serde(default)]
     live_queue: Option<usize>,
+    // ---- 079 Phase 2 で追記(省略可)----
+    #[serde(default)]
+    slow_sub: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -606,7 +708,38 @@ fn resolve(raw: RawConfig) -> Config {
             .geometry
             .unwrap_or_else(|| raw.system.geometry.clone()),
         live_queue: raw.monitor.live_queue.unwrap_or(DEFAULT_MONITOR_LIVE_QUEUE),
+        slow_sub: raw.monitor.slow_sub,
     };
+
+    let slowctl = raw.slowctl.map(|raw| {
+        for device in &raw.device {
+            if let Some(port) = &device.port {
+                if SLOWCTL_SERIAL_TYPES.contains(&device.device_type.as_str())
+                    && device.device_type != "fake"
+                    && !is_stable_serial_port(port)
+                {
+                    // 拒否はしない(開発機に by-id は無い)。ただし黙認もしない — CLAUDE.md。
+                    tracing::warn!(
+                        device = device.name,
+                        port,
+                        "slowctl: port is not a /dev/serial/by-id or by-path name — \
+                         USB の列挙順が変われば別の機器を読む(TODO/079 §2.1)"
+                    );
+                }
+            }
+        }
+        SlowctlConfig {
+            status_pub: raw
+                .status_pub
+                .unwrap_or_else(|| DEFAULT_SLOWCTL_STATUS_PUB.to_string()),
+            log_push: raw
+                .log_push
+                .unwrap_or_else(|| DEFAULT_CONTROLLER_LOG_PUSH_ENDPOINT.to_string()),
+            poll_hz: raw.poll_hz.unwrap_or(DEFAULT_SLOWCTL_POLL_HZ),
+            log_every_s: raw.log_every_s.unwrap_or(DEFAULT_SLOWCTL_LOG_EVERY_S),
+            device: raw.device,
+        }
+    });
 
     let controller = ControllerConfig {
         rest_listen: raw
@@ -658,6 +791,7 @@ fn resolve(raw: RawConfig) -> Config {
         root_sink: raw.root_sink,
         monitor,
         controller,
+        slowctl,
     }
 }
 
@@ -668,6 +802,65 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     validate_receiver(&config.receiver)?;
     validate_monitor(&config.monitor)?;
     validate_controller(&config.controller, config.cobo.len())?;
+    if let Some(slowctl) = &config.slowctl {
+        validate_slowctl(slowctl)?;
+    }
+    Ok(())
+}
+
+/// `[slowctl]` を検証する(SPEC §3.1 v1.31)。
+///
+/// 「静かに何も読まない slowctl」を作らないことが目的: 知らない `type`、口の無いデバイス、
+/// 0 以下の周期はすべて起動失敗にする(SPEC §3.2「半端な既定値で走らない」)。
+fn validate_slowctl(slowctl: &SlowctlConfig) -> Result<(), ConfigError> {
+    // NaN も含めて「正の有限値でない」を弾く(黙って走らせない)。
+    if !slowctl.poll_hz.is_finite() || slowctl.poll_hz <= 0.0 {
+        return Err(ConfigError::InvalidSlowctl(format!(
+            "poll_hz must be greater than 0, got {}",
+            slowctl.poll_hz
+        )));
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    for device in &slowctl.device {
+        if !SLOWCTL_DEVICE_TYPES.contains(&device.device_type.as_str()) {
+            return Err(ConfigError::InvalidSlowctl(format!(
+                "unknown device type {:?} (known: {})",
+                device.device_type,
+                SLOWCTL_DEVICE_TYPES.join(", ")
+            )));
+        }
+        if !seen.insert(device.name.as_str()) {
+            return Err(ConfigError::InvalidSlowctl(format!(
+                "duplicate device name {:?} — logbook / status のキーが衝突する",
+                device.name
+            )));
+        }
+        let serial = SLOWCTL_SERIAL_TYPES.contains(&device.device_type.as_str());
+        if serial && device.port.is_none() {
+            return Err(ConfigError::InvalidSlowctl(format!(
+                "device {:?} of type {:?} needs a `port`",
+                device.name, device.device_type
+            )));
+        }
+        if !serial && device.addr.is_none() {
+            return Err(ConfigError::InvalidSlowctl(format!(
+                "device {:?} of type {:?} needs an `addr`",
+                device.name, device.device_type
+            )));
+        }
+        device
+            .nodes
+            .resolve()
+            .map_err(|e| ConfigError::InvalidSlowctl(format!("device {:?}: {e}", device.name)))?;
+        for alarm in &device.alarms {
+            if alarm.lo > alarm.hi {
+                return Err(ConfigError::InvalidSlowctl(format!(
+                    "device {:?} alarm on {:?}: lo {} is above hi {}",
+                    device.name, alarm.param, alarm.lo, alarm.hi
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1275,10 +1468,10 @@ config_id = "default"
 
     #[test]
     fn source_id_constants_match_spec_3_2() {
-        // SPEC §3.2 source_id 表: receiver = cobo_id、decoder = 100、psu = 200。
+        // SPEC §3.2 source_id 表: receiver = cobo_id、decoder = 100、slowctl = 200(旧 psu)。
         // receiver は CoboConfig::id をそのまま使うので専用定数はない。
         assert_eq!(DECODER_SOURCE_ID, 100);
-        assert_eq!(PSU_SOURCE_ID, 200);
+        assert_eq!(SLOWCTL_SOURCE_ID, 200);
     }
 
     // --- 不正系 ---
@@ -2091,5 +2284,216 @@ router_ip = "10.0.0.1"
 
         let err = load(&missing).unwrap_err();
         assert!(matches!(err, ConfigError::Io { .. }));
+    }
+
+    // -----------------------------------------------------------------
+    // `[slowctl]` / `[monitor] slow_sub`(SPEC §3.1 v1.31、TODO/079 Phase 2)
+    // -----------------------------------------------------------------
+
+    /// **既存 TOML が無変更で読める**(セクションごと省略可)—— 079 Phase 2 の絶対条件。
+    #[test]
+    fn a_config_without_a_slowctl_section_still_parses_and_has_no_slow_wiring() {
+        let geometry = make_temp_geometry_file();
+        let config = parse(&minimal_toml(&geometry, "")).unwrap();
+        assert!(
+            config.slowctl.is_none(),
+            "[slowctl] 省略 = slowctl を走らせない"
+        );
+        assert!(
+            config.monitor.slow_sub.is_none(),
+            "slow_sub 省略 = 購読しない(status JSON は従来と同一)"
+        );
+    }
+
+    /// SPEC §3.1 の `[slowctl]` 例がそのまま読める。
+    #[test]
+    fn the_spec_3_1_slowctl_example_parses_into_one_bronkhorst_device() {
+        let geometry = make_temp_geometry_file();
+        let extra = r#"
+[slowctl]
+status_pub = "tcp://*:47006"
+poll_hz = 1.0
+log_every_s = 60
+[[slowctl.device]]
+type = "bronkhorst_flowbus"
+name = "gas"
+port = "/dev/serial/by-id/usb-FTDI_xxx-if00-port0"
+nodes = "scan"
+expect_serial = ""
+alarms = [{ node = 4, param = "fmeasure", lo = 90.0, hi = 110.0 }]
+"#;
+        let config = parse(&minimal_toml(&geometry, extra)).unwrap();
+        let slowctl = config.slowctl.unwrap();
+        assert_eq!(slowctl.status_pub, "tcp://*:47006");
+        assert_f64_eq(slowctl.poll_hz, 1.0);
+        assert_eq!(slowctl.log_every_s, 60);
+        // LogPost の宛先は省略 = controller の既定 PULL(SPEC §3.2 の 47005)。
+        assert_eq!(slowctl.log_push, DEFAULT_CONTROLLER_LOG_PUSH_ENDPOINT);
+
+        assert_eq!(slowctl.device.len(), 1);
+        let device = &slowctl.device[0];
+        assert_eq!(device.device_type, "bronkhorst_flowbus");
+        assert_eq!(device.name, "gas");
+        assert_eq!(
+            device.port.as_deref(),
+            Some("/dev/serial/by-id/usb-FTDI_xxx-if00-port0")
+        );
+        assert_eq!(device.nodes.resolve().unwrap()[0], 128);
+        assert_eq!(device.expect_serial, "");
+        assert_eq!(device.alarms.len(), 1);
+        assert_eq!(device.alarms[0].node, Some(4));
+        assert_eq!(device.alarms[0].param, "fmeasure");
+        assert_f64_eq(device.alarms[0].lo, 90.0);
+        assert_f64_eq(device.alarms[0].hi, 110.0);
+    }
+
+    /// `[monitor] slow_sub` は SPEC §3.2 の 47006 を指す任意キー。
+    #[test]
+    fn the_monitor_can_be_pointed_at_the_slowctl_pub() {
+        let geometry = make_temp_geometry_file();
+        let toml = minimal_toml(&geometry, "").replace(
+            "[monitor]\nws_listen",
+            "[monitor]\nslow_sub = \"tcp://127.0.0.1:47006\"\nws_listen",
+        );
+        let config = parse(&toml).unwrap();
+        assert_eq!(
+            config.monitor.slow_sub.as_deref(),
+            Some("tcp://127.0.0.1:47006")
+        );
+    }
+
+    /// TODO/079 §2.1: 取り違え防止のため `port` は by-id / by-path が望ましい。
+    /// **拒否はしない**(Mac 開発機に by-id は無い)—— warn の判定条件だけを固定する。
+    #[test]
+    fn only_by_id_and_by_path_count_as_a_stable_serial_port_name() {
+        assert!(is_stable_serial_port(
+            "/dev/serial/by-id/usb-FTDI_xxx-if00-port0"
+        ));
+        assert!(is_stable_serial_port(
+            "/dev/serial/by-path/pci-0000:00-usb-0:1"
+        ));
+        assert!(!is_stable_serial_port("/dev/ttyUSB0"));
+        assert!(!is_stable_serial_port("/dev/tty.usbserial-A5XK3RJT"));
+    }
+
+    /// 不安定なポート名でも**起動できる**(警告だけ)。
+    #[test]
+    fn an_unstable_port_name_is_a_warning_not_a_startup_failure() {
+        let geometry = make_temp_geometry_file();
+        let extra = r#"
+[slowctl]
+status_pub = "tcp://*:47006"
+[[slowctl.device]]
+type = "bronkhorst_flowbus"
+name = "gas"
+port = "/dev/ttyUSB0"
+"#;
+        let config = parse(&minimal_toml(&geometry, extra)).unwrap();
+        let slowctl = config.slowctl.unwrap();
+        // 省略したキーには既定が入る(SPEC §3.1)。
+        assert_f64_eq(slowctl.poll_hz, DEFAULT_SLOWCTL_POLL_HZ);
+        assert_eq!(slowctl.log_every_s, DEFAULT_SLOWCTL_LOG_EVERY_S);
+        assert_eq!(
+            slowctl.device[0].nodes,
+            crate::slowctl::NodesSpec::default()
+        );
+        assert!(slowctl.device[0].alarms.is_empty());
+    }
+
+    /// `deny_unknown_fields` は `[slowctl]` にも効く(綴り間違いを黙って無視しない)。
+    #[test]
+    fn an_unknown_slowctl_key_is_rejected() {
+        let geometry = make_temp_geometry_file();
+        let extra = r#"
+[slowctl]
+status_pub = "tcp://*:47006"
+pool_hz = 1.0
+[[slowctl.device]]
+type = "fake"
+name = "gas"
+port = "script.txt"
+"#;
+        assert!(matches!(
+            parse(&minimal_toml(&geometry, extra)),
+            Err(ConfigError::Parse(_))
+        ));
+
+        let bad_device = r#"
+[slowctl]
+[[slowctl.device]]
+type = "fake"
+name = "gas"
+prot = "script.txt"
+"#;
+        assert!(matches!(
+            parse(&minimal_toml(&geometry, bad_device)),
+            Err(ConfigError::Parse(_))
+        ));
+    }
+
+    /// 知らない `type` は起動失敗(半端な既定で走らない — SPEC §3.2)。
+    #[test]
+    fn an_unknown_device_type_is_a_startup_failure() {
+        let geometry = make_temp_geometry_file();
+        let extra = r#"
+[slowctl]
+[[slowctl.device]]
+type = "bronkhorst_flowbuss"
+name = "gas"
+port = "/dev/ttyUSB0"
+"#;
+        assert!(matches!(
+            parse(&minimal_toml(&geometry, extra)),
+            Err(ConfigError::InvalidSlowctl(_))
+        ));
+    }
+
+    /// シリアル系デバイスに `port` が無いのも起動失敗(静かに何も読まない状態を作らない)。
+    #[test]
+    fn a_serial_device_without_a_port_is_a_startup_failure() {
+        let geometry = make_temp_geometry_file();
+        let extra = r#"
+[slowctl]
+[[slowctl.device]]
+type = "bronkhorst_flowbus"
+name = "gas"
+"#;
+        assert!(matches!(
+            parse(&minimal_toml(&geometry, extra)),
+            Err(ConfigError::InvalidSlowctl(_))
+        ));
+    }
+
+    /// リポに置いた見本 TOML が**実際に読める**こと(腐った見本を配らない)。
+    /// ジオメトリだけは実ファイルが要るので一時ファイルに差し替える。
+    #[test]
+    fn the_example_config_in_the_repository_parses() {
+        let geometry = make_temp_geometry_file();
+        let text = std::fs::read_to_string("config/slowctl_example.toml")
+            .expect("config/slowctl_example.toml");
+        let text = text.replace(
+            "geometry = \"config/geometry_mini_eTPC.dat\"",
+            &format!("geometry = \"{}\"", geometry.display()),
+        );
+        let config = parse(&text).unwrap();
+        assert_eq!(
+            config.monitor.slow_sub.as_deref(),
+            Some("tcp://127.0.0.1:47006")
+        );
+        let slowctl = config.slowctl.unwrap();
+        assert_eq!(slowctl.status_pub, DEFAULT_SLOWCTL_STATUS_PUB);
+        assert_eq!(slowctl.device[0].device_type, "bronkhorst_flowbus");
+        assert_eq!(slowctl.device[0].alarms.len(), 1);
+    }
+
+    /// SPEC §3.2: slowctl の Batch source_id は 200(旧 psu)。
+    #[test]
+    fn the_slowctl_source_id_is_two_hundred() {
+        assert_eq!(SLOWCTL_SOURCE_ID, 200);
+        assert_eq!(DEFAULT_SLOWCTL_STATUS_PUB, "tcp://*:47006");
+        assert_eq!(
+            DEFAULT_CONTROLLER_LOG_PUSH_ENDPOINT,
+            "tcp://127.0.0.1:47005"
+        );
     }
 }

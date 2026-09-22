@@ -1077,11 +1077,11 @@ async fn log_posts_are_stamped_with_ts_and_seq_and_bad_ones_are_counted() {
     let push = context.socket(zmq::PUSH).unwrap();
     push.set_sndtimeo(2000).unwrap();
     push.connect(&harness.log_pull).unwrap();
-    // psu からの投稿を模す(ts / seq は付けない = controller が付ける)。
+    // slowctl からの投稿を模す(ts / seq は付けない = controller が付ける。SPEC §9.2 v1.31)。
     push.send(
         json!({
-            "type": "psu", "actor": "psu", "device": "CAEN0", "channel": 3,
-            "event": "TRIP", "values": {"vmon": 350.2, "imon": 0.008, "vset": 350.0}
+            "type": "slow", "actor": "slowctl", "device": "gas", "node": 4,
+            "event": "VALUE", "values": {"fmeasure": {"value": 130.5, "unit": "mbar"}}
         })
         .to_string()
         .as_bytes(),
@@ -1091,8 +1091,8 @@ async fn log_posts_are_stamped_with_ts_and_seq_and_bad_ones_are_counted() {
     // 壊れた投稿(ログブックのレコードではない)。
     push.send(b"{\"type\":\"nonsense\"}".as_slice(), 0).unwrap();
 
-    wait_until("the psu log post to land", || {
-        harness.logbook().iter().any(|r| r["type"] == json!("psu"))
+    wait_until("the slow log post to land", || {
+        harness.logbook().iter().any(|r| r["type"] == json!("slow"))
     });
 
     let records = harness.logbook();
@@ -1102,16 +1102,18 @@ async fn log_posts_are_stamped_with_ts_and_seq_and_bad_ones_are_counted() {
         .unwrap();
     assert_eq!(comment["author"], json!("aogaki"));
     assert_eq!(comment["actor"], json!("ui"));
-    let psu = records.iter().find(|r| r["type"] == json!("psu")).unwrap();
-    assert_eq!(psu["device"], json!("CAEN0"));
-    assert_eq!(psu["values"]["vmon"], json!(350.2));
+    let slow = records.iter().find(|r| r["type"] == json!("slow")).unwrap();
+    assert_eq!(slow["device"], json!("gas"));
+    assert_eq!(slow["node"], json!(4));
+    assert_eq!(slow["values"]["fmeasure"]["value"], json!(130.5));
+    assert_eq!(slow["values"]["fmeasure"]["unit"], json!("mbar"));
     // ts / seq は controller が付ける(SPEC §9.1)。
     assert_eq!(
-        psu["seq"].as_u64().unwrap(),
+        slow["seq"].as_u64().unwrap(),
         comment["seq"].as_u64().unwrap() + 1
     );
     assert_eq!(
-        psu["ts"].as_str().unwrap().len(),
+        slow["ts"].as_str().unwrap().len(),
         29,
         "RFC3339 ミリ秒 + オフセット"
     );
@@ -1134,6 +1136,97 @@ async fn log_posts_are_stamped_with_ts_and_seq_and_bad_ones_are_counted() {
         .map(|r| r["seq"].as_u64().unwrap())
         .collect();
     assert!(seqs.iter().all(|&s| s > 1), "{seqs:?}");
+
+    harness.shutdown();
+}
+
+/// SPEC §9.2 v1.31: slowctl が投げた直近値が `run_start` / `run_stop` の `slow` に載る。
+/// **投稿が無ければキーごと出ない**(slowctl 不在と「全部 0」を混同しない)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_run_records_carry_the_latest_slow_values() {
+    let harness = harness("run-slow", &[0], true, None).await;
+
+    let context = zmq::Context::new();
+    let push = context.socket(zmq::PUSH).unwrap();
+    push.set_sndtimeo(2000).unwrap();
+    push.connect(&harness.log_pull).unwrap();
+    for (param, value, unit) in [("fmeasure", 130.5, "mbar"), ("temperature", 21.5, "degC")] {
+        push.send(
+            json!({
+                "type": "slow", "actor": "slowctl", "device": "gas", "node": 4,
+                "event": "VALUE", "values": {param: {"value": value, "unit": unit}}
+            })
+            .to_string()
+            .as_bytes(),
+            0,
+        )
+        .unwrap();
+    }
+    wait_until("both slow log posts to land", || {
+        harness
+            .logbook()
+            .iter()
+            .filter(|r| r["type"] == json!("slow"))
+            .count()
+            == 2
+    });
+
+    let token = harness.acquire("aogaki");
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "gas test"}),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let records = harness.logbook();
+    let run_start = records
+        .iter()
+        .find(|r| r["type"] == json!("run_start"))
+        .unwrap();
+    // キーは `"<device>/<node>/<param>"`(SPEC §9.2)。
+    assert_eq!(run_start["slow"]["gas/4/fmeasure"]["value"], json!(130.5));
+    assert_eq!(run_start["slow"]["gas/4/fmeasure"]["unit"], json!("mbar"));
+    assert_eq!(run_start["slow"]["gas/4/temperature"]["value"], json!(21.5));
+    assert_eq!(
+        run_start["slow"]["gas/4/fmeasure"]["ts"]
+            .as_str()
+            .unwrap()
+            .len(),
+        29,
+        "SPEC §9.1 と同じ RFC3339 ミリ秒 + オフセット"
+    );
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+    let records = harness.logbook();
+    let run_stop = records
+        .iter()
+        .find(|r| r["type"] == json!("run_stop"))
+        .unwrap();
+    assert_eq!(run_stop["slow"]["gas/4/fmeasure"]["value"], json!(130.5));
+
+    harness.shutdown();
+}
+
+/// slowctl が 1 本も投げていなければ `slow` は省略される(nullable 規律)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_run_without_any_slow_post_omits_the_slow_field() {
+    let harness = harness("run-noslow", &[0], true, None).await;
+    let token = harness.acquire("aogaki");
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "no slowctl"}),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let records = harness.logbook();
+    let run_start = records
+        .iter()
+        .find(|r| r["type"] == json!("run_start"))
+        .unwrap();
+    assert!(run_start.get("slow").is_none(), "{run_start}");
 
     harness.shutdown();
 }

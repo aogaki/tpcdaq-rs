@@ -252,6 +252,7 @@ fn kind_of(message: &MonitorMessage) -> &str {
         MonitorPayload::Status(_) => "status",
         MonitorPayload::HistSnapshot(_) => "hist_snapshot",
         MonitorPayload::BuiltEvent(_) => "built_event",
+        MonitorPayload::Slow(_) => "slow",
         MonitorPayload::Unknown(kind) => kind,
     }
 }
