@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.30(2026-09-17 — 実装の正本)**
+- **status**: **v1.31(2026-09-22 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -151,7 +151,7 @@
   topology frame は来ない(decoder カウンタ 0)= 確定**、§13-5 実 ECC(20190315)をホストで
   ネイティブ起動し e2e 成立、§13-7 `extra_connections=0` 実測(mini)。初回 configure 7 s
   (261 s コールドスタートは再現せず)。データは frameType 2 rev 5(compact)278,784 B/frame。
-  / **v1.30(2026-09-17)Wave 1 反映(TODO/080)**: §5.4 に **AsAd 電子回路座標パネル**(TODO/077 — monitor タブの Event Display の下、(cobo,asad) 毎 nAget×nCh × nBuckets の 2D、0x03 由来)を追加、§10.3 の 0x03 購読条件を「波形ビュー**または monitor タブ**」に改訂。§6.7 に **raw ツリー契約の共有**(ガス圧シミュレーション gas-pressure-test の Stage 4 が同一契約で `_raw.root` を書き macros を共有 — 契約変更は両リポ同時、合成 raw は §5.5 QA 再構成のフィクスチャ供給元、080 D-8)を明記。
+  / **v1.30(2026-09-17)Wave 1 反映(TODO/080)**: §5.4 に **AsAd 電子回路座標パネル**(TODO/077 — monitor タブの Event Display の下、(cobo,asad) 毎 nAget×nCh × nBuckets の 2D、0x03 由来)を追加、§10.3 の 0x03 購読条件を「波形ビュー**または monitor タブ**」に改訂。§6.7 に **raw ツリー契約の共有**(ガス圧シミュレーション gas-pressure-test の Stage 4 が同一契約で `_raw.root` を書き macros を共有 — 契約変更は両リポ同時、合成 raw は §5.5 QA 再構成のフィクスチャ供給元、080 D-8)を明記。 / **v1.31(2026-09-22)slowctl 骨格の契約(TODO/079 Phase 2、監視のみ)**: §2.3 に slowctl → monitor の PUB ペイロード(kind=`slow`)、§3.1 に `[slowctl]` / `[[slowctl.device]]` / `[monitor] slow_sub` の例、§3.2 に slowctl status PUB `47006` と source_id 200 = slowctl(旧 psu)、§9.2 の `psu` レコードを **`slow`** に一般化(IDENT / VALUE / ALARM / RECOVER / ERROR、値は機器の単位文字列つき)し run_start / run_stop に `slow`(直近値、nullable)を追加、§10.3 の status JSON に `slow` を同梱。作動 API は引き続き無し(§11)。
   / **v1.29(2026-09-15)安全境界を明文化(§11、ユーザー裁定 — TODO/079 の発端)**: web 操作面(controller REST / UI)は DAQ の run 制御と監視のみ。**物理的作動(HV・ガス圧 setpoint・バルブ)は web に経路を作らず、ローカル限定**。§1.1 の psu 行を「監視のみ」に改め、名称を slowctl(HV / ガス / 環境の汎用スローコントロール)へ。根拠 = token + passphrase は事故防止であって認証ではない(§3.1)、TLS/認証は自前実装しない。
   / **v1.28(2026-09-14)§6.7 を実装前に精度上げ(TODO/075 着手、Fable)**: adc ブロック数は
   「観測」ではなく**期待フラグメント集合(§6.3 `--expect`)から起動時に確定**(ブランチは最初の
@@ -455,6 +455,7 @@ Batch(positional array(5)):
 | decoder → root-sink | `Fragments` | `Vec<Fragment>`(§2.4) |
 | root-sink → monitor(PUB) | `Snapshot` | §5.3(ヒスト)/ §5.4(built event)/ status。形式は map 形式 msgpack(`to_vec_named` 相当)で自己記述にする(Rust↔C++ 双方向でないため進化容易性優先 — delila-rs の EbMessage と同じ理屈) |
 | 各 → controller(PUSH) | `LogPost` | JSONL 1 レコード分の JSON 文字列(§9。controller が ts/seq を付与) |
+| slowctl → monitor(PUB) | `Snapshot` | **v1.31**: kind = `slow` — `{kind, ts_ms, samples: [{device, node, param, value, unit, ts_ms, alarm}], counters: {poll_ok, poll_err, parse_err, reconnects, identity_mismatch}}`(map 形式 msgpack、root-sink と同じ流儀。1 Hz に集約、最新値のみ。monitor は落としてよい = モニタ系) |
 
 - バッチ詰め: receiver は「8 MiB 到達 or 10 ms 経過」の早い方でバッチを閉じる(設定可)。
   ホットパスで per-frame の ZMQ send / heap 確保をしない(CLAUDE.md)。
@@ -535,6 +536,19 @@ raw_tree = false                       # §6.7 raw ツリー(run{N}_raw.root)。
 
 [monitor]
 ws_listen = "0.0.0.0:9000"
+slow_sub = "tcp://127.0.0.1:47006"     # slowctl の status PUB(v1.31)。省略 = 購読しない(status JSON に slow は出ない)
+
+[slowctl]                              # v1.31(TODO/079)。監視・記録・アラームのみ — 作動 API は無い(§11)
+status_pub = "tcp://*:47006"
+poll_hz = 1.0                          # 全デバイス共通の読み出し周期
+log_every_s = 60                       # 値が変わらなくても logbook `slow` VALUE を書く間隔(変化 2 % でも書く)
+[[slowctl.device]]
+type = "bronkhorst_flowbus"            # | "arduino_env" | "hivolta" | "hmp2020" | "fake"(テスト)
+name = "gas"                           # logbook / status の `device`
+port = "/dev/serial/by-id/usb-FTDI_xxx-if00-port0"   # /dev/ttyUSBn は書かない(by-id、無ければ by-path)
+nodes = "scan"                         # FLOW-BUS: "scan" = 128 + 3..120 を起動時に走査、または [3, 4, 5]
+expect_serial = ""                     # 任意。空でなければ open 時に 113/3 と照合(不一致 = エラーとして数えて再試行)
+alarms = [{ node = 4, param = "fmeasure", lo = 90.0, hi = 110.0 }]   # [lo, hi] 逸脱で ALARM、戻れば RECOVER。DAQ は止めない
 
 [controller]
 rest_listen = "0.0.0.0:8080"
@@ -557,10 +571,11 @@ receiver プロセスは `tpcdaq-receiver --config x.toml --cobo-id K` で CoBo 
 | root-sink PULL bind | `tcp://*:47003` |
 | root-sink PUB bind | `tcp://*:47004` |
 | controller ログ投稿 PULL bind | `tcp://*:47005` |
+| slowctl status PUB bind | `tcp://*:47006`(v1.31) |
 | コンポーネント REP | graw-writer = `47100`、decoder = `47101`、root-sink = `47102`、receiver k = `47110+k`(v1.2 で固定) |
 | ecc-bridge REP | `tcp://*:47200` |
 | controller REST / monitor WS | `8080` / `9000` |
-| source_id | receiver = `cobo_id`、decoder = 100、root-sink = 101(モニタ PUB、v1.9)、psu = 200(Batch の source_id 空間) |
+| source_id | receiver = `cobo_id`、decoder = 100、root-sink = 101(モニタ PUB、v1.9)、slowctl = 200(旧 psu、v1.31。Batch の source_id 空間) |
 
 - ch 数・CoBo 数・ポートを**コードに焼き込まない**。すべて TOML とジオメトリ(§4)から来る。
 - 設定パースエラーは起動失敗(半端な既定値で走らない — C++ 版 app_config の全リセット方式より厳しくする)。
@@ -1100,11 +1115,11 @@ fake-ECC servant(C++ 版のテストハーネス)相手の e2e を CI に置く(
 
 | type | 追加フィールド |
 |---|---|
-| `run_start` | `run`, `config_id`(3 相同値ならその文字列。非同値なら configure 相の id)、**`config_ids`(v1.13 追加、非同値時のみ**: `{describe, prepare, configure}`。同値時は省略 — nullable 規律)、`geometry: {path, sha256}`, `cobos: [{id, listen}]`, `operator`, `comment`, `expected_fragments`(期待 (cobo,asad) 集合) |
-| `run_stop` | `run`, `duration_s`, `ok: bool`, `reason`(**"normal" / "error:eos-timeout" / "abort:<原因>"** — abort は停止開始時点の起因。EOS の顛末は次の 2 フィールドが持ち、reason には合成しない)、**`forced_eos: bool`**(EOS を receiver `Stop` で注入したか。**実機 TCP flow では通常 true**(§1.3 v1.12 — stop はデータリンクを close しない)。EOF 由来の自然 EOS のみ false)、**`eos_closed: bool`**(EOS がチェーンを流れ切ったことを観測できたか。**false は異常の印**であり、reason が abort でも eos-timeout の事実はここで読める)(v1.12 追加。**v1.14 注記**: 実機 TCP flow では `forced_eos:true` が常態なので、**`forced_eos:false` は「stop 前にリンクが死んだ」ことの強い印** — CoBo 突然死は OS の正常 FIN により自然 EOF として normal クローズし、他に痕跡が残らない(041 D-2 実測)。リーダ・UI は `eos_closed:false` と並んで `forced_eos:false` にも注意を向けること)、`counters: {events_built, events_incomplete, late_fragments, frames: {cobo: n}, overflow_frames, malformed}`(**v1.10: 各項目は nullable — null = 「その時点で取得不能」であり 0 と混同しない**。root-sink が REP を持たない間、events_built/events_incomplete/late_fragments は null。取れる分は GetStatus 実測)、`files: [{path, bytes}]`(graw 群 + root + monitor.root 実績) |
+| `run_start` | `run`, `config_id`(3 相同値ならその文字列。非同値なら configure 相の id)、**`config_ids`(v1.13 追加、非同値時のみ**: `{describe, prepare, configure}`。同値時は省略 — nullable 規律)、`geometry: {path, sha256}`, `cobos: [{id, listen}]`, `operator`, `comment`, `expected_fragments`(期待 (cobo,asad) 集合)、**`slow`(v1.31、nullable — slowctl が動いていなければ省略)**: `{"<device>/<node>/<param>": {value, unit, ts}}` = controller が受け取った `slow` レコードの直近値(VALUE/ALARM/RECOVER 由来) |
+| `run_stop` | `run`, `duration_s`, `ok: bool`, `reason`(**"normal" / "error:eos-timeout" / "abort:<原因>"** — abort は停止開始時点の起因。EOS の顛末は次の 2 フィールドが持ち、reason には合成しない)、**`forced_eos: bool`**(EOS を receiver `Stop` で注入したか。**実機 TCP flow では通常 true**(§1.3 v1.12 — stop はデータリンクを close しない)。EOF 由来の自然 EOS のみ false)、**`eos_closed: bool`**(EOS がチェーンを流れ切ったことを観測できたか。**false は異常の印**であり、reason が abort でも eos-timeout の事実はここで読める)(v1.12 追加。**v1.14 注記**: 実機 TCP flow では `forced_eos:true` が常態なので、**`forced_eos:false` は「stop 前にリンクが死んだ」ことの強い印** — CoBo 突然死は OS の正常 FIN により自然 EOF として normal クローズし、他に痕跡が残らない(041 D-2 実測)。リーダ・UI は `eos_closed:false` と並んで `forced_eos:false` にも注意を向けること)、`counters: {events_built, events_incomplete, late_fragments, frames: {cobo: n}, overflow_frames, malformed}`(**v1.10: 各項目は nullable — null = 「その時点で取得不能」であり 0 と混同しない**。root-sink が REP を持たない間、events_built/events_incomplete/late_fragments は null。取れる分は GetStatus 実測)、`files: [{path, bytes}]`(graw 群 + root + monitor.root 実績)、**`slow`(v1.31、nullable)**: run_start と同形の直近値(run 平均は後続で追加) |
 | `audit` | `action`(REST エンドポイント名), `params`(要約), `operator`, `ok`, `error` |
 | `comment` | `author`, `text`(自由記述、R11) |
-| `psu` | `device`, `channel`, `event`("TRIP"/"ON"/"OFF"/"VSET"/...), `values: {vmon, imon, vset}`(P6 で詳細化) |
+| `slow` | **v1.31、旧 `psu` を一般化(TODO/079)**。`device`(TOML の `name`)、`node`(機器内アドレス: FLOW-BUS ノード番号 / HV ch 番号 / 無ければ null)、`event`(`"IDENT"` 起動時の識別 / `"VALUE"` 計測値 / `"ALARM"` / `"RECOVER"` / `"ERROR"` 読み出し失敗の集計)、`values`: VALUE/ALARM/RECOVER は `{<param>: {value: f64, unit: "<機器が返した単位文字列>"}}`、IDENT は `{<field>: "<string>"}`、ERROR は `{poll_err, parse_err, reconnects, identity_mismatch}` の増分。**1 Hz の全サンプルは書かない**: 前回書いた値から 2 % 以上動いたか `log_every_s` 経過で VALUE、ALARM/RECOVER は即時、ERROR は 1 分毎の集計(0 なら書かない)。actor = `slowctl` |
 
 例:
 
@@ -1153,7 +1168,7 @@ fake-ECC servant(C++ 版のテストハーネス)相手の e2e を CI に置く(
 | type | 方向 | 内容 |
 |---|---|---|
 | `meta` | S→C(接続時・run 変化時) | `{nBuckets, planes: {U,V,W}, geometry, anglesDeg, detector, cobos, run}` |
-| `status` | S→C(1 Hz) | §5.3 の status + `{monitorGaps, clients, wsDropped}` |
+| `status` | S→C(1 Hz) | §5.3 の status + `{monitorGaps, clients, wsDropped}` + **`slow`(v1.31、nullable)**: slowctl の最新 `slow` ペイロード(§2.3)を同梱。`[monitor] slow_sub` 未設定なら省略(従来と同一) |
 | `run` | S→C(遷移時) | `{state, run, ts}` |
 | `subscribe` | C→S | `{"streams": ["uvw","waveforms","histos","status"]}` — 既定は waveforms **以外** ON(帯域制御。**波形ビューまたは monitor タブ**(v1.30、§5.4 AsAd パネル)を開いたクライアントだけが 0x03 を受ける) |
 

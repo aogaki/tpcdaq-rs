@@ -150,6 +150,24 @@ Rust 側の受け口は既にある: controller は JSON 契約の型と組み�
   green ③実 ECC 歩き(041 デモ: describe → … → stop → breakup → reset → reset、audit の
   `ecc_walk_back` が C++ 時と同一)④034 の連続 run(ACM アイドル切断 → 再接続の実証)。
 
+### Phase 2 発注メモ(2026-09-22、Opus)
+
+- 着手前に worktree で `git merge --ff-only main`(ff できなければ固有コミットが無いことを確認して `git reset --hard main`)。発注書 = 本節 +
+  上の Phase 2 節 + Phase 1「結果」節の公開 API。本体の絶対パス `/Users/aogaki/Workspace/tpcdaq-rs/TODO/076_rust_ice_client.md` で読んでよい。
+- reference/ は worktree に無い。`.ice` は本体の絶対パスで読む: `/Users/aogaki/Workspace/tpcdaq-rs/reference/20190315_patched/GetBench/src/get/GetEcc.ice`
+  (`State` 7 / `Error` 10 の**順序が値**)、`.../MDaq/src/mdaq/Ecc.ice`、CmdException の型 id は `tests/fixtures/ice/README.md`(Phase 0)が正。
+- 移植元(リポ内): `tools/ecc_bridge/ecc_core.hpp`(JSON 契約・DataLinkSet XML・next_state)、`ecc_bridge.cpp`(CLI・REP ループ・再接続)、
+  `test_ecc_bridge.cpp`(**457 CHECK → Rust テストへ 1:1**、件数を結果節に書く)。C++ 側は**削除しない**(Phase 3)。
+- 配置: `src/ecc/{mod,proxy,core}.rs` + `src/bin/ecc_bridge.rs`(Cargo の bin 名 `ecc_bridge`。C++ 実行ファイルは tools/ 配下で別物)。
+- 受け入れは ①② のみ(③④ は実 ECC が要る = 新 DAQ 機。結果節に「未実施」と明記):
+  ① `tools/ecc_bridge/run_ecc_e2e.sh` に環境変数 `ECC_BRIDGE_BIN`(既定 `./ecc_bridge`)を足し、Rust bin を指して green。fake_ecc / ecc_e2e_client は
+    ビルド済み(Mac、Ice 3.8)。無ければ `make TPCDAQ_ICE_DIR=/Users/aogaki/Workspace/tpcdaq-rs/reference/20190315_patched -j`。
+  ② `TPCDAQ_ECC_BRIDGE_BIN` を Rust bin に向けて `tests/{ecc_bridge_intake,controller_ecc,p3_e2e,p3_error_paths,soak_smoke}.rs` が green
+    (C++ bin を指しても従来どおり green)。
+- 再接続: LocalException 相当(Connect / Lost / Protocol)で接続を捨て、**次の呼び出しで**再接続(C++ と同じ)。再送はしない(非冪等 op がある)。
+  リプライ待ち中の validate(type 3)/ close(type 4)は Phase 1 の client のとおり。
+- 設計判断が残ったら実装せず報告(例: Ice `Error` enum → CmdException `reason` の写像 — `ecc_core.hpp` を正とする)。
+
 ### Phase 3 — 切替と撤去(0.5 日、**実機で Rust bridge が動いてから** — ユーザー裁定 3)
 
 - 前提 = 新 DAQ 機(または GDED)で実 ECC + 実 zCoBo に対し Rust bridge で run 1 周(describe → … →

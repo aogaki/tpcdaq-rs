@@ -171,3 +171,21 @@ A → B → C の順(B/C は A のスキーマが固まれば並列可)。
 - ✔ JSON を正とする ✔ 078 ✔ 一様値 + 例外リスト(隠れているが黙らない)。
 - 残り: §2 のノブ集合と名前の最終確認(実装時にテンプレート xcfg で全パス照合したうえで、
   Fable が SPEC §3 に固定する)。
+
+## 9. レーン A 発注(2026-09-22、Opus)
+
+- 着手前に worktree で `git merge --ff-only main`(ff できなければ固有コミットが無いことを確認して `git reset --hard main`)。発注書は本体の
+  絶対パス `/Users/aogaki/Workspace/tpcdaq-rs/TODO/078_param_ui_json_xcfg.md` で読んでよい。
+- テンプレート xcfg は worktree に無い(reference/ は gitignore): `/Users/aogaki/Workspace/tpcdaq-rs/reference/config/configure-physics-zCobo1k-extTrig_120fC_25MHz_232ns_trigDelay1748.xcfg`
+  (+ `..._12.5MHz_232ns_trigDelay3576.xcfg`、`configure-pedestals-*.xcfg` 2 種、`configure-pulser.xcfg`、`describe-elitpc.xcfg`)。
+  **コミットしない**。リポに入れるフィクスチャは**合成の縮小テンプレート**(同じ構造で AsAd 1 / AGET 1 / ch 数本)。
+- 範囲 = §2 スキーマ + §3 レンダラ + §5-1 往復 + §5-2 オラクル(ccfg_resolve)。REST / UI(レーン B/C)は含めない。
+- **最初の仕事 = §2 ノブ定義表のパス照合**: 各ノブについてテンプレートに実在する xcfg パス(要素名・id・属性・型・現行値)を
+  `docs/PARAMS_KNOBS_ja.md`(新規、表)に書き出す。表と実物が食い違うノブ・見つからないノブは**実装せず報告**(Fable が SPEC §3 に固定してから)。
+  合致したノブだけ実装する。
+- 配置: `src/params/{mod,schema,render,paths}.rs`。XML は `quick-xml`(新規依存、MIT)。スキーマ検証は serde + 手書き範囲チェック(jsonschema crate は入れない)。
+  生成物名 `<template stem>__<sha256 先頭 8>.xcfg`、configure / prepare 同内容(§3-3)。除去規則(§3-1)は**負性テスト必須**。
+- オラクル `tools/ccfg_resolve/`(C++17、Makefile、`CCFG_DIR=/Users/aogaki/Workspace/tpcdaq-rs/reference/20190315_patched/CompoundConfig` を
+  ビルド時参照、コミットしない、make は `-j`)。Rust 側は env `TPCDAQ_CCFG_RESOLVE_BIN` があるときだけ照合テストを走らせ、無ければ skip を**出力に明示**。
+  CompoundConfig の Mac ビルドが通らなければその事実(エラー要旨)を結果節に書き、往復 + 負性テストだけで green にする。
+- 受け入れ: fmt / clippy / test green、production `.unwrap()` 無し。結果節に: 照合したノブ数 / 食い違い / オラクル照合の件数(全インスタンス数)。

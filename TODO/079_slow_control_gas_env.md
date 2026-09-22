@@ -167,6 +167,62 @@ DAQ 機 --USB--> USB-RS232(9.09.122 相当) --T-part 7.03.366--> [先頭機器 D
 - **やらないこと**: 書き込みコマンド、serialport 依存の追加、slowctl コンポーネント本体、TOML、logbook。
 - 完了条件: `cargo fmt && cargo clippy --tests -- -D warnings && cargo test` green、テスト数の増分を結果節に。
 
+## 2.6 Phase 2 発注(slowctl 骨格 — Opus、2026-09-22 着手)
+
+前提: Phase 1 済(`src/slowctl/{propar,link,fake}.rs`、main `cargo test` 614 passed)。**契約 = SPEC v1.31**(§2.3 slowctl→monitor PUB、
+§3.1 `[slowctl]` 例、§3.2 ポート 47006 / source_id 200、§9.2 `slow` レコード + run_start/run_stop の `slow`、§10.3 status の `slow`)。
+着手前に worktree で `git merge --ff-only main`(ff できなければ固有コミットが無いことを確認して `git reset --hard main`)。
+発注書・SPEC は本体ツリーの絶対パス(`/Users/aogaki/Workspace/tpcdaq-rs/TODO/079_slow_control_gas_env.md`、`docs/SPEC_ja.md`)で読んでよい。
+reference/ は worktree に無い(本票では不要)。
+
+### 作るもの
+1. `src/slowctl/mod.rs` — **ドメイン型(IO 非依存、tokio 非依存)**:
+   - `Sample { device: String, node: Option<u8>, param: String, value: f64, unit: String, ts_ms: u64, alarm: bool }`
+   - `Ident { device: String, node: Option<u8>, fields: BTreeMap<String, String> }`
+   - `trait Driver { fn ident(&mut self) -> Result<Vec<Ident>, DriverError>; fn poll(&mut self) -> Result<Vec<Sample>, DriverError>; }`
+     同期(ブロッキング)。`DriverError { Io(std::io::Error), Timeout, Protocol(String), Identity { expected: String, got: String } }`。
+   - `AlarmRule { node: Option<u8>, param: String, lo: f64, hi: f64 }` と判定の純関数(前回状態 + Sample → `Some(Alarm)` / `Some(Recover)` / `None`)。
+   - `LogPolicy`(純関数): 前回書いた値から `|Δ| ≥ 2 %`(0 近傍は絶対値 `1e-9`)か `log_every_s` 経過で VALUE を書く。
+2. `src/slowctl/bronkhorst.rs` — `Driver` 実装。`ProParLink<Box<dyn serialport::SerialPort>>`(Phase 1 の入口そのまま)。
+   `ident`: `nodes = "scan"` → 128 + 3..=120 を順に、`[..]` → 指定のみ。応答ノードごとに 113/12, 113/2, 113/3, 113/5, 113/6, 1/13, 1/31, 1/17, 1/14。
+   `poll`: ノード毎に 33/0 fmeasure・33/3 fsetpoint・33/7 temperature・1/20 alarm_info・114/1 valve_output(sensor type が制御器のときだけ)。
+   単位 = 1/31 の文字列(fmeasure/fsetpoint)、`degC`(temperature)、`%`(valve、生 u32 を % に直さず生値 + unit "raw" でよい — 換算式は現地で確定)。
+   `expect_serial` が空でなければ 113/3 と照合、不一致は `DriverError::Identity`。**書き込みは型として存在しない**(Phase 1 と同じ)。
+   依存追加: `serialport = { version = "4", default-features = false }`(libudev 不要。by-id の解決は OS の symlink で足りる)。
+3. `src/slowctl/fake_device.rs`(cfg(test) + feature `slowctl-fake`)— `Driver` を **Phase 1 の FakeProPar を in-memory の双方向パイプで挟んだ
+   bronkhorst ドライバ**で実現(別の偽物を作らない)。テストから値の時系列と無応答を注入できること。
+4. `src/slowctl/component.rs` + `src/bin/slowctl.rs`:
+   - `src/config.rs`: `Config.slowctl: Option<SlowctlConfig>`(既存 TOML は無変更で読める)、`MonitorConfig.slow_sub: Option<String>`。
+     `deny_unknown_fields` 維持。`port` が `/dev/serial/by-id/` `by-path/` 以外なら **warn**(拒否しない — Mac 開発機に by-id は無い)。
+   - デバイス毎に **std スレッド**(ブロッキング IO)で `ident` → `poll` ループ(`poll_hz`)。結果は `std::sync::mpsc` で本体へ。
+     エラーはカウンタ(`poll_ok / poll_err / parse_err / reconnects / identity_mismatch`)+ `warn!` + 指数バックオフ再接続(1 → 30 s)。
+   - 本体(tokio の 1 タスク、または std のまま — KISS で選び、理由を結果節に): (a) **status PUB**(`status_pub`、map 形式 msgpack、
+     kind = `slow`、1 Hz に集約、最新値のみ)(b) **LogPost**(既存 PUSH → controller `log_pull_bind`、JSON 1 行、`type: "slow"`、
+     §9.2 の方針: IDENT 起動時 / VALUE は LogPolicy / ALARM・RECOVER 即時 / ERROR は 1 分毎の増分、0 なら書かない)。zmq_helper の既存 API を使う。
+   - CLI `--config x.toml`、`RUST_LOG`。SIGINT で PUB/PUSH を閉じて終了。
+5. `src/logbook.rs`: `LogbookRecord::Psu` → **`Slow`**(`type: "slow"`、§9.2 のフィールド順)。`PsuValues` 削除。psu の手組みオラクル 3 本は
+   slow の手組みオラクルに置換(件数維持)。`src/runs_yaml.rs` の psu 参照も追従。
+6. `src/monitor.rs`: `slow_sub` があれば slowctl の PUB を **同じ SUB ソケットに追加 connect**。**recv 前に poll する既存規律を守る**
+   (メモリ zmq-fairqueue-starvation: 複数上流の SUB は recv 前に poll)。最新 `slow` ペイロードを保持し WS `status` JSON に `slow` として同梱。
+   `slow_sub` 無しなら従来と同一 JSON(既存テストが無変更で green = 証拠)。
+7. `src/controller.rs`: log-post スレッドで `type == "slow"` の VALUE/ALARM/RECOVER を見て `slow_latest`(`HashMap<String, {value, unit, ts}>`、
+   キー `"<device>/<node>/<param>"`、node 無しは `"-"`)を更新。`run_start` / `run_stop` に `slow`(nullable、無ければ省略)。run 平均は作らない。
+8. `config/slowctl_example.toml`(SPEC §3.1 の例をそのまま)。既存の実運用 TOML には `[slowctl]` を **書かない**(現地 Phase 0 の後)。
+
+### テスト(TDD: 赤を実測してから緑)
+- 単体: AlarmRule(境界・復帰・node 一致)/ LogPolicy(2 % と時間)/ config パース(省略・by-id 警告・未知キー拒否)/
+  `Slow` レコードの手組みオラクル(§9.2 のフィールド順、JSON 文字列完全一致)/ kind=`slow` msgpack の往復。
+- 統合 `tests/slowctl_integration.rs`: fake device 1 台の TOML で `slowctl` bin を子プロセス起動(既存統合テストの流儀、ポートは OS 任せ)→
+  ① SUB で `kind == "slow"` を受け samples に fmeasure がある ② PULL(controller の代わりにテストが bind)に IDENT → VALUE の順で届く
+  ③ 閾値を跨ぐ値を注入 → ALARM → RECOVER ④ 無応答を注入 → poll_err 増加、復帰後に VALUE 再開。
+- monitor: `slow_sub` あり/なしで status JSON の `slow` の有無(既存 monitor テストの流儀)。controller: `run_start.slow` が載る(controller_integration に 1 本)。
+- 実機受け入れ(現地、Phase 0 後): FlowSuite / 前面表示と 1 分間一致 — 本票では未実施と結果節に明記。
+
+### 受け入れ
+`cargo fmt && cargo clippy --tests -- -D warnings && cargo test` green(614 → 増分を結果節に)。production に `.unwrap()` 無し。
+silent failure 無し(全エラー経路にカウンタか `warn!`)。**設計判断が残ったら実装せず報告**(例: serialport の feature で Linux ビルドが変わる、
+monitor の SUB を 1 本にするか 2 本にするか)。
+
 ## 3. 確認事項(着手は止めない — 既定で進め、現地で確定)
 1. ~~Bronkhorst の機種・接続~~ → **判明**(§1.1–1.2)。残: 先頭機器・ノード番号(Phase 0 で scan)、
    **RS232 の現在の相手 PC**(第 2 local host が使えるかで運用が変わる、§1.5)。
