@@ -408,3 +408,13 @@ controller が最後に上がる(docs/NEW_DAQ_SETUP_ja.md)ので、slowctl が�
 
 **残る既知の限界**(設計判断が要るなら Fable 裁定): 再送キューは**プロセス内のみ**。
 slowctl が controller より先に落ちればキューの中身は失われる(永続化はしていない)。
+
+### Fable レビュー(Phase 2、2026-09-22、マージ `worktree-agent-ad12512bd609e755e` → main `c3f3a0c`)
+- 逸脱 1(`[slowctl] log_push`)承認 → SPEC §3.1 に追記済み(`8788bf9`)。逸脱 2(sndtimeo 200 ms)は **IDENT / ALARM / RECOVER の再送キュー**(上限 64、
+  最古から捨てて `log_dropped`)を追加させて承認(起動順で controller が最後 = IDENT が落ちる経路を塞ぐ)。逸脱 3–9 承認
+  (std スレッド + 同期 ZMQ の KISS 構成、monitor の seq 追跡を source_id 毎に分離、alarm_info を bitmask Sample、self dev-dependency、偽デバイスのスクリプト注入)。
+- **裁定: 再送キューの永続化はしない**(プロセス内のみ)。slowctl 再起動時に IDENT は必ず再送されるので、失われるのは停止中の ALARM/RECOVER だけ。
+  それは controller 側の run 記録 `slow` と次の VALUE で分かる。永続化は KISS に反する。
+- マージ時の衝突は `src/slowctl/mod.rs` の `pub mod` ブロック(085 と本票)のみ、両方残して解決。
+- 次(Phase 3 = Arduino スケッチ + ドライバ、Phase 4 = UI トレンド、+ 085 のコーデックを `Driver` に載せる小チケット)は現地 Phase 0 と並行で可。
+
