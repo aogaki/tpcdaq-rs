@@ -7,18 +7,28 @@
 # 使い方(バイナリは make 済みであること):
 #   make TPCDAQ_ICE_DIR=<repo>/reference/20190315_patched && ./run_ecc_e2e.sh
 #
+# ブリッジ本体は **$ECC_BRIDGE_BIN で差し替えられる**(既定 = 同ディレクトリの C++ 版)。
+# TODO/076 Phase 2 の Rust 版を同じ e2e に掛けるための口:
+#   cargo build --bin ecc_bridge
+#   ECC_BRIDGE_BIN=<repo>/target/debug/ecc_bridge ./run_ecc_e2e.sh
+# fake_ecc(Ice servant)と ecc_e2e_client は C++ のまま = **照合相手は変わらない**。
+#
 # ポートは全部 OS 任せ(fake_ecc は "PROXY ..."、ecc_bridge は "BIND ..." を stdout に 1 行出す)
 # —— 固定ポートを書かないので並列実行に耐える。
 
 set -eu
 cd "$(dirname "$0")"
 
-for bin in ./fake_ecc ./ecc_bridge ./ecc_e2e_client; do
+ECC_BRIDGE_BIN=${ECC_BRIDGE_BIN:-./ecc_bridge}
+
+for bin in ./fake_ecc "$ECC_BRIDGE_BIN" ./ecc_e2e_client; do
   if [ ! -x "$bin" ]; then
     echo "run_ecc_e2e: $bin が無い。先に make (TPCDAQ_ICE_DIR=... ) すること" >&2
+    echo "  (ブリッジを差し替えるなら ECC_BRIDGE_BIN=<実行可能なパス>)" >&2
     exit 1
   fi
 done
+echo "run_ecc_e2e: bridge = $ECC_BRIDGE_BIN"
 
 work=$(mktemp -d)
 fake_pid=""
@@ -59,7 +69,7 @@ fi
 proxy=${proxy_line#PROXY }
 echo "run_ecc_e2e: fake ECC proxy = $proxy"
 
-./ecc_bridge --bind "tcp://127.0.0.1:*" --ecc-proxy "$proxy" \
+"$ECC_BRIDGE_BIN" --bind "tcp://127.0.0.1:*" --ecc-proxy "$proxy" \
   >"$work/bridge.out" 2>"$work/bridge.err" &
 bridge_pid=$!
 if ! bind_line=$(wait_for_line "$work/bridge.out" BIND); then
