@@ -1,0 +1,5 @@
+# C++ ビルド生成物(コミットしない)。CompoundConfig / TinyXml のソースも
+# **ビルド時参照するだけ**でリポには一切入らない(reference/ は .gitignore 済み)。
+build/
+*.o
+*.dSYM/

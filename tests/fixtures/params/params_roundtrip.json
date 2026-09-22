@@ -1,0 +1,15 @@
+{
+  "schema": "tpcdaq-params/1",
+  "template": "configure-mini-fixture.xcfg",
+  "knobs": {
+    "triggerDelay": 1748,
+    "writingClockFrequency_MHz": 25.0,
+    "triggerMode": "external",
+    "globalThreshold": 1,
+    "lsbThreshold": 15,
+    "gain": "120fC",
+    "triggerInhibition": "none"
+  },
+  "exceptions": [],
+  "note": "template_mini.xcfg の現行値そのまま(078 §5-1 の往復テスト)"
+}

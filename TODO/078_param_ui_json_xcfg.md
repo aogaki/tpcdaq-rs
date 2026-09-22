@@ -189,3 +189,78 @@ A → B → C の順(B/C は A のスキーマが固まれば並列可)。
   ビルド時参照、コミットしない、make は `-j`)。Rust 側は env `TPCDAQ_CCFG_RESOLVE_BIN` があるときだけ照合テストを走らせ、無ければ skip を**出力に明示**。
   CompoundConfig の Mac ビルドが通らなければその事実(エラー要旨)を結果節に書き、往復 + 負性テストだけで green にする。
 - 受け入れ: fmt / clippy / test green、production `.unwrap()` 無し。結果節に: 照合したノブ数 / 食い違い / オラクル照合の件数(全インスタンス数)。
+
+## 結果(レーン A — スキーマ + レンダラ、2026-09-22、Opus レーン)
+
+実行環境: macOS 26.6.2 (arm64) / rustc 1.97.1 / Apple clang 21.0.0 / boost 1.90(homebrew)。
+
+### 実行コマンド
+
+```
+cargo fmt && cargo clippy --tests -- -D warnings && cargo test
+make -j8 -C tools/ccfg_resolve CCFG_DIR=/Users/aogaki/Workspace/tpcdaq-rs/reference/20190315_patched/CompoundConfig
+TPCDAQ_CCFG_RESOLVE_BIN=$PWD/tools/ccfg_resolve/build/ccfg_resolve \
+TPCDAQ_XCFG_TEMPLATE=/Users/aogaki/Workspace/tpcdaq-rs/reference/config/configure-physics-zCobo1k-extTrig_120fC_25MHz_232ns_trigDelay1748.xcfg \
+  cargo test --test params_ccfg_oracle -- --nocapture
+```
+
+### テスト数
+
+**614 passed → 645 passed / 0 failed / 1 ignored**(+31)。clippy 警告ゼロ、production の `.unwrap()` 無し。
+内訳: `tests/params_render.rs` 18(往復・除去規則の負性・例外・スキーマ違反・生成物名)、
+`tests/params_ccfg_oracle.rs` 4(env 無しでは SKIP を stderr に出して green)、
+`src/params/{paths,schema,render}.rs` の単体 9。
+
+### ノブ照合(最初の仕事 — `docs/PARAMS_KNOBS_ja.md`)
+
+`reference/config` の configure-*.xcfg 5 本 + describe-elitpc.xcfg で全パスを照合。
+**照合 11 ノブ(§2 表の 10 + §2.1 裁定 2 の `TriggerInhibition`)→ 実装 7 / 食い違い 4**。
+
+- 実装(7): `triggerDelay`(CoBo, `Module.triggerDelay`, unit=10ns)、`writingClockFrequency_MHz`、
+  `triggerMode`(FW が扱える 5 値のみ)、`globalThreshold`(AGET, **`Global.Reg1.` が §2 表から抜けていた**)、
+  `lsbThreshold`、`gain`、`triggerInhibition`。
+- **未実装 = 要裁定(4)**: `peakingTime_ns`(実物は AGET スコープの `Global.Reg1.peackingTime`、綴りも違う)、
+  `readout`(CoBo 1 か所ではなく `Module.enableWriteHittedregister` + AGET の `isAllChannelRead`/`isFPNRead`
+  + channel の `Reading` の合成)、`zeroSuppression`(enabled は CoBo だが threshold は **channel** スコープ)、
+  `pulser`(AsAd ではなく **CoBo** スコープの `Instance.Generator`)。詳細は PARAMS_KNOBS_ja.md §4。
+
+### オラクル照合(§5-2)
+
+`tools/ccfg_resolve` は **Mac でビルドできた**(C++11、後述の逸脱 2 点)。
+
+- 合成フィクスチャ(AsAd 0..1 × Aget 0..1 × ch 0..5、CoBo instance 2 本): **158 インスタンス**を
+  全数照合、一致。一様値をテンプレートと変え、3 スコープすべてに例外を置いた状態。
+- **実テンプレート**(`configure-physics-…_trigDelay1748.xcfg`、ELITPC 実寸 4 AsAd × 4 AGET × 68 ch):
+  **3,283 インスタンス**(channel ノブ 3 × 1,088 + AGET ノブ 1 × 16 + CoBo ノブ 3)を全数照合、一致。
+- 除去規則(§3-1)の負性テストもオラクルで実施: 明示 id ノードを仕込んだテンプレートでは
+  `999 / 6 / 0 / 2 / 1pC` が勝つ(= 罠が本物)→ 生成物では `1748 / 1 / 15 / 15 / 120fC` に戻る。
+- 往復(§5-1)は**バイト一致**まで強めた。合成フィクスチャと実テンプレート(831 行)の両方で
+  `render(knobs = テンプレート現行値, exceptions = [])` == テンプレート。
+
+### 承認が必要な逸脱
+
+1. **粗い例外の xcfg 上の形(最重要)**: 078 §2 の「`{"asad":1}` → `<AsAd id="1"><Aget id="*"><channel id="*">`」
+   は**実機の解決器では効かない**(ccfg_resolve で実測、158 中 22 が一様値に負けた)。一次資料
+   `CompoundConfig/src/CCfg/View/Search.hpp` の `if(iInstance >= iPath and index != "*")` が理由。
+   レンダラは**テンプレートに実在する id の直積へ展開**して明示ノードで書くことにした
+   (JSON の意味は不変、生成 xcfg の形だけが変わる)。実寸コスト: 4 例外(うち 1 つが AsAd 全体の
+   gain = 272 ノード)で 831 行 → 1,668 行。SPEC §3 に写す前に裁定が要る(PARAMS_KNOBS_ja.md §6 に
+   選択肢 a/b/c)。
+2. **生成物名の stem**: §3-3 の「`<template stem>__<hash8>`」を字義どおりにすると
+   `configure-configure-physics-…` になるため、テンプレート名から相のプレフィクス
+   (`configure-`/`prepare-`)を落とした部分を stem とした(ECC は `<相>-<configId>.xcfg` で読む)。
+3. **`at` は (asad, aget, ch) の接頭辞のみ**(`{"ch":3}` 単独や空の `at` はスキーマ違反)。
+   §2 の「粗さ」を末尾の切り落としと解釈した。
+4. **全ノブ必須**(`knobs` に 7 個すべて無いと 400)。「省略 = テンプレート由来」は §2 に無いので採らない。
+5. **sha256 の対象**は受け取った JSON テキストのバイト列(正規化しない)。
+6. **ccfg_resolve は C++17 ではなく C++11**: CompoundConfig のヘッダが `std::auto_ptr`(C++17 で削除)を
+   使うため。加えて Makefile で `-DWORDS_LITTLE_ENDIAN`(autotools の config.h 代替)と
+   **`-DTIXML_USE_STL`**(これが無いと TinyXml のレイアウトが食い違い `XmlToConfigVisitor::isObject` で
+   SEGV する — 実測)を与えている。
+7. 例外の宛先 id がテンプレートに無ければ**エラー**(黙って無視しない)。許される id はテンプレートから
+   集める(ch 数をコードに焼き込まない — CLAUDE.md)。
+
+### 未実施
+
+- §5-3(実 ECC で describe→prepare→configure)、§5-4(REST/UI)、§5-5(実データへの反映)は
+  レーン B/C/実機作業。レーン A の範囲外。
