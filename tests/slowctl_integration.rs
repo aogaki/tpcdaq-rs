@@ -143,18 +143,25 @@ alarms = [{{ param = "fmeasure", lo = {ALARM_LO}, hi = {ALARM_HI} }}]
     path
 }
 
-/// テスト側で controller 役の PULL と monitor 役の SUB を先に開く(listen-before-start)。
-fn open_sockets(
-    context: &zmq::Context,
-    pub_port: u16,
-    log_port: u16,
-) -> (zmq::Socket, zmq::Socket) {
+/// controller 役の PULL だけを開く(`bind_log_pull` を分けてあるのは、後から上げる
+/// 起動順のテストが**わざと開かずに** slowctl を先に立てるため)。
+fn bind_log_pull(context: &zmq::Context, log_port: u16) -> zmq::Socket {
     let log_pull = context.socket(zmq::PULL).unwrap();
     log_pull.set_rcvtimeo(200).unwrap();
     log_pull.set_linger(0).unwrap();
     log_pull
         .bind(&format!("tcp://127.0.0.1:{log_port}"))
         .unwrap();
+    log_pull
+}
+
+/// テスト側で controller 役の PULL と monitor 役の SUB を先に開く(listen-before-start)。
+fn open_sockets(
+    context: &zmq::Context,
+    pub_port: u16,
+    log_port: u16,
+) -> (zmq::Socket, zmq::Socket) {
+    let log_pull = bind_log_pull(context, log_port);
 
     let sub = context.socket(zmq::SUB).unwrap();
     sub.set_subscribe(b"").unwrap();
@@ -342,6 +349,57 @@ fn the_slowctl_process_publishes_samples_and_posts_ident_value_alarm_and_recover
         }
     }
     assert!(resumed, "無応答から復帰したあとの値が PUB に出ていない");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **実運用の起動順**(controller が最後 — docs/NEW_DAQ_SETUP_ja.md)で IDENT を落とさない。
+///
+/// PULL を **bind せずに** slowctl を起動 → 数 tick 回してから bind → 1 通目が IDENT。
+/// 再送キューは投函順なので、停止中に起きた ALARM / RECOVER もその後ろに続く。
+/// 停止中の VALUE は再送しない(次の VALUE が来る)= 古い値で logbook を埋めない。
+#[test]
+fn records_from_before_the_controller_was_up_arrive_in_order_starting_with_ident() {
+    let dir = scratch_dir("late-controller");
+    let script = dir.join("gas_script.txt");
+    std::fs::write(&script, SCRIPT.as_bytes()).unwrap();
+
+    let pub_port = free_port();
+    let log_port = free_port();
+    let config = write_config(&dir, &script, pub_port, log_port);
+
+    let context = zmq::Context::new();
+    // **PULL はまだ開かない**(controller が居ない状態で slowctl が先に立つ)。
+    let child = Command::new(env!("CARGO_BIN_EXE_slowctl"))
+        .args(["--config", &config.to_string_lossy()])
+        .env("RUST_LOG", "warn")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn slowctl");
+    let _guard = Proc(child);
+
+    // poll_hz = 20 なのでスクリプト 8 行(IDENT / ALARM / RECOVER を含む)は
+    // 0.4 s で流れ切る。1 s 待てば全部「controller 不在で投函に失敗した」状態になる。
+    std::thread::sleep(Duration::from_secs(1));
+
+    let log_pull = bind_log_pull(&context, log_port);
+    let deadline = Instant::now() + DEADLINE;
+
+    let mut events = Vec::new();
+    while events.len() < 3 {
+        let Some(record) = next_log_record(&log_pull, deadline) else {
+            break;
+        };
+        let (event, device, _) = event_of(&record);
+        assert_eq!(device, "gas");
+        events.push(event.to_string());
+    }
+    assert_eq!(
+        events,
+        vec!["IDENT", "ALARM", "RECOVER"],
+        "controller が後から上がっても 1 通目は IDENT、以後は投函順"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

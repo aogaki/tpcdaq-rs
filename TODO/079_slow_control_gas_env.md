@@ -295,7 +295,8 @@ cargo test
 
 ### テスト数(before → after)
 
-**`cargo test` 614 passed → 658 passed / 0 failed / 1 ignored(+44)**。
+**`cargo test` 614 passed → 658 passed / 0 failed / 1 ignored(+44)**
+(→ レビュー指摘 2 の追加実装で **662 passed / 0 failed(+48)**。下の「追記」節)。
 内訳(新規): `src/slowctl` 22(bronkhorst 9 / component 6 / domain 5 / fake_device 2)、
 `src/config.rs` 8、`src/monitor.rs` 2、`src/logbook.rs` 1、`src/controller.rs` 1、
 `src/bin/slowctl.rs` 2、`tests/slowctl_integration.rs` 2、`tests/monitor_ws.rs` 2、
@@ -364,3 +365,46 @@ monitor 側は `tests/monitor_ws.rs` に 2 本: `slow_sub` 無し = status JSON 
   リポには見本 `config/slowctl_example.toml` だけを置き、その TOML が実際に `config::parse` を
   通ることをテストで固定した。
 - UI トレンド / status バッジ(Phase 4)。
+
+### 追記(Phase 2 レビュー対応 — LogPost 再送キュー、2026-09-22)
+
+Fable レビュー: **逸脱 1(`log_push` キー)承認**(SPEC §3.1 への追記は Fable が main 側で実施)、
+**逸脱 3–9 承認**、**逸脱 2 は「IDENT が落ちるのは許容できない」** —— 実運用の起動順では
+controller が最後に上がる(docs/NEW_DAQ_SETUP_ja.md)ので、slowctl が先に立つと起動時の IDENT が
+**確実に**落ちる。→ 再送キューを追加実装した。
+
+**仕様(`src/slowctl/component.rs`)**
+
+- `is_retryable(record)`: 再送するのは **`IDENT` / `ALARM` / `RECOVER`**(= 一度きりの事実。
+  落とすと二度と記録に現れない)。**`VALUE` は再送しない**(次の VALUE が来る)、
+  **`ERROR` も再送しない**(次回の 1 分集計に増分が含まれる)。古い値で logbook を埋めない。
+- `RetryQueue`: FIFO、上限 **64**(`RETRY_QUEUE_LIMIT`)。超えたら**最古から**捨てて
+  `log_dropped` を数え `warn!`(無制限に抱えない = CLAUDE.md のメモリ規律)。
+- `LogPoster`: 本体ループの**周回の先頭で `flush()`** —— 溜まった再送を投函順に流してから
+  新しいレコードを投函する。よって controller が後から上がっても **1 通目は必ず IDENT**。
+  1 周回で失敗する送信は高々 1 本(最初の失敗で `down` を立て、その周回は以後 send を試さない)
+  = `LOG_SEND_TIMEOUT_MS`(200 ms、逸脱 2 で承認済み)のブロックが積み上がらない。
+  送れなかった 1 本は**先頭へ戻す**ので順序は崩れない。
+- 捨てた投稿の累計 `log_dropped` は LogPoster が持つ(SPEC §2.3 の `counters` には載らない
+  slowctl 自身の健全性。warn に `queued` と一緒に出る)。
+
+**テスト(658 → 662 passed / 0 failed、+4)**
+
+- `src/slowctl/component.rs` +3: `only_one_off_records_are_worth_resending`(5 種の event +
+  slow 以外)/ `the_retry_queue_is_bounded_and_drops_the_oldest_first`(上限ちょうどまで
+  1 本も捨てない → 65 本目で最古 `IDENT0` が落ち、先頭が `IDENT1` になる)/
+  `records_queued_while_the_controller_is_down_arrive_in_order_once_it_is_up`
+  (**実 ZMQ**。相手不在で IDENT・ALARM が溜まり VALUE は捨てられる → PULL を bind →
+  `IDENT, ALARM` の順で届き `log_dropped == 1`)。
+- `tests/slowctl_integration.rs` +1(発注どおり):
+  `records_from_before_the_controller_was_up_arrive_in_order_starting_with_ident` ——
+  **PULL を bind せずに** slowctl を起動 → 1 s(poll_hz 20 で 20 tick、スクリプト 8 行は 0.4 s で
+  流れ切る)→ PULL を bind → 受けた順が **`[IDENT, ALARM, RECOVER]`**。停止中の VALUE は届かない。
+- 既存 4 項目は**変更なし**。`tests/monitor_ws.rs` の `a_slow_sub_...` に `client.settle()` を
+  1 行足した(全体実行時に `warm_up` の "idle" 在庫を読んで `state` の assert が落ちたため。
+  harness が同じ目的で用意している作法で、slow の検証内容は不変)。
+- 再実行 5 回連続 green(`--test slowctl_integration` / `--test monitor_ws`)+ `cargo test` 全体 2 回連続 green。
+  `cargo fmt --check` / `cargo clippy --tests -- -D warnings` / `cargo clippy --all-targets -- -D warnings` clean。
+
+**残る既知の限界**(設計判断が要るなら Fable 裁定): 再送キューは**プロセス内のみ**。
+slowctl が controller より先に落ちればキューの中身は失われる(永続化はしていない)。

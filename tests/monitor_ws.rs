@@ -413,6 +413,8 @@ async fn a_slow_sub_adds_the_latest_slow_payload_to_the_status_json() {
     let mut client = Client::connect(&monitor).await;
     let _ = client.next_json("meta", RECV_TIMEOUT).await;
     warm_up(&mut publisher, &mut client, 7).await;
+    // `warm_up` が流した "idle" の在庫を空にしてから観測する(harness の作法)。
+    client.settle().await;
 
     // slowctl の 1 通を流し、以後の status に載るまで status を叩き続ける。
     slow_publisher.slow(130.5);

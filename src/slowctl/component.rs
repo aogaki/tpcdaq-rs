@@ -13,9 +13,14 @@
 //! # 落としてよいもの / いけないもの
 //!
 //! * status PUB(§2.3)= **モニタ系**。SUB が居なければ落ちてよい —— 落ちた数は数える。
-//! * LogPost(§9)= 記録系だが、**controller 不在で slowctl を止めてはいけない**
-//!   (計測は続く)。送れなかった投稿は捨てて `log_dropped` に数え、warn する。
+//! * LogPost(§9)= 記録系だが、**controller 不在で slowctl を止めてはいけない**(計測は続く)。
 //!   保存系のロスレス契約(receiver → graw-writer / decoder)とは別の口である。
+//!   ただし **`IDENT` / `ALARM` / `RECOVER` は一度きりの事実**なので落とさない ——
+//!   送信に失敗したら [`RetryQueue`](上限 [`RETRY_QUEUE_LIMIT`])に入れ、周回の先頭で
+//!   投函順に再送する。実運用の起動順は controller が最後(docs/NEW_DAQ_SETUP_ja.md)で、
+//!   slowctl が先に立つと起動時の IDENT が必ず失敗するため、これが無いと機器の識別記録が
+//!   実機で常に消える。`VALUE`(次が来る)と `ERROR`(次回集計に入る)は再送しない。
+//!   捨てた分は `log_dropped` に数えて warn する(silent にしない — CLAUDE.md)。
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -53,6 +58,14 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 /// デバイススレッド → 本体のキュー段数(1 Hz 級なので浅くてよい)。
 const EVENT_QUEUE: usize = 256;
+
+/// 届かなかった一度きりのレコード(IDENT / ALARM / RECOVER)を抱える上限。
+///
+/// 実運用の起動順では controller が最後に上がる(docs/NEW_DAQ_SETUP_ja.md)ので、
+/// slowctl が先に立つと起動時の IDENT が**必ず**投函に失敗する。捨てると機器の識別記録が
+/// 二度と残らないので、届くまで抱えて再送する。抱え込みが無制限にならないよう上限を置き、
+/// 超えたら最古から捨てて数える。64 = 機器数 × 事象数として実運用の桁に十分な余裕。
+const RETRY_QUEUE_LIMIT: usize = 64;
 
 /// LogPost 1 本にかける上限(ミリ秒)。
 ///
@@ -646,17 +659,20 @@ fn main_loop(
         .map(|(i, d)| (d.name.as_str(), i))
         .collect();
 
-    let log_dropped = AtomicU64::new(0);
+    let mut poster = LogPoster::new(log_push);
     let mut sequence_number = 0u64;
     let mut last_publish = Instant::now();
     let mut last_error_report = Instant::now();
     let mut previous: Vec<SlowCounters> = vec![SlowCounters::default(); params.devices.len()];
 
     while !stop.load(Ordering::Relaxed) {
+        // 周回の先頭で再送を流す —— controller が後から上がっても 1 通目は IDENT になる。
+        poster.flush();
+
         match rx.recv_timeout(DRAIN_TIMEOUT) {
             Ok(DeviceEvent::Ident(idents)) => {
                 for ident in &idents {
-                    post(log_push, &log_dropped, &ident_record(ident));
+                    poster.post(ident_record(ident));
                 }
             }
             Ok(DeviceEvent::Samples(samples)) => {
@@ -665,7 +681,7 @@ fn main_loop(
                     .and_then(|s| index_of.get(s.device.as_str()).copied())
                     .unwrap_or(0);
                 for record in aggregator.ingest(device_index, samples) {
-                    post(log_push, &log_dropped, &record);
+                    poster.post(record);
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -708,7 +724,7 @@ fn main_loop(
                     continue;
                 };
                 if let Some(delta) = counter_delta(&now, previous_slot) {
-                    post(log_push, &log_dropped, &error_record(&device.name, &delta));
+                    poster.post(error_record(&device.name, &delta));
                 }
                 *previous_slot = now;
             }
@@ -716,23 +732,140 @@ fn main_loop(
     }
 }
 
-/// LogPost を 1 本投函する。落ちても計測は止めない(数えて warn する)。
+// ---------------------------------------------------------------------
+// LogPost(再送キュー付き)
+// ---------------------------------------------------------------------
+
+/// 投函に失敗したとき**再送する**レコードか(SPEC §9.2 の `event` 別)。
 ///
-/// `dropped` は **コンポーネント共通**(投函の失敗はどのデバイスのせいでもない)。
-/// SPEC §2.3 の `counters` には載らない slowctl 自身の健全性なので、warn とこの値で見る。
-fn post(log_push: &zmq::Socket, dropped: &AtomicU64, record: &LogbookRecord) {
-    let json = match serde_json::to_vec(record) {
-        Ok(json) => json,
-        Err(e) => {
-            error!(error = %e, "slowctl: cannot encode a logbook record");
+/// * `IDENT` / `ALARM` / `RECOVER` = **一度きりの事実**。落とすと二度と記録に現れない。
+/// * `VALUE` = 次の VALUE が来る。`ERROR` = 次回の 1 分集計に増分が含まれる。
+///   どちらも溜め込む意味がないので再送しない(古い値で logbook を埋めない)。
+fn is_retryable(record: &LogbookRecord) -> bool {
+    matches!(record, LogbookRecord::Slow { event, .. }
+        if matches!(event.as_str(), "IDENT" | "ALARM" | "RECOVER"))
+}
+
+/// 届かなかった一度きりのレコードを抱えておく有界キュー(FIFO)。
+///
+/// 上限を超えたら**最古から**捨てる —— 新しい ALARM のほうが運用上の価値が高く、
+/// 無制限に抱えるのは CLAUDE.md が禁じるメモリ暴走そのものだから。
+#[derive(Debug, Default)]
+pub struct RetryQueue {
+    queue: std::collections::VecDeque<LogbookRecord>,
+}
+
+impl RetryQueue {
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// 末尾に積む。上限超過で最古を捨てたら `true`(呼び手が数えて warn する)。
+    pub fn push(&mut self, record: LogbookRecord) -> bool {
+        let evicted = self.queue.len() >= RETRY_QUEUE_LIMIT;
+        if evicted {
+            self.queue.pop_front();
+        }
+        self.queue.push_back(record);
+        evicted
+    }
+
+    fn pop_front(&mut self) -> Option<LogbookRecord> {
+        self.queue.pop_front()
+    }
+
+    /// 送れなかった 1 本を**先頭へ**戻す(投函順を崩さない)。
+    fn push_front(&mut self, record: LogbookRecord) {
+        self.queue.push_front(record);
+    }
+}
+
+/// LogPost の投函口。**落ちても計測は止めない**が、一度きりのレコードは落とさない。
+///
+/// 1 周回につき失敗する送信は高々 1 本(最初の失敗で `down` を立て、その周回は
+/// 以後 send を試さない)。`LOG_SEND_TIMEOUT_MS` のブロックが積み上がらないようにするため。
+struct LogPoster<'a> {
+    socket: &'a zmq::Socket,
+    retry: RetryQueue,
+    /// この周回で既に送信が失敗したか(次の [`LogPoster::flush`] で降りる)。
+    down: bool,
+    /// 捨てた投稿の累計(キュー溢れ + 再送しない種別の送信失敗)。
+    /// SPEC §2.3 の `counters` には載らない slowctl 自身の健全性。
+    dropped: u64,
+}
+
+impl<'a> LogPoster<'a> {
+    fn new(socket: &'a zmq::Socket) -> Self {
+        Self {
+            socket,
+            retry: RetryQueue::default(),
+            down: false,
+            dropped: 0,
+        }
+    }
+
+    /// 周回の先頭で呼ぶ: `down` を降ろし、溜まった再送を**投函順に**流す。
+    ///
+    /// 新しいレコードより先に流すので、controller が後から上がっても
+    /// **1 通目は IDENT** になる(実運用の起動順 = controller が最後、docs/NEW_DAQ_SETUP_ja.md)。
+    fn flush(&mut self) {
+        self.down = false;
+        // `front()` の借用を跨いで `try_send(&mut self)` を呼べないので、1 本ずつ取り出して
+        // 失敗したら**先頭に戻す**(順序は保たれる)。
+        while let Some(record) = self.retry.pop_front() {
+            if !self.try_send(&record) {
+                // 相手がまだ居ない。残りはこの周回では試さない(200 ms を積み上げない)。
+                self.retry.push_front(record);
+                return;
+            }
+        }
+    }
+
+    /// 1 本投函する。落ちたら種別に応じて再送キューへ回すか、数えて捨てる。
+    fn post(&mut self, record: LogbookRecord) {
+        if !self.down && self.try_send(&record) {
             return;
         }
-    };
-    // `DONTWAIT` は使わない —— `LOG_SEND_TIMEOUT_MS` を効かせるため(理由はその定数の doc)。
-    if let Err(e) = log_push.send(&json[..], 0) {
-        let total = dropped.fetch_add(1, Ordering::Relaxed) + 1;
-        warn!(error = %e, log_dropped = total,
-              "slowctl: LogPost dropped (is the controller running?)");
+        if is_retryable(&record) {
+            if self.retry.push(record) {
+                self.dropped += 1;
+                warn!(
+                    log_dropped = self.dropped,
+                    limit = RETRY_QUEUE_LIMIT,
+                    "slowctl: the LogPost retry queue is full — dropped the oldest record"
+                );
+            }
+        } else {
+            self.dropped += 1;
+        }
+    }
+
+    /// 実際に送る。失敗したら `down` を立てて `false`。
+    fn try_send(&mut self, record: &LogbookRecord) -> bool {
+        let json = match serde_json::to_vec(record) {
+            Ok(json) => json,
+            Err(e) => {
+                // 符号化できないものは何度試しても通らない。捨てる以外にない(が黙らない)。
+                error!(error = %e, "slowctl: cannot encode a logbook record");
+                return true;
+            }
+        };
+        // `DONTWAIT` は使わない —— `LOG_SEND_TIMEOUT_MS` を効かせるため(理由はその定数の doc)。
+        match self.socket.send(&json[..], 0) {
+            Ok(()) => true,
+            Err(e) => {
+                if !self.down {
+                    warn!(error = %e, queued = self.retry.len(), log_dropped = self.dropped,
+                          "slowctl: LogPost did not go through (is the controller running?)");
+                }
+                self.down = true;
+                false
+            }
+        }
     }
 }
 
@@ -929,5 +1062,123 @@ mod tests {
         assert_eq!(slow.samples[0].value, 130.5);
         assert_eq!(slow.samples[0].unit, "mbar");
         assert_eq!(slow.counters.poll_ok, 3);
+    }
+
+    // -----------------------------------------------------------------
+    // LogPost の再送(079 Phase 2 レビュー指摘)
+    // -----------------------------------------------------------------
+
+    fn slow_event(event: &str) -> LogbookRecord {
+        LogbookRecord::Slow {
+            actor: SLOW_ACTOR.to_string(),
+            device: "gas".to_string(),
+            node: Some(3),
+            event: event.to_string(),
+            values: json!({}),
+        }
+    }
+
+    /// 一度きりの事実(IDENT / ALARM / RECOVER)だけ再送する。
+    /// VALUE は次が来る、ERROR は次回集計に入るので、古い値で logbook を埋めない。
+    #[test]
+    fn only_one_off_records_are_worth_resending() {
+        assert!(is_retryable(&slow_event("IDENT")));
+        assert!(is_retryable(&slow_event("ALARM")));
+        assert!(is_retryable(&slow_event("RECOVER")));
+        assert!(!is_retryable(&slow_event("VALUE")));
+        assert!(!is_retryable(&slow_event("ERROR")));
+        // slow 以外(controller が書くもの)は slowctl の再送対象ではない。
+        assert!(!is_retryable(&LogbookRecord::Comment {
+            actor: "ui".to_string(),
+            author: "aogaki".to_string(),
+            text: "x".to_string(),
+        }));
+    }
+
+    /// 再送キューは FIFO で、上限を超えたら**最古から**捨てて呼び手に知らせる。
+    #[test]
+    fn the_retry_queue_is_bounded_and_drops_the_oldest_first() {
+        let mut queue = RetryQueue::default();
+        assert!(queue.is_empty());
+
+        // 上限ちょうどまでは 1 本も捨てない。
+        for i in 0..RETRY_QUEUE_LIMIT {
+            assert!(!queue.push(slow_event(&format!("IDENT{i}"))), "i = {i}");
+        }
+        assert_eq!(queue.len(), RETRY_QUEUE_LIMIT);
+
+        // 上限 + 1 本目で最古(IDENT0)が落ちる。長さは上限のまま。
+        assert!(queue.push(slow_event("ALARM")));
+        assert_eq!(queue.len(), RETRY_QUEUE_LIMIT);
+        let LogbookRecord::Slow { event, .. } = queue.pop_front().unwrap() else {
+            panic!("retry queue holds slow records");
+        };
+        assert_eq!(event, "IDENT1", "先頭は IDENT0 ではなく IDENT1");
+
+        // 送れなかった 1 本を戻すと順序が保たれる。
+        queue.push_front(slow_event("IDENT1"));
+        let LogbookRecord::Slow { event, .. } = queue.pop_front().unwrap() else {
+            panic!("retry queue holds slow records");
+        };
+        assert_eq!(event, "IDENT1");
+    }
+
+    /// 相手が居ない間は溜め、相手が現れたら**投函順に**流れる(実配線で確かめる)。
+    ///
+    /// これが実運用の姿そのもの: 起動順で controller は最後に上がる
+    /// (docs/NEW_DAQ_SETUP_ja.md)ので、slowctl の 1 通目 = IDENT は必ず 1 度失敗する。
+    #[test]
+    fn records_queued_while_the_controller_is_down_arrive_in_order_once_it_is_up() {
+        let context = zmq::Context::new();
+        let endpoint = {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = probe.local_addr().unwrap().port();
+            drop(probe);
+            format!("tcp://127.0.0.1:{port}")
+        };
+
+        let push = context.socket(zmq::PUSH).unwrap();
+        crate::zmq_helper::apply_push_hwm(&push).unwrap();
+        push.set_sndtimeo(50).unwrap(); // テストを待たせない(本番は LOG_SEND_TIMEOUT_MS)
+        push.set_linger(0).unwrap();
+        push.connect(&endpoint).unwrap();
+
+        let mut poster = LogPoster::new(&push);
+        // 相手はまだ居ない: IDENT と ALARM は溜まり、VALUE は捨てられる。
+        poster.flush();
+        poster.post(slow_event("IDENT"));
+        poster.post(slow_event("VALUE"));
+        poster.post(slow_event("ALARM"));
+        assert_eq!(poster.retry.len(), 2, "VALUE は溜めない");
+        assert_eq!(poster.dropped, 1, "捨てた VALUE は数える");
+
+        // controller が上がる。
+        let pull = context.socket(zmq::PULL).unwrap();
+        pull.set_rcvtimeo(2000).unwrap();
+        pull.set_linger(0).unwrap();
+        pull.bind(&endpoint).unwrap();
+
+        // 何周か回れば接続が張られて流れ切る(1 周に 1 本しか失敗を試さない設計なので、
+        // 接続が張られるまでの周回が要る)。
+        for _ in 0..40 {
+            poster.flush();
+            if poster.retry.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(poster.retry.is_empty(), "再送が流れ切っていない");
+
+        let mut events = Vec::new();
+        for _ in 0..2 {
+            let raw = pull.recv_bytes(0).expect("queued record");
+            let record: LogbookRecord = serde_json::from_slice(&raw).unwrap();
+            let LogbookRecord::Slow { event, .. } = record else {
+                panic!("expected a slow record");
+            };
+            events.push(event);
+        }
+        assert_eq!(events, vec!["IDENT", "ALARM"], "投函順のまま届く");
+        assert_eq!(poster.dropped, 1, "捨てたのは VALUE の 1 本だけ");
     }
 }
