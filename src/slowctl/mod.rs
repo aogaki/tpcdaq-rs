@@ -13,3 +13,17 @@ pub mod link;
 /// インメモリ ProPar 応答器(テスト専用、または `slowctl-fake` feature)。
 #[cfg(any(test, feature = "slowctl-fake"))]
 pub mod fake;
+
+/// CAEN DT1415ET 読み出しコーデック(純関数、IO なし)。TODO/085。監視のみ(SET 系の型は無い)。
+pub mod hivolta;
+
+/// R&S/HAMEG HMP2020 読み出しコーデック(純関数、IO なし)。TODO/085。監視のみ(SET 系の型は無い)。
+pub mod hmp;
+
+/// インメモリ HiVolta 応答器(テスト専用、または `slowctl-fake` feature)。TODO/085。
+#[cfg(any(test, feature = "slowctl-fake"))]
+pub mod fake_hv;
+
+/// インメモリ HMP2020 応答器(テスト専用、または `slowctl-fake` feature)。TODO/085。
+#[cfg(any(test, feature = "slowctl-fake"))]
+pub mod fake_hmp;
