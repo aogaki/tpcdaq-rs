@@ -1,6 +1,6 @@
 # 077 — モニタタブに AsAd 電子回路座標 2D(272 ch × 512)を追加
 
-**Status: MERGED**(2026-09-17 実装 Sonnet レーン → Fable レビュー → main へマージ `3a973f7`。**残 = demo 目視(受け入れ 2 項目目)**、
+**Status: COMPLETED**(2026-09-17 実装 Sonnet レーン → Fable レビュー → main へマージ `3a973f7`。**残 = demo 目視(受け入れ 2 項目目)**、
 076 Phase 0 レーンが 46002 を使い終わってから Fable が実施 → COMPLETED/archive。2026-09-14 起票、Fable。
 発端 = ユーザー: 「信号が時間窓に収まっているか」の確認はチップ毎の波形表示だと選択を変えている間に
 次のイベントが来る → **UVW Event Display(0x02)がまさにそれで、同一タブに 3 面が並ぶので解決**。
@@ -75,3 +75,20 @@ TS 150〜200 行 + テスト 100 行。Sonnet 半日。Fable レビューは完�
 - demo 目視: headless Chrome の自動撮影はデータ到着前に閉じてしまい判定不能(monitor ログには monitor タブからの
   `subscribe … waveforms: true` が出ており購読配線は実証)。**2026-09-17 10:40 から demo スタック(mini、2 Hz ループ、
   1 時間 run)を立てたままにしてユーザーの目視を依頼** → 結果を追記して archive。
+
+## 結果(第 2 弾: demo 目視、2026-09-22、ユーザー + Fable)
+
+- 環境: demo スタック(mini、vcobo ループ 20 Hz、run 2)、`http://localhost:8080/monitor`(controller 配信の ui/dist、077 のコードを含むことを
+  `grid-asad` / `≠ UVW` 文字列で確認)。データ源は 2025 mini の実 run(全 272 ch が同時に立ち上がるパルサー様の波形)。
+- **合格**: Event display の下に AsadCobo0Asad0(272 ch × 512 buckets)が出て、ラベル `event #107` は UVW 側の `run 2 · event #107` と一致、
+  `≠ UVW` バッジ無し。log トグル・パネル形状も UVW と同じ流儀。スクリーンショットはユーザー手元(2026-09-22 16:1x)。
+- 見えたもの: 各 AGET の FPN(11/22/45/56 = 16 行)がパルス区間(bucket ≈120–512)で**白い横線**になる。WS を直接覗いた実測
+  (`scratchpad/asad_zero_probe.py`、0x03 を 3 通)で FPN ch 45 の生 ADC 最大が 4094/4095 = **パルサー run の FPN は 4095 飽和**
+  (068 の既知事実)→ ベースライン減算後 ≈ 3700 でカラースケールの最上位 = 現パレット(`jsroot-loader.ts` PALETTE = 56)の白。
+  表示は正しい(FPN が見えるという 077 の狙いどおり)が、最上位色が白なので通常 ch の明るい水色と見分けにくい → **086 でパレット変更**。
+  ちょうど 0 のセル(JSROOT が描かない)は 139,264 中 55–155 で先頭 80 bucket に偏り、白線の原因ではない。
+- 副次的発見: vcobo の `loop = true` は eventIdx を付け替えないので、2 周目以降は root-sink が **late fragments として捨て**(status:
+  events_built 108 / late_fragments 8866)、表示は 1 周目の最後のイベントで止まる(新規クライアントには 0x02/0x03 が届かない)→ **087**。
+- 手順上の失敗(Fable): 目視中のスタックに対し `run_once.sh` を裏で走らせ、ユーザーの run 1 を 16:08 に停止させてしまった
+  (`controller is Running — not Idle` → 45 s 後の run/stop が他人の run を止めた)。**他人が使っている demo スタックに run 操作を投げない**。
+
