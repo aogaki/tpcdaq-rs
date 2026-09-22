@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.31(2026-09-22 — 実装の正本)**
+- **status**: **v1.32(2026-09-22 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -151,7 +151,7 @@
   topology frame は来ない(decoder カウンタ 0)= 確定**、§13-5 実 ECC(20190315)をホストで
   ネイティブ起動し e2e 成立、§13-7 `extra_connections=0` 実測(mini)。初回 configure 7 s
   (261 s コールドスタートは再現せず)。データは frameType 2 rev 5(compact)278,784 B/frame。
-  / **v1.30(2026-09-17)Wave 1 反映(TODO/080)**: §5.4 に **AsAd 電子回路座標パネル**(TODO/077 — monitor タブの Event Display の下、(cobo,asad) 毎 nAget×nCh × nBuckets の 2D、0x03 由来)を追加、§10.3 の 0x03 購読条件を「波形ビュー**または monitor タブ**」に改訂。§6.7 に **raw ツリー契約の共有**(ガス圧シミュレーション gas-pressure-test の Stage 4 が同一契約で `_raw.root` を書き macros を共有 — 契約変更は両リポ同時、合成 raw は §5.5 QA 再構成のフィクスチャ供給元、080 D-8)を明記。 / **v1.31(2026-09-22)slowctl 骨格の契約(TODO/079 Phase 2、監視のみ)**: §2.3 に slowctl → monitor の PUB ペイロード(kind=`slow`)、§3.1 に `[slowctl]` / `[[slowctl.device]]` / `[monitor] slow_sub` の例、§3.2 に slowctl status PUB `47006` と source_id 200 = slowctl(旧 psu)、§9.2 の `psu` レコードを **`slow`** に一般化(IDENT / VALUE / ALARM / RECOVER / ERROR、値は機器の単位文字列つき)し run_start / run_stop に `slow`(直近値、nullable)を追加、§10.3 の status JSON に `slow` を同梱。作動 API は引き続き無し(§11)。
+  / **v1.30(2026-09-17)Wave 1 反映(TODO/080)**: §5.4 に **AsAd 電子回路座標パネル**(TODO/077 — monitor タブの Event Display の下、(cobo,asad) 毎 nAget×nCh × nBuckets の 2D、0x03 由来)を追加、§10.3 の 0x03 購読条件を「波形ビュー**または monitor タブ**」に改訂。§6.7 に **raw ツリー契約の共有**(ガス圧シミュレーション gas-pressure-test の Stage 4 が同一契約で `_raw.root` を書き macros を共有 — 契約変更は両リポ同時、合成 raw は §5.5 QA 再構成のフィクスチャ供給元、080 D-8)を明記。 / **v1.31(2026-09-22)slowctl 骨格の契約(TODO/079 Phase 2、監視のみ)**: §2.3 に slowctl → monitor の PUB ペイロード(kind=`slow`)、§3.1 に `[slowctl]` / `[[slowctl.device]]` / `[monitor] slow_sub` の例、§3.2 に slowctl status PUB `47006` と source_id 200 = slowctl(旧 psu)、§9.2 の `psu` レコードを **`slow`** に一般化(IDENT / VALUE / ALARM / RECOVER / ERROR、値は機器の単位文字列つき)し run_start / run_stop に `slow`(直近値、nullable)を追加、§10.3 の status JSON に `slow` を同梱。作動 API は引き続き無し(§11)。 / **v1.32(2026-09-22)パラメータ JSON の契約(TODO/078 レーン A)**: §3.3 を新設 — JSON が正・xcfg は生成物、11 ノブとスコープ、例外は「一様値 + 例外リスト」、**CompoundConfig の継承は粗い例外を発注どおりには解決しない(Search.hpp の backtrack、オラクル実測)ので粗い例外は実在 id の直積へ展開**、生成物名 `<stem>__<sha256 8>`、受け入れは CompoundConfig オラクル(tools/ccfg_resolve、env-gated)。
   / **v1.29(2026-09-15)安全境界を明文化(§11、ユーザー裁定 — TODO/079 の発端)**: web 操作面(controller REST / UI)は DAQ の run 制御と監視のみ。**物理的作動(HV・ガス圧 setpoint・バルブ)は web に経路を作らず、ローカル限定**。§1.1 の psu 行を「監視のみ」に改め、名称を slowctl(HV / ガス / 環境の汎用スローコントロール)へ。根拠 = token + passphrase は事故防止であって認証ではない(§3.1)、TLS/認証は自前実装しない。
   / **v1.28(2026-09-14)§6.7 を実装前に精度上げ(TODO/075 着手、Fable)**: adc ブロック数は
   「観測」ではなく**期待フラグメント集合(§6.3 `--expect`)から起動時に確定**(ブランチは最初の
@@ -580,6 +580,22 @@ receiver プロセスは `tpcdaq-receiver --config x.toml --cobo-id K` で CoBo 
 
 - ch 数・CoBo 数・ポートを**コードに焼き込まない**。すべて TOML とジオメトリ(§4)から来る。
 - 設定パースエラーは起動失敗(半端な既定値で走らない — C++ 版 app_config の全リセット方式より厳しくする)。
+
+### 3.3 パラメータ JSON(v1.32、TODO/078 — 正本は JSON、xcfg は生成物)
+
+- **xcfg を直接編集しない。** 実験側の正典 xcfg を**テンプレート**として無改変で取り込み、`tpcdaq-params/1` の JSON(`template` + `knobs` + `exceptions`)から
+  `configure-<stem>__<sha256 先頭 8>.xcfg` と同内容の `prepare-…` を生成する(同じ JSON → 同じファイル)。describe は不変。
+- **ノブ = 11(JSON の葉 13)**、定義は `src/params/schema.rs` の `KNOBS` が唯一(表と根拠 = `docs/PARAMS_KNOBS_ja.md` §7)。
+  CoBo: `triggerDelay`(10 ns 単位)/ `writingClockFrequency_MHz` / `triggerMode` / `zeroSuppression.enabled` / `pulser.{enabled, voltage_mV, period_ms}`(`Generator.amplitudeStart` と同値、mV)。
+  AGET: `globalThreshold` / `peakingTime_ns`(AGET 仕様 16 値 = xcfg `range`)/ `readout`(`isAllChannelRead` + `isFPNRead`、full/partial。`enableWriteHittedregister` と `channel.Reading` はテンプレート由来)。
+  channel: `lsbThreshold` / `gain` / `triggerInhibition` / `zeroSuppression.threshold`。**全ノブ必須**(省略不可)。管理外の要素はテンプレートを 1 バイトも変えない(往復はバイト一致)。
+- **例外リスト**: `at` は (asad, aget, ch) の接頭辞、ノブのスコープと同じか粗いものだけ。**CompoundConfig の継承解決(`CCfg/View/Search.hpp`)は
+  `<AsAd id="1"><Aget id="*">` のような粗い明示ノードを一様値より優先しない**(段を戻って `*` の連鎖を選び直す backtrack。オラクル実測、078 結果節)。
+  よってレンダラは粗い `at` を**テンプレート実在 id の直積へ展開して明示ノードで書く**(JSON の意味は不変、生成物が大きくなるだけ)。宛先 id がテンプレートに無ければエラー。
+- **除去規則**: 管理ノブは当該ノブの全インスタンスノード(`*` と明示 id)をテンプレートから除去してから一様値を `*` に、例外を明示 id に書く(除去を省くとテンプレートの明示ノードが勝つ — 負性テストで固定)。
+- **受け入れ**: ①往復(例外なし + テンプレート値 = バイト一致)②**CompoundConfig オラクル** `tools/ccfg_resolve/`(C++11、reference/ の CompoundConfig をビルド時参照、コミットしない、
+  env `TPCDAQ_CCFG_RESOLVE_BIN` + `TPCDAQ_XCFG_TEMPLATE` があるときだけ照合し、無ければ skip を明示)で全インスタンス一致(実テンプレート 4,423)③実 ECC で describe → prepare → configure(新 DAQ 機)。
+- REST(`/api/params`)/ UI(Parameters ビュー、Exceptions (N) バッジ、status バーの `params <id> · exceptions N`)/ 監査ログ(`params_hash`、`exceptions: N`)は 078 レーン B/C(§8.1 / §9 / §11 に着手時追記)。
 
 ## 4. ジオメトリ仕様
 

@@ -309,3 +309,12 @@ TPCDAQ_XCFG_TEMPLATE=/Users/aogaki/Workspace/tpcdaq-rs/reference/config/configur
    実質 {232}(+pulser の 1014)になり実験切替級ノブとして使えないため、**AGET 仕様の 16 値**
    (= xcfg の `range` 属性そのもの)を定数表とし、テンプレートの `range` と一致することを
    テストで検算する形にした。
+
+### Fable レビュー(レーン A、2026-09-22、マージ `worktree-agent-a92b0c123f7438f2d` → main)
+- 自分でも再実行: 実テンプレートのオラクル照合 **4,423 インスタンス一致**(`params_ccfg_oracle` 4 本 green)、ブランチ `cargo test` 655 passed、fmt / clippy clean。
+- 逸脱 1 = **選択肢 a 確定**(粗い例外は実在 id の直積へ展開)。逸脱 2–9 **承認**(stem の相プレフィクス除去 / `at` 接頭辞 / 全ノブ必須 / 生バイト sha256 /
+  ccfg_resolve C++11 + `-DTIXML_USE_STL` / 宛先 id 不在はエラー / readout は差分に現れた AGET 2 要素のみ管理(`enableWriteHittedregister` は pedestals で false = モード非依存) /
+  `voltage_mV` = `amplitudeStart`(CoBoConfigParser.cpp:1074)/ `peakingTime_ns` は xcfg `range` の 16 値をテストで検算)。
+- **SPEC v1.32 §3.3 に契約を固定**(ノブ 11、スコープ、展開規則、除去規則、受け入れ)。§2 の JSON 例の `peakingTime_ns` は AGET スコープ、`pulser` は CoBo スコープと読み替える(表は PARAMS_KNOBS_ja.md §7 が正)。
+- 次 = レーン B(controller REST + run/start 結線 + 監査ログ、Sonnet)→ レーン C(UI、Sonnet)。§5-3(実 ECC)は新 DAQ 機。
+
