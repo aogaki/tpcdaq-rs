@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Setup id="Conditions">
+	<!-- 078 レーン A の合成フィクスチャ。実 xcfg(reference/config、リポに入れない)の
+	     構造を縮小して写したもの: AsAd 0..1 / Aget 0..1 / channel 0..5。
+	     値は実テンプレートと同じ(docs/PARAMS_KNOBS_ja.md の「現行値」)。 -->
+	<ECC>
+		<DataMonitor>true</DataMonitor>
+		<Verbose>false</Verbose>
+	</ECC>
+	<Node id="*">
+		<Instance id="*" />
+	</Node>
+	<Node id="CoBo">
+		<Instance id="*">
+			<isActive>true</isActive>
+			<Module>
+				<nbEvent>100</nbEvent>
+				<coboId range="[0, 255]">0</coboId>
+				<readoutDepth unit="buckets" range="[0, 512]">512</readoutDepth>
+				<enableWriteHittedregister>true</enableWriteHittedregister>
+				<triggerMode range="{external, external_2p, noTrigger, onMultiplicity, onMultiplicity_2p, onRequest, onRequest_2p, onSlowControl, onSlowControl_2p, periodically, periodically_2p}">external</triggerMode>
+				<!-- Delay (units of 10 ns) between event causing the trigger and actual freeze of the AGET SCA memory. -->
+				<triggerDelay unit="10ns">1748</triggerDelay>
+				<writingClockFrequency unit="MHz" range="[1.0, 200.0]">25.0</writingClockFrequency>
+				<enableZeroSuppression>false</enableZeroSuppression>
+			</Module>
+			<!-- CoBo スコープの Generator(pulser の {enabled, voltage, period} はここ)。 -->
+			<Generator>
+				<amplitudeStart unit="mV" range="[-1000.0, 1000.0]">-1000.0</amplitudeStart>
+				<periodicModeEnabled>false</periodicModeEnabled>
+				<period_ms unit="ms">1000</period_ms>
+			</Generator>
+			<AsAd id="*">
+				<Control>
+					<isActive>false</isActive>
+				</Control>
+				<!-- AsAd スコープの Generator。**ここにも triggerDelay がある**(単位違い)。
+				     除去規則を要素名でやると Module.triggerDelay と混ざる。 -->
+				<Generator>
+					<isCalibMode>false</isCalibMode>
+					<triggerDelay unit="WCK periods" range="[0, 31]">0</triggerDelay>
+				</Generator>
+				<Aget id="*">
+					<Control>
+						<isActive>true</isActive>
+					</Control>
+					<Global>
+						<ReadoutPointerOffset>0</ReadoutPointerOffset>
+						<Reg1>
+							<peackingTime unit="ns" range="{70, 117, 232, 280, 334, 383, 502, 541, 568, 632, 721, 760, 831, 870, 976, 1014}">232</peackingTime>
+							<isAllChannelRead>true</isAllChannelRead>
+							<isFPNRead>true</isFPNRead>
+							<GlobalThresholdValue range="[0, 7]">1</GlobalThresholdValue>
+						</Reg1>
+					</Global>
+					<channel id="*">
+						<isActive>true</isActive>
+						<TriggerInhibition range="{inhibit_channel, inhibit_trigger, none}">none</TriggerInhibition>
+						<LSBThresholdValue range="[0, 15]">15</LSBThresholdValue>
+						<Gain range="{10pC, 120fC, 1pC, 240fC}">120fC</Gain>
+						<Reading range="{always, never, only_if_hit}">always</Reading>
+						<zeroSuppressionThreshold range="[0, 4095]">600</zeroSuppressionThreshold>
+					</channel>
+					<channel id="0" />
+					<channel id="1" />
+					<channel id="2" />
+					<channel id="3" />
+					<channel id="4" />
+					<channel id="5" />
+				</Aget>
+				<Aget id="0" />
+				<Aget id="1" />
+			</AsAd>
+			<AsAd id="0">
+				<Control>
+					<isActive>true</isActive>
+				</Control>
+			</AsAd>
+			<AsAd id="1">
+				<Control>
+					<isActive>true</isActive>
+				</Control>
+			</AsAd>
+		</Instance>
+		<Instance id="0" />
+		<Instance id="1">
+			<Module>
+				<coboId>1</coboId>
+			</Module>
+		</Instance>
+	</Node>
+</Setup>

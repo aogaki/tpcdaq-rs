@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Setup id="Conditions">
+	<!-- 078 §3-1 の除去規則の負性テスト用フィクスチャ。
+	     template_mini.xcfg と同じ構造に、**管理ノブを明示 id ノードで上書きしている箇所**を
+	     8 か所仕込んである(現行の実テンプレートには無いが、Warsaw 側の改訂で入り得る形):
+	       1. Instance[0]/Module/triggerDelay = 999        (CoBo スコープ)
+	       2. AsAd[*]/Aget[1]/Global/Reg1/GlobalThresholdValue = 6  (AGET スコープ)
+	       3. AsAd[*]/Aget[*]/channel[4]/LSBThresholdValue = 0      (channel スコープ)
+	       4. AsAd[1]/Aget[0]/channel[3]/{LSBThresholdValue,Gain}   (channel スコープ、深い明示)
+	       5. AsAd[*]/Aget[1]/Global/Reg1/peackingTime = 70         (AGET、2026-09-22 追加ノブ)
+	       6. AsAd[*]/Aget[1]/Global/Reg1/isAllChannelRead = false   (readout の合成先)
+	       7. AsAd[*]/Aget[*]/channel[4]/zeroSuppressionThreshold = 11 (channel)
+	       8. Instance[0]/{Module/enableZeroSuppression, Generator/periodicModeEnabled} (CoBo)
+	     除去を省くと、これらが JSON の一様値に勝ってしまう。 -->
+	<ECC>
+		<DataMonitor>true</DataMonitor>
+		<Verbose>false</Verbose>
+	</ECC>
+	<Node id="*">
+		<Instance id="*" />
+	</Node>
+	<Node id="CoBo">
+		<Instance id="*">
+			<isActive>true</isActive>
+			<Module>
+				<nbEvent>100</nbEvent>
+				<coboId range="[0, 255]">0</coboId>
+				<readoutDepth unit="buckets" range="[0, 512]">512</readoutDepth>
+				<enableWriteHittedregister>true</enableWriteHittedregister>
+				<triggerMode range="{external, external_2p, noTrigger, onMultiplicity, onMultiplicity_2p, onRequest, onRequest_2p, onSlowControl, onSlowControl_2p, periodically, periodically_2p}">external</triggerMode>
+				<triggerDelay unit="10ns">1748</triggerDelay>
+				<writingClockFrequency unit="MHz" range="[1.0, 200.0]">25.0</writingClockFrequency>
+				<enableZeroSuppression>false</enableZeroSuppression>
+			</Module>
+			<Generator>
+				<amplitudeStart unit="mV" range="[-1000.0, 1000.0]">-1000.0</amplitudeStart>
+				<periodicModeEnabled>false</periodicModeEnabled>
+				<period_ms unit="ms">1000</period_ms>
+			</Generator>
+			<AsAd id="*">
+				<Control>
+					<isActive>false</isActive>
+				</Control>
+				<Generator>
+					<isCalibMode>false</isCalibMode>
+					<triggerDelay unit="WCK periods" range="[0, 31]">0</triggerDelay>
+				</Generator>
+				<Aget id="*">
+					<Control>
+						<isActive>true</isActive>
+					</Control>
+					<Global>
+						<ReadoutPointerOffset>0</ReadoutPointerOffset>
+						<Reg1>
+							<peackingTime unit="ns" range="{70, 117, 232, 280, 334, 383, 502, 541, 568, 632, 721, 760, 831, 870, 976, 1014}">232</peackingTime>
+							<isAllChannelRead>true</isAllChannelRead>
+							<isFPNRead>true</isFPNRead>
+							<GlobalThresholdValue range="[0, 7]">1</GlobalThresholdValue>
+						</Reg1>
+					</Global>
+					<channel id="*">
+						<isActive>true</isActive>
+						<TriggerInhibition range="{inhibit_channel, inhibit_trigger, none}">none</TriggerInhibition>
+						<LSBThresholdValue range="[0, 15]">15</LSBThresholdValue>
+						<Gain range="{10pC, 120fC, 1pC, 240fC}">120fC</Gain>
+						<Reading range="{always, never, only_if_hit}">always</Reading>
+						<zeroSuppressionThreshold range="[0, 4095]">600</zeroSuppressionThreshold>
+					</channel>
+					<channel id="0" />
+					<channel id="1" />
+					<channel id="2" />
+					<channel id="3" />
+					<channel id="4">
+						<LSBThresholdValue>0</LSBThresholdValue>
+						<zeroSuppressionThreshold>11</zeroSuppressionThreshold>
+					</channel>
+					<channel id="5" />
+				</Aget>
+				<Aget id="0" />
+				<Aget id="1">
+					<Global>
+						<Reg1>
+							<GlobalThresholdValue>6</GlobalThresholdValue>
+							<peackingTime unit="ns">70</peackingTime>
+							<isAllChannelRead>false</isAllChannelRead>
+						</Reg1>
+					</Global>
+				</Aget>
+			</AsAd>
+			<AsAd id="0">
+				<Control>
+					<isActive>true</isActive>
+				</Control>
+			</AsAd>
+			<AsAd id="1">
+				<Control>
+					<isActive>true</isActive>
+				</Control>
+				<Aget id="0">
+					<channel id="3">
+						<LSBThresholdValue>2</LSBThresholdValue>
+						<Gain>1pC</Gain>
+					</channel>
+				</Aget>
+			</AsAd>
+		</Instance>
+		<Instance id="0">
+			<Module>
+				<triggerDelay unit="10ns">999</triggerDelay>
+				<enableZeroSuppression>true</enableZeroSuppression>
+			</Module>
+			<Generator>
+				<periodicModeEnabled>true</periodicModeEnabled>
+			</Generator>
+		</Instance>
+		<Instance id="1">
+			<Module>
+				<coboId>1</coboId>
+			</Module>
+		</Instance>
+	</Node>
+</Setup>
