@@ -540,6 +540,7 @@ slow_sub = "tcp://127.0.0.1:47006"     # slowctl の status PUB(v1.31)。省略 
 
 [slowctl]                              # v1.31(TODO/079)。監視・記録・アラームのみ — 作動 API は無い(§11)
 status_pub = "tcp://*:47006"
+log_push = "tcp://127.0.0.1:47005"     # controller のログ投稿 PULL(§3.2)。省略 = この既定(079 Phase 2 レビューで追加)
 poll_hz = 1.0                          # 全デバイス共通の読み出し周期
 log_every_s = 60                       # 値が変わらなくても logbook `slow` VALUE を書く間隔(変化 2 % でも書く)
 [[slowctl.device]]
