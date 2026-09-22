@@ -257,3 +257,91 @@ Fable レビューはフェーズ境界 2 回(Phase 1 後 = ワイヤ、Phase 2 
   **Phase 2 のプロキシの責務**(CloseConnection 受信 = 未 dispatch の旨をエラー文字列に残す)。
 - Phase 2 へ: State(7)/ Error(10)の値表(ゴールデンは `02 00` = Described/NoErr、`01 01` = Idle/WhenDescribe の 2 点)、
   サーバ発 CloseConnection(ACM)は未観測 → 034 連続 run で実証、sliced 例外の実バイトは未採取(読み飛ばしは実装済み)。
+
+## 結果(Phase 2 — `Ecc` 型付きプロキシ + ecc_core 移植 + `ecc_bridge` bin、2026-09-22、Opus レーン)
+
+- **実装**: `src/ecc/{mod,core,proxy}.rs` + `src/bin/ecc_bridge.rs`(実装 ≈1,225 行 + 同ファイル内テスト ≈1,200 行)。
+  依存追加なし(zmq / serde_json は既存)、`unsafe` 無し、production に `.unwrap()` 無し、tokio 不使用(同期 REP 逐次)。
+  `tools/ecc_bridge/run_ecc_e2e.sh` に `ECC_BRIDGE_BIN`(既定 `./ecc_bridge`)を追加。
+  **C++ 一式(ecc_bridge.cpp / ecc_core.hpp / test_ecc_bridge.cpp / json_min.hpp / fake_ecc.cpp / ecc_e2e_client.cpp)は
+  無変更・無削除**(撤去は Phase 3 = 実機確認後)。
+
+- **実行コマンド / テスト数(before → after)**:
+  - `cargo test` … **614 → 652 passed / 0 failed / 1 ignored**(+38 = core 18 + proxy 13 + bin 7)。
+  - `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo clippy --tests -- -D warnings` … いずれも clean。
+  - 環境: macOS 26.6.2(Darwin 25.6.0)、rustc 1.97.1、2026-09-22。
+
+- **TDD の赤を実測**: 実装本体を `unimplemented!("TDD red")` に置いてからテストを回した。
+  `cargo test --lib ecc::` = **30 failed / 1 passed**(唯一通ったのは serde_json だけを触る
+  `the_json_substrate_behaves_like_json_min`)、`cargo test --bin ecc_bridge` = **7 failed / 0 passed**。
+  実装を戻して全緑(31 / 7)。
+
+- **457 CHECK の移植 = 457 件**(`tools/ecc_bridge/test_ecc_bridge.cpp` の green 経路で実行される CHECK 数と同数。
+  実測 `./test_ecc_bridge ../../tests/fixtures/ecc_transitions.txt` → `457 passed, 0 failed`):
+
+  | C++ テスト | CHECK | Rust テスト(`src/ecc/core.rs`) | assert |
+  |---|---:|---|---:|
+  | data_link_set_single_cobo / two_cobo / escapes_attributes | 1+1+1 | 同名 | 1+1+1 |
+  | data_link_set_round_trip | 13 | `data_link_set_round_trip` | 13 |
+  | parse_configure_request / simple_actions / rejects_bad_input / defaults_flow_type | 12+7+22+3 | 同名 | 12+7+22+3 |
+  | make_response / …carries_ecc_error_beside_state | 2+2 | `make_response_has_the_four_keys` / 同名 | 2+2 |
+  | error_strings / state_strings | 11+18 | 同名 | 11+18 |
+  | state_machine_happy_path / reset_walks_back… / configure_is_silently_skipped… / rejects_out_of_order | 18+31+20+11 | 同名 | 18+31+20+11 |
+  | golden_transition_table(64 行 × 4 + 行数) | 257 | 同名(同じ `tests/fixtures/ecc_transitions.txt` を読む) | 257 |
+  | json_min(自前 JSON 273 行の土台) | 27 | `the_json_substrate_behaves_like_json_min`(土台 = serde_json) | 27 |
+  | **計** | **457** | | **457** |
+
+  加えて golden 表の**形式検査** 3 assert/行 × 64 = 192(C++ では失敗時のみ実行される診断 `CHECK(false)` に対応)。
+  `-2.5e1` だけ C++ `as_int()` = `-25` に対し serde_json は f64 のままなので `as_f64() == -25.0` で照合(値は同じ)。
+
+- **変異(mutation)で噛み合いを実証** — 6 件すべて**期待どおりのテストだけ**が赤(他は緑のまま):
+
+  | 変異 | 赤になったテスト |
+  |---|---|
+  | `xml_escape` が `"` を素通し | data_link_set_escapes_attributes / …round_trip |
+  | `next_state`: Ready からの reset が Idle へ(**034 の事故**) | reset_walks_back… / golden_transition_table / rejects_out_of_order |
+  | `Error::NoErr` の綴りを Ice 側(`NoErr`)に寄せる | error_strings / make_response… / wire_tables… |
+  | `parse_request` が小文字 `tcp` を黙って直す | parse_rejects_bad_input |
+  | `WIRE_STATES` の Idle と Described を入れ替え | wire_tables… / get_status_decodes_the_two_enums |
+  | `ice_ping` を Normal(mode 0)で打つ | connecting_pings_the_servant_like_the_cpp_bridge |
+
+- **受け入れ ①(`run_ecc_e2e.sh` を Rust bin で)**: green。
+  `ECC_BRIDGE_BIN=<worktree>/target/debug/ecc_bridge ./run_ecc_e2e.sh` → **`ecc_e2e: 52 passed, 0 failed`**
+  (C++ bin での同じ実行も 52 passed = 回帰なし)。fake_ecc / ecc_e2e_client は C++(Ice 3.8.2)のまま。
+  **ブリッジの stderr ログは C++ 版と 1 行ずつ同一**(状態遷移・`ecc_error` の set/clear・
+  `Could not establish data link.` の本文まで)。唯一の差は壊れた JSON の理由文字列
+  (`parse error at offset 10: unexpected end of input` → `parse error: EOF while parsing a value at line 1 column 10`)
+  —— json_min → serde_json の言い回しの差で、契約(`ok=false` + 理由が載る)は同じ。
+
+- **受け入れ ②(`TPCDAQ_ECC_BRIDGE_BIN` を Rust bin に向けた既存 Rust 統合テスト)**: green。
+  `tests/{ecc_bridge_intake, controller_ecc, p3_error_paths, p3_e2e, soak_smoke}.rs` = **2 / 2 / 2 / 5 / 3 = 14 本 green**
+  (`TPCDAQ_ROOT_SINK_BIN` / `TPCDAQ_REAL_GRAW` / `TPCDAQ_REAL_GEOMETRY_MINI` も実物を渡した実走)。
+  C++ bin を指した同じ 4 本(intake + controller_ecc)も従来どおり green。
+  **`p3_e2e::e2e_h_consecutive_runs_need_no_manual_ecc_reset`(034 の歩き戻し)が Rust bridge で通る**のがこの段の要。
+  なお §2.4 の「6 ファイル 26 本」のうち `controller_integration.rs` は `MockTransport` 経由で bin を起動しない
+  (env を読んでいない)ため、実際に env で切り替わるのは上記 5 ファイル 14 本。
+
+- **承認が必要な逸脱**(Fable レビュー待ち。いずれも SPEC §8.2 の JSON 契約と CLI は不変):
+  1. `parse_request` の C++ `Request{valid,error,…}` → **`Result<Request, String>`**(`valid` = `is_ok`)。
+     `next_state` の out 引数 → `Transition{step,next,error}` を返す形。意味論は 1:1。
+  2. **`--ecc-proxy` の文字列を bind の前に検査して不正なら exit 2**(C++ は Ice の ParseException を
+     `Result::fail` にして走り続け、全 action に `ok=false` を返していた)。誰も REQ を待っていない時点で落ちる方が安全、
+     という判断。`category/name` 形式の identity も**拒否**する(黙って別オブジェクトに話しかけない)。
+  3. **プロキシのログは bin 側の `eprintln!`**(C++ と同じ体裁)。`tracing` を初期化していないので
+     `src/ice` の debug ログ(ハートビート)は出ない。stdout は `BIND …` 1 行のみ(契約)。
+  4. **SIGINT/SIGTERM はハンドラを置かず既定動作で終了**(C++ は 200 ms poll + フラグ)。
+     観測できる違いは「シャットダウン 1 行が出ないことがある」だけで、テストは SIGKILL / `kill -TERM` を使う。
+  5. `getStatus` の out が **2 enum ちょうどでない**場合は `Err`(「読めた分だけ」で通さない)。
+     C++ は Ice の生成コードが同じ検査をしていた位置。
+  6. `Observed`(getStatus 失敗)の理由を **stderr に 1 行残す**(C++ `observe()` は捨てていた)。
+     応答の `error` は従来どおり直前の操作のものが正。
+  7. **connect タイムアウト = 10 s の定数**(`proxy::CONNECT_TIMEOUT`)。C++ は Ice 既定。
+     controller の 60 s/REQ(SPEC §8.2 v1.20)より短いことだけが要件。CLI フラグは増やしていない。
+
+- **未実施**(実 ECC が要る = 新 DAQ 機 / GDED。本レーンでは**触っていない**):
+  - **③ 実 ECC 歩き**(041 デモ: describe → … → stop → breakup → reset → reset、audit の `ecc_walk_back` 同一性)。
+  - **④ 034 の連続 run**(ACM アイドル切断 → 再接続の実証)。再接続規則は実装済み
+    (`a_lost_connection_is_dropped_and_the_next_call_reconnects` でサーバ発切断は再現済み)だが、
+    **実 ECC の ACM による切断そのものは未観測**(Phase 1 から持ち越し)。
+  - sliced format の例外実バイトは未採取(読み飛ばしは実装済み)。
+  - Phase 3(C++ 撤去・SPEC/CLAUDE.md 更新・GDED へのネイティブ配置)は**着手していない**。
