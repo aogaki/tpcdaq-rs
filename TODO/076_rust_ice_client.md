@@ -345,3 +345,12 @@ Fable レビューはフェーズ境界 2 回(Phase 1 後 = ワイヤ、Phase 2 
     **実 ECC の ACM による切断そのものは未観測**(Phase 1 から持ち越し)。
   - sliced format の例外実バイトは未採取(読み飛ばしは実装済み)。
   - Phase 3(C++ 撤去・SPEC/CLAUDE.md 更新・GDED へのネイティブ配置)は**着手していない**。
+
+### Fable レビュー(Phase 2、2026-09-22、マージ `worktree-agent-a446ecc3e5e8faec7` → main)
+- 自分でも再実行: `cargo test` **652 passed / 0 failed / 1 ignored**(614 + 38)、fmt / clippy clean、`ECC_BRIDGE_BIN=<Rust bin> run_ecc_e2e.sh` → **52 passed, 0 failed**。
+- 逸脱 1–7 は**すべて承認**(Result/Transition の型 = 意味論 1:1、`--ecc-proxy` 不正は起動失敗 = SPEC §3.2「半端な既定値で走らない」と同じ流儀、
+  getStatus の厳格化と失敗理由のログは silent 禁止に合う、SIGINT 既定動作、connect 10 s)。
+- **Phase 3 への持ち越し 2 点**: ①bin のログを他の Rust bin と同じ `tracing_subscriber`(env-filter)初期化にし、`src/ice` の debug が `RUST_LOG` で出るようにする(いまは `eprintln!`)。
+  ②`controller_integration.rs` は MockTransport 経由で bin を使わない(§2.4 の「26 本」は実際には 5 ファイル 14 本 + mock 12 本)— 記述を訂正済みとして扱う。
+- Phase 3 の前提(実 ECC + 実 zCoBo で Rust bridge の run 1 周、audit `ecc_walk_back` が C++ と同一)は新 DAQ 機で。それまで `TPCDAQ_ECC_BRIDGE_BIN` で切替可能な状態を維持。
+
