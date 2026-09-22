@@ -455,8 +455,8 @@ pub fn build_runs_doc(
                     }
                 }
             }
-            // audit / psu はこの変換の対象外(run 条件を持たない)。
-            LogbookRecord::Audit { .. } | LogbookRecord::Psu { .. } => {}
+            // audit / slow はこの変換の対象外(run 条件を持たない)。
+            LogbookRecord::Audit { .. } | LogbookRecord::Slow { .. } => {}
         }
     }
 
@@ -699,6 +699,7 @@ mod tests {
                 operator: "aogaki".to_string(),
                 comment: "gas test".to_string(),
                 expected_fragments: vec![(0, 0)],
+                slow: None,
             },
         }
     }
@@ -750,6 +751,7 @@ mod tests {
                         bytes: 1_234_567,
                     },
                 ],
+                slow: None,
             },
         }
     }
@@ -883,6 +885,7 @@ mod tests {
                             bytes: 1,
                         },
                     ],
+                    slow: None,
                 },
             },
         ];
@@ -1081,6 +1084,7 @@ mod tests {
                         path: "run57/ctrl/CoBo0_2026-08-12T18:00:00.010_0000.graw".to_string(),
                         bytes: 12,
                     }],
+                    slow: None,
                 },
             },
         ];

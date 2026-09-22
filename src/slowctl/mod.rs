@@ -27,3 +27,407 @@ pub mod fake_hv;
 /// インメモリ HMP2020 応答器(テスト専用、または `slowctl-fake` feature)。TODO/085。
 #[cfg(any(test, feature = "slowctl-fake"))]
 pub mod fake_hmp;
+
+// =====================================================================
+// Phase 2(TODO/079 §2.6)—— ドメイン型 + `Driver` 抽象
+// =====================================================================
+//
+// ここに置くのは **IO にも tokio にも依存しない型だけ**(CLAUDE.md の Clean
+// Architecture: ドメイン核は IO に依存しない)。シリアルポートを掴むのは
+// [`bronkhorst`]、ZMQ とスレッドを掴むのは [`component`]。
+
+/// Bronkhorst FLOW-BUS(ProPar)ドライバ。`Driver` 実装。
+pub mod bronkhorst;
+
+/// slowctl コンポーネント本体(デバイススレッド + status PUB + LogPost)。
+pub mod component;
+
+/// テスト用の偽デバイス(= [`fake::FakeProPar`] を噛ませた [`bronkhorst`] ドライバ)。
+#[cfg(any(test, feature = "slowctl-fake"))]
+pub mod fake_device;
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+/// SPEC §2.3 の slowctl → monitor PUB ペイロードの `kind`。
+pub const SLOW_KIND: &str = "slow";
+
+/// `node` が無いデバイス(Arduino 等)を表すキー要素(SPEC §9.2「node 無しは `-`」)。
+pub const NODELESS: &str = "-";
+
+/// 壁時計の unix ミリ秒。`Sample::ts_ms` / `SlowPayload::ts_ms` の唯一の出所。
+pub fn now_ms() -> u64 {
+    // 1970 より前は表現しない(u64 へ落とす)。負になるのは時計が壊れている場合だけで、
+    // そのときは 0 として記録に残す(silent に別の値を捏造しない)。
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
+
+/// 1 計測値(SPEC §2.3 `samples[]` の要素、SPEC §9.2 `slow.values` の材料)。
+///
+/// `unit` は**機器が返した単位文字列そのまま**(SPEC §9.2)。コードで単位を決め打ちしない。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sample {
+    /// TOML の `[[slowctl.device]] name`。
+    pub device: String,
+    /// 機器内アドレス(FLOW-BUS ノード番号 / HV ch 番号)。無ければ `None`(SPEC §9.2 の null)。
+    pub node: Option<u8>,
+    pub param: String,
+    pub value: f64,
+    pub unit: String,
+    pub ts_ms: u64,
+    /// 機器側 Alarm info(ProPar 1/20)≠ 0。`[lo, hi]` 逸脱は [`AlarmRule`] が別に見る。
+    pub alarm: bool,
+}
+
+impl Sample {
+    /// 直近値マップのキー `"<device>/<node>/<param>"`(SPEC §9.2、node 無しは `"-"`)。
+    pub fn key(&self) -> String {
+        latest_key(&self.device, self.node, &self.param)
+    }
+}
+
+/// [`Sample::key`] と同じ組み立て(controller 側が Sample を持たずにキーを作るため)。
+pub fn latest_key(device: &str, node: Option<u8>, param: &str) -> String {
+    match node {
+        Some(node) => format!("{device}/{node}/{param}"),
+        None => format!("{device}/{NODELESS}/{param}"),
+    }
+}
+
+/// 起動時の識別群(logbook `slow` の `event: "IDENT"`、TODO/079 §2.2)。
+///
+/// `fields` は文字列マップ(機種・シリアル・ファーム・単位…)。機器ごとに項目が違うので
+/// 型を切らずに名前で持つ —— logbook の `values` にそのまま入る形(SPEC §9.2)。
+/// `BTreeMap` は JSON のキー順を決定的にするため(手組みオラクルが書ける)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ident {
+    pub device: String,
+    pub node: Option<u8>,
+    pub fields: BTreeMap<String, String>,
+}
+
+/// ドライバの失敗要因(TODO/079 §2.6)。silent failure を作らないため、
+/// コンポーネントはこの区別でカウンタを振り分ける(Timeout/Io = `poll_err`、
+/// Protocol = `parse_err`、Identity = `identity_mismatch`)。
+#[derive(Debug, thiserror::Error)]
+pub enum DriverError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("device did not answer in time")]
+    Timeout,
+
+    #[error("protocol error: {0}")]
+    Protocol(String),
+
+    /// open 時の名乗り照合に失敗(TODO/079 §2.1 のポート取り違え対策)。
+    #[error("device identity mismatch: expected {expected}, got {got}")]
+    Identity { expected: String, got: String },
+}
+
+/// スロー制御デバイス 1 台。**同期(ブロッキング)**——呼び出し側が専用スレッドを持つ。
+///
+/// **書き込み API は存在しない**(TODO/079 §1.5 / SPEC §11 の安全境界: 監視・記録・
+/// アラームのみ。setpoint を書く経路を型として作らない)。
+pub trait Driver {
+    /// 起動時の識別(node scan 含む)。以後 [`Driver::poll`] が返すノード集合を確定する。
+    fn ident(&mut self) -> Result<Vec<Ident>, DriverError>;
+
+    /// 1 周期分の計測値。
+    fn poll(&mut self) -> Result<Vec<Sample>, DriverError>;
+}
+
+/// [`AlarmRule::evaluate`] の遷移(遷移が無ければ `None`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlarmEvent {
+    Alarm,
+    Recover,
+}
+
+impl AlarmEvent {
+    /// logbook `slow.event` の文字列(SPEC §9.2)。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AlarmEvent::Alarm => "ALARM",
+            AlarmEvent::Recover => "RECOVER",
+        }
+    }
+}
+
+/// `[lo, hi]` 逸脱の監視規則(TOML `alarms = [{ node, param, lo, hi }]`、SPEC §3.1)。
+///
+/// **DAQ は止めない**(TODO/079 §3-3 の既定)—— 記録とバッジだけ。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlarmRule {
+    /// 省略 = どのノードにも当たる。
+    #[serde(default)]
+    pub node: Option<u8>,
+    pub param: String,
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl AlarmRule {
+    /// この規則が `sample` を見るか(node と param の一致)。
+    pub fn matches(&self, sample: &Sample) -> bool {
+        self.param == sample.param && (self.node.is_none() || self.node == sample.node)
+    }
+
+    /// `[lo, hi]` は両端を含む —— 外れていれば true。
+    pub fn is_out_of_range(&self, value: f64) -> bool {
+        value < self.lo || value > self.hi
+    }
+
+    /// 前回状態 + サンプル → 遷移(純関数)。`was_alarm` はこの規則の前回の判定。
+    pub fn evaluate(&self, was_alarm: bool, sample: &Sample) -> Option<AlarmEvent> {
+        if !self.matches(sample) {
+            return None;
+        }
+        match (was_alarm, self.is_out_of_range(sample.value)) {
+            (false, true) => Some(AlarmEvent::Alarm),
+            (true, false) => Some(AlarmEvent::Recover),
+            _ => None,
+        }
+    }
+}
+
+/// TOML の `nodes`(SPEC §3.1): `"scan"` か明示リスト。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NodesSpec {
+    /// `"scan"` 以外の文字列は [`NodesSpec::resolve`] が拒否する(silent に scan へ倒さない)。
+    Keyword(String),
+    List(Vec<u8>),
+}
+
+impl NodesSpec {
+    /// FLOW-BUS の走査範囲(TODO/079 §1.2 / §2.2: RS232 直結の先頭機器 = 128、他は 3…120)。
+    pub fn scan_nodes() -> Vec<u8> {
+        std::iter::once(128u8).chain(3u8..=120u8).collect()
+    }
+
+    /// 実際に ping するノード列。未知のキーワードは `Err`(設定ミスを黙って握らない)。
+    pub fn resolve(&self) -> Result<Vec<u8>, String> {
+        match self {
+            NodesSpec::Keyword(word) if word == "scan" => Ok(Self::scan_nodes()),
+            NodesSpec::Keyword(word) => Err(format!(
+                "nodes must be \"scan\" or a list of node numbers, got {word:?}"
+            )),
+            NodesSpec::List(nodes) => Ok(nodes.clone()),
+        }
+    }
+}
+
+impl Default for NodesSpec {
+    fn default() -> Self {
+        NodesSpec::Keyword("scan".to_string())
+    }
+}
+
+/// VALUE を logbook に書くかどうかの規則(SPEC §9.2「1 Hz の全サンプルは書かない」)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogPolicy {
+    /// 値が動かなくてもこの間隔で 1 本書く(秒)。
+    pub log_every_s: u64,
+}
+
+/// 相対 2 %(SPEC §9.2)。
+const LOG_RELATIVE_THRESHOLD: f64 = 0.02;
+/// 0 近傍で相対判定が効かなくなるときの絶対下限(TODO/079 §2.6)。
+const LOG_ABSOLUTE_FLOOR: f64 = 1e-9;
+
+impl LogPolicy {
+    /// `last` = 前回 **書いた** (値, ts_ms)。`None`(= まだ書いていない)なら必ず書く。
+    pub fn should_log(&self, last: Option<(f64, u64)>, value: f64, ts_ms: u64) -> bool {
+        let Some((last_value, last_ts)) = last else {
+            return true;
+        };
+        let threshold = (LOG_RELATIVE_THRESHOLD * last_value.abs()).max(LOG_ABSOLUTE_FLOOR);
+        if (value - last_value).abs() >= threshold {
+            return true;
+        }
+        ts_ms.saturating_sub(last_ts) >= self.log_every_s.saturating_mul(1_000)
+    }
+}
+
+/// SPEC §2.3 の `counters`(slowctl → monitor PUB)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlowCounters {
+    pub poll_ok: u64,
+    pub poll_err: u64,
+    pub parse_err: u64,
+    pub reconnects: u64,
+    pub identity_mismatch: u64,
+}
+
+/// slowctl → monitor PUB のペイロード(SPEC §2.3 v1.31、kind = [`SLOW_KIND`])。
+///
+/// **`Sample` をそのままワイヤに載せる**(SPEC の `samples[]` の形と同一)。
+/// ワイヤは root-sink と同じ流儀の map 形式 msgpack(`to_vec_named`)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SlowPayload {
+    pub kind: String,
+    pub ts_ms: u64,
+    pub samples: Vec<Sample>,
+    pub counters: SlowCounters,
+}
+
+// ---------------------------------------------------------------------
+// テスト(仕様書 — 先に書く)
+// ---------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod domain_tests {
+    use super::*;
+
+    fn sample(param: &str, value: f64, node: Option<u8>) -> Sample {
+        Sample {
+            device: "gas".to_string(),
+            node,
+            param: param.to_string(),
+            value,
+            unit: "mbar".to_string(),
+            ts_ms: 1_000,
+            alarm: false,
+        }
+    }
+
+    /// TODO/079 §2.1: `[lo, hi]` は**両端を含む**(逸脱で ALARM、戻れば RECOVER)。
+    #[test]
+    fn an_alarm_rule_fires_outside_the_closed_range_and_recovers_inside() {
+        let rule = AlarmRule {
+            node: Some(4),
+            param: "fmeasure".to_string(),
+            lo: 90.0,
+            hi: 110.0,
+        };
+        // 範囲内(両端含む)= 平常
+        assert_eq!(
+            rule.evaluate(false, &sample("fmeasure", 90.0, Some(4))),
+            None
+        );
+        assert_eq!(
+            rule.evaluate(false, &sample("fmeasure", 110.0, Some(4))),
+            None
+        );
+        // 外れれば ALARM(下・上とも)
+        assert_eq!(
+            rule.evaluate(false, &sample("fmeasure", 89.9, Some(4))),
+            Some(AlarmEvent::Alarm)
+        );
+        assert_eq!(
+            rule.evaluate(false, &sample("fmeasure", 110.1, Some(4))),
+            Some(AlarmEvent::Alarm)
+        );
+        // ALARM 中に外れたままなら再通知しない(連打しない)
+        assert_eq!(
+            rule.evaluate(true, &sample("fmeasure", 200.0, Some(4))),
+            None
+        );
+        // ALARM 中に戻れば RECOVER
+        assert_eq!(
+            rule.evaluate(true, &sample("fmeasure", 100.0, Some(4))),
+            Some(AlarmEvent::Recover)
+        );
+    }
+
+    /// 規則は node と param の両方が当たったサンプルにだけ効く。
+    #[test]
+    fn an_alarm_rule_only_matches_its_own_node_and_param() {
+        let rule = AlarmRule {
+            node: Some(4),
+            param: "fmeasure".to_string(),
+            lo: 90.0,
+            hi: 110.0,
+        };
+        assert!(rule.matches(&sample("fmeasure", 100.0, Some(4))));
+        assert!(
+            !rule.matches(&sample("fmeasure", 100.0, Some(5))),
+            "別ノード"
+        );
+        assert!(
+            !rule.matches(&sample("temperature", 100.0, Some(4))),
+            "別 param"
+        );
+        // 当たらない規則は範囲外でも何も言わない
+        assert_eq!(
+            rule.evaluate(false, &sample("fmeasure", 0.0, Some(5))),
+            None
+        );
+
+        // node 省略 = どのノードにも当たる
+        let any_node = AlarmRule {
+            node: None,
+            param: "fmeasure".to_string(),
+            lo: 90.0,
+            hi: 110.0,
+        };
+        assert!(any_node.matches(&sample("fmeasure", 100.0, Some(7))));
+        assert!(any_node.matches(&sample("fmeasure", 100.0, None)));
+    }
+
+    /// SPEC §9.2: VALUE は「前回書いた値から 2 % 以上動いた」か「`log_every_s` 経過」。
+    #[test]
+    fn the_log_policy_writes_on_two_percent_or_on_time() {
+        let policy = LogPolicy { log_every_s: 60 };
+
+        // 初回(前回が無い)は必ず書く。
+        assert!(policy.should_log(None, 100.0, 0));
+
+        // 100.0 → 101.9 は 1.9 %(手計算: 1.9 / 100 = 0.019 < 0.02)→ 書かない。
+        assert!(!policy.should_log(Some((100.0, 0)), 101.9, 1_000));
+        // 100.0 → 102.0 はちょうど 2 %(閾値は「以上」)→ 書く。
+        assert!(policy.should_log(Some((100.0, 0)), 102.0, 1_000));
+        // 下向きも同じ: 100.0 → 98.0 = -2 % → 書く。
+        assert!(policy.should_log(Some((100.0, 0)), 98.0, 1_000));
+
+        // 動かなくても 60 s 経てば書く(59.999 s では書かない)。
+        assert!(!policy.should_log(Some((100.0, 0)), 100.0, 59_999));
+        assert!(policy.should_log(Some((100.0, 0)), 100.0, 60_000));
+
+        // 0 近傍は相対 2 % が効かないので絶対 1e-9 を下限にする。
+        assert!(!policy.should_log(Some((0.0, 0)), 5e-10, 1_000));
+        assert!(policy.should_log(Some((0.0, 0)), 1e-9, 1_000));
+    }
+
+    /// SPEC §2.3 の kind=`slow` ペイロードが map 形式 msgpack で往復すること。
+    #[test]
+    fn the_slow_payload_round_trips_through_named_msgpack() {
+        let payload = SlowPayload {
+            kind: SLOW_KIND.to_string(),
+            ts_ms: 1_758_000_000_123,
+            samples: vec![
+                sample("fmeasure", 130.5, Some(4)),
+                Sample {
+                    device: "env".to_string(),
+                    node: None,
+                    param: "t_c".to_string(),
+                    value: 21.75,
+                    unit: "degC".to_string(),
+                    ts_ms: 1_758_000_000_100,
+                    alarm: true,
+                },
+            ],
+            counters: SlowCounters {
+                poll_ok: 41,
+                poll_err: 2,
+                parse_err: 1,
+                reconnects: 3,
+                identity_mismatch: 0,
+            },
+        };
+        let bytes = rmp_serde::to_vec_named(&payload).unwrap();
+        let back: SlowPayload = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(back, payload);
+        assert_eq!(back.samples[1].node, None, "node は nullable(SPEC §9.2)");
+    }
+
+    /// logbook / status のキーは `"<device>/<node>/<param>"`、node 無しは `"-"`(SPEC §9.2)。
+    #[test]
+    fn the_latest_value_key_uses_a_dash_for_a_nodeless_device() {
+        assert_eq!(sample("fmeasure", 1.0, Some(4)).key(), "gas/4/fmeasure");
+        assert_eq!(sample("fmeasure", 1.0, None).key(), "gas/-/fmeasure");
+    }
+}

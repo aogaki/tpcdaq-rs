@@ -114,13 +114,17 @@ pub struct OutputFile {
     pub bytes: u64,
 }
 
-/// `psu.values`(SPEC §9.2、P6 で詳細化予定)。
+/// `slow.values` の VALUE / ALARM / RECOVER 形の 1 要素(SPEC §9.2 v1.31)。
+///
+/// `unit` は**機器が返した単位文字列そのまま**(コードで決め打ちしない)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PsuValues {
-    pub vmon: f64,
-    pub imon: f64,
-    pub vset: f64,
+pub struct SlowValue {
+    pub value: f64,
+    pub unit: String,
 }
+
+/// `slow` レコードの `actor`(SPEC §9.2 v1.31)。
+pub const SLOW_ACTOR: &str = "slowctl";
 
 // ---------------------------------------------------------------------
 // レコード本体(SPEC §9.2)
@@ -148,6 +152,10 @@ pub enum LogbookRecord {
         comment: String,
         /// 期待 (cobo, asad) 集合(SPEC §9.2)。
         expected_fragments: Vec<(u32, u32)>,
+        /// slowctl の直近値(SPEC §9.2 v1.31、nullable)。**slowctl が動いていなければ
+        /// 省略**(空オブジェクトを書かない —— null / 省略 ≠ 空値の nullable 規律)。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slow: Option<Value>,
     },
 
     #[serde(rename = "run_stop")]
@@ -181,6 +189,9 @@ pub enum LogbookRecord {
         eos_closed: bool,
         counters: Counters,
         files: Vec<OutputFile>,
+        /// `run_start` と同形の直近値(SPEC §9.2 v1.31、nullable。run 平均は後続)。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slow: Option<Value>,
     },
 
     #[serde(rename = "audit")]
@@ -203,14 +214,21 @@ pub enum LogbookRecord {
         text: String,
     },
 
-    #[serde(rename = "psu")]
-    Psu {
+    /// スローコントロール(SPEC §9.2 v1.31 —— 旧 `psu` を一般化、TODO/079)。
+    #[serde(rename = "slow")]
+    Slow {
         actor: String,
+        /// TOML の `[[slowctl.device]] name`。
         device: String,
-        channel: u32,
-        /// `"TRIP"` / `"ON"` / `"OFF"` / `"VSET"` / ...(SPEC §9.2、P6 で詳細化)。
+        /// 機器内アドレス(FLOW-BUS ノード / HV ch)。無ければ **null**(省略ではない)。
+        node: Option<u8>,
+        /// `"IDENT"` / `"VALUE"` / `"ALARM"` / `"RECOVER"` / `"ERROR"`(SPEC §9.2)。
         event: String,
-        values: PsuValues,
+        /// 形は `event` で決まる(SPEC §9.2):
+        /// VALUE/ALARM/RECOVER = `{<param>: {value, unit}}`、IDENT = `{<field>: "<string>"}`、
+        /// ERROR = `{poll_err, parse_err, reconnects, identity_mismatch}` の増分。
+        /// 3 形あるので `audit.params` と同じく自由記述 JSON([`Value`])で持つ。
+        values: Value,
     },
 }
 
@@ -249,6 +267,18 @@ pub mod schema {
         "expected_fragments",
     ];
 
+    /// `run_start` に slowctl の直近値が載るとき(v1.31)。`slow` は末尾。
+    pub const RUN_START_WITH_SLOW: &[&str] = &[
+        "run",
+        "config_id",
+        "geometry",
+        "cobos",
+        "operator",
+        "comment",
+        "expected_fragments",
+        "slow",
+    ];
+
     /// `run_start` の `actor` 以降で、ConfigId の 3 相が**非同値**のとき(v1.13)。
     /// `config_ids` は `config_id` の直後に入る。
     pub const RUN_START_WITH_CONFIG_IDS: &[&str] = &[
@@ -275,14 +305,27 @@ pub mod schema {
         "files",
     ];
 
+    /// `run_stop` に slowctl の直近値が載るとき(v1.31)。`slow` は末尾。
+    pub const RUN_STOP_WITH_SLOW: &[&str] = &[
+        "run",
+        "duration_s",
+        "ok",
+        "reason",
+        "forced_eos",
+        "eos_closed",
+        "counters",
+        "files",
+        "slow",
+    ];
+
     /// `audit` の `actor` 以降(SPEC §9.2)。
     pub const AUDIT: &[&str] = &["action", "params", "operator", "ok", "error"];
 
     /// `comment` の `actor` 以降(SPEC §9.2)。
     pub const COMMENT: &[&str] = &["author", "text"];
 
-    /// `psu` の `actor` 以降(SPEC §9.2)。
-    pub const PSU: &[&str] = &["device", "channel", "event", "values"];
+    /// `slow` の `actor` 以降(SPEC §9.2 v1.31)。
+    pub const SLOW: &[&str] = &["device", "node", "event", "values"];
 }
 
 // ---------------------------------------------------------------------
@@ -290,7 +333,10 @@ pub mod schema {
 // ---------------------------------------------------------------------
 
 /// SPEC §9.1「RFC3339、ミリ秒、ローカルオフセット付き」で現在時刻を書式化する。
-fn now_rfc3339_millis() -> String {
+///
+/// `run_start.slow` / `run_stop.slow` の `ts`(SPEC §9.2 v1.31)も同じ書式なので公開する
+/// —— 書式文字列を 2 箇所に書かない。
+pub fn now_rfc3339_millis() -> String {
     chrono::Local::now()
         .format("%Y-%m-%dT%H:%M:%S%.3f%:z")
         .to_string()
@@ -497,6 +543,7 @@ mod tests {
             operator: "aogaki".to_string(),
             comment: "gas test".to_string(),
             expected_fragments: vec![(0, 0)],
+            slow: None,
         }
     }
 
@@ -542,6 +589,7 @@ mod tests {
                     bytes: 1_234_567,
                 },
             ],
+            slow: None,
         }
     }
 
@@ -564,17 +612,16 @@ mod tests {
         }
     }
 
-    fn sample_psu() -> LogbookRecord {
-        LogbookRecord::Psu {
-            actor: "psu".to_string(),
-            device: "CAEN0".to_string(),
-            channel: 3,
-            event: "TRIP".to_string(),
-            values: PsuValues {
-                vmon: 350.2,
-                imon: 0.008,
-                vset: 350.0,
-            },
+    /// SPEC §9.2 の VALUE 形(`{<param>: {value, unit}}`)。
+    fn sample_slow() -> LogbookRecord {
+        LogbookRecord::Slow {
+            actor: SLOW_ACTOR.to_string(),
+            device: "gas".to_string(),
+            node: Some(4),
+            event: "VALUE".to_string(),
+            values: serde_json::json!({
+                "fmeasure": {"value": 130.5, "unit": "mbar"}
+            }),
         }
     }
 
@@ -661,6 +708,7 @@ mod tests {
             eos_closed: true,
             counters,
             files,
+            slow: None,
         };
         let line = LogbookLine {
             ts: "2026-08-15T12:17:53.621-04:00".to_string(),
@@ -724,6 +772,7 @@ mod tests {
             operator: "aogaki".to_string(),
             comment: "gas test".to_string(),
             expected_fragments: vec![(0, 0)],
+            slow: None,
         }
     }
 
@@ -829,18 +878,58 @@ mod tests {
         );
     }
 
-    /// `psu` も同様に手組みオラクル。
+    /// `slow` も同様に手組みオラクル(SPEC §9.2 v1.31)。`values` の 3 形をすべて固定する。
+    ///
+    /// SPEC が順序を定めているのは **`actor` 以降の 4 フィールド**(`device` / `node` /
+    /// `event` / `values`)だけ。`values` の中は自由記述オブジェクトで、`serde_json::Map`
+    /// が `BTreeMap` である以上**キーは常に辞書順**になる(= 決定的に書き出せる)。
     #[test]
-    fn psu_matches_a_hand_assembled_oracle() {
+    fn slow_matches_a_hand_assembled_oracle() {
+        // VALUE —— `{<param>: {value, unit}}`。
         let line = LogbookLine {
             ts: "2026-08-12T18:00:02.000+03:00".to_string(),
             seq: 9,
-            record: sample_psu(),
+            record: sample_slow(),
         };
-        let json = serde_json::to_string(&line).unwrap();
         assert_eq!(
-            json,
-            r#"{"ts":"2026-08-12T18:00:02.000+03:00","seq":9,"type":"psu","actor":"psu","device":"CAEN0","channel":3,"event":"TRIP","values":{"vmon":350.2,"imon":0.008,"vset":350.0}}"#
+            serde_json::to_string(&line).unwrap(),
+            r#"{"ts":"2026-08-12T18:00:02.000+03:00","seq":9,"type":"slow","actor":"slowctl","device":"gas","node":4,"event":"VALUE","values":{"fmeasure":{"unit":"mbar","value":130.5}}}"#
+        );
+
+        // IDENT —— `{<field>: "<string>"}`。node を持たない機器は **null**(省略ではない)。
+        let ident = LogbookLine {
+            ts: "2026-08-12T18:00:00.000+03:00".to_string(),
+            seq: 7,
+            record: LogbookRecord::Slow {
+                actor: SLOW_ACTOR.to_string(),
+                device: "env".to_string(),
+                node: None,
+                event: "IDENT".to_string(),
+                values: serde_json::json!({"model": "MKR1000", "serial": "A1"}),
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&ident).unwrap(),
+            r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"slow","actor":"slowctl","device":"env","node":null,"event":"IDENT","values":{"model":"MKR1000","serial":"A1"}}"#
+        );
+
+        // ERROR —— カウンタの増分(SPEC §9.2「0 なら書かない」のは書き手側の判断)。
+        let error = LogbookLine {
+            ts: "2026-08-12T18:01:00.000+03:00".to_string(),
+            seq: 11,
+            record: LogbookRecord::Slow {
+                actor: SLOW_ACTOR.to_string(),
+                device: "gas".to_string(),
+                node: None,
+                event: "ERROR".to_string(),
+                values: serde_json::json!({
+                    "poll_err": 3, "parse_err": 1, "reconnects": 1, "identity_mismatch": 0
+                }),
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&error).unwrap(),
+            r#"{"ts":"2026-08-12T18:01:00.000+03:00","seq":11,"type":"slow","actor":"slowctl","device":"gas","node":null,"event":"ERROR","values":{"identity_mismatch":0,"parse_err":1,"poll_err":3,"reconnects":1}}"#
         );
     }
 
@@ -851,7 +940,7 @@ mod tests {
             sample_run_stop(),
             sample_audit(),
             sample_comment(),
-            sample_psu(),
+            sample_slow(),
         ] {
             let line = LogbookLine {
                 ts: "2026-08-12T00:00:00.000+00:00".to_string(),
@@ -949,6 +1038,107 @@ mod tests {
         assert_eq!(top_level_keys(&json), expected_keys(schema::RUN_START));
     }
 
+    /// SPEC §9.2 v1.31: `slow` は run_start / run_stop の**末尾**に、**あるときだけ**出る。
+    #[test]
+    fn run_records_put_slow_last_and_omit_it_when_slowctl_is_not_running() {
+        let slow = serde_json::json!({
+            "gas/4/fmeasure": {"value": 130.5, "unit": "mbar", "ts": "2026-09-22T10:00:00.000+03:00"}
+        });
+
+        let LogbookRecord::RunStart {
+            actor,
+            run,
+            config_id,
+            config_ids,
+            geometry,
+            cobos,
+            operator,
+            comment,
+            expected_fragments,
+            ..
+        } = sample_run_start()
+        else {
+            panic!("sample_run_start が RunStart でない");
+        };
+        let with_slow = LogbookLine {
+            ts: "2026-08-12T00:00:00.000+00:00".to_string(),
+            seq: 1,
+            record: LogbookRecord::RunStart {
+                actor,
+                run,
+                config_id,
+                config_ids,
+                geometry,
+                cobos,
+                operator,
+                comment,
+                expected_fragments,
+                slow: Some(slow.clone()),
+            },
+        };
+        let json = serde_json::to_string(&with_slow).unwrap();
+        assert_eq!(
+            top_level_keys(&json),
+            expected_keys(schema::RUN_START_WITH_SLOW)
+        );
+        // `slow` の中は自由記述オブジェクト = `serde_json::Map`(BTreeMap)なので辞書順。
+        assert!(
+            json.contains(
+                r#""slow":{"gas/4/fmeasure":{"ts":"2026-09-22T10:00:00.000+03:00","unit":"mbar","value":130.5}}"#
+            ),
+            "{json}"
+        );
+        // 往復しても形が変わらない。
+        let back: LogbookLine = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, with_slow);
+
+        let LogbookRecord::RunStop {
+            actor,
+            run,
+            duration_s,
+            ok,
+            reason,
+            forced_eos,
+            eos_closed,
+            counters,
+            files,
+            ..
+        } = sample_run_stop()
+        else {
+            panic!("sample_run_stop が RunStop でない");
+        };
+        let stop_json = serde_json::to_string(&LogbookLine {
+            ts: "2026-08-12T00:00:00.000+00:00".to_string(),
+            seq: 2,
+            record: LogbookRecord::RunStop {
+                actor,
+                run,
+                duration_s,
+                ok,
+                reason,
+                forced_eos,
+                eos_closed,
+                counters,
+                files,
+                slow: Some(slow),
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            top_level_keys(&stop_json),
+            expected_keys(schema::RUN_STOP_WITH_SLOW)
+        );
+
+        // slowctl が動いていなければ**キーごと出ない**(= v1.31 より前と同一の行)。
+        let without = serde_json::to_string(&LogbookLine {
+            ts: "2026-08-12T00:00:00.000+00:00".to_string(),
+            seq: 3,
+            record: sample_run_start(),
+        })
+        .unwrap();
+        assert!(!without.contains("slow"));
+    }
+
     #[test]
     fn run_stop_field_order_matches_the_schema_table() {
         let line = LogbookLine {
@@ -983,14 +1173,14 @@ mod tests {
     }
 
     #[test]
-    fn psu_field_order_matches_the_schema_table() {
+    fn slow_field_order_matches_the_schema_table() {
         let line = LogbookLine {
             ts: "2026-08-12T00:00:00.000+00:00".to_string(),
             seq: 1,
-            record: sample_psu(),
+            record: sample_slow(),
         };
         let json = serde_json::to_string(&line).unwrap();
-        assert_eq!(top_level_keys(&json), expected_keys(schema::PSU));
+        assert_eq!(top_level_keys(&json), expected_keys(schema::SLOW));
     }
 
     /// 表が実際のフィールド数より短い場合に確実に落ちること(ガード自身の健全性)。

@@ -178,6 +178,7 @@ impl Monitor {
             live_queue: 256,
             detector: "mini_eTPC_e2e".to_string(),
             cobos: vec![0],
+            slow_sub: None,
         };
         let (shutdown, shutdown_rx) = broadcast::channel(1);
         let (bound_tx, bound_rx) = oneshot::channel();

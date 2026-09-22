@@ -279,3 +279,132 @@ Phase 1 は Phase 0 を待たずに着手できる(マニュアルの実例が�
   §3.9.5 の fmeasure・valve output の Answer が node 03(消し忘れ)/ **serial number の Answer は長さバイト 00 のまま 11 B の
   実データが続く**(実機の挙動か誤植か不明 — node scan で 113/3 を読んで確かめる)。
 - Phase 2(slowctl 骨格、Opus)の入口: `ProParLink::new(port)` に `serialport` の `Box<dyn SerialPort>`(Read + Write)を渡すだけ。
+
+## 結果(Phase 2 — slowctl 骨格、2026-09-22、Opus レーン)
+
+### 実行コマンド(すべて green / 警告ゼロ)
+
+```
+git merge --ff-only main      # ベース = c797792
+cargo fmt && cargo fmt --check
+cargo clippy --tests -- -D warnings
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+実行環境: macOS 15(Darwin 25.6.0)、worktree `agent-ad12512bd609e755e`、2026-09-22。
+
+### テスト数(before → after)
+
+**`cargo test` 614 passed → 658 passed / 0 failed / 1 ignored(+44)**
+(→ レビュー指摘 2 の追加実装で **662 passed / 0 failed(+48)**。下の「追記」節)。
+内訳(新規): `src/slowctl` 22(bronkhorst 9 / component 6 / domain 5 / fake_device 2)、
+`src/config.rs` 8、`src/monitor.rs` 2、`src/logbook.rs` 1、`src/controller.rs` 1、
+`src/bin/slowctl.rs` 2、`tests/slowctl_integration.rs` 2、`tests/monitor_ws.rs` 2、
+`tests/controller_integration.rs` 2。
+psu のオラクル 3 本(`sample_psu` を使う手組みオラクル / フィールド順 / 5 型 round-trip)は
+**slow のオラクルに 1 対 1 で置換**(件数維持)。`slow_matches_a_hand_assembled_oracle` は
+VALUE / IDENT / ERROR の 3 形を JSON 文字列完全一致で固定する。
+
+### 統合テスト `tests/slowctl_integration.rs` の 4 項目(実バイナリを子プロセス起動、ポートは OS 任せ)
+
+デバイスは `type = "fake"`(= Phase 1 の `FakeProPar` を共有ハンドルで挟んだ**本物の
+Bronkhorst ドライバ**)。値の時系列はスクリプトファイルで注入(`100,100,120,120,100,silent,silent,105`)。
+
+| # | 見たこと | 実測 |
+|---|---|---|
+| ① | SUB に `kind == "slow"`、`samples` に `fmeasure` | source_id = 200、`device="gas"` / `node=3` / `unit="mbar"`(機器から読んだ 1/31 の文字列) |
+| ② | PULL に IDENT → VALUE の順 | 1 通目 = `IDENT`(`capacity_unit="mbar"`、`serial` あり)、2 通目 = `VALUE` |
+| ③ | 閾値([90, 110])を跨ぐ | `ALARM` の値 = 120.0、`RECOVER` の値 = 100.0、順序も ALARM → RECOVER |
+| ④ | 無応答 → 復帰 | `counters.poll_err == 2`(`silent` 2 行ぶんちょうど)、`parse_err == 0` / `identity_mismatch == 0`、復帰後に fmeasure = 105.0 が PUB に再登場 |
+
++ `[slowctl]` の無い TOML で bin が**何もせず正常終了**することも 1 本(既存 TOML 無変更の証拠)。
+monitor 側は `tests/monitor_ws.rs` に 2 本: `slow_sub` 無し = status JSON に `slow` キーが**無い**
+(従来と同一)、`slow_sub` あり = 同じ SUB の 2 本目から来た `slow` が status に同梱され、
+`monitorGaps == 0`(2 ソースの seq を混ぜていない)。
+
+### 承認が必要な逸脱(発注書に無い判断)
+
+1. **`[slowctl] log_push`(省略可、既定 `tcp://127.0.0.1:47005`)を足した** —— SPEC §3.1 の例には
+   無いキー。controller のログ投稿 PULL をコードに焼き込まないため(CLAUDE.md「ポートを焼き込まない」)
+   + 統合テストが宛先を動的ポートに向ける必要があるため。SPEC §3.1 に追記するかは Fable 裁定。
+2. **LogPost の送信は `sndtimeo = 200 ms`(ノンブロッキングではない)** —— ロスレス PUSH は
+   `ZMQ_IMMEDIATE` なので、起動直後 ZMTP ハンドシェイク前の 1 本目(= IDENT)が「相手が居るのに」
+   落ちる(実際に `cargo test` 全体実行で 1 度再現した)。無限待ちは controller 不在で計測を
+   止めるので不可。200 ms は握手(localhost で ms 級)に桁で足り、controller 不在時も 1 本あたり
+   この時間しか止まらない。落ちた分は `log_dropped` + `warn!`。
+3. **`Driver::poll` は最初のノードの失敗でそのまま `Err`**(部分成功を返さない)。`ident` の
+   node scan は無応答ノードを飛ばすので、`poll` の失敗は「起動時に応答したノードが落ちた」= 異常。
+   5 連続で失敗したらリンクを開き直す(指数バックオフ 1 → 30 s)。
+4. **`alarm_info`(1/20)を `unit = "bitmask"` の Sample としても出す** —— 発注書の単位表には
+   無いが、機器側アラームのビットが記録に残らないと「なぜ ALARM になったか」が読めないため。
+   Sample の `alarm` フラグはそのノードの全サンプルに立てる。
+5. **monitor の seq 追跡を source_id 毎に分けた** —— v1.31 で SUB の上流が 2 本(root-sink 101 /
+   slowctl 200)になり、1 本の `GapTracker` では 101 と 200 の seq が交互に来て巨大なギャップ・
+   巻き戻りに見える。`BTreeMap<source_id, GapTracker>` にして `monitorGaps` の意味を保った
+   (テスト `sequence_gaps_are_tracked_per_source_id` で固定)。
+6. **`Cargo.toml` に自分自身への dev-dependency**(`tpcdaq = { path = ".", features = ["slowctl-fake"] }`)
+   —— 統合テストが**子プロセスとして起動する** `slowctl` バイナリに fake を入れるため
+   (`cfg(test)` は bin には効かない。cargo#2911 の定石)。`cargo build` / `cargo install` には無影響
+   (`cargo build --bins` で確認済み)。
+7. **本体は tokio ではなく std スレッド + `mpsc` + 同期 ZMQ**(発注書が「KISS で選び理由を結果節に」)
+   —— デバイス IO はブロッキングで周期 1 Hz 級。tokio に載せても `spawn_blocking` でスレッドに
+   戻るだけで、async 境界ぶんの複雑さしか増えない。tokio は `src/bin/slowctl.rs` の SIGINT 待ちのみで、
+   本体へは `AtomicBool` を 1 本渡す。
+8. **`PSU_SOURCE_ID` → `SLOWCTL_SOURCE_ID` に改名**(値 200 は不変。SPEC §3.2 v1.31 の「旧 psu」に追従)。
+9. **偽デバイスの時系列はスクリプトファイルで注入**(`type = "fake"` の `port` がそのパス)。
+   子プロセス越しに時系列と無応答を注入する口が他に無いため。`fake_device.rs` は
+   `cfg(any(test, feature = "slowctl-fake"))` に閉じている。
+
+### 未実施
+
+- **実機受け入れ(現地、Phase 0 後)**: FlowSuite / 前面表示と 1 分間一致 —— **本票では未実施**。
+  実機が無いと測れない(先頭機器・ノード番号・by-id の実名も現地で確定)。
+- `arduino_env`(Phase 3)/ `hivolta` / `hmp2020`(085 + 後続)のドライバ: TOML の `type` としては
+  受理するが、`open_driver` が「未実装」で明示的に失敗する(黙って何も読まないデバイスを作らない)。
+- 実運用 TOML への `[slowctl]` 追記: **していない**(現地 Phase 0 の後 — 発注書 §2.6-8)。
+  リポには見本 `config/slowctl_example.toml` だけを置き、その TOML が実際に `config::parse` を
+  通ることをテストで固定した。
+- UI トレンド / status バッジ(Phase 4)。
+
+### 追記(Phase 2 レビュー対応 — LogPost 再送キュー、2026-09-22)
+
+Fable レビュー: **逸脱 1(`log_push` キー)承認**(SPEC §3.1 への追記は Fable が main 側で実施)、
+**逸脱 3–9 承認**、**逸脱 2 は「IDENT が落ちるのは許容できない」** —— 実運用の起動順では
+controller が最後に上がる(docs/NEW_DAQ_SETUP_ja.md)ので、slowctl が先に立つと起動時の IDENT が
+**確実に**落ちる。→ 再送キューを追加実装した。
+
+**仕様(`src/slowctl/component.rs`)**
+
+- `is_retryable(record)`: 再送するのは **`IDENT` / `ALARM` / `RECOVER`**(= 一度きりの事実。
+  落とすと二度と記録に現れない)。**`VALUE` は再送しない**(次の VALUE が来る)、
+  **`ERROR` も再送しない**(次回の 1 分集計に増分が含まれる)。古い値で logbook を埋めない。
+- `RetryQueue`: FIFO、上限 **64**(`RETRY_QUEUE_LIMIT`)。超えたら**最古から**捨てて
+  `log_dropped` を数え `warn!`(無制限に抱えない = CLAUDE.md のメモリ規律)。
+- `LogPoster`: 本体ループの**周回の先頭で `flush()`** —— 溜まった再送を投函順に流してから
+  新しいレコードを投函する。よって controller が後から上がっても **1 通目は必ず IDENT**。
+  1 周回で失敗する送信は高々 1 本(最初の失敗で `down` を立て、その周回は以後 send を試さない)
+  = `LOG_SEND_TIMEOUT_MS`(200 ms、逸脱 2 で承認済み)のブロックが積み上がらない。
+  送れなかった 1 本は**先頭へ戻す**ので順序は崩れない。
+- 捨てた投稿の累計 `log_dropped` は LogPoster が持つ(SPEC §2.3 の `counters` には載らない
+  slowctl 自身の健全性。warn に `queued` と一緒に出る)。
+
+**テスト(658 → 662 passed / 0 failed、+4)**
+
+- `src/slowctl/component.rs` +3: `only_one_off_records_are_worth_resending`(5 種の event +
+  slow 以外)/ `the_retry_queue_is_bounded_and_drops_the_oldest_first`(上限ちょうどまで
+  1 本も捨てない → 65 本目で最古 `IDENT0` が落ち、先頭が `IDENT1` になる)/
+  `records_queued_while_the_controller_is_down_arrive_in_order_once_it_is_up`
+  (**実 ZMQ**。相手不在で IDENT・ALARM が溜まり VALUE は捨てられる → PULL を bind →
+  `IDENT, ALARM` の順で届き `log_dropped == 1`)。
+- `tests/slowctl_integration.rs` +1(発注どおり):
+  `records_from_before_the_controller_was_up_arrive_in_order_starting_with_ident` ——
+  **PULL を bind せずに** slowctl を起動 → 1 s(poll_hz 20 で 20 tick、スクリプト 8 行は 0.4 s で
+  流れ切る)→ PULL を bind → 受けた順が **`[IDENT, ALARM, RECOVER]`**。停止中の VALUE は届かない。
+- 既存 4 項目は**変更なし**。`tests/monitor_ws.rs` の `a_slow_sub_...` に `client.settle()` を
+  1 行足した(全体実行時に `warm_up` の "idle" 在庫を読んで `state` の assert が落ちたため。
+  harness が同じ目的で用意している作法で、slow の検証内容は不変)。
+- 再実行 5 回連続 green(`--test slowctl_integration` / `--test monitor_ws`)+ `cargo test` 全体 2 回連続 green。
+  `cargo fmt --check` / `cargo clippy --tests -- -D warnings` / `cargo clippy --all-targets -- -D warnings` clean。
+
+**残る既知の限界**(設計判断が要るなら Fable 裁定): 再送キューは**プロセス内のみ**。
+slowctl が controller より先に落ちればキューの中身は失われる(永続化はしていない)。

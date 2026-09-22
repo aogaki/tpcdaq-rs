@@ -156,6 +156,9 @@ pub enum MonitorPayload {
     Status(Box<StatusPayload>),
     HistSnapshot(Box<HistSnapshotPayload>),
     BuiltEvent(Box<BuiltEventPayload>),
+    /// slowctl の kind=`slow`(SPEC §2.3 v1.31)。root-sink とは**別ソース**
+    /// (source_id 200)で同じ SUB に入ってくる。
+    Slow(Box<crate::slowctl::SlowPayload>),
     Unknown(String),
 }
 
@@ -191,6 +194,14 @@ impl MonitorMessage {
     pub fn built_event(&self) -> Option<&BuiltEventPayload> {
         match &self.payload {
             MonitorPayload::BuiltEvent(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// `slow` ならその中身(SPEC §2.3 v1.31)。
+    pub fn slow(&self) -> Option<&crate::slowctl::SlowPayload> {
+        match &self.payload {
+            MonitorPayload::Slow(s) => Some(s),
             _ => None,
         }
     }
@@ -235,6 +246,7 @@ pub fn decode_message(raw: &[u8]) -> Result<MonitorMessage, WireError> {
         "status" => MonitorPayload::Status(Box::new(payload_of(raw, &kind)?)),
         "hist_snapshot" => MonitorPayload::HistSnapshot(Box::new(payload_of(raw, &kind)?)),
         "built_event" => MonitorPayload::BuiltEvent(Box::new(payload_of(raw, &kind)?)),
+        crate::slowctl::SLOW_KIND => MonitorPayload::Slow(Box::new(payload_of(raw, &kind)?)),
         _ => MonitorPayload::Unknown(kind),
     };
     Ok(MonitorMessage {
@@ -827,10 +839,15 @@ pub struct MonitorStats {
 pub fn status_json(
     status: &StatusPayload,
     stats: MonitorStats,
+    slow: Option<&crate::slowctl::SlowPayload>,
 ) -> Result<String, serde_json::Error> {
     let mut value = serde_json::to_value(status)?;
     if let Some(map) = value.as_object_mut() {
         map.insert("type".to_string(), serde_json::json!("status"));
+        // SPEC §10.3 v1.31: nullable —— 一度も受け取っていなければ **キーごと出さない**。
+        if let Some(slow) = slow {
+            map.insert("slow".to_string(), serde_json::to_value(slow)?);
+        }
         map.insert(
             "monitorGaps".to_string(),
             serde_json::json!(stats.monitor_gaps),
@@ -1028,6 +1045,9 @@ pub struct MonitorParams {
     pub detector: String,
     /// `meta.cobos`(設定の `[[cobo]]` id)。
     pub cobos: Vec<u32>,
+    /// slowctl の status PUB への SUB 接続先(SPEC §3.1 v1.31)。
+    /// **`None` = 購読しない**(WS の `status` JSON に `slow` は出ない = 従来と同一)。
+    pub slow_sub: Option<String>,
 }
 
 impl MonitorParams {
@@ -1039,6 +1059,7 @@ impl MonitorParams {
             live_queue: config.monitor.live_queue,
             detector: config.system.experiment.clone(),
             cobos: config.cobo.iter().map(|c| c.id).collect(),
+            slow_sub: config.monitor.slow_sub.clone(),
         }
     }
 }
@@ -1078,6 +1099,8 @@ pub struct MonitorCounters {
     pub status_in: AtomicU64,
     pub snapshots_in: AtomicU64,
     pub events_in: AtomicU64,
+    /// slowctl の `slow` ペイロード受信数(SPEC §2.3 v1.31)。
+    pub slow_in: AtomicU64,
     /// 未知 kind(前方互換 — 数えて無視する)。
     pub unknown_kind: AtomicU64,
     pub decode_errors: AtomicU64,
@@ -1168,6 +1191,9 @@ pub struct Hub {
     meta_run: AtomicU32,
     /// 直近に見た `(run, state)`(遷移検知用)。
     last_run_state: Mutex<Option<(u32, String)>>,
+    /// slowctl の最新 `slow` ペイロード(SPEC §10.3 v1.31)。購読していなければ `None` の
+    /// まま = `status` JSON に `slow` は出ない(従来と同一の JSON)。
+    last_slow: Mutex<Option<crate::slowctl::SlowPayload>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1189,6 +1215,7 @@ impl Hub {
             meta: Mutex::new(meta),
             meta_run: AtomicU32::new(0),
             last_run_state: Mutex::new(None),
+            last_slow: Mutex::new(None),
         })
     }
 
@@ -1345,10 +1372,19 @@ impl Hub {
             *lock(&self.last_run_state) = Some((status.run, status.state.clone()));
         }
 
-        match status_json(status, self.stats()) {
+        let slow = lock(&self.last_slow).clone();
+        match status_json(status, self.stats(), slow.as_ref()) {
             Ok(text) => self.broadcast_json(&text, true),
             Err(e) => error!(error = %e, "monitor: cannot encode the status message"),
         }
+    }
+
+    /// slowctl の `slow` を 1 通受けて保持する(SPEC §10.3 v1.31)。
+    ///
+    /// **ここでは WS へ配らない** —— `slow` は root-sink の 1 Hz `status` に同梱して出る
+    /// (新しい WS メッセージ型を作らない、SPEC §2.1 の「受け皿は既存の口」)。
+    fn on_slow(&self, slow: &crate::slowctl::SlowPayload) {
+        *lock(&self.last_slow) = Some(slow.clone());
     }
 
     /// C→S の `subscribe` を適用する。
@@ -1401,7 +1437,10 @@ fn now_rfc3339_millis() -> String {
 struct Ingest {
     hub: Arc<Hub>,
     converter: DisplayConverter,
-    gaps: GapTracker,
+    /// **送り手ごと**の seq 追跡(SPEC §2.2 の seq はソース毎の系列)。
+    /// v1.31 で SUB に slowctl(source_id 200)が加わり、root-sink(101)と seq が
+    /// 交互に来るようになったため、1 本の `GapTracker` では飛びも巻き戻りも意味を失う。
+    gaps: std::collections::BTreeMap<u32, GapTracker>,
     /// 変換結果の入れ物。**使い回す**(ホットパスで確保し直さない)。
     frames: Vec<Vec<u8>>,
     logged_decode_error: bool,
@@ -1413,7 +1452,7 @@ impl Ingest {
         Self {
             hub,
             converter: DisplayConverter::new(geometry),
-            gaps: GapTracker::new(),
+            gaps: std::collections::BTreeMap::new(),
             frames: Vec::new(),
             logged_decode_error: false,
             logged_unknown_kind: false,
@@ -1436,13 +1475,13 @@ impl Ingest {
             }
         };
 
-        let missed = self.gaps.observe(message.sequence_number);
+        let tracker = self.gaps.entry(message.source_id).or_default();
+        let missed = tracker.observe(message.sequence_number);
         if missed > 0 {
             MonitorCounters::bump(&counters.monitor_gaps, missed);
         }
-        counters
-            .source_restarts
-            .store(self.gaps.restarts(), Ordering::Relaxed);
+        let restarts: u64 = self.gaps.values().map(GapTracker::restarts).sum();
+        counters.source_restarts.store(restarts, Ordering::Relaxed);
 
         match &message.payload {
             MonitorPayload::Status(status) => {
@@ -1467,6 +1506,10 @@ impl Ingest {
                     self.hub.publish_live(Stream::Waveforms, &mut self.frames);
                 }
             }
+            MonitorPayload::Slow(slow) => {
+                MonitorCounters::bump(&counters.slow_in, 1);
+                self.hub.on_slow(slow);
+            }
             MonitorPayload::Unknown(kind) => {
                 MonitorCounters::bump(&counters.unknown_kind, 1);
                 if !self.logged_unknown_kind {
@@ -1486,6 +1529,7 @@ const SUB_POLL_TIMEOUT_MS: i64 = 100;
 
 fn spawn_sub_thread(
     endpoint: String,
+    slow_endpoint: Option<String>,
     hub: Arc<Hub>,
     geometry: Arc<Geometry>,
     stop: Arc<AtomicBool>,
@@ -1511,10 +1555,6 @@ fn spawn_sub_thread(
                 error!(error = %e, "monitor: cannot subscribe");
                 return;
             }
-            if let Err(e) = socket.set_rcvtimeo(SUB_POLL_TIMEOUT_MS as i32) {
-                error!(error = %e, "monitor: cannot set the SUB receive timeout");
-                return;
-            }
             if let Err(e) = socket.set_linger(0) {
                 error!(error = %e, "monitor: cannot set SUB linger");
                 return;
@@ -1524,12 +1564,44 @@ fn spawn_sub_thread(
                 return;
             }
             info!(endpoint, "monitor: subscribed to the root-sink monitor PUB");
+            if let Some(slow_endpoint) = &slow_endpoint {
+                // SPEC §3.1 v1.31: slowctl の PUB を **同じ SUB ソケットに追加 connect**。
+                if let Err(e) = socket.connect(slow_endpoint) {
+                    error!(endpoint = slow_endpoint, error = %e,
+                           "monitor: cannot connect the SUB socket to slowctl");
+                    return;
+                }
+                info!(
+                    endpoint = slow_endpoint,
+                    "monitor: subscribed to the slowctl status PUB"
+                );
+            }
 
             let mut ingest = Ingest::new(hub, geometry);
-            let mut buffer = zmq::Message::new();
             while !stop.load(Ordering::Relaxed) {
-                match socket.recv(&mut buffer, 0) {
-                    Ok(()) => ingest.handle(&buffer),
+                // **recv の前に必ず poll する**(TODO/013 の fair-queue 飢餓)。libzmq は
+                // `recv` が成功し続ける間 `process_commands()` を 100 通に 1 度しか走らせず、
+                // fair-queue から外れた上流(= もう 1 本の PUB)がそのぶん戻れない。
+                // v1.31 で上流が 2 本になったので、単一上流時代の `recv` 直呼びは使えない。
+                let readable = {
+                    let mut items = [socket.as_poll_item(zmq::POLLIN)];
+                    match zmq::poll(&mut items, SUB_POLL_TIMEOUT_MS) {
+                        Ok(_) => items[0].is_readable(),
+                        Err(zmq::Error::ETERM) => break,
+                        // シグナルによる中断は失敗ではない(次の周回で待ち直す)。
+                        Err(zmq::Error::EINTR) => false,
+                        Err(e) => {
+                            error!(error = %e, "monitor: SUB poll failed");
+                            break;
+                        }
+                    }
+                };
+                if !readable {
+                    continue;
+                }
+                // 待つのは poll の仕事なので recv はノンブロッキング。
+                match socket.recv_bytes(zmq::DONTWAIT) {
+                    Ok(raw) => ingest.handle(&raw),
                     Err(zmq::Error::EAGAIN) => continue,
                     Err(zmq::Error::ETERM) => break,
                     Err(e) => {
@@ -1662,6 +1734,7 @@ pub async fn run_monitor(
     let stop = Arc::new(AtomicBool::new(false));
     let sub_thread = spawn_sub_thread(
         params.sub_endpoint.clone(),
+        params.slow_sub.clone(),
         Arc::clone(&hub),
         Arc::clone(&geometry),
         Arc::clone(&stop),
@@ -2380,6 +2453,7 @@ TestAux0\t0\t0\t0\t4
                 clients: 3,
                 ws_dropped: 45,
             },
+            None,
         )
         .unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -2401,6 +2475,127 @@ TestAux0\t0\t0\t0\t4
         assert_eq!(value["monitorGaps"], 12);
         assert_eq!(value["clients"], 3);
         assert_eq!(value["wsDropped"], 45);
+        // SPEC §10.3 v1.31: slowctl を購読していなければ `slow` は**出ない**
+        // (従来と 1 バイトも変わらない JSON)。
+        assert!(value.get("slow").is_none());
+    }
+
+    /// slowctl を購読していれば同じ `status` に `slow` が同梱される(SPEC §10.3 v1.31)。
+    #[test]
+    fn status_json_carries_the_latest_slow_payload_when_there_is_one() {
+        let slow = crate::slowctl::SlowPayload {
+            kind: crate::slowctl::SLOW_KIND.to_string(),
+            ts_ms: 1_758_000_000_123,
+            samples: vec![crate::slowctl::Sample {
+                device: "gas".to_string(),
+                node: Some(4),
+                param: "fmeasure".to_string(),
+                value: 130.5,
+                unit: "mbar".to_string(),
+                ts_ms: 1_758_000_000_100,
+                alarm: false,
+            }],
+            counters: crate::slowctl::SlowCounters {
+                poll_ok: 7,
+                ..crate::slowctl::SlowCounters::default()
+            },
+        };
+        let text = status_json(
+            &status_payload(),
+            MonitorStats {
+                monitor_gaps: 0,
+                clients: 1,
+                ws_dropped: 0,
+            },
+            Some(&slow),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["slow"]["kind"], "slow");
+        assert_eq!(value["slow"]["samples"][0]["param"], "fmeasure");
+        assert_eq!(value["slow"]["samples"][0]["unit"], "mbar");
+        assert_eq!(value["slow"]["counters"]["poll_ok"], 7);
+        // §5.3 の status 側は一切変わらない。
+        assert_eq!(value["run"], 7);
+    }
+
+    /// v1.31 で SUB の上流が 2 本になった —— seq は**ソース毎**に追う(混ぜない)。
+    #[test]
+    fn sequence_gaps_are_tracked_per_source_id() {
+        let counters = Arc::new(MonitorCounters::default());
+        let geometry = Arc::new(
+            geometry::load(Path::new("tests/fixtures/geometry_mini_reduced.dat"))
+                .expect("fixture geometry"),
+        );
+        let hub = Hub::new(
+            Meta {
+                n_buckets: 512,
+                planes: [4, 3, 4],
+                geometry: "tests/fixtures/geometry_mini_reduced.dat".to_string(),
+                angles_deg: None,
+                detector: "mini_eTPC".to_string(),
+                cobos: vec![0],
+                run: 7,
+            },
+            4,
+            Arc::clone(&counters),
+        );
+        let mut ingest = Ingest::new(hub, geometry);
+
+        let slow = crate::slowctl::SlowPayload {
+            kind: crate::slowctl::SLOW_KIND.to_string(),
+            ts_ms: 1,
+            samples: Vec::new(),
+            counters: crate::slowctl::SlowCounters::default(),
+        };
+        let status = status_payload();
+
+        // root-sink(101)は 10, 11 と連続、slowctl(200)は 0, 1 と連続。
+        ingest.handle(&envelope(
+            101,
+            7,
+            10,
+            0,
+            &rmp_serde::to_vec_named(&status).unwrap(),
+        ));
+        ingest.handle(&envelope(
+            200,
+            0,
+            0,
+            0,
+            &rmp_serde::to_vec_named(&slow).unwrap(),
+        ));
+        ingest.handle(&envelope(
+            101,
+            7,
+            11,
+            0,
+            &rmp_serde::to_vec_named(&status).unwrap(),
+        ));
+        ingest.handle(&envelope(
+            200,
+            0,
+            1,
+            0,
+            &rmp_serde::to_vec_named(&slow).unwrap(),
+        ));
+        assert_eq!(
+            counters.monitor_gaps.load(Ordering::Relaxed),
+            0,
+            "系列を混ぜたら 10→0→11→1 が巨大なギャップに見えてしまう"
+        );
+        assert_eq!(counters.source_restarts.load(Ordering::Relaxed), 0);
+        assert_eq!(counters.slow_in.load(Ordering::Relaxed), 2);
+
+        // root-sink だけ 2 通落ちた(12, 13)。
+        ingest.handle(&envelope(
+            101,
+            7,
+            14,
+            0,
+            &rmp_serde::to_vec_named(&status).unwrap(),
+        ));
+        assert_eq!(counters.monitor_gaps.load(Ordering::Relaxed), 2);
     }
 
     #[test]

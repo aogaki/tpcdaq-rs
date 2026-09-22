@@ -1,0 +1,53 @@
+# config/slowctl_example.toml — SPEC §3.1 の例(v1.31、TODO/079)。
+#
+# **実運用 TOML には `[slowctl]` をまだ書かない**(現地 Phase 0 で先頭機器・ノード番号・
+# by-id の実名を確定してから — TODO/079 §1.2 / §4)。ここは形の見本である。
+#
+# slowctl は **監視・記録・アラームのみ**(SPEC §11 の安全境界)。setpoint / バルブを
+# 動かすキーは存在しない。
+
+[system]
+experiment = "mini_eTPC"
+output_root = "/data/tpcdaq"          # 出力・logbook・状態ファイルの根
+geometry = "config/geometry_mini_eTPC.dat"
+
+[[cobo]]
+id = 0
+listen = "0.0.0.0:46005"
+data_sender_id = "CoBo[0]"            # ECC の NodeId 表記そのまま(実機の罠)
+
+[decoder]
+workers = 1
+
+[root_sink]
+snapshot_hz = 1.0
+event_publish_hz = 20.0
+build_timeout_ms = 1000
+raw_tree = false
+
+[monitor]
+ws_listen = "0.0.0.0:9000"
+slow_sub = "tcp://127.0.0.1:47006"     # slowctl の status PUB(v1.31)。省略 = 購読しない
+
+[slowctl]                              # v1.31(TODO/079)
+status_pub = "tcp://*:47006"           # SPEC §3.2 の既定ポート
+log_push = "tcp://127.0.0.1:47005"     # controller のログ投稿 PULL(省略時もこの既定)
+poll_hz = 1.0                          # 全デバイス共通の読み出し周期
+log_every_s = 60                       # 値が変わらなくても VALUE を書く間隔(変化 2 % でも書く)
+
+[[slowctl.device]]
+type = "bronkhorst_flowbus"            # | "arduino_env" | "hivolta" | "hmp2020" | "fake"(テスト)
+name = "gas"                           # logbook / status の `device`
+# /dev/ttyUSBn は書かない — USB の列挙順が変われば別の機器を読む(TODO/079 §2.1)。
+# 個体シリアルの無いアダプタなら /dev/serial/by-path/… を使う。
+port = "/dev/serial/by-id/usb-FTDI_xxx-if00-port0"
+nodes = "scan"                         # "scan" = 128 + 3..120 を起動時に走査、または [3, 4, 5]
+expect_serial = ""                     # 空でなければ open 時に 113/3 と照合(不一致は数えて再試行)
+# [lo, hi] 逸脱で ALARM、戻れば RECOVER。**DAQ は止めない**(TODO/079 §3-3)。
+alarms = [{ node = 4, param = "fmeasure", lo = 90.0, hi = 110.0 }]
+
+[controller]
+rest_listen = "0.0.0.0:8080"
+passphrase = "change-me"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
+config_id = "default"
