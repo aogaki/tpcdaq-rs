@@ -33,6 +33,9 @@ const DEADLINE: Duration = Duration::from_secs(20);
 const ALARM_LO: f64 = 90.0;
 const ALARM_HI: f64 = 110.0;
 
+/// TODO/088: 壁時計固定の `sleep` の代わりに使う条件待ちの上限(発注書 §1)。
+const CONDITION_DEADLINE: Duration = Duration::from_secs(10);
+
 // ---------------------------------------------------------------------
 // 小道具
 // ---------------------------------------------------------------------
@@ -355,21 +358,36 @@ fn the_slowctl_process_publishes_samples_and_posts_ident_value_alarm_and_recover
 
 /// **実運用の起動順**(controller が最後 — docs/NEW_DAQ_SETUP_ja.md)で IDENT を落とさない。
 ///
-/// PULL を **bind せずに** slowctl を起動 → 数 tick 回してから bind → 1 通目が IDENT。
+/// PULL を **bind せずに** slowctl を起動 → スクリプトが流れ切ったことを status PUB の
+/// `counters.poll_ok` で確認してから bind → 1 通目が IDENT。
 /// 再送キューは投函順なので、停止中に起きた ALARM / RECOVER もその後ろに続く。
 /// 停止中の VALUE は再送しない(次の VALUE が来る)= 古い値で logbook を埋めない。
+///
+/// TODO/088: 元は固定 `sleep(1s)` だった(poll_hz = 20 でスクリプト 8 行は 0.4 s で流れ切る、
+/// という壁時計前提)。全体テスト負荷下ではプロセス起動やスケジューリングが 1 s を超えることが
+/// あり、まれに赤くなっていた。status PUB(SPEC §2.3、1 Hz 集約)の `poll_ok` が
+/// スクリプト行数以上になるまで**条件待ち**することで、実際に流れ切ったことを直接確認する。
 #[test]
 fn records_from_before_the_controller_was_up_arrive_in_order_starting_with_ident() {
     let dir = scratch_dir("late-controller");
     let script = dir.join("gas_script.txt");
     std::fs::write(&script, SCRIPT.as_bytes()).unwrap();
+    let script_lines = SCRIPT.lines().count() as u64;
 
     let pub_port = free_port();
     let log_port = free_port();
     let config = write_config(&dir, &script, pub_port, log_port);
 
     let context = zmq::Context::new();
-    // **PULL はまだ開かない**(controller が居ない状態で slowctl が先に立つ)。
+    // status PUB は slowctl を起動する前に SUB しておく(slow-joiner で最初の 1 通を
+    // 取りこぼさないため — listen-before-start と同じ流儀)。
+    // **LogPost の PULL はまだ開かない**(controller が居ない状態で slowctl が先に立つ)。
+    let sub = context.socket(zmq::SUB).unwrap();
+    sub.set_subscribe(b"").unwrap();
+    sub.set_rcvtimeo(200).unwrap();
+    sub.set_linger(0).unwrap();
+    sub.connect(&format!("tcp://127.0.0.1:{pub_port}")).unwrap();
+
     let child = Command::new(env!("CARGO_BIN_EXE_slowctl"))
         .args(["--config", &config.to_string_lossy()])
         .env("RUST_LOG", "warn")
@@ -379,12 +397,26 @@ fn records_from_before_the_controller_was_up_arrive_in_order_starting_with_ident
         .expect("spawn slowctl");
     let _guard = Proc(child);
 
-    // poll_hz = 20 なのでスクリプト 8 行(IDENT / ALARM / RECOVER を含む)は
-    // 0.4 s で流れ切る。1 s 待てば全部「controller 不在で投函に失敗した」状態になる。
-    std::thread::sleep(Duration::from_secs(1));
+    // 固定 sleep の代わりに条件待ち: status PUB の poll_ok がスクリプト行数以上になれば、
+    // スクリプトは(controller 不在のまま)最後まで流れ切っている。
+    let wait_deadline = Instant::now() + CONDITION_DEADLINE;
+    let mut drained = false;
+    while Instant::now() < wait_deadline {
+        let Some(payload) = next_slow_payload(&sub, wait_deadline) else {
+            break;
+        };
+        if payload.counters.poll_ok >= script_lines {
+            drained = true;
+            break;
+        }
+    }
+    assert!(
+        drained,
+        "status PUB の poll_ok がスクリプト行数({script_lines})に届かない(スクリプトが流れ切っていない)"
+    );
 
     let log_pull = bind_log_pull(&context, log_port);
-    let deadline = Instant::now() + DEADLINE;
+    let deadline = Instant::now() + CONDITION_DEADLINE;
 
     let mut events = Vec::new();
     while events.len() < 3 {

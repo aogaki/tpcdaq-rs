@@ -35,7 +35,15 @@ const MONITOR_SOURCE_ID: u32 = 101;
 /// slowctl の status PUB の source_id(SPEC §3.2 v1.31)。
 const SLOWCTL_SOURCE_ID: u32 = 200;
 
-const RECV_TIMEOUT: Duration = Duration::from_secs(5);
+/// `next_json` / `next_binary` など「来るまで読む」条件待ちループの上限(壁時計の決め打ちでは
+/// なく、届かなければここで初めて赤くする安全弁)。
+///
+/// TODO/088 追補: 元は 5 s だったが、全体 `cargo test` の並列負荷下では monitor 側のタスク
+/// スケジューリングが遅れて `a_slow_client_drops_live_frames_but_never_the_json_control_channel`
+/// が `no status JSON within 5s` でまれに落ちた。ループ自体は元々「届くまで読む」条件待ちなので、
+/// 上限だけ 15 s に伸ばして負荷耐性を持たせる(ファイル内の全テストが同じ定数を共有している
+/// ため、これで「同種の固定待ち」全体に同じ流儀が及ぶ)。
+const RECV_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ---------------------------------------------------------------------
 // テスト内 PUB(SPEC §5.3 のワイヤを手で組む)
