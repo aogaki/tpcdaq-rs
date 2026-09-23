@@ -1,0 +1,277 @@
+<div class="params">
+  @if (loading()) {
+    <p class="banner info">Loading parameters…</p>
+  }
+
+  @if (loadError(); as error) {
+    <p class="banner error"><code>GET /api/params</code> failed: {{ error }}</p>
+  }
+
+  @if (!loading() && loadError() === null && info() === null && !draftReady()) {
+    <section class="card">
+      <h2>No parameters yet</h2>
+      <p class="sub">
+        No <code>current.json</code> is configured on the controller yet. Enter the template xcfg
+        file name (from the <code>ecc_config_dir</code>, e.g.
+        <code>configure-physics-zCobo1k-extTrig_120fC_25MHz_232ns_trigDelay1748.xcfg</code>) and
+        load the defaults — knobs start at the current HIGS2026 working point (SPEC §3.3), and
+        nothing is saved until you press <em>Save</em>.
+      </p>
+      <label class="field">
+        template
+        <input
+          type="text"
+          [value]="newTemplateInput()"
+          (input)="setNewTemplateInput($event)"
+          autocomplete="off"
+        />
+      </label>
+      <button type="button" [disabled]="newTemplateInput().trim() === ''" (click)="loadDefaults()">
+        Load defaults from template
+      </button>
+    </section>
+  }
+
+  @if (draftReady()) {
+    <!-- (1) identity: template name + the saved id/exceptions badge. -->
+    <section class="card">
+      <header>
+        <h2>Parameters</h2>
+        @if (info(); as current) {
+          <span class="chip mono">id {{ current.id }}</span>
+          <span class="chip">exceptions {{ current.exceptions }}</span>
+        } @else {
+          <span class="chip unknown">not saved yet</span>
+        }
+      </header>
+      <label class="field">
+        template
+        <input
+          type="text"
+          [value]="templateName()"
+          (input)="setTemplateName($event)"
+          autocomplete="off"
+        />
+      </label>
+      <label class="field">
+        note (optional)
+        <input type="text" [value]="noteText()" (input)="setNote($event)" autocomplete="off" />
+      </label>
+    </section>
+
+    <!-- (2) the 11 knobs (scope is not shown — SPEC §3.3 / 078 §0). -->
+    <section class="card">
+      <header>
+        <h2>Knobs</h2>
+      </header>
+      <div class="knob-groups">
+        @for (group of groups; track group.name) {
+          <div class="knob-group">
+            <span class="group-label">{{ group.label }}</span>
+            <div class="knob-fields">
+              @for (field of group.fields; track field.key) {
+                <label class="knob-field">
+                  <span class="field-label">{{ field.label }}</span>
+                  @switch (field.kind) {
+                    @case ('bool') {
+                      <input
+                        type="checkbox"
+                        [checked]="isChecked(field.key)"
+                        (change)="onBoolChange(field, $event)"
+                      />
+                    }
+                    @case ('enum') {
+                      <select (change)="onScalarChange(field, $event)">
+                        @for (choice of field.choices; track choice) {
+                          <option [value]="choice" [selected]="isEnumSelected(field, choice)">
+                            {{ choice }}
+                          </option>
+                        }
+                      </select>
+                    }
+                    @default {
+                      <input
+                        type="number"
+                        [value]="displayValue(field.key)"
+                        [attr.min]="field.min ?? null"
+                        [attr.max]="field.max ?? null"
+                        (change)="onScalarChange(field, $event)"
+                      />
+                    }
+                  }
+                  @if (field.unit) {
+                    <span class="unit">{{ field.unit }}</span>
+                  }
+                </label>
+              }
+            </div>
+          </div>
+        }
+      </div>
+    </section>
+
+    <!-- (3) exceptions: "a specific chip only" (068 noisy channels etc). -->
+    <section class="card">
+      <header>
+        <h2>
+          Exceptions <span class="badge">{{ exceptionsDraft().length }}</span>
+        </h2>
+        <span class="spacer"></span>
+        <button type="button" (click)="addException()">Add exception</button>
+        <button
+          type="button"
+          [disabled]="exceptionsDraft().length === 0"
+          (click)="resetToUniform()"
+        >
+          Reset to uniform
+        </button>
+      </header>
+      <table class="exceptions">
+        <thead>
+          <tr>
+            <th>asad</th>
+            <th>aget</th>
+            <th>ch</th>
+            <th>knob</th>
+            <th>value</th>
+            <th>note</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (row of exceptionsDraft(); track $index) {
+            <tr>
+              <td>
+                <input
+                  type="number"
+                  class="narrow"
+                  placeholder="*"
+                  [value]="row.asad"
+                  (change)="updateAt($index, 'asad', $event)"
+                />
+              </td>
+              <td>
+                <input
+                  type="number"
+                  class="narrow"
+                  placeholder="*"
+                  [value]="row.aget"
+                  (change)="updateAt($index, 'aget', $event)"
+                />
+              </td>
+              <td>
+                <input
+                  type="number"
+                  class="narrow"
+                  placeholder="*"
+                  [value]="row.ch"
+                  (change)="updateAt($index, 'ch', $event)"
+                />
+              </td>
+              <td>
+                <select (change)="onExceptionKnobChange($index, $event)">
+                  @for (field of fields; track field.key) {
+                    <option
+                      [value]="field.key"
+                      [selected]="isExceptionKnobSelected(row, field.key)"
+                    >
+                      {{ field.label }}
+                    </option>
+                  }
+                </select>
+              </td>
+              <td>
+                @if (exceptionField(row)?.kind === 'bool') {
+                  <select (change)="updateExceptionValue($index, $event)">
+                    <option value="true" [selected]="row.value === 'true'">true</option>
+                    <option value="false" [selected]="row.value === 'false'">false</option>
+                  </select>
+                } @else if (exceptionField(row)?.choices; as choices) {
+                  <select (change)="updateExceptionValue($index, $event)">
+                    @for (choice of choices; track choice) {
+                      <option [value]="choice" [selected]="isExceptionValueSelected(row, choice)">
+                        {{ choice }}
+                      </option>
+                    }
+                  </select>
+                } @else {
+                  <input
+                    type="number"
+                    [value]="row.value"
+                    (change)="updateExceptionValue($index, $event)"
+                  />
+                }
+              </td>
+              <td>
+                <input
+                  type="text"
+                  placeholder="why"
+                  [value]="row.note"
+                  (change)="updateExceptionNote($index, $event)"
+                />
+              </td>
+              <td>
+                <button type="button" (click)="removeException($index)">Remove</button>
+              </td>
+            </tr>
+          } @empty {
+            <tr>
+              <td colspan="7" class="unknown">
+                No exceptions — the uniform value applies everywhere
+              </td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </section>
+
+    <!-- (4) save + preview. -->
+    <section class="card">
+      <header>
+        <h2>Save</h2>
+      </header>
+      @if (saveDisabledReason(); as reason) {
+        <p class="banner info">{{ reason }}</p>
+      }
+      <div class="row">
+        <button type="button" [disabled]="saveDisabled()" (click)="save()">
+          {{ saveBusy() ? 'saving…' : 'Save' }}
+        </button>
+        <button type="button" [disabled]="previewDisabled()" (click)="preview()">
+          {{ previewBusy() ? 'rendering…' : 'Preview xcfg' }}
+        </button>
+      </div>
+      @if (previewDisabledReason(); as reason) {
+        <p class="sub">{{ reason }}</p>
+      }
+
+      @if (saveError(); as error) {
+        <p class="banner error">
+          <span class="err">{{ error }}</span>
+        </p>
+      }
+      @if (saveResult(); as result) {
+        <p class="banner ok">
+          Saved <span class="mono">{{ result.id }}</span> · exceptions {{ result.exceptions }}
+          <br /><span class="mono">configure: {{ result.files.configure }}</span> <br /><span
+            class="mono"
+            >prepare: {{ result.files.prepare }}</span
+          >
+        </p>
+      }
+
+      @if (previewError(); as error) {
+        <p class="banner error">
+          <span class="err">{{ error }}</span>
+        </p>
+      }
+      @if (previewText() !== null) {
+        <div class="xcfg-preview">
+          @for (line of previewLines(); track $index) {
+            <div class="line" [class.hl]="isManagedLine(line)">{{ line }}</div>
+          }
+        </div>
+      }
+    </section>
+  }
+</div>

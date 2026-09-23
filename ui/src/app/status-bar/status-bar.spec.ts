@@ -1,129 +1,135 @@
 /**
- * status-bar の `slow` バッジ(TODO/079 §2.8-4)。
+ * status バーの `params <id> · exceptions N`(SPEC v1.33 §3.3、TODO/078 §11「作るもの」4)。
  *
- * 既存の 4 本柱(health/state/run/... の各 `item`)は他レーンとの衝突を避けるため
- * 触っていない(発注書: status-bar.html は末尾に `<span class="item">` を 1 個足すだけ)。
- * ここでは新しく足した `slowAlarmCount` / `slowAlarmTooltip` の計算だけを見る。
+ * `GET /api/params` を 15 s 毎に poll する。404/503/失敗はどれも `—`(0 と混同しない —
+ * CLAUDE.md「未知と 0 を混同させない」)。他の status バー項目(health/state/run 等)は
+ * `WsClientService` を最小の fake で満たすだけにして触らない。
  */
 import { type ComponentFixture, TestBed } from '@angular/core/testing';
+import { signal } from '@angular/core';
 
+import { ParamsApiService, ParamsClient, type ParamsInfo } from '../api/params-api';
 import { WsClientService } from '../ws/ws-client';
-import { StatusBar } from './status-bar';
+import { StatusBar, STATUS_BAR_PARAMS_POLL_MS } from './status-bar';
 
-/** monitor の `status_json`(SPEC §10.3)の最小形 + `slow`(v1.31、任意)。 */
-function statusWith(slow?: Record<string, unknown>): Record<string, unknown> {
+const PARAMS_INFO: ParamsInfo = {
+  id: 'mini-fixture__797d5dc2',
+  sha256: '797d5dc2455',
+  exceptions: 3,
+  params: {
+    schema: 'tpcdaq-params/1',
+    template: 'configure-mini-fixture.xcfg',
+    knobs: {},
+    exceptions: [],
+  },
+  files: { configure: '/tmp/configure.xcfg', prepare: '/tmp/prepare.xcfg' },
+};
+
+/** 実物の WS シグナルの形だけ真似た最小 fake(health バッジ等は既定でも壊れない値にする)。 */
+function fakeWs(): Partial<WsClientService> {
   return {
-    type: 'status',
-    run: 7,
-    state: 'running',
-    events_built: 0,
-    events_incomplete: 0,
-    late_fragments: 0,
-    pending_events: 0,
-    frames_per_cobo: {},
-    bytes_written: 0,
-    saturation: {
-      U: { saturated: 0, counted: 0 },
-      V: { saturated: 0, counted: 0 },
-      W: { saturated: 0, counted: 0 },
-    },
-    publish_drops: 0,
-    monitorGaps: 0,
-    clients: 0,
-    wsDropped: 0,
-    ...(slow ? { slow } : {}),
+    health: signal('offline') as unknown as WsClientService['health'],
+    link: signal('idle') as unknown as WsClientService['link'],
+    counters: signal({
+      meta: 0,
+      status: 0,
+      run: 0,
+      uvw: 0,
+      waveforms: 0,
+      histo1d: 0,
+      histo2d: 0,
+      decodeErrors: 0,
+      jsonErrors: 0,
+      unknownJsonTypes: 0,
+      reconnects: 0,
+    }) as unknown as WsClientService['counters'],
+    lastIssue: signal(null) as unknown as WsClientService['lastIssue'],
+    status: signal(null) as unknown as WsClientService['status'],
+    url: (() => 'ws://localhost:9000') as unknown as WsClientService['url'],
+    reconnectNow: () => {},
   };
 }
 
-describe('StatusBar — slow バッジ', () => {
+async function flush(): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    await Promise.resolve();
+  }
+}
+
+describe('StatusBar — params <id> · exceptions N', () => {
   let fixture: ComponentFixture<StatusBar>;
-  let ws: WsClientService;
 
-  beforeEach(() => {
-    TestBed.configureTestingModule({});
+  function text(): string {
+    return (fixture.nativeElement as HTMLElement).textContent ?? '';
+  }
+
+  function build(getParams: () => Promise<ParamsInfo | null>): void {
+    const api = new ParamsClient(
+      () => '/api',
+      () => Promise.reject(new Error('unused: getParams is stubbed directly below')),
+    );
+    // getParams だけ差し替える(URL 組み立ての回帰確認は params-api.spec.ts の役目)。
+    api.getParams = getParams;
+
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: ParamsApiService, useValue: api as unknown as ParamsApiService },
+        { provide: WsClientService, useValue: fakeWs() as WsClientService },
+      ],
+    });
     fixture = TestBed.createComponent(StatusBar);
-    ws = TestBed.inject(WsClientService);
     fixture.detectChanges();
+  }
+
+  afterEach(() => fixture?.destroy());
+
+  it('取れたら id と exceptions を出す', async () => {
+    build(() => Promise.resolve(PARAMS_INFO));
+    await flush();
+    fixture.detectChanges();
+
+    expect(text()).toContain('mini-fixture__797d5dc2');
+    expect(text()).toContain('exceptions');
+    expect(text()).toContain('3');
   });
 
-  afterEach(() => fixture.destroy());
-
-  it('status が来ていない、または slow キーが無ければ「—」', () => {
-    expect(fixture.componentInstance.slowAlarmCount()).toBeNull();
-
-    ws.status.set(statusWith() as never);
+  it('404(まだ無い)は — (0 と書かない)', async () => {
+    build(() => Promise.resolve(null));
+    await flush();
     fixture.detectChanges();
-    expect(fixture.componentInstance.slowAlarmCount()).toBeNull();
-    expect(fixture.nativeElement.textContent).toContain('—');
+
+    expect(fixture.componentInstance.paramsId()).toBeNull();
+    expect(fixture.componentInstance.paramsExceptions()).toBeNull();
+    expect(text()).toContain('—');
   });
 
-  it('alarm=true のサンプル数を数える(非対称: 2 件 alarm、1 件正常)', () => {
-    ws.status.set(
-      statusWith({
-        kind: 'slow',
-        ts_ms: 1,
-        samples: [
-          {
-            device: 'gas',
-            node: 3,
-            param: 'fmeasure',
-            value: 130,
-            unit: 'mbar',
-            ts_ms: 1,
-            alarm: true,
-          },
-          {
-            device: 'env',
-            node: null,
-            param: 't_c',
-            value: 24,
-            unit: 'degC',
-            ts_ms: 1,
-            alarm: true,
-          },
-          {
-            device: 'gas',
-            node: 5,
-            param: 'fmeasure',
-            value: 100,
-            unit: 'mbar',
-            ts_ms: 1,
-            alarm: false,
-          },
-        ],
-        counters: { poll_ok: 3, poll_err: 0, parse_err: 0, reconnects: 0, identity_mismatch: 0 },
-      }) as never,
-    );
+  it('503/失敗も — にする(黙って 0 にしない)', async () => {
+    build(() => Promise.reject(new Error('ecc_config_dir is not configured')));
+    await flush();
     fixture.detectChanges();
 
-    expect(fixture.componentInstance.slowAlarmCount()).toBe(2);
-    expect(fixture.componentInstance.slowAlarmTooltip()).toBe('gas/3/fmeasure, env/t_c');
-    expect(fixture.nativeElement.textContent).toContain('slow');
-    expect(fixture.nativeElement.textContent).toContain('2');
+    expect(fixture.componentInstance.paramsId()).toBeNull();
+    expect(fixture.componentInstance.paramsExceptions()).toBeNull();
   });
 
-  it('slow はあるが alarm が 0 件なら 0(通常色、tooltip は「no active alarms」)', () => {
-    ws.status.set(
-      statusWith({
-        kind: 'slow',
-        ts_ms: 1,
-        samples: [
-          {
-            device: 'gas',
-            node: 3,
-            param: 'fmeasure',
-            value: 100,
-            unit: 'mbar',
-            ts_ms: 1,
-            alarm: false,
-          },
-        ],
-        counters: { poll_ok: 1, poll_err: 0, parse_err: 0, reconnects: 0, identity_mismatch: 0 },
-      }) as never,
-    );
-    fixture.detectChanges();
+  it(`15 s(STATUS_BAR_PARAMS_POLL_MS)ごとに再取得する`, async () => {
+    vi.useFakeTimers();
+    try {
+      let calls = 0;
+      const results: (ParamsInfo | null)[] = [null, PARAMS_INFO];
+      build(() => Promise.resolve(results[Math.min(calls++, results.length - 1)]));
+      await flush();
+      fixture.detectChanges();
+      expect(fixture.componentInstance.paramsId()).toBeNull();
 
-    expect(fixture.componentInstance.slowAlarmCount()).toBe(0);
-    expect(fixture.componentInstance.slowAlarmTooltip()).toBe('No active slow-control alarms');
+      await vi.advanceTimersByTimeAsync(STATUS_BAR_PARAMS_POLL_MS);
+      await flush();
+      fixture.detectChanges();
+
+      expect(calls).toBeGreaterThanOrEqual(2);
+      expect(fixture.componentInstance.paramsId()).toBe('mini-fixture__797d5dc2');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -1,10 +1,14 @@
-import { Component, computed, inject } from '@angular/core';
+import { Component, type OnDestroy, computed, inject, signal } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 
 import { alarmLabels, countAlarms } from '../slow/slow-history';
+import { ParamsApiService } from '../api/params-api';
 import { saturationPercent } from '../ws/json';
 import { WsClientService } from '../ws/ws-client';
+
+/** `params <id> · exceptions N` の poll 間隔(078 §11「作るもの」4)。 */
+export const STATUS_BAR_PARAMS_POLL_MS = 15000;
 
 /**
  * 全ページ共通の status バー(SPEC §10.3 の `status` + monitor の 3 キー + §5.2 の飽和率)。
@@ -18,8 +22,9 @@ import { WsClientService } from '../ws/ws-client';
   templateUrl: './status-bar.html',
   styleUrl: './status-bar.scss',
 })
-export class StatusBar {
+export class StatusBar implements OnDestroy {
   private readonly ws = inject(WsClientService);
+  private readonly paramsApi = inject(ParamsApiService);
 
   readonly health = this.ws.health;
   readonly link = this.ws.link;
@@ -98,4 +103,35 @@ export class StatusBar {
     const labels = alarmLabels(slow.samples);
     return labels.length === 0 ? 'No active slow-control alarms' : labels.join(', ');
   });
+  /**
+   * `params <id> · exceptions N`(SPEC v1.33 §3.3、TODO/078 §11)。`GET /api/params` を
+   * 15 s 毎に poll する REST(WS の `status` には乗らない)。404(まだ無い)/ 503
+   * (`ecc_config_dir` 未設定)/ その他の失敗はどれも `null` = 画面では `—`
+   * (0 と混同しない —— CLAUDE.md「未知と 0 を混同させない」)。
+   */
+  readonly paramsId = signal<string | null>(null);
+  readonly paramsExceptions = signal<number | null>(null);
+
+  private paramsTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor() {
+    void this.pollParams();
+    this.paramsTimer = setInterval(() => void this.pollParams(), STATUS_BAR_PARAMS_POLL_MS);
+  }
+
+  ngOnDestroy(): void {
+    if (this.paramsTimer !== null) clearInterval(this.paramsTimer);
+    this.paramsTimer = null;
+  }
+
+  private async pollParams(): Promise<void> {
+    try {
+      const info = await this.paramsApi.getParams();
+      this.paramsId.set(info?.id ?? null);
+      this.paramsExceptions.set(info?.exceptions ?? null);
+    } catch {
+      this.paramsId.set(null);
+      this.paramsExceptions.set(null);
+    }
+  }
 }

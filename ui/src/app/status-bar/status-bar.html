@@ -60,4 +60,8 @@
   <span class="item" [class.bad]="(slowAlarmCount() ?? 0) > 0" [matTooltip]="slowAlarmTooltip()">
     <span class="key">slow</span>{{ slowAlarmCount() === null ? '—' : slowAlarmCount() }}
   </span>
+  <span class="item" matTooltip="Parameters JSON (SPEC §3.3 / TODO/078), polled every 15 s">
+    <span class="key">params</span>{{ paramsId() ?? '—' }} · exceptions
+    {{ format(paramsExceptions()) }}
+  </span>
 </div>

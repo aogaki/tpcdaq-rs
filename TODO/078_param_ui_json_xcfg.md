@@ -503,3 +503,101 @@ Save 無効化条件、Preview のハイライト)。`npm run build` green、pre
 ### 受け入れ・逸脱
 結果節に: 画面構成の要旨(スクリーンショットは不要、テストで縛る)、テスト数 before → after、承認が要る逸脱(特に diff 表示を出さない件の代替)。
 SPEC §11 への転記は Fable。設計判断が残る分岐は実装せず報告。
+
+## 結果(レーン C — Parameters UI、2026-09-23、Sonnet レーン)
+
+実行環境: macOS 26.6.2 (arm64) / Angular CLI 22.1.4 / vitest 4.0.8。着手前に worktree で
+`git merge --ff-only main` → `1cead35` に到達、`ln -s .../ui/node_modules ui/node_modules`、
+`cd ui && npm test -- --watch=false` で 204 passed を確認してから着手。
+
+### 実行コマンド
+
+```
+cd ui
+npm test -- --watch=false
+npm run build
+npx prettier --check "src/app/**/*.{ts,html,scss}"
+```
+
+### 画面構成の要旨
+
+- `ui/src/app/api/params-api.ts`(+ spec): `controller-api.ts`/`run-control-api.ts` と同じ
+  `FetchLike` 注入の薄いクライアント。`getParams()`(404→`null`、それ以外の失敗は
+  `ParamsApiError{status,message}` をサーバの `error` 文言のまま投げる)/ `putParams(token,
+  params)` / `renderParams(template?)`。
+- `ui/src/app/params/knob-spec.ts`(+ spec): `docs/PARAMS_KNOBS_ja.md` §7 の写し。11 グループ・
+  葉 14(§7 の表をそのまま数えると 14 —— 発注書本文の「葉は 13」という記述とは 1 個ずれている。
+  実装は表・フィクスチャ・サーバのどれとも矛盾なく一致させたので、本文側の数え間違いと判断し
+  そのまま進めた。設計判断ではないため報告のみ)。`flattenKnobs`/`nestKnobs` で JSON の入れ子
+  (`zeroSuppression`/`pulser`)とフラットな葉のキー(`.` 区切り、`exceptions[].knob` と同じ表記)
+  を往復させる。`knob-spec.spec.ts` が `tests/fixtures/params/params_roundtrip.json` の
+  `knobs` と過不足なく一致することを検査(サーバ側スキーマが変わったら赤になる = 二重管理の検知)。
+- `ui/src/app/params/params-view.{ts,html,scss}`(+ spec、遅延ルート `params`、NAV
+  `run` の直後): 読み込み(`GET /api/params`)→ 404 なら「No parameters yet」+ テンプレート名
+  入力 + 「Load defaults from template」(knobs は `DEFAULT_KNOBS` = `params_roundtrip.json` の
+  値そのもの、`params-view.spec.ts` の別 `describe` でフィクスチャと一致することを検査)。
+  ノブ 11 個のフォーム(select/number/checkbox、スコープは非表示)、折りたたみ
+  「Exceptions (N)」テーブル(at 接頭辞・knob・value・note、追加/削除/Reset to uniform、
+  件数バッジは常時表示)、Save(token 必須・Running 中は無効・失敗はサーバ文言そのまま)、
+  Preview xcfg(`renderParams()` の `configure_xcfg` を表示。テンプレート本文が REST に無い
+  ため diff は出さず、管理ノブの xcfg 要素名を含む行をハイライト)。
+- `status-bar`: 末尾に `params <id> · exceptions N` を追加(`ParamsApiService.getParams()` を
+  15 s 毎に poll、404/503/失敗はどれも `—`)。
+
+### テスト数
+
+**204 passed → 246 passed / 0 failed / 5 skipped**(既存の `describe.skipIf` 4 本 + 元からの
+1 skip、変更なし)。内訳(新規 42):
+
+- `params-api.spec.ts` 15(200/404/503/500/ネットワーク断 × GET、body 形/400/401/409/503/
+  インスタンス確認 × PUT、template 有無/URL エンコード/400/本文非 JSON × render)。
+- `knob-spec.spec.ts` 12(グループ数・葉数、フィクスチャとの過不足、往復、個別ノブの型・範囲、
+  未知キー、スコープ深さの集合)。
+- `params-view.spec.ts` 11(404→既定値フォーム、200→表示、503→ロードエラー(No parameters yet
+  にしない)、例外の追加・削除・Reset、token 無し→Save 無効、Running 中→Save 無効、Save 成功、
+  Save 失敗(400 文言そのまま)、Preview 成功+ハイライト、Preview 無効(未保存)、
+  DEFAULT_KNOBS↔フィクスチャ一致)。
+- `status-bar.spec.ts` 4(取得成功、404→`—`、503/失敗→`—`、15 s ごとの再取得)。
+
+`npm run build` green(`params-view` は独立の遅延チャンク 23.09 kB raw / 5.99 kB transfer)。
+`npx prettier --check` green。
+
+### 承認が要る逸脱
+
+1. **Preview xcfg は「テンプレートとの diff」ではなく「管理ノブの行のハイライト」**
+   (発注書 §11-3 が明記した代替そのもの)。ハイライト対象の xcfg 要素名(`KnobField.xcfgElements`)
+   は `docs/PARAMS_KNOBS_ja.md` §7 の「xcfg」列から手で写した表示専用のヒントで、
+   型・範囲の表(`KNOB_FIELDS` 本体)と違って**フィクスチャとの自動突き合わせテストが無い**
+   (画面のハイライトが 1 行増減する程度の実害しかないため、往復・過不足検査ほど厳格にしなかった)。
+   サーバのノブ表が変わった場合、ここだけ手で追従する必要がある——承認 or 追加テストの要否を確認したい。
+2. **`status-bar.ts` に polling ロジックを直接足した**(status-bar.html は末尾に 1 行足すだけ、
+   という発注書の指示は `.html` について明記していたが `.ts` には触れていなかった)。
+   `params <id> · exceptions N` は 15 s poll という状態を持つ機能なので、既存の
+   `state`/`run`/`eventsBuilt` 等と同じ置き場(`StatusBar` クラス)に signals・
+   `OnDestroy`・`constructor` を追加した。同時進行の 079 レーン(slow バッジ)も
+   `status-bar.ts` を触る前提なので、マージ時に競合が起きる可能性がある(内容は独立した
+   追記のみなので解消は容易と見立てている)。
+3. **`<select>` の選択状態は `[value]`(`<select>`側)ではなく `[selected]`(各 `<option>` 側)で
+   持たせた**。`@for` で生成した `<option>` は親 `<select>` の `[value]` 束縛より後に DOM へ
+   挿入されるため、素直に `[value]` を付けると選択が反映されない(実測— 最初のテスト実装で
+   Gain が常に先頭の選択肢に固定される不具合として顕在化、`isEnumSelected`/
+   `isExceptionKnobSelected`/`isExceptionValueSelected` で修正)。発注書に明記の無い実装細部
+   だが、念のため記載する。
+4. **`GET /api/params` が 503/500 等(404 以外)で失敗した場合は「No parameters yet」の
+   新規作成導線を出さない**(ロードエラーのバナーだけを出す)。サーバ側の不整合がある状態で
+   ユーザーに「新規作成」を促すのは危険と判断した(発注書に明記なし)。
+5. **例外テーブルの `value` 入力は選択した `knob` の型(bool は true/false の select、
+   enum は選択肢の select、int/real は number input)に追従させた**。発注書は
+   「value(select)」とだけ書いており型の出し分けまでは指定していないが、078 §2 の
+   スキーマ検証(型違いは 400)と整合させるため、フォーム側でも同じ型のコントロールにした。
+6. **テストの `whenStable()` だけでは fetch ベースの非同期チェーン(2 段以上 await)を
+   待ちきれなかった**ため、`params-view.spec.ts`/`status-bar.spec.ts` の `settle()`/`flush()`
+   は `whenStable()` の後にマイクロタスクを 20 回 `await` している(zoneless 環境の既知の
+   制約。`run-view.spec.ts` は 1 段 await の fake しか使っていなかったため気付かれていなかった
+   可能性がある — 他レーンの async テストで同種のフレークが出た場合はこの手当てを検討されたい)。
+
+### 未実施 / 範囲外
+
+- SPEC §11 への転記(Fable)。
+- 実 ECC / 実機での確認(078 §5-3/§5-5)は本レーンの範囲外。
+- demo スタック起動は行っていない(指示どおり)。
