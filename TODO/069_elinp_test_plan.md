@@ -192,3 +192,94 @@ Phase 4。root-sink(ROOT)は GDED に無く未検証 — run.root 経路は次�
 - 受け入れ: 2 run × 60 frames で全一致(ヘッダ全項目 + item sha256)、item 総数 60 × 139,264。オラクル値を 1 ずらすと赤になること。`cargo test` green、fmt / clippy。
   結果節に照合表(067 B と同じ体裁)を書く。
 
+## 結果(#16 — compact の MFM オラクル照合、2026-09-23、Sonnet レーン)
+
+**照合元 = GET 純正 MFM ライブラリの実リンク**(067 B と同じ経路、フォールバック不要)。
+使い捨てダンパ `reference/_spike/mfm_compact/mfm_compact_dump.cpp`(gitignore、リポ非コミット、
+本体側 `/Users/aogaki/Workspace/tpcdaq-rs/reference/_spike/mfm_compact/` に配置)を
+`reference/_spike/prefix/lib/libMultiFrame.dylib` へ直接リンクしてビルド
+(`clang++ -std=c++14`。`std::auto_ptr` 依存のため C++14 止まり — 使い捨てスクリプトなので
+`tools/` の C++17 規約は適用しない。SDK は既定の Xcode CLT で問題なし、`SDKROOT` 明示は不要だった)。
+経路は CoBoFrameViewer の `CoBoEvent::fromFrame()`/`decodeSamples()` の compact 分岐
+(`reference/20190315_patched/CoBoFrameViewer/src/get/CoBoEvent.cpp:187-259`)と同一 ——
+`mfm::FrameDictionary::addFormats(reference/config/CoboFormats.xcfg)` →
+`mfm::Frame::read` → `frame.headerField(...)` / `itemAt(i).field("").bitField("agetIdx"/"sample")`、
+ch/bucket は per-AGET カーソル(numChannels=68)で full-readout 順から復元 —— これは
+`src/decode.rs` の `decode_items` compact 分岐と完全同一のアルゴリズムであることをソース比較で確認した。
+
+**ハマった点(オラクル側のバグ、我々の decoder とは無関係)**: `in.peek() != EOF` をループ条件にすると、
+60 フレーム目(ファイル末尾ぴったり)を読み終えた直後に `peek()` が偽陽性で non-EOF を返し、
+存在しない 61 本目を `Frame::read` しようとして `ios_base::failure`(libMultiFrame.dylib 側の
+古い ABI と衝突し `try/catch(std::exception&)` で捕まらず `libc++abi: terminating due to uncaught
+exception` で落ちる)。ファイルサイズを事前に `tellg()` で確定し `while (tellg() < fileSizeB)` に
+変えて解消(60 フレームちょうどで正常終了)。
+
+対象 = `reference/exp_data/2026/d3_pulser_scan/run0011/CoBo0_AsAd0_2026-09-23T12:13:30.285_0000.graw`
+と `run0006/CoBo0_AsAd0_2026-09-23T12:07:16.744_0000.graw`(いずれも単一 CoBo0/AsAd0、
+topology frame なし、16,727,040 B = 60 × 278,784 B ぴったり)。
+
+我々側 = `tests/decode_real_compact.rs`(`TPCDAQ_EXP_DATA_2026` 配下のときだけ走る)。
+`Framer` + `Decoder::decode` の出力(`Fragment`)から、ダンパと同一の正規化バイト列
+(ヘッダ固定順 LE + `Fragment::items` そのまま = `pack_item` 済み u32 LE 連結)を組み立て、
+60 フレーム分を 1 本の SHA-256 に畳んで比較する(item を全部文字列比較すると巨大なので、
+発注書の指示どおり sha256 で照合。frame0 のヘッダ・先頭/末尾 item は個別 assert でも二重に固定)。
+
+### 照合表
+
+| # | 項目 | run0011 | run0006 |
+|---|---|---|---|
+| データフレーム数 | オラクル/我々 | 60 / 60 | 60 / 60 |
+| フレーム長 | オラクル/我々 | 278,784 B 固定 / 278,784 B 固定 | 278,784 B 固定 / 278,784 B 固定 |
+| itemCount/frame | オラクル/我々 | 139,264 / 139,264 | 139,264 / 139,264 |
+| item 総数 | オラクル/我々 | 8,355,840 / 8,355,840 | 8,355,840 / 8,355,840 |
+| malformed / unsupported | 我々 | 0 / 0 | 0 / 0 |
+| frame0 ヘッダ全項目 | オラクル | frameType 2 / rev 5 / cobo 0 / asad 0 / eventIdx 0 / eventTime 116,416,830 / readOffset 0 / status 0 / mult [1,2,4,8] / windowOut 0xFFFFFFFF / lastCell [690,690,690,690] | frameType 2 / rev 5 / cobo 0 / asad 0 / eventIdx 0 / eventTime 116,437,331 / readOffset 0 / status 0 / mult [1,2,4,8] / windowOut 0xFFFFFFFF / lastCell [690,690,690,690] |
+| frame0 ヘッダ全項目 | 我々(`Fragment`) | 全一致 | 全一致 |
+| frame0 先頭 10 item (aget,ch,buck,adc) | オラクル/我々 | (2,0,0,416)(2,1,0,402)(3,0,0,476)(3,1,0,449)(0,0,0,477)(0,1,0,460)(1,0,0,362)(1,1,0,429)(3,2,0,403)(3,3,0,474) — 全一致 | (1,0,0,368)(1,1,0,432)(2,0,0,430)(2,1,0,404)(3,0,0,461)(3,1,0,449)(0,0,0,486)(0,1,0,468)(2,2,0,402)(2,3,0,397) — 全一致 |
+| frame0 末尾 5 item | オラクル/我々 | (3,67,511,472)(0,66,511,560)(0,67,511,535)(1,66,511,498)(1,67,511,445) — 全一致 | (2,67,511,452)(3,66,511,429)(3,67,511,446)(0,66,511,541)(0,67,511,516) — 全一致 |
+| **item sha256(60 フレーム全部、ヘッダ+item 込み)** | オラクル/我々 | `a19c01f9…e34b` / **一致** | `4ab94f85…283e` / **一致** |
+
+### オラクルを 1 ずらす赤の実測(TDD の赤確認)
+
+`run0011` の期待 sha256 の末尾 1 桁を `b→c` に書き換えて `cargo test --test decode_real_compact`
+を実行 → `real_compact_run0011_matches_the_mfm_oracle` が
+`assertion `left == right` failed` で **FAILED**(run0006 は無関係のため引き続き ok)。
+確認後に元の値へ復元(`git diff --stat` で無変化を確認済み)。
+
+### 実行環境・コマンド
+
+- 環境: macOS(Darwin 25.6.0)、実データ手元(`TPCDAQ_EXP_DATA_2026=/Users/aogaki/Workspace/tpcdaq-rs/reference/exp_data/2026`)、2026-09-23。
+- ダンパビルド/実行:
+  ```
+  clang++ -std=c++14 -Wall -Wno-deprecated-declarations \
+    -I<repo>/reference/_spike/prefix/include -pthread -DWORDS_LITTLE_ENDIAN=1 -DTIXML_USE_STL \
+    mfm_compact_dump.cpp -o mfm_compact_dump \
+    -L<repo>/reference/_spike/prefix/lib -lMultiFrame -lUtilities -lCompoundConfig -ltinyxml \
+    -framework CoreFoundation -Wl,-rpath,<repo>/reference/_spike/prefix/lib
+  ./mfm_compact_dump reference/config/CoboFormats.xcfg <run>.graw
+  ```
+- Rust: `TPCDAQ_EXP_DATA_2026=.../reference/exp_data/2026 cargo test --test decode_real_compact -- --nocapture`
+  → `run0011: frames=60 items=8355840 malformed=0 unsupported=0 frame_sizes={278784} sha256=a19c01f9…`、
+  `run0006: frames=60 items=8355840 malformed=0 unsupported=0 frame_sizes={278784} sha256=4ab94f85…`、
+  **2 passed; 0 failed**。
+- `cargo fmt` → 適用後 `cargo fmt -- --check` クリーン。`cargo clippy --tests -- -D warnings` → 警告 0。
+- `cargo test`(フルスイート、実データ env 未設定 = 新規 2 本は skip 経路で ok): **846 passed; 0 failed;
+  1 ignored**(58 バイナリ)。新規テスト追加前は 844 passed(本ユニットで +2)。
+  新規テスト名: `real_compact_run0011_matches_the_mfm_oracle`、`real_compact_run0006_matches_the_mfm_oracle`
+  (`tests/decode_real_compact.rs`)。
+- スキップしたテスト: なし(該当 2 本は `TPCDAQ_EXP_DATA_2026` 未設定時のみ skip。実データ env
+  設定下では上記のとおり実行され green)。
+
+### 発注書からの逸脱
+
+- 発注書は「ダンパは JSON/CSV でヘッダと sha256 を出す」としたが、実装はプレーンテキスト
+  (`key=value` 行)にした——中身は同一情報(ヘッダ全項目・先頭10/末尾5 item・sha256)で、
+  唯一の消費者が目視 + このドキュメントへの転記だったため JSON/CSV パーサを足す理由がなく、
+  KISS を優先した。実質的な差分ではない。
+- sha256 の対象を「frame 毎」ではなく「run 全体(60 frame)を 1 本の incremental digest に畳む」
+  形にした。発注書の「frame 毎の header と全 item の sha256 を出し…一致させる」を素直に読むと
+  60 行 × 2 run のハッシュ表になるが、それでは受け入れ条件の「2 run × 60 frames で全一致」を
+  結局 1 個の bool として見るだけなので、run 単位の 1 digest に畳んでも検証力は同じ(あるフレーム
+  のどこか 1 バイトでもずれれば digest が変わる)。frame0 は個別に header/first10/last5 を平文でも
+  固定してあるので、可読性(CLAUDE.md「テストは仕様書」)は損なっていない。
+
