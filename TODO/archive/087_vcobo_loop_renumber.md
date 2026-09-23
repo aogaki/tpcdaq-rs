@@ -1,6 +1,6 @@
 # 087 — vcobo `loop = true` で eventIdx / eventTime を付け替える(2 周目以降がビルダに捨てられる)
 
-**Status: READY**(2026-09-22 起票 Fable。Sonnet 1 日、C++ tools/vcobo)
+**Status: COMPLETED**(2026-09-22 起票 Fable。Sonnet 1 日、C++ tools/vcobo)
 
 ## 0. 事実(077 目視 第 2 弾で判明)
 - `tools/vcobo/vcobo_link.hpp` のループは `cursor_ = 0` に戻して**同じバイト列**を再送する。eventIdx が 1 周目と同じなので root-sink の
@@ -133,3 +133,11 @@ make -C tools/vcobo ci TPCDAQ_ICE_DIR=/Users/aogaki/Workspace/tpcdaq-rs/referenc
 (引き続き Fable がマージ後に実施)。
 
 **実行環境**: 前節と同一(macOS Darwin 25.6.0、Ice 3.7 keg、2026-09-23)。
+
+### demo 受け入れ(Fable、2026-09-23、main `5f5b4ea` の vcobo をビルドして実施)
+- `TPCDAQ_DEMO_LOOP=true start_demo.sh` → `run_once.sh 900`。後接続の WS クライアント(`ws_tally.py`、15 s)を run 開始 45 s 後と 2 分後に 2 回:
+  - A: 0x02 **307** / 0x03 **102** / status 15、`events_built 3977、late_fragments 0、events_incomplete 0、monitorGaps 0`
+  - B: 0x02 **301** / 0x03 **100**、`events_built 5134、late_fragments 0`(1 周 108 イベントを何十周も越えて増え続ける)
+- 修正前(09-22、同じデータ)は `events_built 108 / late_fragments 8866` で後接続クライアントには 0x02/0x03 が 0 通だった(077 結果 第 2 弾)。→ **受け入れ ①②③ 合格**。
+- 副作用: 1 周目はバイト一致のまま(`loop = false` 経路は無改変、vcobo ci のバイト一致チェック green)。
+
