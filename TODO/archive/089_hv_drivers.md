@@ -184,3 +184,14 @@ CAEN GUI(HiVolta)/ HMP2020 前面表示との 1 分間一致確認は**未実施
   (TCP が既定)。書き込み系の経路なし(grep で確認)。
 - 残 = 実機(CAEN GUI / HMP 前面表示と 1 分間一致、`INST:NSEL?` の実在確認)。
 
+### 実機受け入れ(HiVolta DT1415ET、2026-09-23 12:27–12:29、GDED USB、Fable。ユーザー条件「値は絶対に変えない」= MON のみ)
+- 前提: ユーザーが GECO2020 を閉じ、`usermod -aG dialout daq` 済み。`hv.conf`(bench.conf + `[slowctl]`、`type = "hivolta"`、
+  `port = /dev/serial/by-id/usb-CAEN_SPA_DT1415_HV_Power_Supply-if00`)で controller + slowctl を 70 s 起動(`RUST_LOG=info`)。
+- **IDENT**: `{name: DT1415ET, nch: 8, frel: 1.14, snum: 165, ctr: REMOTE, ilkm: UNDRIVEN}`(open から識別まで 0.15 s)。
+- **VALUE**: 8 ch × {vset[V], vmon[V], imon[µA], status[bitmask]} + board {bdalarm[bitmask], bdilk[flag]} = 34 サンプル/poll。
+  全 ch VSET 0.0 V(HV は停止中)、VMON 0.0–1.82 V の残留、IMON −2.3–+0.57 µA、STATUS 0、BDALARM 0、BDILK 0。
+- **1 Hz 成立**: `log_every_s = 30` の定期 VALUE が 12:27:43.864 / 12:28:13.848 / 12:28:43.839(30.0 s ± 0.02)= poll ループが時間どおり
+  (USB CDC で 34 往復/poll でも余裕)。logbook `slow` = IDENT 1 + VALUE 102(70 s)、ERROR / ALARM 0、slowctl の warn 0、identity_mismatch 0。
+- 送った命令は `$CMD:MON,...` のみ(ドライバに SET 系は存在しない)。終了後 slowctl / controller を停止、GECO の再開はユーザー。
+- 残: HMP2020(現地でシリアル接続後)、HV 印加中の値(次の run で自動記録)、TCP 経路(HiVolta の Ethernet 設定が未確認)。
+

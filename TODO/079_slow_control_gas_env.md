@@ -677,3 +677,8 @@ UI のみ、`cargo test` 等は対象外)。
 - 逸脱 1–4 **承認**(`StatusMessage` の実体は `ws/json.ts` / slow-view の spec は純関数 `slow-history.ts` に寄せる = 既存規約 / status-bar の computed 追加 / 新規 spec)。
 - 残 = 実機(現地 Phase 0 → 各ドライバの 1 分間一致)、SPEC §11 への「Slow control ビュー」1 行(078 レーン C のマージ時にまとめて v1.34)。
 
+### Phase 0(部分)— HiVolta 実機(2026-09-23、GDED 遠隔)
+- HiVolta DT1415ET は USB で GDED に接続(`/dev/serial/by-id/usb-CAEN_SPA_DT1415_HV_Power_Supply-if00`)。089 ドライバで IDENT / VALUE を実機取得
+  (archive/089 の実機受け入れ節)。by-id 命名と名乗り照合(BDSNUM = 165)の方針が実機で成立。
+- 残る Phase 0: Bronkhorst(USB-RS232 の相手 PC が GDED か要確認 — GDED には ttyUSB 無し)、Arduino、HMP2020。
+
