@@ -69,6 +69,15 @@ requires re-reading the GRAW file. Raw files are ~130 KB/event.
 **Shell note**: always single-quote the macro call - unquoted parentheses
 are shell syntax in zsh/bash: `root -l 'graw2root.C+O("file.graw")'`.
 
+**macOS SDKROOT note**: on this Mac (CLT 27), ACLiC/cling loses track of the
+libc++ headers unless `SDKROOT` points at a real SDK - prefix every `root`
+invocation with `SDKROOT=$(xcrun --sdk macosx --show-sdk-path)`, e.g.
+`SDKROOT=$(xcrun --sdk macosx --show-sdk-path) root -l -b -q 'pulserScan.C(...)'`.
+
+| step | input | output | content |
+|---|---|---|---|
+| pulserScan.C | 2 CSV from `calib scan --csv-channels ... --csv-waveform ...` | `pulserScan.png` | D-3 pulser amplitude scan (TODO/091 §1): per-channel response vs amplitude (FPN vs signal), residual-fraction distribution vs amplitude, average waveform per amplitude (signal ch mean), rise(10-90%)/peak/FWHM table (stdout + on-canvas, units = ADC sample buckets) |
+
 ## Assumptions / caveats
 
 - Data format: CoBo full readout, single AsAd; **frameType 1 (4-byte items) and

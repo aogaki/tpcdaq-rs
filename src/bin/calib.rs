@@ -12,12 +12,14 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use tpcdaq::calib::{pedestal, pulser, table};
+use tpcdaq::calib::{pedestal, pulser, scan, table};
 
 const USAGE: &str = "usage:\n  \
     calib pedestal <graw...> --out <pedestal.json>\n  \
     calib pulser <graw...> --out <pulser.json>\n  \
-    calib merge <pedestal.json> <pulser.json> --out <calib.json> [--k <f64=5.0>]";
+    calib merge <pedestal.json> <pulser.json> --out <calib.json> [--k <f64=5.0>]\n  \
+    calib scan --amp <mV>=<graw> [--amp <mV>=<graw> ...] --out <scan.json>\n    \
+        [--csv-channels <path>] [--csv-waveform <path>]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -37,6 +39,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "pedestal" => run_pedestal(rest),
         "pulser" => run_pulser(rest),
         "merge" => run_merge(rest),
+        "scan" => run_scan(rest),
         other => Err(format!("unknown subcommand: {other}")),
     }
 }
@@ -123,6 +126,67 @@ fn run_merge(args: &[String]) -> Result<(), String> {
         "wrote {} ({} channels)",
         out.display(),
         merged.channels.len()
+    );
+    Ok(())
+}
+
+/// `--amp <mV>=<graw> [--amp ...] --out <scan.json> [--csv-channels <p>] [--csv-waveform <p>]`
+/// (TODO/091 §1)。
+fn run_scan(args: &[String]) -> Result<(), String> {
+    let mut runs: Vec<scan::ScanRun> = Vec::new();
+    let mut out: Option<PathBuf> = None;
+    let mut csv_channels: Option<PathBuf> = None;
+    let mut csv_waveform: Option<PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(a) = iter.next() {
+        match a.as_str() {
+            "--amp" => {
+                let v = iter.next().ok_or("--amp requires a value")?;
+                let (amp_str, path_str) = v
+                    .split_once('=')
+                    .ok_or_else(|| format!("--amp value must be <mV>=<path>, got: {v}"))?;
+                let amp_mv: f64 = amp_str
+                    .parse()
+                    .map_err(|_| format!("--amp mV is not a number: {amp_str}"))?;
+                runs.push(scan::ScanRun {
+                    amp_mv,
+                    path: PathBuf::from(path_str),
+                });
+            }
+            "--out" => {
+                let v = iter.next().ok_or("--out requires a value")?;
+                out = Some(PathBuf::from(v));
+            }
+            "--csv-channels" => {
+                let v = iter.next().ok_or("--csv-channels requires a value")?;
+                csv_channels = Some(PathBuf::from(v));
+            }
+            "--csv-waveform" => {
+                let v = iter.next().ok_or("--csv-waveform requires a value")?;
+                csv_waveform = Some(PathBuf::from(v));
+            }
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    let out = out.ok_or("missing --out <path>")?;
+    if runs.is_empty() {
+        return Err("no --amp <mV>=<graw> given".to_string());
+    }
+
+    let computed = scan::compute(&runs).map_err(|e| e.to_string())?;
+    scan::write(&computed, &out).map_err(|e| e.to_string())?;
+    if let Some(p) = &csv_channels {
+        scan::write_channels_csv(&computed, p).map_err(|e| e.to_string())?;
+    }
+    if let Some(p) = &csv_waveform {
+        scan::write_waveform_csv(&computed, p).map_err(|e| e.to_string())?;
+    }
+    println!(
+        "wrote {} ({} channels, {} amps, {} events)",
+        out.display(),
+        computed.channels.len(),
+        computed.amps.len(),
+        computed.meta.events
     );
     Ok(())
 }

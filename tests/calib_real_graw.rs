@@ -31,7 +31,7 @@
 
 use std::path::PathBuf;
 
-use tpcdaq::calib::{pedestal, pulser};
+use tpcdaq::calib::{median, pedestal, pulser, scan};
 
 fn exp_data_root() -> Option<PathBuf> {
     match std::env::var_os("TPCDAQ_EXP_DATA_2026") {
@@ -165,5 +165,116 @@ fn pulser_real_run_matches_the_068_csv_oracle_within_the_documented_median_vs_me
         (ch11.amplitude_median - 3681.103).abs() < 15.0,
         "amplitude_median={} vs csv amp_mean=3681.103",
         ch11.amplitude_median
+    );
+}
+
+/// TODO/091 §1 実データ回帰: D-3 パルサー振幅スキャン(2026-09-23、GDED、実 ECC・実
+/// zCoBo、run 6–11、−100/−200/−300/−500/−700/−1000 mV)。
+///
+/// オラクル値は 091 §1 の発注書に書かれた Fable の先行数値
+/// (`calib pulser` を各 run に個別適用した際の、信号 ch 中央値 / FPN 中央値、生 ADC・
+/// 減算なし)。ここでは `calib::scan::compute` の per-channel `amplitude`(= 各 run 内で
+/// pulser と同じ peak-baseline 定義を再利用した中央値)を is_fpn で分けて中央値を取り、
+/// 同じ数字と 1 ADC 以内で一致することを確認する。
+#[test]
+fn scan_real_d3_pulser_ladder_matches_the_091_fable_pre_numbers_within_1_adc() {
+    let Some(root) = exp_data_root() else {
+        return;
+    };
+    let base = root.join("d3_pulser_scan");
+    let runs = vec![
+        scan::ScanRun {
+            amp_mv: -100.0,
+            path: base.join("run0006/CoBo0_AsAd0_2026-09-23T12:07:16.744_0000.graw"),
+        },
+        scan::ScanRun {
+            amp_mv: -200.0,
+            path: base.join("run0007/CoBo0_AsAd0_2026-09-23T12:08:31.454_0000.graw"),
+        },
+        scan::ScanRun {
+            amp_mv: -300.0,
+            path: base.join("run0008/CoBo0_AsAd0_2026-09-23T12:09:46.202_0000.graw"),
+        },
+        scan::ScanRun {
+            amp_mv: -500.0,
+            path: base.join("run0009/CoBo0_AsAd0_2026-09-23T12:11:00.883_0000.graw"),
+        },
+        scan::ScanRun {
+            amp_mv: -700.0,
+            path: base.join("run0010/CoBo0_AsAd0_2026-09-23T12:12:15.583_0000.graw"),
+        },
+        scan::ScanRun {
+            amp_mv: -1000.0,
+            path: base.join("run0011/CoBo0_AsAd0_2026-09-23T12:13:30.285_0000.graw"),
+        },
+    ];
+    for r in &runs {
+        assert!(r.path.is_file(), "missing {}", r.path.display());
+    }
+
+    let started = std::time::Instant::now();
+    let table = scan::compute(&runs).expect("scan::compute");
+    eprintln!(
+        "calib_real_graw: scan compute took {:.2}s, {} channels",
+        started.elapsed().as_secs_f64(),
+        table.channels.len()
+    );
+
+    assert_eq!(table.channels.len(), 272, "1 asad x 4 aget x 68 raw ch");
+
+    let amp_index = |mv: f64| {
+        table
+            .amps
+            .iter()
+            .position(|&a| a == mv)
+            .unwrap_or_else(|| panic!("amp {mv} missing"))
+    };
+    let idx_m100 = amp_index(-100.0);
+    let idx_m300 = amp_index(-300.0);
+    let idx_m1000 = amp_index(-1000.0);
+
+    let group_median = |idx: usize, want_fpn: bool| -> f64 {
+        let vals: Vec<f64> = table
+            .channels
+            .iter()
+            .filter(|c| c.is_fpn == want_fpn)
+            .map(|c| c.amplitude[idx])
+            .collect();
+        median(&vals)
+    };
+
+    // 091 §1 発注書: 「先に Fable が calib pulser(081)で見た数字(signal ch 中央値、
+    // FPN 除く): −100 mV → 369.0 ADC / −300 → 1074.0 / −1000 → 3239.8(飽和 ch 0)。
+    // ... FPN の中央値は 543.6 / 1589.8 / 3427.0」。
+    let signal_m100 = group_median(idx_m100, false);
+    let signal_m300 = group_median(idx_m300, false);
+    let signal_m1000 = group_median(idx_m1000, false);
+    assert!(
+        (signal_m100 - 369.0).abs() < 1.0,
+        "signal median @-100mV={signal_m100}"
+    );
+    assert!(
+        (signal_m300 - 1074.0).abs() < 1.0,
+        "signal median @-300mV={signal_m300}"
+    );
+    assert!(
+        (signal_m1000 - 3239.8).abs() < 1.0,
+        "signal median @-1000mV={signal_m1000}"
+    );
+
+    let fpn_m100 = group_median(idx_m100, true);
+    let fpn_m300 = group_median(idx_m300, true);
+    let fpn_m1000 = group_median(idx_m1000, true);
+    assert!(
+        (fpn_m100 - 543.6).abs() < 1.0,
+        "fpn median @-100mV={fpn_m100}"
+    );
+    assert!(
+        (fpn_m300 - 1589.8).abs() < 1.0,
+        "fpn median @-300mV={fpn_m300}"
+    );
+    assert!(
+        (fpn_m1000 - 3427.0).abs() < 1.0,
+        "fpn median @-1000mV={fpn_m1000}"
     );
 }
