@@ -28,6 +28,7 @@ import { WsClientService } from '../ws/ws-client';
 import { DisplayClock } from '../display/display-clock';
 import { observeResize } from '../display/resize-observer';
 import { type EChartsInstance, loadECharts } from './echarts-loader';
+import { gridShape, isDense } from './waveform-layout';
 import {
   type WaveformPlot,
   type WaveformSelection,
@@ -35,8 +36,11 @@ import {
   updateWaveformCache,
 } from './waveform-select';
 
-/** 描画系列数の上限の選択肢(表示側の都合。検出器の値ではない)。 */
-const SERIES_LIMITS = [4, 8, 16, 32, 64] as const;
+/**
+ * 描画系列数の上限の選択肢(表示側の都合。検出器の値ではない)。
+ * 68 = AGET 1 個分(FPN 込み)、136 = 2 AGET 分、272 = AsAd 1 枚分(4 AGET × 68 ch、090)。
+ */
+const SERIES_LIMITS = [4, 8, 16, 32, 64, 68, 136, 272] as const;
 /** 1 系列あたりの点数の上限の選択肢。 */
 const POINT_LIMITS = [128, 256, 512, 1024] as const;
 
@@ -142,11 +146,12 @@ export class WaveformView implements OnDestroy {
     this.chart = null;
   }
 
-  /** グリッド表示では系列数に応じて高さを伸ばす。 */
+  /** グリッド表示では系列数に応じて高さを伸ばす(列数が増えるほど行は低くなる)。 */
   readonly chartHeightPx = computed(() => {
     const plot = this.rendered();
     if (this.mode() === 'overlay' || !plot || plot.series.length === 0) return 520;
-    return Math.max(320, gridShape(plot.series.length).rows * 190);
+    const shape = gridShape(plot.series.length);
+    return Math.max(320, shape.rows * shape.rowHeightPx);
   });
 
   selectKey(event: Event): void {
@@ -241,18 +246,19 @@ function rangeInclusive(from: number, to: number): number[] {
   return out;
 }
 
-/** グリッド表示の並び(横は最大 4 列)。 */
-function gridShape(count: number): { cols: number; rows: number } {
-  const cols = Math.max(1, Math.min(4, Math.ceil(Math.sqrt(count))));
-  return { cols, rows: Math.max(1, Math.ceil(count / cols)) };
-}
-
 const AXIS_COLOR = '#7f8c99';
 const TEXT_COLOR = '#cfd8dc';
 
 function seriesName(aget: number, ch: number): string {
   return `A${aget}/ch${ch}`;
 }
+
+/** これを超えたら凡例を隠す(272 個の凡例は役に立たない。ツールチップの系列名で判別)。 */
+const LEGEND_SERIES_LIMIT = 64;
+/** grid 表示でこの列数以上になったら軸ラベルを間引く(小さすぎて読めない)。 */
+const AXIS_LABEL_THIN_COLS = 8;
+/** grid 表示でこの列数のときだけタイトルを小さくする(12 列 = AsAd 全部)。 */
+const TITLE_SMALL_FONT_COLS = 12;
 
 function buildOption(plot: WaveformPlot, mode: PlotMode): EChartsOption {
   const common = {
@@ -266,11 +272,18 @@ function buildOption(plot: WaveformPlot, mode: PlotMode): EChartsOption {
   };
 
   if (mode === 'overlay') {
+    const pointsPerSeries = plot.series[0]?.points.length ?? 0;
+    const dense = isDense(plot.series.length, pointsPerSeries);
     return {
       ...common,
       grid: { left: 64, right: 24, top: 28, bottom: 56 },
       tooltip: { trigger: 'axis' },
-      legend: { type: 'scroll', bottom: 0, textStyle: { color: TEXT_COLOR } },
+      legend: {
+        type: 'scroll',
+        bottom: 0,
+        show: plot.series.length <= LEGEND_SERIES_LIMIT,
+        textStyle: { color: TEXT_COLOR },
+      },
       xAxis: {
         type: 'value',
         name: 'time bucket',
@@ -285,6 +298,7 @@ function buildOption(plot: WaveformPlot, mode: PlotMode): EChartsOption {
         showSymbol: false,
         lineStyle: { width: 1 },
         data: entry.points,
+        ...(dense ? { sampling: 'lttb' as const, large: true } : {}),
       })),
     };
   }
@@ -292,31 +306,39 @@ function buildOption(plot: WaveformPlot, mode: PlotMode): EChartsOption {
   const { cols, rows } = gridShape(plot.series.length);
   const cellW = 100 / cols;
   const cellH = 100 / rows;
+  // 列・行が増えるほどセルは小さくなるので、余白はセル寸法に**比例**させる
+  // (固定 % ポイントだと列数が増えたときに幅・高さが負になる)。
+  const padX = cellW * 0.1;
+  const padY = cellH * 0.1;
+  const thinAxis = cols >= AXIS_LABEL_THIN_COLS;
+  const titleFontSize = cols === TITLE_SMALL_FONT_COLS ? 10 : 11;
   return {
     ...common,
     tooltip: { trigger: 'axis' },
     title: plot.series.map((entry, index) => ({
       text: seriesName(entry.aget, entry.ch),
-      left: `${(index % cols) * cellW + 4}%`,
-      top: `${Math.floor(index / cols) * cellH + 1}%`,
-      textStyle: { fontSize: 11, color: TEXT_COLOR },
+      left: `${(index % cols) * cellW + cellW * 0.04}%`,
+      top: `${Math.floor(index / cols) * cellH + cellH * 0.02}%`,
+      textStyle: { fontSize: titleFontSize, color: TEXT_COLOR },
     })),
     grid: plot.series.map((_entry, index) => ({
-      left: `${(index % cols) * cellW + 6}%`,
-      top: `${Math.floor(index / cols) * cellH + 5}%`,
-      width: `${cellW - 10}%`,
-      height: `${cellH - 10}%`,
+      left: `${(index % cols) * cellW + padX}%`,
+      top: `${Math.floor(index / cols) * cellH + padY}%`,
+      width: `${cellW - 2 * padX}%`,
+      height: `${cellH - 2 * padY}%`,
     })),
     xAxis: plot.series.map((_entry, index) => ({
       gridIndex: index,
       type: 'value' as const,
       min: 0,
       max: Math.max(0, plot.nBuckets - 1),
+      axisLabel: { show: !thinAxis },
       ...axisCommon,
     })),
     yAxis: plot.series.map((_entry, index) => ({
       gridIndex: index,
       type: 'value' as const,
+      axisLabel: { show: !thinAxis },
       ...axisCommon,
     })),
     series: plot.series.map((entry, index) => ({
