@@ -8,10 +8,30 @@
 - 注意: run 5(12:04–12:06)はスクリプトの変数展開ミスで `asad-pulser-start ${3:--1000}` を送っており **無効**(直前の −1000 mV 設定が残っていた可能性)。解析から除外。
 - 2026-09-14 の run 1/2(−1000 mV、122 + 20 frames)も同条件の参照点として使える(`out/run0001`, `out/run0002`)。
 
-## 1. 解析発注(Sonnet、データを Mac に持ち帰ってから)
-- `calib pulser`(081)を各 run に掛け、ch 毎の応答(中央値)を振幅の関数にする → 直線性(残差)と ch 毎ゲイン(068 の相対ゲインと照合)。
-- 平均波形(ch 平均、振幅ごと)を出し、立ち上がり・ピーク位置・幅を振幅の関数で表にする(066(b) の電子回路応答 = Unfolding の応答関数の元)。
-- 出力は `macros/` の ROOT マクロか `src/bin/calib.rs` の拡張のどちらか(KISS で選び、理由を書く)。図は `reference/_spike/d3/` に。
+## 1. 解析発注(Sonnet、2026-09-23 — データは Mac の `/Users/aogaki/Workspace/tpcdaq-rs/reference/exp_data/2026/d3_pulser_scan/run00{06..11}/*.graw`)
+
+先に Fable が `calib pulser`(081)で見た数字(signal ch 中央値、FPN 除く): −100 mV → **369.0** ADC / −300 → **1074.0** / −1000 → **3239.8**(飽和 ch 0)。
+比 −300/−100 = 2.91、−1000/−100 = 8.78(高振幅側で圧縮)。FPN の中央値は 543.6 / 1589.8 / 3427.0。= 梯子は本物。
+
+### 作るもの
+1. `src/calib/scan.rs` + `calib scan` サブコマンド(`src/bin/calib.rs`): 入力 = `--amp <mV>=<graw>` を複数(または `--runs <json>`)。各 run を既存の
+   `calib::pulser` と同じ復号で読み、**ch 毎**に (a) 振幅中央値(既存)(b) **平均波形 512 点**(ペデスタル = 先頭 25 セル平均を引いた後、イベント平均)を出す。
+   出力 JSON: `{meta, amps:[mV], channels:[{asad,aget,ch,is_fpn, amplitude:[per amp], fit:{slope, intercept, max_resid_frac}, waveform:[[512] per amp]}]}`。
+   直線性: 振幅 ≤ −700 mV(圧縮前)の点で最小二乗、全点の残差(fraction of fit)を出す。既存の `calib pulser` / `merge` は変えない。
+2. `macros/pulserScan.C`(ROOT、JSON は `nlohmann` を使わず `calib scan --csv` で **CSV も出す**方が KISS): 図 = ①ch 毎の応答 vs 振幅(全 ch 重ね、FPN 別色)
+   ②残差 vs 振幅(ch 毎の分布、中央値 ± 16–84 %)③平均波形(振幅ごとに 1 本、ch 平均、FPN 除く)④立ち上がり時間(10–90 %)・ピーク位置・FWHM vs 振幅の表。
+   出力は `reference/_spike/d3/`(gitignore)に PNG、表は結果節に転記。
+3. 参照点: 2026-09-14 の run0001/run0002(−1000 mV)は GDED にあり Mac には無い → 使わない(今日の run 11 で足りる)。
+
+### テスト
+- `calib scan` の単体: 合成フレーム(既存 `tests/calib_synthetic.rs` の生成器)で 3 振幅 × 数イベント → slope / intercept / 残差 / 平均波形の手計算オラクル。
+- 実データは env `TPCDAQ_EXP_DATA_2026` 配下のときだけ(既存 `tests/calib_real_graw.rs` の流儀): 6 run で 272 ch、飽和 0、−100/−300/−1000 の中央値が上の数字と 1 ADC 以内。
+- `cargo fmt && cargo clippy --tests -- -D warnings && cargo test` green(現 838)、production `.unwrap()` 無し。ROOT マクロは `root -l -b -q` で通ること(SDKROOT は
+  メモリ mac-root-cling-sdkroot、`macros/README.md` に行を足す)。
+
+### 受け入れ・結果節
+ch 毎の slope の分布(中央値・±%)、068 の相対ゲイン(±4.4 %)との整合、残差の最大(圧縮の開始振幅)、平均波形の立ち上がり / ピーク / FWHM の表、図の所在。
+設計判断が残る分岐(例: 圧縮のモデル化)は実装せず報告。
 
 ## 2. 参照
 080 D-3、073 #10、066(b)、081(calib)、069 結果(09-14)、076 結果(09-23)。
