@@ -609,3 +609,21 @@ npx prettier --check "src/app/**/*.{ts,html,scss}"
   例外 value の型別コントロール / テストの flush)。
 - **SPEC v1.34 §11** に Parameters ビューを固定。残 = §5-3(実 ECC、新 DAQ 機)と §5-5(実データへの反映)。**078 のソフト側は完了**(A/B/C)。
 
+## 結果(§5-3 / §5-5 — 実 ECC + 実 zCoBo、2026-09-23 12:40–12:44、GDED 遠隔、Fable)
+- 構成: 076 Phase 3 前提と同じ(実 ECC ネイティブ + Rust ecc_bridge + bench スタック)。`bench2.conf` に `ecc_config_dir = /home/daq/ELITPC/GetSoftware_config`、
+  `params_dir = out/params`。全 bin を再ビルド(古い graw_writer 等が `deny_unknown_fields` で新キーを拒否した → 「bin は全部同時に更新する」)。
+- **P1 = テンプレート(`configure-pulser.xcfg`、GDED 実物 md5 e10434965…)の現行値をそのまま JSON にして PUT** → `id = pulser__75bb9a9e`、
+  `configure-pulser__75bb9a9e.xcfg` / `prepare-…` が config dir に生成(44,212 B)。run 12 / 13: `run_start.config_ids = {describe: zCobo, prepare: pulser__75bb9a9e,
+  configure: pulser__75bb9a9e}`、`run_start.params = {id, sha256, exceptions: 0}`、**ECC ログ `Reading configuration file '…/configure-pulser__75bb9a9e.xcfg'`**、
+  prepare / configure / start とも `NO_ERR`、30 frames、malformed 0。→ **§5-3 合格**(生成 xcfg を実 ECC が受理)。
+- **P2 = gain 120fC → 240fC だけ変えて PUT** → `id = pulser__aecb7641`、run 14(30 frames)。`calib pulser`(−300 mV):
+  | run | 設定 | signal ch 振幅中央値 [ADC] |
+  |---|---|---|
+  | 8 | 純正 `pulser` config(120fC) | 1074.0 |
+  | 12 | params P1(120fC、テンプレート値) | 1079.7 |
+  | 14 | params P2(240fC) | 598.2 |
+  P1 / 純正 = **1.005**(生成 xcfg は純正と同じ挙動)、P2 / P1 = **0.554**(gain 段が実データに現れる)。→ **§5-5 合格**。
+- 注意: `run_bench.sh` が操作権を横取りするため、スクリプト内で先に取った token が PUT で `stale or unknown token` になった(P2 の 1 回目 = run 13 は P1 のまま)。
+  token を PUT 直前に取り直して解決。生成 xcfg 2 組は GDED の config dir に残置(純正ファイルは無改変)。
+- 078 は §5-4(REST/UI テスト = レーン B/C 済)を含め**全受け入れ完了**。UI からの操作は現地で。
+
