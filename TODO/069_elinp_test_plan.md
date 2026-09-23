@@ -167,6 +167,7 @@ Phase 4。root-sink(ROOT)は GDED に無く未検証 — run.root 経路は次�
 | # | 項目 | 実測 | 判定 |
 |---|---|---|---|
 | 7 | 連続 run × 10 | run 15–24(各 20 s、パルサー −300 mV): run/start 7.89–7.92 s、run/stop 3.63–3.64 s、**10 本とも `ecc_walk_back = [status->Ready, breakup->Prepared, reset->Described, reset->Idle]`**、20 frames / malformed 0 / eos_closed true / reason normal | ✅ |
+| 7'' | ACM(**300 s** アイドル後の run 26) | 12:57:41 → 13:02:41 に run/start 8.02 s で成功、20 s run 正常。ブリッジ log の `connected to Ecc` は起動時の 1 回のみ = **5 分のアイドルでも Ice 接続は切られない**(この ECC は ACM で閉じない、または往復が無くても保持)。再接続経路は依然未実証(意図的に ECC を再起動して試す = #14' で) | ✅ |
 | 7' | ACM(90 s アイドル後の run 24) | run 23 停止 12:49:20 → 90 s 待ち → run 24 開始 12:50:50、**再接続なしで成功**(bridge ログに切断・再接続の記録なし)。Ice 3.7 サーバ既定 60 s の ACM 切断は**発生しなかった** — 再接続経路は未実証のまま(次は 5 分以上のアイドルで) | ✅(条件付き) |
 | 6' | 歩き戻し(Rust ブリッジ) | 076 結果節: C++ 時と同一 | ✅ |
 | 3' | 生成 xcfg(078) | prepare / configure が `configure-pulser__<sha8>.xcfg` で通る(078 結果節) | ✅ |
