@@ -1,14 +1,14 @@
 /**
  * 086 レビュー — 「反転前提のカスタムパレット」の核になる純関数 `invertColors` の単体テスト。
+ * 086 追補2 — 自前のダーク用ランプを作る純関数 `rampPalette` の単体テスト。
  *
- * DARK_MODE(`filter: invert(100%)`)を打ち消すため、kBird の生の配色(`rgb(r,g,b)` / `#rrggbb`)
- * を 255-x で反転してからカスタムパレットとして登録する(jsroot-loader.ts 参照)。
- * ここでは jsroot を読み込まず、文字列変換だけを検証する(KISS — 実際の反転後パレットが
- * 本物の kBird に一致することは 086 の結果節に手計算の出典を記録)。
+ * DARK_MODE(`filter: invert(100%)`)を打ち消すため、ダーク用ランプの生の配色
+ * (`rgb(r,g,b)` / `#rrggbb`)を 255-x で反転してからカスタムパレットとして登録する
+ * (jsroot-loader.ts 参照)。ここでは jsroot を読み込まず、純関数だけを検証する(KISS)。
  */
 import { vi } from 'vitest';
 
-import { invertColors } from './jsroot-loader';
+import { invertColors, rampPalette, TPCDAQ_DARK_STOPS } from './jsroot-loader';
 
 describe('086 invertColors — DARK_MODE の invert(100%) を打ち消す反転', () => {
   it('rgb(r,g,b) は各成分を 255-x する(出典: colors.mjs case 57 stop0 ≈ rgb(53,42,135)、255-53=202/255-42=213/255-135=120)', () => {
@@ -27,5 +27,24 @@ describe('086 invertColors — DARK_MODE の invert(100%) を打ち消す反転'
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('086 追補2 rampPalette — 9 stop の線形補間ランプ', () => {
+  it('n=255 で 255 色を返す(位置は i / 254 で等間隔)', () => {
+    expect(rampPalette(TPCDAQ_DARK_STOPS)).toHaveLength(255);
+  });
+
+  it('先頭は stop0 の端点そのもの(位置 0.000 = 黒 rgb(0,0,0))', () => {
+    expect(rampPalette(TPCDAQ_DARK_STOPS)[0]).toBe('rgb(0,0,0)');
+  });
+
+  it('末尾は stop8 の端点そのもの(位置 1.000 = 橙 rgb(255,120,0))', () => {
+    const colors = rampPalette(TPCDAQ_DARK_STOPS);
+    expect(colors[colors.length - 1]).toBe('rgb(255,120,0)');
+  });
+
+  it('位置 0.0625(黒と暗紫の中間)を手計算で照合する(出典: n=17 のとき index 1 の位置は 1/16=0.0625。stop0 黒 rgb(0,0,0)@0.000 と stop1 暗紫 rgb(30,10,60)@0.125 のちょうど中間なので frac=0.5 → r=(0+30)/2=15、g=(0+10)/2=5、b=(0+60)/2=30)', () => {
+    expect(rampPalette(TPCDAQ_DARK_STOPS, 17)[1]).toBe('rgb(15,5,30)');
   });
 });
