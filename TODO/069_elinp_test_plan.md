@@ -171,6 +171,10 @@ Phase 4。root-sink(ROOT)は GDED に無く未検証 — run.root 経路は次�
 | 6' | 歩き戻し(Rust ブリッジ) | 076 結果節: C++ 時と同一 | ✅ |
 | 3' | 生成 xcfg(078) | prepare / configure が `configure-pulser__<sha8>.xcfg` で通る(078 結果節) | ✅ |
 
+| 15' | 余分な TCP 接続(run 25、GDED から `nc 192.168.4.2 46005` を 15 s) | `extra_connections` 0 → **1**、receiver WARN「a second data link arrived while one is already up — closing it at once」、本物のリンク(peer 192.168.4.81:40225)は無傷で run 継続(25 frames、malformed 0) | ✅ |
+| 12 | stop 後のリンク | run/stop 後の receiver `peer` = **null**(receiver の Stop がこちら側でリンクを閉じる = 強制 EOS が正規経路、`forced_eos:true / eos_closed:true`)。CoBo 側が自分から close しないことは 09-14 の観測どおり | ✅(意味論確認) |
+| 13/14 | CoBo 側の kill / S1 復旧 | **未実施**: zCoBo への root ssh が「REMOTE HOST IDENTIFICATION HAS CHANGED」で拒否(板が再イメージされた?)。ユーザーに新しい host key の受け入れを確認してから | ⏸ |
+
 構成・手順 = メモリ geteccserver-native-gded(09-23 追記)。**残**: #8–#10(zCoBo 側の切断は遠隔では不可、ECC halt と receiver 余分接続は遠隔で可能 — 次回)、
 #13/#14、#16(compact のオラクル照合 = 今日の run 6–11 で可)、Phase 4(root-sink は新機)。
 
