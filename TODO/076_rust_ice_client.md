@@ -354,3 +354,18 @@ Fable レビューはフェーズ境界 2 回(Phase 1 後 = ワイヤ、Phase 2 
   ②`controller_integration.rs` は MockTransport 経由で bin を使わない(§2.4 の「26 本」は実際には 5 ファイル 14 本 + mock 12 本)— 記述を訂正済みとして扱う。
 - Phase 3 の前提(実 ECC + 実 zCoBo で Rust bridge の run 1 周、audit `ecc_walk_back` が C++ と同一)は新 DAQ 機で。それまで `TPCDAQ_ECC_BRIDGE_BIN` で切替可能な状態を維持。
 
+## 結果(Phase 3 前提 — 実機確認、2026-09-23、GDED 遠隔、Fable)
+- 構成: GDED(daq@192.168.144.101)で **実 getEccServer 20190315 をホストにネイティブ起動**(`-a 127.0.0.1:46002`、`--config-repo-url
+  /home/daq/ELITPC/GetSoftware_config`、LD_LIBRARY_PATH = vm_ice : GET lib : stage(xenial deb 展開))+ **Rust `ecc_bridge`**(`target/release/ecc_bridge
+  --bind tcp://*:47200 --ecc-proxy "Ecc:tcp -h 127.0.0.1 -p 46002"`、GDED 上でネイティブ、**SSH トンネル不要**)+ bench スタック(`bench_up.sh`:
+  null_sink / graw_writer / decoder / receiver0 / controller)。VM の GET は全停止(ユーザー)。実 zCoBo 192.168.4.81、AsAd 内蔵パルサー
+  (`getEccClient` で `asad-pulser-start -1000 1000`)。
+- ブリッジ log: `connected to Ecc:tcp -h 127.0.0.1 -p 46002 (encoding 1.1)` → describe / prepare / configure / start / stop / breakup / reset / reset
+  すべて `ok=1`、`ecc_error=NO_ERR`(Ice 3.7.2 サーバとの実機互換を初確認)。
+- run 3(60 s): run/start **7.41 s**、`asad-pulser-start` 後 ~1 Hz、**60 frames / 16,727,040 B(= 60 × 278,784)**、malformed 0 / overflow 0 /
+  extra_connections 0 / topology_frames 0、run/stop 3.66 s、`forced_eos:true / eos_closed:true`。
+- run 4(30 s): audit `ecc_walk_back = ["status->Ready","breakup->Prepared","reset->Described","reset->Idle"]` = **C++ ブリッジ時(069 結果 #6)と同一**。
+  run/start 7.98 s、30 frames / 8,363,520 B。
+- → **Phase 3 の前提(実 ECC + 実 zCoBo で Rust bridge の run 1 周、walk-back 一致)は満たした。** C++ 撤去(Phase 3 本体)は次の起票で。
+- 残懸念: bin のログは `eprintln!`(tracing 未初期化、Phase 2 レビューの持ち越し①)。ACM のアイドル切断は 2 run の間隔 20 s では未観測。
+
