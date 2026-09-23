@@ -1,17 +1,18 @@
 #!/bin/sh
-# run_ecc_e2e.sh — ecc-bridge の統合テスト(TODO/017 §テスト、SPEC §8.3)。
+# run_ecc_e2e.sh — ecc-bridge の統合テスト(TODO/017 §テスト、SPEC §8.3、TODO/076 Phase 3)。
 #
-#   fake_ecc(Ice servant)を上げる → ecc_bridge を上げる → ecc_e2e_client が ZMQ REQ で
-#   全状態遷移と listen-before-start の負性テストを機械照合する。
+#   fake_ecc(Ice servant)を上げる → ecc_bridge(Rust bin)を上げる → ecc_e2e_client が
+#   ZMQ REQ で全状態遷移と listen-before-start の負性テストを機械照合する。
 #
-# 使い方(バイナリは make 済みであること):
-#   make TPCDAQ_ICE_DIR=<repo>/reference/20190315_patched && ./run_ecc_e2e.sh
+# 使い方:
+#   make TPCDAQ_ICE_DIR=<repo>/reference/20190315_patched   # fake_ecc / ecc_e2e_client
+#   cargo build --release --bin ecc_bridge                  # ecc_bridge(Rust)
+#   ./run_ecc_e2e.sh
 #
-# ブリッジ本体は **$ECC_BRIDGE_BIN で差し替えられる**(既定 = 同ディレクトリの C++ 版)。
-# TODO/076 Phase 2 の Rust 版を同じ e2e に掛けるための口:
-#   cargo build --bin ecc_bridge
-#   ECC_BRIDGE_BIN=<repo>/target/debug/ecc_bridge ./run_ecc_e2e.sh
-# fake_ecc(Ice servant)と ecc_e2e_client は C++ のまま = **照合相手は変わらない**。
+# ブリッジ本体は 076 Phase 3 で C++ 版を撤去し、**Rust 版が唯一の実装**になった。
+# 既定は `$ECC_BRIDGE_BIN`(明示指定があればそれ)→ `<repo>/target/release/ecc_bridge`
+# → `<repo>/target/debug/ecc_bridge` の順で探す(無ければエラー)。fake_ecc(Ice servant)
+# と ecc_e2e_client は C++ のまま = **照合相手は変わらない**。
 #
 # ポートは全部 OS 任せ(fake_ecc は "PROXY ..."、ecc_bridge は "BIND ..." を stdout に 1 行出す)
 # —— 固定ポートを書かないので並列実行に耐える。
@@ -19,7 +20,19 @@
 set -eu
 cd "$(dirname "$0")"
 
-ECC_BRIDGE_BIN=${ECC_BRIDGE_BIN:-./ecc_bridge}
+if [ -z "${ECC_BRIDGE_BIN:-}" ]; then
+  repo_root=$(cd ../.. && pwd)
+  if [ -x "$repo_root/target/release/ecc_bridge" ]; then
+    ECC_BRIDGE_BIN="$repo_root/target/release/ecc_bridge"
+  elif [ -x "$repo_root/target/debug/ecc_bridge" ]; then
+    ECC_BRIDGE_BIN="$repo_root/target/debug/ecc_bridge"
+  else
+    echo "run_ecc_e2e: ecc_bridge が無い(target/release にも target/debug にも)。" >&2
+    echo "  先に 'cargo build --release --bin ecc_bridge' (または --bin ecc_bridge) すること" >&2
+    echo "  (差し替えるなら ECC_BRIDGE_BIN=<実行可能なパス>)" >&2
+    exit 1
+  fi
+fi
 
 for bin in ./fake_ecc "$ECC_BRIDGE_BIN" ./ecc_e2e_client; do
   if [ ! -x "$bin" ]; then

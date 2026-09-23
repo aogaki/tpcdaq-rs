@@ -6,14 +6,17 @@
 //! を Rust 側の回帰として置いておく。状態遷移そのものの網羅は C++ 側の
 //! `tools/ecc_bridge/run_ecc_e2e.sh` が担当(こちらは契約の口だけ見る)。
 //!
-//! **env 未設定なら skip** —— C++/Ice ビルドを `cargo test` の前提にしない:
+//! ecc_bridge は 076 Phase 3 以降 **Rust bin が既定**(`env!("CARGO_BIN_EXE_ecc_bridge")`
+//! —— `cargo test` が必ずビルドするので env 無しで走る)。fake-ECC(Ice servant のテストダブル)
+//! だけは C++/Ice のままなので、**それが無ければ skip**:
 //!
 //! ```text
 //! make -C tools/ecc_bridge TPCDAQ_ICE_DIR=$PWD/reference/20190315_patched
-//! TPCDAQ_ECC_BRIDGE_BIN=$PWD/tools/ecc_bridge/ecc_bridge \
 //! TPCDAQ_FAKE_ECC_BIN=$PWD/tools/ecc_bridge/fake_ecc \
 //!   cargo test --test ecc_bridge_intake
 //! ```
+//!
+//! C++ 版ブリッジと比較したいときだけ `TPCDAQ_ECC_BRIDGE_BIN` で明示的に上書きする。
 
 #![allow(clippy::unwrap_used)]
 
@@ -23,17 +26,17 @@ use std::process::{Child, Command, Stdio};
 
 use serde_json::Value;
 
-/// 2 つの env が揃っていなければ skip(片方だけなら「揃っていない」と分かるように出す)。
+/// ecc_bridge は Rust bin が既定(cargo test が必ずビルドする)。fake_ecc(C++/Ice)が
+/// 無ければ skip(理由を出す)。
 fn bins() -> Option<(PathBuf, PathBuf)> {
-    let bridge = std::env::var_os("TPCDAQ_ECC_BRIDGE_BIN").map(PathBuf::from);
+    let bridge = std::env::var_os("TPCDAQ_ECC_BRIDGE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_ecc_bridge")));
     let fake = std::env::var_os("TPCDAQ_FAKE_ECC_BIN").map(PathBuf::from);
-    match (bridge, fake) {
-        (Some(b), Some(f)) => Some((b, f)),
-        (b, f) => {
-            eprintln!(
-                "skip: TPCDAQ_ECC_BRIDGE_BIN={:?} TPCDAQ_FAKE_ECC_BIN={:?}",
-                b, f
-            );
+    match fake {
+        Some(fake) => Some((bridge, fake)),
+        None => {
+            eprintln!("skip: TPCDAQ_FAKE_ECC_BIN が無い(fake_ecc は C++/Ice のまま。ecc_bridge={bridge:?})");
             None
         }
     }

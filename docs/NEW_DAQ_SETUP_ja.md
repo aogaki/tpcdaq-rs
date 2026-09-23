@@ -120,13 +120,17 @@ params_dir = "/data/tpcdaq/params"               # v1.33: パラメータ JSON(c
 
 ## 7. ECC ブリッジ
 
-- **Rust(TODO/076 Phase 2 済、2026-09-22)**: `target/release/ecc_bridge --bind tcp://*:47200 --ecc-proxy "Ecc:tcp -h 127.0.0.1 -p 46002"`。
-  依存無し(Ice ライブラリ不要)。宅内では fake ECC の e2e 52 本と既存統合テスト 14 本を通してある。**最初の実機確認はここ**
-  (076 Phase 3 の前提 = describe → … → stop → breakup → reset → reset の 1 周と audit `ecc_walk_back` が C++ 時と同一)。
-  合格したら C++ ブリッジと Ice 3.8 は不要(Phase 3 で撤去)。
-- **C++ 併存(Rust が通るまで)**: Ice 3.8 が要る → ZeroC の apt リポ(noble)から `libzeroc-ice3.8-dev` 相当、
-  `cd tools/ecc_bridge && make TPCDAQ_ICE_DIR=<20190315_patched のパス> -j`。**Ice 3.7 と 3.8 を同一プロセスに混ぜない**
-  (無言 SIGSEGV — VIRTUAL_ZCOBO §4.1 の罠)。ECC(3.7)とブリッジ(3.8)は別プロセスなので共存可。
+- **Rust が唯一の実装(TODO/076 Phase 3、2026-09-23 に C++ 版を撤去)**:
+  `target/release/ecc_bridge --bind tcp://*:47200 --ecc-proxy "Ecc:tcp -h 127.0.0.1 -p 46002"`。
+  依存無し(Ice ライブラリ不要 —— `src/ice/` の自前クライアントが encoding 1.1 を直接喋る)。
+  実 ECC + 実 zCoBo での 1 周(describe → … → stop → breakup → reset → reset)と
+  audit `ecc_walk_back` が C++ 版時と同一であることを実機で確認済み(076 Phase 3 前提)。
+- `tools/ecc_bridge/` に残るのは fake-ECC(Ice servant のテストダブル、`fake_ecc.cpp`)と
+  e2e クライアント(`ecc_e2e_client.cpp`)だけ —— どちらも Rust bin をローカルで機械照合する
+  ための C++/Ice 資産で、本番のブリッジではない。ビルドは
+  `cd tools/ecc_bridge && make TPCDAQ_ICE_DIR=<20190315_patched のパス> -j`
+  (Ice 3.8 が要る。ECC 本体は Ice 3.7 —— **同一プロセスに混ぜない**、無言 SIGSEGV。
+  VIRTUAL_ZCOBO §4.1 の罠。ECC と fake_ecc は別プロセスなので無関係)。
 - ✅ `python3 -c "import zmq; s=zmq.Context().socket(zmq.REQ); s.connect('tcp://127.0.0.1:47200'); s.send_json({'action':'status'}); print(s.recv_json())"`
   → `{"ok":true,"state":"Idle","ecc_error":"NO_ERR"}`。
 

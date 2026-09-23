@@ -33,11 +33,12 @@
 //! graw-writer)はテストプロセス内タスクとして起動する** —— `--config` 起動ではコマンド REP
 //! ポートが定数(47100 / 47101 / 47110+k)に焼かれており動的化できないため(`src/config.rs`)。
 //!
-//! env が欠けたら**欠けた変数名を stderr に出して** skip する(silent skip を作らない):
+//! env が欠けたら**欠けた変数名を stderr に出して** skip する(silent skip を作らない)。
+//! `TPCDAQ_ECC_BRIDGE_BIN` は 076 Phase 3 以降 Rust bin が既定なので不要(C++ 版と比較したい
+//! ときだけ明示的に渡す):
 //!
 //! ```text
 //! TPCDAQ_ROOT_SINK_BIN=$PWD/tools/root_sink/root_sink \
-//! TPCDAQ_ECC_BRIDGE_BIN=$PWD/tools/ecc_bridge/ecc_bridge \
 //! TPCDAQ_FAKE_ECC_BIN=$PWD/tools/ecc_bridge/fake_ecc \
 //! TPCDAQ_REAL_GRAW=$HOME/TPC/CoBo_2025-09-01T08_51_06.203_0000.graw \
 //! TPCDAQ_REAL_GEOMETRY_MINI=$HOME/TPC/miniTPC_UVW_pcb_info/new_geometry_mini_eTPC.dat \

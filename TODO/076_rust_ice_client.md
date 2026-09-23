@@ -392,3 +392,110 @@ Fable レビューはフェーズ境界 2 回(Phase 1 後 = ワイヤ、Phase 2 
   demo が動いていないときに)。
 - 結果節: 削除した行数、テスト数、e2e 出力、demo の run 1 本の結果、承認が要る逸脱。
 
+## 結果(Phase 3 — C++ 撤去、2026-09-23、Sonnet レーン)
+
+- **前提**: worktree で `git merge --ff-only main` → `05e2f90` 着手前に一致。着手前 `cargo test`
+  **838 passed / 0 failed / 1 ignored**(発注書どおり)。
+
+- **削除**: `tools/ecc_bridge/ecc_bridge.cpp`(361 行)、`tools/ecc_bridge/test_ecc_bridge.cpp`
+  (558 行)= **計 919 行**。`git diff --stat HEAD` = 15 files changed, 160 insertions(+), 1028
+  deletions(-)(残り 109 行は Makefile/README/docs/tests の整理)。
+
+- **残した(発注書の削除リストと 1 点だけ食い違う — 下記「承認が要る逸脱 1」)**:
+  `fake_ecc.cpp`(Ice servant のテストダブル)、`ecc_e2e_client.cpp`(Rust bin の e2e 相手)、
+  `run_ecc_e2e.sh`(既定を Rust bin に付け替え)、`tap_*.py`、`slice/` 生成の仕組み。
+  `Makefile` は fake_ecc / ecc_e2e_client の 2 つだけを作る形に縮めた
+  (`all: fake_ecc ecc_e2e_client`、`ecc_bridge` / `test_ecc_bridge` / `test`(ECC_TRANSITIONS 経由の
+  golden 表照合)ターゲットを削除)。`.gitignore` から `ecc_bridge` / `test_ecc_bridge` の
+  ビルド成果物エントリも削った。
+
+- **`run_ecc_e2e.sh` の既定ブリッジ**: `ECC_BRIDGE_BIN` 未指定なら
+  `<repo>/target/release/ecc_bridge` → 無ければ `<repo>/target/debug/ecc_bridge` → 無ければ
+  「先に `cargo build --release --bin ecc_bridge` すること」を stderr に出して exit 1。
+
+- **`tests/*.rs` の `TPCDAQ_ECC_BRIDGE_BIN`**: `tests/controller_ecc.rs` / `tests/ecc_bridge_intake.rs`
+  の `bins()` と `tests/common/mod.rs` の `e2e_env()` を、env 未設定なら
+  `env!("CARGO_BIN_EXE_ecc_bridge")` にフォールバックする形へ変更(`TPCDAQ_FAKE_ECC_BIN` だけが
+  真の skip ゲート)。実測(env を一切設定せず `cargo test --test controller_ecc --test
+  ecc_bridge_intake --test p3_error_paths --test p3_e2e --test soak_smoke`):
+  - `controller_ecc` / `ecc_bridge_intake`: 「skip: TPCDAQ_FAKE_ECC_BIN が無い」に変わり(以前は
+    `TPCDAQ_ECC_BRIDGE_BIN` も一緒に不足と出ていた)、**env-gated テスト自体は 2/2, 2/2 green**
+    (fake_ecc 無しでも走る非 gated テストの分)。
+  - `p3_error_paths` / `p3_e2e` / `soak_smoke`: skip 理由の一覧から `TPCDAQ_ECC_BRIDGE_BIN` が
+    消え、`TPCDAQ_ROOT_SINK_BIN, TPCDAQ_FAKE_ECC_BIN, TPCDAQ_REAL_GRAW,
+    TPCDAQ_REAL_GEOMETRY_MINI` の 4 本だけが残ることを確認(意図どおり)。
+  各ファイルの module doc の起動例も `TPCDAQ_ECC_BRIDGE_BIN` を省いて更新。
+
+- **`src/bin/ecc_bridge.rs` のログ**: `eprintln!` を全部 `tracing`(`error!`/`warn!`/`info!`)に
+  置換。`Options` 解析エラー・`--ecc-proxy` 不正・ZMQ bind 失敗・getStatus 失敗・action ごとの
+  結果・接続確立/切断・shutdown まで、意味を変えずフィールド化(例:
+  `info!(action = %.., ok, state = %.., ecc_error = %.., error = %.., "action")`)。
+  `println!("BIND {endpoint}")` はそのまま(契約)。
+
+- **テスト**: `cargo test` **838 passed / 0 failed / 1 ignored**(着手前と同数 —
+  Phase 3 はリファクタのみで新規テストは追加していない)。`cargo clippy --all-targets -- -D
+  warnings` / `cargo clippy --tests -- -D warnings` / `cargo fmt`(diff なし)すべて clean。
+  `cargo test --bin ecc_bridge` = 7 passed(既存の CLI/契約テストが tracing 移行後も無変更で green)。
+
+- **e2e 出力**(実測、`make clean && make -j TPCDAQ_ICE_DIR=.../reference/20190315_patched` の
+  クリーンビルドから):
+  ```
+  run_ecc_e2e: bridge = <repo>/target/release/ecc_bridge
+  run_ecc_e2e: fake ECC proxy = Ecc:tcp -h 127.0.0.1 -p 59234
+  run_ecc_e2e: bridge REP = tcp://127.0.0.1:59235
+  ecc_e2e: 52 passed, 0 failed
+  ```
+  fake_ecc / ecc_bridge の stderr ログも全遷移一致(describe→prepare→configure→start→stop→
+  breakup→reset→reset、`WHEN_START` の `Could not establish data link.` まで Phase 2 と同じ)。
+
+- **demo(`reference/_spike/demo/`)**: **未実施**。理由 2 点:
+  1. `ps` / `lsof -iTCP -sTCP:LISTEN` で確認 —— controller / monitor / vcobo_daq / ecc_bridge /
+     fake_ecc のいずれも稼働しておらず、47xxx 系ポートの listen も無い(ポート衝突の懸念は無い)。
+  2. にもかかわらず未実施なのは、**このセッションが worktree に隔離されており
+     `reference/`(メインチェックアウトのみに存在、.gitignore 済みで worktree には無い)を書けない
+     ため**(Edit ツールが `reference/_spike/demo/env_demo.sh` への書き込みを
+     「worktree の外」として拒否するのを実測)。`git merge --ff-only` の前提説明どおり
+     `reference/` は worktree に無いが、今回はその**書き込み側**にも同じ制約がかかった。
+     メインチェックアウト側 `/Users/aogaki/Workspace/tpcdaq-rs/reference/_spike/demo/env_demo.sh`
+     の 27 行目を次のように直し、`bash start_demo.sh` → `run_once.sh 12` → `stop_demo.sh` を
+     確認するのは、worktree の外で行える人(施主 or メインセッション)に持ち越す:
+     ```diff
+     -ECC_BRIDGE=${TPCDAQ_ECC_BRIDGE_BIN:-$REPO/tools/ecc_bridge/ecc_bridge}
+     +ECC_BRIDGE=${TPCDAQ_ECC_BRIDGE_BIN:-$BIN/ecc_bridge}
+     ```
+     (`$BIN` はその 3 行上で `$REPO/target/release` として既に定義済み。`start_demo.sh` 自体は
+     `$ECC_BRIDGE` を参照するだけで変更不要 —— 発注書は `start_demo.sh` を名指ししていたが、
+     実際に直すのは `env_demo.sh` 側だった)。
+
+- **承認が要る逸脱**:
+  1. **`ecc_core.hpp` / `json_min.hpp` / `check.hpp` を削除しなかった**(発注書は
+     「削除」と明記、`check.hpp` だけ「test_ecc_bridge 専用なら」と条件付き)。実際に grep して
+     確認した結果、3 つとも **`test_ecc_bridge.cpp` 専用ではなかった**:
+     - `fake_ecc.cpp` は `ecc_core.hpp` の `ecc::State` / `ecc::Error` / `ecc::next_state` /
+       `ecc::parse_data_link_set` / `ecc::to_string` を状態機械の本体として使っている
+       (~20 箇所)。
+     - `ecc_e2e_client.cpp` は `check.hpp` の `CHECK` マクロ(52 件の合否そのもの)と
+       `json_min.hpp` の `jsonmin::parse`(応答パース)を使っている
+       (`ecc_core.hpp` の include はこのファイルでは実は不使用 —— 削らずに残した)。
+     削除すると「残す」と明記された `fake_ecc.cpp` / `ecc_e2e_client.cpp` が**ビルド不能**になり、
+     `### テスト` 節の受け入れ条件(`run_ecc_e2e.sh` 52 passed)を満たせなくなるため、
+     この 3 ヘッダは残す判断をした(`make clean && make -j ...` のクリーンビルドで実証済み)。
+     ecc_bridge.cpp・test_ecc_bridge.cpp 自体の削除は発注書どおり実施。
+  2. **`src/bin/ecc_bridge.rs` は `bin_support::init_tracing()` を使わず、専用の
+     `init_tracing_to_stderr()` を実装した**(発注書は「他の Rust bin と同じ
+     tracing_subscriber(env-filter)初期化」と指示)。`bin_support::init_tracing()` は
+     既定で **stdout** に書く(`tracing_subscriber::fmt()` の既定 writer)ことを実測で確認 ——
+     このままだと `println!("BIND {endpoint}")` の直後に `info!` 等が同じ stdout に混ざり、
+     「stdout は BIND 1 行のみ」という契約(この bin 自身のドキュメントコメント、Phase 2
+     承認済み逸脱 3)を壊す。試験プロセス側(`Proc::spawn` 系)は stdout の最初の 1 行しか
+     読まないため、以後 tracing が stdout に書き続けると読まれないまま OS パイプに溜まり、
+     長時間 e2e/soak で書き込みブロック(デッドロック)の恐れもある。実測で確認
+     (`init_tracing()` のままだと `BIND ...` の次の行に `INFO ... starting` が stdout に出る、
+     `.with_writer(std::io::stderr)` を足すと stdout は `BIND` 1 行だけになる)。
+     `RUST_LOG` フィルタの意味論(既定 `info`)は共有ヘルパーと同一。
+
+- **未実施(このレーンでは触っていない)**: `docs/SPEC_ja.md` §1.1/§8.2、`CLAUDE.md` の
+  Tech Stack 行(発注書どおり Fable の担当)。demo 実走(上記、worktree 外の理由)。
+
+環境: macOS 26.6.2(Darwin 25.6.0)、rustc 1.97.1、Ice 3.8.2(Homebrew)、2026-09-23。
+

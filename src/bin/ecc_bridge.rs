@@ -16,13 +16,31 @@
 //! * REP は 1 スレッド逐次(コマンドは人間スケール)。**必ず 1 リクエスト 1 レスポンス**を返す
 //!   —— 返さないと REQ 側が永久に待つ。
 //!
-//! C++ 版(`tools/ecc_bridge/ecc_bridge.cpp`)は Phase 3 まで残す。CLI と stdout の
-//! `BIND <endpoint>` 1 行は**そのまま**(`run_ecc_e2e.sh` と Rust 統合テストが見ている)。
+//! C++ 版(`tools/ecc_bridge/ecc_bridge.cpp`)は 076 Phase 3 で撤去済み(fake_ecc /
+//! ecc_e2e_client は残る)。CLI と stdout の `BIND <endpoint>` 1 行は**そのまま**
+//! (`run_ecc_e2e.sh` と Rust 統合テストが見ている)。ログは他の Rust bin と同じ
+//! `RUST_LOG`(既定 `info`)で絞れる `tracing`(076 Phase 3 で `eprintln!` から移行)。
+//! **`tpcdaq::bin_support::init_tracing` は使わない**——既定の書き込み先が stdout で、
+//! それだと `BIND` 1 行きり(SPEC §8.2)の契約を壊す(実測: `info!` が BIND の直後に
+//! stdout へ混ざる)ので、[`init_tracing_to_stderr`] で明示的に stderr へ向ける。
 
 use std::process::ExitCode;
 
 use tpcdaq::ecc::core;
 use tpcdaq::ecc::proxy::{EccProxy, Observed, CONNECT_TIMEOUT};
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
+
+/// 他の Rust bin と同じ `RUST_LOG`(既定 `info`)フィルタだが、**stderr へ書く**
+/// (`bin_support::init_tracing` は stdout に書くため、この bin にだけは使えない)。
+fn init_tracing_to_stderr() {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+}
 
 struct Options {
     /// ZMQ REP の bind(SPEC §3.2)。
@@ -89,7 +107,7 @@ fn observe(ecc: &mut EccProxy) -> Observed {
     match ecc.get_status() {
         Ok(observed) => observed,
         Err(e) => {
-            eprintln!("ecc_bridge: getStatus failed: {e}");
+            error!(error = %e, "getStatus failed");
             Observed::default()
         }
     }
@@ -116,7 +134,7 @@ fn handle(ecc: &mut EccProxy, request_json: &str) -> String {
         Ok(request) => request,
         Err(reason) => {
             // 壊れたリクエストでも ECC の状態は返す(状態が見えないと運用が止まる)。
-            eprintln!("ecc_bridge: rejected request: {reason}");
+            warn!(reason = %reason, "rejected request");
             let observed = observe(ecc);
             return core::make_response(false, observed.state, &reason, observed.error);
         }
@@ -128,11 +146,12 @@ fn handle(ecc: &mut EccProxy, request_json: &str) -> String {
             Ok(observed) => (true, observed, String::new()),
             Err(e) => (false, Observed::default(), e),
         };
-        eprintln!(
-            "ecc_bridge: status -> ok={} state={} ecc_error={} {error}",
-            u8::from(ok),
-            observed.state,
-            observed.error
+        info!(
+            ok,
+            state = %observed.state,
+            ecc_error = %observed.error,
+            error = %error,
+            "status"
         );
         return core::make_response(ok, observed.state, &error, observed.error);
     }
@@ -143,17 +162,20 @@ fn handle(ecc: &mut EccProxy, request_json: &str) -> String {
     let ok = result.is_ok();
     let observed = observe(ecc);
     let error = result.err().unwrap_or_default();
-    eprintln!(
-        "ecc_bridge: {} -> ok={} state={} ecc_error={} {error}",
-        request.action,
-        u8::from(ok),
-        observed.state,
-        observed.error
+    info!(
+        action = %request.action,
+        ok,
+        state = %observed.state,
+        ecc_error = %observed.error,
+        error = %error,
+        "action"
     );
     core::make_response(ok, observed.state, &error, observed.error)
 }
 
 fn main() -> ExitCode {
+    init_tracing_to_stderr();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let options = match parse_args(&args) {
         Cli::Run(options) => options,
@@ -162,7 +184,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Cli::Bad(reason) => {
-            eprintln!("ecc_bridge: {reason}");
+            error!(reason = %reason, "bad arguments");
             eprint!("{USAGE}");
             return ExitCode::from(2);
         }
@@ -172,7 +194,7 @@ fn main() -> ExitCode {
     let mut ecc = match EccProxy::from_proxy_string(&options.ecc_proxy, CONNECT_TIMEOUT) {
         Ok(ecc) => ecc,
         Err(reason) => {
-            eprintln!("ecc_bridge: bad --ecc-proxy: {reason}");
+            error!(reason = %reason, "bad --ecc-proxy");
             return ExitCode::from(2);
         }
     };
@@ -181,16 +203,16 @@ fn main() -> ExitCode {
     let rep = match context.socket(zmq::REP) {
         Ok(socket) => socket,
         Err(e) => {
-            eprintln!("ecc_bridge: cannot create the REP socket: {e}");
+            error!(error = %e, "cannot create the REP socket");
             return ExitCode::FAILURE;
         }
     };
     if let Err(e) = rep.set_linger(0) {
-        eprintln!("ecc_bridge: cannot set ZMQ_LINGER: {e}");
+        error!(error = %e, "cannot set ZMQ_LINGER");
         return ExitCode::FAILURE;
     }
     if let Err(e) = rep.bind(&options.bind) {
-        eprintln!("ecc_bridge: zmq bind({}) failed: {e}", options.bind);
+        error!(bind = %options.bind, error = %e, "zmq bind failed");
         return ExitCode::FAILURE;
     }
 
@@ -201,28 +223,25 @@ fn main() -> ExitCode {
     };
     println!("BIND {endpoint}");
     if let Err(e) = std::io::Write::flush(&mut std::io::stdout()) {
-        eprintln!("ecc_bridge: cannot flush the BIND line: {e}");
+        error!(error = %e, "cannot flush the BIND line");
         return ExitCode::FAILURE;
     }
-    eprintln!("ecc_bridge: ecc proxy = {}", options.ecc_proxy);
+    info!(ecc_proxy = %options.ecc_proxy, "starting");
 
     // 起動時に一度だけ繋ぎに行く。失敗しても**起動は続ける**(ECC が後から上がる運用がある)。
     if let Err(e) = ecc.connect() {
-        eprintln!("ecc_bridge: ECC not reachable yet: {e}");
+        warn!(error = %e, "ECC not reachable yet");
     }
     let mut connected = ecc.is_connected();
     if connected {
-        eprintln!(
-            "ecc_bridge: connected to {} (encoding 1.1)",
-            options.ecc_proxy
-        );
+        info!(ecc_proxy = %options.ecc_proxy, "connected to ECC (encoding 1.1)");
     }
 
     loop {
         let request = match rep.recv_bytes(0) {
             Ok(bytes) => bytes,
             Err(e) => {
-                eprintln!("ecc_bridge: recv failed: {e}");
+                error!(error = %e, "recv failed");
                 break;
             }
         };
@@ -230,20 +249,21 @@ fn main() -> ExitCode {
         let request = String::from_utf8_lossy(&request);
         let reply = handle(&mut ecc, &request);
         if let Err(e) = rep.send(reply.as_bytes(), 0) {
-            eprintln!("ecc_bridge: send failed: {e}");
+            error!(error = %e, "send failed");
             break;
         }
         // 接続の張り直し/切断は運用で読みたいので、変化したときだけ 1 行出す。
         if ecc.is_connected() != connected {
             connected = ecc.is_connected();
-            eprintln!(
-                "ecc_bridge: ECC connection {}",
+            info!(
+                connected,
+                "ECC connection {}",
                 if connected { "established" } else { "dropped" }
             );
         }
     }
 
-    eprintln!("ecc_bridge: shutting down");
+    info!("shutting down");
     ExitCode::SUCCESS
 }
 

@@ -102,9 +102,13 @@ StateMachine → MultiFrame → MDaq → GetBench)のフルビルドは `-j8` �
   - 実 xcfg(`describe-zCobo-ZC706` + `configure-pulser`)で `config-list` が実トリプレットを
     返す。ハード無し `sm-describe` は ConnectTimeout → `WHEN_DESCRIBE` で健全にエラー着地
     (クラッシュ・ハング無し)。
-  - **我々の ecc_bridge(Ice 3.8.2)→ 実 ECC(3.7.11)の実通信成功**
+  - **我々の ecc_bridge(当時は C++/Ice 3.8.2)→ 実 ECC(3.7.11)の実通信成功**
     (`{"action":"status"}` → `{"ok":true,"state":"Idle"}`、encoding 1.1)。
     Ice 3.7/3.8 の wire 互換をテストダブルでなく実物で実証。
+    **更新(TODO/076 Phase 3、2026-09-23)**: ecc_bridge は Rust 実装に置き換わり、
+    ブリッジ自身は Ice ライブラリを一切リンクしない(`src/ice/` の自前 Ice クライアント
+    実装が encoding 1.1 を直接喋る)。ここに記録した実 ECC 側の Ice 3.7 縛りと wire 互換の
+    事実は不変 —— レーン A の履歴として原文のまま残す。
   - **ボーナス(039 の前倒し)**: `getHwServer` も `--enable-cobo` でビルドでき、
     **実 ECC ↔ ローカル getHwServer の接続まで実証**
     (`Connecting to 'CoBo' node '0' at 127.0.0.1:46001` → `Added HW node`)。

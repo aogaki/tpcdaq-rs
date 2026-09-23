@@ -11,11 +11,11 @@
 //! * 合格した run の**出力が消える**(「書いて検証して消す」)。
 //! * メトリクス CSV が 1 行 1 サンプルで書かれ、レポートがその CSV から作られる。
 //!
-//! env が欠けたら**欠けた変数名を stderr に出して** skip する(030 と同じ 5 本):
+//! env が欠けたら**欠けた変数名を stderr に出して** skip する(030 と同じ 5 本。
+//! `TPCDAQ_ECC_BRIDGE_BIN` は 076 Phase 3 以降 Rust bin が既定なので不要):
 //!
 //! ```text
 //! TPCDAQ_ROOT_SINK_BIN=$PWD/tools/root_sink/root_sink \
-//! TPCDAQ_ECC_BRIDGE_BIN=$PWD/tools/ecc_bridge/ecc_bridge \
 //! TPCDAQ_FAKE_ECC_BIN=$PWD/tools/ecc_bridge/fake_ecc \
 //! TPCDAQ_REAL_GRAW=$HOME/TPC/CoBo_2025-09-01T08_51_06.203_0000.graw \
 //! TPCDAQ_REAL_GEOMETRY_MINI=$HOME/TPC/miniTPC_UVW_pcb_info/new_geometry_mini_eTPC.dat \

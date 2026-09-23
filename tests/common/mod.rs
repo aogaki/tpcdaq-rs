@@ -71,6 +71,11 @@ pub struct E2eEnv {
 }
 
 /// 欠けた env 名を **stderr に列挙して** `None`(silent skip を作らない — CLAUDE.md)。
+///
+/// `TPCDAQ_ECC_BRIDGE_BIN` は 076 Phase 3 以降 **Rust bin が既定**
+/// (`env!("CARGO_BIN_EXE_ecc_bridge")` —— `cargo test` が必ずビルドする)なので、
+/// この env が無くても skip 理由には数えない。C++ 版ブリッジと比較したいときだけ
+/// 明示的に上書きする。
 pub fn e2e_env(test: &str) -> Option<E2eEnv> {
     let mut missing = Vec::new();
     let mut get = |name: &str| -> Option<PathBuf> {
@@ -83,7 +88,9 @@ pub fn e2e_env(test: &str) -> Option<E2eEnv> {
         }
     };
     let root_sink = get("TPCDAQ_ROOT_SINK_BIN");
-    let ecc_bridge = get("TPCDAQ_ECC_BRIDGE_BIN");
+    let ecc_bridge = std::env::var_os("TPCDAQ_ECC_BRIDGE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_ecc_bridge")));
     let fake_ecc = get("TPCDAQ_FAKE_ECC_BIN");
     let graw = get("TPCDAQ_REAL_GRAW");
     let geometry = get("TPCDAQ_REAL_GEOMETRY_MINI");
@@ -93,7 +100,7 @@ pub fn e2e_env(test: &str) -> Option<E2eEnv> {
     }
     Some(E2eEnv {
         root_sink: root_sink?,
-        ecc_bridge: ecc_bridge?,
+        ecc_bridge,
         fake_ecc: fake_ecc?,
         graw: graw?,
         geometry: geometry?,
