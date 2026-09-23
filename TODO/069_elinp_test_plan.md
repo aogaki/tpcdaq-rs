@@ -161,3 +161,16 @@ ECC ログ副産物: AsAd 温度 Tint 28 °C / Text 29 °C(stop 時読み出し)
 
 **未実施**: #7(連続 ×10)、#8/#9/#10、Phase 3 #13/#14/#16(オラクル照合は .graw を持ち帰り次第)、
 Phase 4。root-sink(ROOT)は GDED に無く未検証 — run.root 経路は次回。
+
+## 結果(第 2 弾: 2026-09-23 遠隔ベンチ — Rust ecc_bridge、実 ECC ネイティブ、VM の GET 停止、Fable)
+
+| # | 項目 | 実測 | 判定 |
+|---|---|---|---|
+| 7 | 連続 run × 10 | run 15–24(各 20 s、パルサー −300 mV): run/start 7.89–7.92 s、run/stop 3.63–3.64 s、**10 本とも `ecc_walk_back = [status->Ready, breakup->Prepared, reset->Described, reset->Idle]`**、20 frames / malformed 0 / eos_closed true / reason normal | ✅ |
+| 7' | ACM(90 s アイドル後の run 24) | run 23 停止 12:49:20 → 90 s 待ち → run 24 開始 12:50:50、**再接続なしで成功**(bridge ログに切断・再接続の記録なし)。Ice 3.7 サーバ既定 60 s の ACM 切断は**発生しなかった** — 再接続経路は未実証のまま(次は 5 分以上のアイドルで) | ✅(条件付き) |
+| 6' | 歩き戻し(Rust ブリッジ) | 076 結果節: C++ 時と同一 | ✅ |
+| 3' | 生成 xcfg(078) | prepare / configure が `configure-pulser__<sha8>.xcfg` で通る(078 結果節) | ✅ |
+
+構成・手順 = メモリ geteccserver-native-gded(09-23 追記)。**残**: #8–#10(zCoBo 側の切断は遠隔では不可、ECC halt と receiver 余分接続は遠隔で可能 — 次回)、
+#13/#14、#16(compact のオラクル照合 = 今日の run 6–11 で可)、Phase 4(root-sink は新機)。
+
