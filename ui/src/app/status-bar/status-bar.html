@@ -56,4 +56,9 @@
       <mat-icon aria-hidden="true">report</mat-icon>{{ issue }}
     </span>
   }
+
+  <span class="item" matTooltip="Parameters JSON (SPEC §3.3 / TODO/078), polled every 15 s">
+    <span class="key">params</span>{{ paramsId() ?? '—' }} · exceptions
+    {{ format(paramsExceptions()) }}
+  </span>
 </div>

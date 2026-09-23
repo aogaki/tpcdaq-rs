@@ -1,0 +1,242 @@
+.params {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem 2rem;
+  max-width: 74rem;
+}
+
+h2 {
+  margin: 0;
+  font: var(--mat-sys-title-small);
+}
+
+.card {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: var(--tpc-radius);
+  background: var(--mat-sys-surface-container-low);
+  padding: 0.75rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.card > header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.sub {
+  margin: 0;
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-small);
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+}
+
+.banner {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 3px solid;
+  border-radius: 4px;
+  background: var(--mat-sys-surface-container-low);
+  font: var(--mat-sys-body-small);
+}
+
+.banner.info {
+  border-color: var(--tpc-info);
+}
+
+.banner.error {
+  border-color: var(--tpc-error);
+  color: var(--tpc-error);
+}
+
+.banner.ok {
+  border-color: var(--tpc-ok);
+}
+
+.banner .err {
+  color: var(--tpc-error);
+  word-break: break-word;
+}
+
+.chip {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-small);
+}
+
+.chip.unknown {
+  color: var(--tpc-unknown);
+}
+
+.badge {
+  display: inline-block;
+  min-width: 1.4em;
+  margin-left: 0.3rem;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: var(--mat-sys-surface-container-high);
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-small);
+  text-align: center;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-small);
+  max-width: 32rem;
+}
+
+input,
+select {
+  background: var(--mat-sys-surface-container-high);
+  color: var(--mat-sys-on-surface);
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 4px;
+  padding: 0.3rem 0.5rem;
+  font: inherit;
+}
+
+button {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--mat-sys-on-surface);
+  font: inherit;
+  padding: 0.35rem 0.9rem;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* ---- knobs ---- */
+
+.knob-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.knob-group {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--mat-sys-outline-variant) 40%, transparent);
+}
+
+.knob-group:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.group-label {
+  min-width: 12rem;
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-medium);
+  font-weight: 600;
+}
+
+.knob-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.9rem;
+}
+
+.knob-field {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font: var(--mat-sys-body-small);
+}
+
+.knob-field .field-label {
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.knob-field input[type='number'] {
+  width: 6rem;
+}
+
+.knob-field .unit {
+  color: var(--mat-sys-on-surface-variant);
+  font-size: 0.7rem;
+}
+
+/* ---- exceptions ---- */
+
+.exceptions {
+  width: 100%;
+  border-collapse: collapse;
+  font: var(--mat-sys-body-small);
+}
+
+.exceptions th {
+  text-align: left;
+  color: var(--mat-sys-on-surface-variant);
+  font-weight: 500;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--mat-sys-outline-variant);
+  padding: 0.25rem 0.5rem 0.25rem 0;
+}
+
+.exceptions td {
+  padding: 0.25rem 0.5rem 0.25rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--mat-sys-outline-variant) 40%, transparent);
+}
+
+.exceptions input.narrow {
+  width: 3.5rem;
+}
+
+.unknown {
+  color: var(--tpc-unknown);
+}
+
+/* ---- preview ---- */
+
+.xcfg-preview {
+  max-height: 24rem;
+  overflow: auto;
+  background: var(--mat-sys-surface-container-high);
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 4px;
+  padding: 0.5rem 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+}
+
+.xcfg-preview .line {
+  white-space: pre;
+}
+
+.xcfg-preview .line.hl {
+  background: color-mix(in srgb, var(--tpc-info) 18%, transparent);
+  color: var(--mat-sys-on-surface);
+}
