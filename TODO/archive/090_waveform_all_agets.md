@@ -88,3 +88,12 @@ cd ui && npx prettier --check src/app/waveform/waveform-view.ts src/app/waveform
 
 ### スキップしたテスト
 - なし(新規追加分は全て green)。既存の 5 skipped は本チケット着手前からの既存スキップで、090 の変更対象外。
+
+### 目視(2026-09-23、ユーザー + Fable、マージ `worktree-agent-aac3c11918e496c56` → main `3ac3599`)
+- ユーザー: 「確認して、いいと思いました」。
+- Fable: demo(run 2、300 s)に対し閲覧のみの headless Chrome(`reference/_spike/demo/cdp_wave.py`: 4 AGET ON → ch all → max series 272 → overlay / grid)で撮影
+  (`scratchpad/wave090_{overlay,grid}.png`)。表示行 `requested 272 series · drawn 272 · stride 1`。
+  - overlay: 272 本が重なり、パルサー波形の束(頂上 ≈ 3800)と **FPN 16 本の 4095 飽和(平坦)**が一目で分かれる。凡例は非表示(64 超)。
+  - grid: 12 列 × 23 行、1 枚 110 px、タイトル `A<aget>/ch<n>`、軸ラベル非表示。FPN(11/22/45/56)の矩形飽和が各 AGET で確認できる。
+- UI 283 passed、build green。
+
