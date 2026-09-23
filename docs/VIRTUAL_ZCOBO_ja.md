@@ -366,6 +366,13 @@ R8(registerAccess=zCobo)も構造的に消える。実 getHwServer + シード�
   **encoding 1.0 クライアント(実 ECC)相手の受信テストを明示的に持つ**こと。
 - **ペーシング**: 設定で「実時間風(固定 Hz、既定 ~100 Hz)」と「全速(031 負荷ハーネス
   モード)」を切替。3 s 端数 flush(§4.3-⑧)も再現。
+- **loop 時の付け替え(087)**: `loop=true` で先頭へ戻るたびに、送出コピー上の eventIdx へ
+  「セット内の最大 eventIdx + 1」× 周回数を加算する(2 周目以降が late fragment として
+  捨てられる問題への対処。graw_writer が書く .graw もこのヘッダで書かれる)。eventTime も
+  同様に `time_offset_per_lap = (最大−最小 eventTime) + step`(`step` = それを
+  `n_data_frames − 1` で整数除算した「セット内平均間隔」)を周回数倍して加算する
+  (データフレーム 2 枚未満なら 0。48-bit 桁あふれは考えない — demo 用途、087 Fable 裁定
+  2026-09-23)。rateVsTime 系の解析で周回境界が「巻き戻り」に見えないようにする。
 - **設定駆動**: AsAd 数(mini 1 / ELITPC 4)・CoBo 数・graw ファイルセット・ペーシングは
   設定ファイル。ch 数焼き込み禁止の不変条件をここでも守る。
 - **xcfg セット**: デモ用 describe / configure / hardwareDescription は

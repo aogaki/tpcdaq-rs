@@ -373,6 +373,17 @@ inline uint64_t read_header_uint(const uint8_t* p, size_t n, bool little) {
   return v;
 }
 
+/// `read_header_uint` の逆: `value` の下位 `n` バイトを `p` へ書く(エンディアン指定)。
+/// `n` バイト幅を超えるビットは自然に切り捨てられる(48-bit eventTime へ加算後の値を
+/// そのまま渡してよい)。
+inline void write_header_uint(uint8_t* p, size_t n, uint64_t value, bool little) {
+  if (little) {
+    for (size_t i = 0; i < n; ++i) p[i] = uint8_t((value >> (8 * i)) & 0xFF);
+  } else {
+    for (size_t i = 0; i < n; ++i) p[n - 1 - i] = uint8_t((value >> (8 * i)) & 0xFF);
+  }
+}
+
 /// 共通 MFM ヘッダの eventIdx(offset 22..26)を覗き見る。src/decode.rs::peek_event_idx と
 /// **同じゲート**: 28 バイト未満 / frameType(offset 5..7)∉ {1,2} は false =「制御フレーム」。
 /// 制御フレームは eventIdx を持たないのでマージ順序に関与しない(遭遇時にそのまま流す)。
@@ -382,6 +393,31 @@ inline bool peek_event_idx(const uint8_t* frame, size_t len, uint32_t& event_idx
   const uint64_t frame_type = read_header_uint(frame + 5, 2, little);
   if (frame_type != 1 && frame_type != 2) return false;
   event_idx = uint32_t(read_header_uint(frame + 22, 4, little));
+  return true;
+}
+
+/// eventIdx(4B, offset 22)/ eventTime(6B, offset 16)へオフセットを加算する純関数
+/// (TODO/087: 仮想 CoBo が `loop=true` で先頭へ戻るたびに、周回番号ぶんのオフセットを
+/// 乗せて呼ぶための下請け)。ゲートは `peek_event_idx` と同一 —— 28 バイト未満 /
+/// frameType(offset 5..7)∉ {1,2} は「制御フレーム」として **無改変・false**。
+/// データフレームなら両オフセットを加算して true を返す。加算対象の 2 フィールド以外の
+/// バイトには一切触れない。呼び出し側が確保済みのバッファを直接書き換える(heap 確保なし
+/// — ホットパスからの呼び出しを想定)。
+inline bool patch_frame_header(uint8_t* frame, size_t len, uint32_t idx_offset,
+                               uint64_t time_offset) {
+  if (len < 28) return false;
+  const bool little = (frame[0] & 0x80) != 0;
+  const uint64_t frame_type = read_header_uint(frame + 5, 2, little);
+  if (frame_type != 1 && frame_type != 2) return false;
+
+  if (idx_offset != 0) {
+    const uint32_t event_idx = uint32_t(read_header_uint(frame + 22, 4, little));
+    write_header_uint(frame + 22, 4, uint64_t(event_idx + idx_offset), little);
+  }
+  if (time_offset != 0) {
+    const uint64_t event_time = read_header_uint(frame + 16, 6, little);
+    write_header_uint(frame + 16, 6, event_time + time_offset, little);
+  }
   return true;
 }
 
