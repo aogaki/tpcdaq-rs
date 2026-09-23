@@ -138,3 +138,69 @@
   spec: ①`rampPalette` の端点と中点(0.0625 = 黒と暗紫の中間)の手計算オラクル ②長さ 255 ③既存の `invertColors` 3 本は不変。
 - 受け入れ: `npm test`(268 → +2〜3)、`npm run build`、prettier。目視は Fable が `cdp_shot.py` で行う。
 
+## 追補2 結果(2026-09-23、Sonnet レーン)
+
+### 変更ファイル
+- `ui/src/app/monitor/jsroot-loader.ts`
+  - `getColorPalette(57)`(kBird)呼び出しと `KBIRD_PALETTE_ID` 定数を削除。代わりに自前のダーク用ランプ
+    `TPCDAQ_DARK_STOPS`(9 stop、export 済み定数)と、それを 255 色の `rgb(r,g,b)` 配列に線形補間する
+    純関数 `rampPalette(stops, n = 255)`(export 済み)を新設。
+  - パイプラインは方式変更なし: `TPCDAQ_DARK_STOPS` → `rampPalette` → `invertColors`(255-x)→
+    `setColorPalette(CUSTOM_PALETTE_ID = 1057, …)` → `settings.Palette = 1057`。
+  - コメントを全面書き直し(kBird の記述を削除。「JSROOT の colz は最下位レベルに約 5 % 位置の色を使うので
+    先頭 15 % を黒〜暗紫にしてある」を残した)。`invertColors` のコメントも「`getColorPalette()` が返す配色」→
+    「`rampPalette()` は常に `rgb(r,g,b)` を返す」に合わせて更新。
+- `ui/src/app/monitor/jsroot-loader.spec.ts`
+  - `describe('086 追補2 rampPalette — 9 stop の線形補間ランプ', …)` を新設(4 テスト)。既存の
+    `invertColors` 3 本(`describe('086 invertColors — …')`)は無変更のまま green。
+
+### ランプの実装
+- `rampPalette(stops, n = 255)`: 出力 `i`(`0 ≤ i < n`)ごとに位置 `t = i / (n - 1)` を計算し、`t` を挟む隣接
+  2 stop 間を線形補間して `rgb(r,g,b)`(各成分 `Math.round`)を返す。`stops` は位置 0–1 の昇順・先頭が 0・
+  末尾が 1 であることを前提にする(範囲外の扱いは今回不要 — 発注書の 9 stop がその前提を満たす)。
+- `TPCDAQ_DARK_STOPS`(発注書どおり 9 stop、そのまま転記):
+  `0.000 (0,0,0)` 黒 / `0.125 (30,10,60)` 暗紫 / `0.250 (60,20,140)` 藍 / `0.375 (30,80,200)` 青 /
+  `0.500 (0,160,200)` シアン / `0.625 (40,200,120)` 緑 / `0.750 (180,220,60)` 黄緑 / `0.875 (255,210,0)` 黄 /
+  `1.000 (255,120,0)` 橙。
+
+### 端点・中点の値(手計算オラクル、spec に反映)
+- 端点(`n = 255` のとき index 0 と index 254): 先頭 = stop0 そのもの `rgb(0,0,0)`、末尾 = stop8 そのもの
+  `rgb(255,120,0)`。
+- 中点(`n = 17` のとき index 1 の位置は `1/16 = 0.0625` = stop0(黒、位置 0.000)と stop1(暗紫、位置 0.125)の
+  ちょうど中間): `frac = (0.0625 - 0.000) / (0.125 - 0.000) = 0.5` →
+  `r = (0+30)/2 = 15`、`g = (0+10)/2 = 5`、`b = (0+60)/2 = 30` → `rgb(15,5,30)`。実装の出力と一致を確認。
+
+### TDD(red → green)
+- 実装後、`jsroot-loader.ts` の変更だけを一時的に退避(spec の import はそのまま)して
+  `npm test -- --watch=false` を実行し、
+  `TS2305: Module '"./jsroot-loader"' has no exported member 'rampPalette'` /
+  `'TPCDAQ_DARK_STOPS'` で red を確認(ビルド時型エラーで落ちる)。退避を戻して green に復帰したことを確認した。
+
+### 実行コマンドとテスト結果
+- `cd ui && npm test -- --watch=false`
+  - `Test Files: 21 passed | 1 skipped (22)`
+  - **`Tests: 272 passed | 5 skipped (277)`**(before 268 → after 272、+4。発注書の見込み「+2〜3」に対し
+    +4 — 端点 2 本(先頭/末尾)を別テストに分けたため)。
+  - 新規テスト名(`describe` = `086 追補2 rampPalette — 9 stop の線形補間ランプ`):
+    `n=255 で 255 色を返す(位置は i / 254 で等間隔)`、
+    `先頭は stop0 の端点そのもの(位置 0.000 = 黒 rgb(0,0,0))`、
+    `末尾は stop8 の端点そのもの(位置 1.000 = 橙 rgb(255,120,0))`、
+    `位置 0.0625(黒と暗紫の中間)を手計算で照合する(…)`。
+  - 既存 `invertColors` 3 本は無変更・green のまま。
+- `cd ui && npm run build`
+  - green。`Application bundle generation complete.`(3.8s 前後)。警告・エラー無し。
+- `cd ui && npx prettier --check src/app/monitor/jsroot-loader.ts src/app/monitor/jsroot-loader.spec.ts`
+  - `All matched files use Prettier code style!`
+
+### 発注書からの逸脱
+- なし。方式(pre-invert + `setColorPalette` + `settings.Palette = 1057`)は不変、配色だけを発注書の 9 stop に
+  差し替えた。`rampPalette` は発注書のシグネチャ(`stops`, `n = 255` 既定)どおり export。テスト数は発注書の
+  見込み「+2〜3」より 1 本多い +4(端点を先頭/末尾で 2 本に分けたため。仕様には反しない)。
+- 目視確認は今回も**未実施**(発注書の指示どおり「目視は Fable が `cdp_shot.py` で行う」— demo は立てていない)。
+
+### 実行環境
+- 2026-09-23、worktree `.claude/worktrees/agent-ae7309f2098878299`(`git merge --ff-only main` で
+  `fda4ec3`(「086 追補2 発注」コミット)まで同期済み)。
+- Node/npm は本体 `ui/node_modules` をシンボリックリンクで再利用
+  (`ln -s /Users/aogaki/Workspace/tpcdaq-rs/ui/node_modules ui/node_modules`)。
+
