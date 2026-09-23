@@ -564,3 +564,6 @@ Fable レビューはフェーズ境界 2 回(Phase 1 後 = ワイヤ、Phase 2 
   追補の SIGINT/SIGTERM(signal-hook、rcvtimeo 500 ms、実プロセスで 35 ms 停止)承認。cargo 840 passed(ベース)、e2e 52 passed。
 - SPEC §1.1 / §8.2、CLAUDE.md Tech Stack は v1.35 で改訂。**076 完了 → archive**。次に実機で使うときは GDED の rsync + `cargo build --release --bins`。
 
+### 追記(2026-09-23、069 #14): **再接続経路を実機で実証** — getEccServer を再起動すると bridge の status が
+`ice local error: connection lost: 127.0.0.1:46002 closed the connection while reading message header`(state Unknown)を返し、次の run/start で自動再接続 → describe から通った。
+

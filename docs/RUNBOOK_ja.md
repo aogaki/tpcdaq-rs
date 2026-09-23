@@ -55,7 +55,8 @@
 | 症状 | 手当 |
 |---|---|
 | zCoBo に ping が通らない / ECC が `WHEN_DESCRIBE` | `ssh root@192.168.4.8x`、`cd /etc/init.d; ./S99gethwserver stop; ./S99gethwserver start`(SURVEY p.230)。ダメなら電源再投入(§1-2) |
-| ECC が Off/halt に見える(`onUnPrepare` 失敗) | controller の reset を 2 回(Described → Idle)。改善しなければ getEccServer 再起動 |
+| ECC が Off/halt に見える(`onUnPrepare` / breakup 失敗、`ecc_error: WHEN_BREAKUP`) | **controller の reset では戻らない(Off のまま — 069 #14 実測)→ getEccServer を再起動**。Rust ブリッジは次の操作で自動再接続するので、そのまま run/start(歩き戻しは Idle から) |
+| zCoBo の getHwServer が死んだ / 板の再起動 | run は `forced_eos:false` で自然終了に見える(受信 EOF)。run/stop は ECC の stop が 60 s 待って `abort:ecc-stop-failed` になるが受信データは無傷。板で `cd /etc/init.d && ./S99gethwserver start`(2 s で 46001 復帰)→ ECC 再起動 → run/start。zCoBo の ssh host key は起動ごとに変わる(仕様)ので `StrictHostKeyChecking=no` で |
 | データが来ない・止まる(制御は通る) | ジャンボ経路を疑う: `ping -M do -s 8972`(073 #15)。receiver ログ `CoBo connected` の有無 |
 | `extra_connections > 0` | 余分な TCP 接続(旧 dataRouter / 別 PC)。相手を止めてから run |
 | 停電・UPS 放電 | §1 の順序でやり直す。logbook の最終行破損は許容(§9.1)— リーダが警告する |

@@ -174,7 +174,10 @@ Phase 4。root-sink(ROOT)は GDED に無く未検証 — run.root 経路は次�
 
 | 15' | 余分な TCP 接続(run 25、GDED から `nc 192.168.4.2 46005` を 15 s) | `extra_connections` 0 → **1**、receiver WARN「a second data link arrived while one is already up — closing it at once」、本物のリンク(peer 192.168.4.81:40225)は無傷で run 継続(25 frames、malformed 0) | ✅ |
 | 12 | stop 後のリンク | run/stop 後の receiver `peer` = **null**(receiver の Stop がこちら側でリンクを閉じる = 強制 EOS が正規経路、`forced_eos:true / eos_closed:true`)。CoBo 側が自分から close しないことは 09-14 の観測どおり | ✅(意味論確認) |
-| 13/14 | CoBo 側の kill / S1 復旧 | **未実施**: zCoBo への root ssh が「REMOTE HOST IDENTIFICATION HAS CHANGED」で拒否(板が再イメージされた?)。ユーザーに新しい host key の受け入れを確認してから | ⏸ |
+| 13 | CoBo 側の kill(run 27、13:28:58 に板で `S99gethwserver stop`) | receiver: 即 `TCP EOF — end of stream` → EOS を両リンクへ送出、`peer` null。run/stop → **`forced_eos:false` / `eos_closed:true`**(自然 EOF = 「normal に見える異常」のシグナルが立つ)。ただし `ok:false, reason: abort:ecc-stop-failed`(ECC の stop が死んだ板を待って 60 s 超 → bridge REQ timeout)。receiver に「downstream is full — blocking on backpressure」→ teardown で 1 通 abandoned(counted、= EOS 後のハートビート。要確認 → 092) | ✅(意味論) |
+| 14 | S1 復旧(板で `S99gethwserver start` → 2 s で 46001 open) | run/start の歩き戻し: `status->Ready` → **`breakup` が失敗し ECC が `Off`(WHEN_BREAKUP、ice UnknownException)** → run/start は 56 s で abort。controller の `reset` ×2 でも Off のまま → **getEccServer を再起動**(Rust bridge は `connection lost` → 次の呼び出しで**自動再接続**)→ run/start 7.5 s で `status->Idle` から describe/prepare/configure/start → run 28(15 frames、malformed 0、正常停止)。**復旧手順 = 板 `S99gethwserver start` → ECC 再起動 → run/start** | ✅ |
+| 7''' | Ice 再接続経路 | #14 の ECC 再起動で bridge が `connection lost … closed the connection while reading message header` を status に出し、次の run/start で再接続成功 = **再接続経路を実機で実証** | ✅ |
+- zCoBo の root ssh: host key は起動ごとに変わる(ユーザー: 仕様)。GDED から `python3 ~/tpcdaq-rs/zcobo.py "<cmd>"`(pty でパスワード投入、`StrictHostKeyChecking=no` + `UserKnownHostsFile=/dev/null`)で非対話実行できる。パスワードはリポに書かない。
 
 構成・手順 = メモリ geteccserver-native-gded(09-23 追記)。**残**: #8–#10(zCoBo 側の切断は遠隔では不可、ECC halt と receiver 余分接続は遠隔で可能 — 次回)、
 #13/#14、#16(compact のオラクル照合 = 今日の run 6–11 で可)、Phase 4(root-sink は新機)。
