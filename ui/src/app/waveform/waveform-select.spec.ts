@@ -179,3 +179,51 @@ describe('クライアント側間引き(上限・stride・件数の申告)', ()
     expect(plot.outOfRange).toBe(0);
   });
 });
+
+describe('AsAd 1 枚分(4 AGET × 68 ch = 272 ch)を一度に選ぶ(090)', () => {
+  /** AsAd 1 枚分の形(SPEC §5.4): 4 AGET × 68 ch。値は個数の確認だけに使うので 0 のまま。 */
+  function asadFixture(): WaveformsMessage {
+    const nAget = 4;
+    const nCh = 68;
+    const nBuckets = 2;
+    return {
+      kind: 'waveforms',
+      header: { msgType: 0x03, incomplete: false, runNumber: 1, eventNumber: 1 },
+      cobo: 0,
+      asad: 0,
+      nAget,
+      nCh,
+      nBuckets,
+      adc: new Uint16Array(nAget * nCh * nBuckets),
+    };
+  }
+
+  it('maxSeries=272 なら AsAd 全部(4 AGET × 68 ch)が出て、何も落とさない', () => {
+    const plot = selectWaveforms(asadFixture(), {
+      agets: [0, 1, 2, 3],
+      channels: [...Array(68).keys()],
+      maxSeries: 272,
+      maxPoints: 512,
+    });
+    // 手計算: 4 AGET × 68 ch = 272。
+    expect(plot.requestedSeries).toBe(272);
+    expect(plot.series.length).toBe(272);
+    expect(plot.droppedSeries).toBe(0);
+    expect(plot.outOfRange).toBe(0);
+  });
+
+  it('maxSeries=68 なら AGET 1 個分(68 ch)しか描かない', () => {
+    const plot = selectWaveforms(asadFixture(), {
+      agets: [0, 1, 2, 3],
+      channels: [...Array(68).keys()],
+      maxSeries: 68,
+      maxPoints: 512,
+    });
+    expect(plot.requestedSeries).toBe(272);
+    expect(plot.series.length).toBe(68);
+    // 手計算: 272 - 68 = 204。
+    expect(plot.droppedSeries).toBe(204);
+    // 先頭から順(aget 昇順 → ch 昇順)なので描いた 68 系列は全部 aget=0。
+    expect(plot.series.every((s) => s.aget === 0)).toBe(true);
+  });
+});
