@@ -1,6 +1,6 @@
 # 091 — D-3: AsAd 内蔵パルサーの振幅スキャン(GDED 遠隔、実 zCoBo)→ ゲイン直線性 + 電子回路応答
 
-**Status: IN PROGRESS**(2026-09-23 起票 Fable。080 D-3 / 073-#10 / 066(b) 前半。データ取得 = Fable(遠隔)、解析 = Sonnet)
+**Status: COMPLETED**(2026-09-23 起票 Fable。080 D-3 / 073-#10 / 066(b) 前半。データ取得 = Fable(遠隔)、解析 = Sonnet)
 
 ## 0. 取得(2026-09-23、GDED、Rust ecc_bridge + 実 ECC ネイティブ、VM の GET は停止)
 - 構成は 076 結果節(Phase 3 前提)と同じ。1 run = 1 振幅、`asad-pulser-start <mV> 1000`(周期 1000 ms)、60 s(≈ 60 frames、frameType 2 compact、全 ch)。
@@ -187,4 +187,16 @@ TPCDAQ_EXP_DATA_2026=/Users/aogaki/Workspace/tpcdaq-rs/reference/exp_data/2026 c
 - 変更: `src/calib/mod.rs`(`pub mod scan;`)、`src/bin/calib.rs`(`scan` サブコマンド)、
   `tests/calib_synthetic.rs`、`tests/calib_real_graw.rs`、`macros/README.md`
   (SDKROOT note + pulserScan.C 行)、本チケット(この結果節)。
+
+### Fable レビュー(解析、2026-09-23、マージ `worktree-agent-a6bdab1b225754745` → main)
+- 逸脱 1–6 **承認**(フィット点 = |振幅| ≤ 700 mV の 5 点 / `--runs` 未実装 / CSV 2 本 / FPN も fit 対象 / 単位はバケット / 圧縮のモデル化なし)。
+- **物理の読み**(`reference/_spike/d3/pulserScan.png`):
+  - signal ch は −700 mV まで直線(残差 < 2 %)、**−1000 mV で −5.3 %** = 圧縮の開始は −700〜−1000 mV(生 ADC ≈ 3600/4095 付近)。−100 mV の −4.7 % は
+    小振幅側の切片効果かパルサー DAC の非直線性 — 要観察(較正では −200〜−700 を使う)。
+  - **FPN は signal より ≈ 1.5 倍高感度**(−100 mV で 544 vs 369)で、−700 mV 以上では ADC 上限に張り付く → 077 で見えた「パルサー run の FPN 4095 飽和」の由来。
+    FPN からゲインは取れない(068 の結論と同じ)。
+  - ch 毎 slope のばらつき: 中央値からの相対ずれ 1.37 %(最悪 5.19 %)= 068 の相対ゲイン ±4.4 % と同オーダー。
+  - 平均波形(pulser テンプレートは WCK **100 MHz = 10 ns/bucket**): ピーク bucket 187–188(振幅非依存)、**立ち上がり 10–90 % ≈ 57–61 bkt = 0.57–0.61 µs**、
+    **FWHM ≈ 160–168 bkt = 1.60–1.68 µs**(peaking time 1014 ns)。振幅依存は 5 % 以内 → 電子回路応答は線形域では形が不変(066(b) の応答関数の元として使える)。
+- 残: 066(b) 後半(イオンテール + Unfolding)は D-5 で。25 MHz(物理設定)での平均波形は次の線源 run で。
 
