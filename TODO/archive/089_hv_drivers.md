@@ -177,3 +177,10 @@ CAEN GUI(HiVolta)/ HMP2020 前面表示との 1 分間一致確認は**未実施
 実機で `INST:NSEL?` が `#CMD:ERR` 相当のエラーを返す、または無応答なら、`HmpDriver::poll` は
 その ch で `DriverError::Protocol`(または `Timeout`)を返して停止する——silent に別 ch の値を
 読むことは無いが、実機セッションでの確認は必須。
+
+### Fable レビュー(2026-09-23、マージ `worktree-agent-af04083a470b676fe` → main `b6f27df`)
+- 初回の報告 2 点を裁定して実装させた: ①config の `hivolta` は `addr` or `port`(両方あれば addr 優先)②HMP の `INST:NSEL n` は `ScpiLink::send`(書くだけ)+
+  `INST:NSEL?` で選択確認(不一致は Protocol)。発注書の「5 項目」は誤記で 4 項目(VMON / IMON / STATUS / VSET)が正。serial フォールバック時の 1 poll 1.57 s は許容
+  (TCP が既定)。書き込み系の経路なし(grep で確認)。
+- 残 = 実機(CAEN GUI / HMP 前面表示と 1 分間一致、`INST:NSEL?` の実在確認)。
+

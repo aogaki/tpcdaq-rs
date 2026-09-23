@@ -547,6 +547,7 @@ log_every_s = 60                       # 値が変わらなくても logbook `sl
 type = "bronkhorst_flowbus"            # | "arduino_env" | "hivolta" | "hmp2020" | "fake"(テスト)
 name = "gas"                           # logbook / status の `device`
 port = "/dev/serial/by-id/usb-FTDI_xxx-if00-port0"   # /dev/ttyUSBn は書かない(by-id、無ければ by-path)
+# hivolta は addr = "192.168.x.y:1470"(TCP、既定)または port(USB VCP 9600)のどちらか。両方あれば addr 優先(v1.34、TODO/089)
 nodes = "scan"                         # FLOW-BUS: "scan" = 128 + 3..120 を起動時に走査、または [3, 4, 5]
 expect_serial = ""                     # 任意。空でなければ open 時に 113/3 と照合(不一致 = エラーとして数えて再試行)
 alarms = [{ node = 4, param = "fmeasure", lo = 90.0, hi = 110.0 }]   # [lo, hi] 逸脱で ALARM、戻れば RECOVER。DAQ は止めない
