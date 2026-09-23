@@ -229,3 +229,9 @@
   → 追記 8 の結論(ポート内の残留は日単位で減り、永久汚染ではない = ²²⁴Ra の反跳汚染)が 6 日分でも成立。その他の飛跡は 3.66 d 成分 0.0029 ± 0.0012(2.4σ)、定数 0.0124 Hz。
 - 次の観測点: run 再開後に同じ解析を足せば、²²⁴Ra なら 2 週間で筋が消える(消えなければ ²²⁸Th の剥離)。
 
+## 追記 10(2026-09-23、設定の確認)
+- ユーザー確認: mini のデータは**常に 25 MHz(40 ns/bucket)**で取っている(VM の workspace.xcfg が指す `configure-physics-extTrig_240fC_25MHz_70ns.xcfg`、VM 内 `/home/getuser/Desktop/TPCConfigFiles/`)。
+  TPC_Share の `configure-pedestals.xcfg`(外部トリガ / 100 MHz / 1 pC / 1014 ns、09-11 編集)は物理 run の設定ではない。→ 本チケットの時間軸(40 ns)は正しい。
+- 09-23 14:46〜15:05 に tpcdaq-rs で背景 run(run 5、configure-pedestals 設定)を試みたが、**HiVolta(DT1415ET S/N 165)は 12:27 の初読み出し時点から全 ch VSET 0 V**(HV 断)で
+  α は取れず中止。HV の再印加は現地作業。代わりに内部トリガの pedestal run(run 6、240fC / 25 MHz / 70 ns、30 分)を取得(081 の本番機受け入れ用)。
+
