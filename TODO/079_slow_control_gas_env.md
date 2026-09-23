@@ -223,6 +223,31 @@ reference/ は worktree に無い(本票では不要)。
 silent failure 無し(全エラー経路にカウンタか `warn!`)。**設計判断が残ったら実装せず報告**(例: serialport の feature で Linux ビルドが変わる、
 monitor の SUB を 1 本にするか 2 本にするか)。
 
+## 2.7 Phase 3 発注(Arduino MKR ENV スケッチ + ドライバ — Sonnet、2026-09-23 着手)
+
+前提: Phase 2 済(`Driver` trait / `Sample` / `Ident` / `DriverError` は `src/slowctl/mod.rs`、`open_driver` は `src/slowctl/component.rs`、
+シリアルの open は `bronkhorst.rs` の `open_serial` の流儀)。着手前に worktree で `git merge --ff-only main`。発注書は本体の絶対パス
+`/Users/aogaki/Workspace/tpcdaq-rs/TODO/079_slow_control_gas_env.md`(§2.3、§2.6、Phase 2 結果節、本節)で読んでよい。
+
+### 作るもの
+1. `tools/arduino_env/env_json.ino` + `tools/arduino_env/README.md`: ボード = Arduino MKR 系 + **MKR ENV Shield**(ライブラリ `Arduino_MKRENV`)。
+   `Serial.begin(115200)`、`ENV.begin()` 失敗時は 1 秒毎に `{"dev":"mkr_env","error":"ENV shield not found"}`。成功時は **1 秒毎に JSON 1 行**:
+   `{"dev":"mkr_env","seq":123,"t_c":24.31,"rh":41.2,"p_hpa":1003.7,"lux":120.5,"uva":0.12,"uvb":0.03}`(小数 2 桁、`seq` は起動からの通番、行末 `\n`)。
+   WiFi は使わない。README に配線(シールド装着のみ)、`arduino-cli` での書き込み手順(core / lib のインストールコマンド)、`/dev/serial/by-id/` の見つけ方。
+2. `src/slowctl/arduino.rs`: `ArduinoEnv<S: Read + Write>` が `Driver` を実装。
+   - `ident`: 最大 3 行(各行のタイムアウトは呼び手の設定)を読み、`"dev":"mkr_env"` を確認して `Ident { device, node: None, fields: {"dev": "mkr_env", "seq": ...} }` を返す。
+     `"error"` 行なら `DriverError::Protocol(<error 文言>)`、`dev` が違えば `DriverError::Identity { expected: "mkr_env", got }`。
+   - `poll`: バッファに溜まった行を全部読み **最後の完全な行**だけを使う(1 Hz 未満で読んでも古い行で埋めない)。Sample は node = None で
+     `t_c`[`degC`] / `rh`[`%`] / `p_hpa`[`hPa`] / `lux`[`lux`] / `uva`[`raw`] / `uvb`[`raw`]。JSON でない・キー欠落は `Protocol`(parse_err に数えられる)、行が来なければ `Timeout`。
+   - `serde_json` で復号(依存追加なし)。`seq` の飛びは `warn!` で可視化(数えるだけ、エラーにしない)。
+3. `component.rs::open_driver` に `"arduino_env"`(`port` 必須、115200 8N1、`open_serial` と同じ by-id 警告と `expect_serial` 不使用 = 名乗りで照合)。
+4. `src/slowctl/fake_arduino.rs`(cfg(test) + feature `slowctl-fake`): 行の列と無応答を注入できる in-memory 応答器。
+
+### テスト(TDD)
+- 単体: 正常行のゴールデン(上の JSON をそのまま)→ Sample 6 個と単位 / `error` 行 / `dev` 不一致 / 壊れ JSON / キー欠落 / 複数行溜まりで最後だけ採用 / 無応答 Timeout。
+- `open_driver("arduino_env")` の経路は config パースの単体(既存の `[[slowctl.device]]` テストの流儀)で `type` と `port` の検証まで。
+- `cargo fmt && cargo clippy --tests -- -D warnings && cargo test` green(現 784)、production `.unwrap()` 無し。実機受け入れ(現地でシールド接続、1 分間 FlowSuite 相当の目視)は未実施と明記。
+
 ## 3. 確認事項(着手は止めない — 既定で進め、現地で確定)
 1. ~~Bronkhorst の機種・接続~~ → **判明**(§1.1–1.2)。残: 先頭機器・ノード番号(Phase 0 で scan)、
    **RS232 の現在の相手 PC**(第 2 local host が使えるかで運用が変わる、§1.5)。

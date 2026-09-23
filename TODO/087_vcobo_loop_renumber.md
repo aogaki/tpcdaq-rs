@@ -17,7 +17,7 @@
   `loop = false` のときは呼ばない(1 周目はバイト一致のまま = 既存テストが証拠)。
 - テスト(`test_vcobo_core.cpp`): ①合成フレーム(little / big 両方)で eventIdx / eventTime の加算値と他バイトの不変を検査 ②制御フレームは無改変
   ③2 周分の送出列で eventIdx が単調増加し重複が無いこと(既存のループテストがあれば拡張)。`make -j` で green、件数を結果節に。
-- 受け入れ(demo): `TPCDAQ_DEMO_LOOP=true` で run を 3 分回し、`/api/status` の events_built が周回に応じて増え、late_fragments が 0 のまま。
+- 受け入れ(demo、**Fable がマージ後に実施 — 実装レーンは demo スタックを立てない**(ユーザーのスタックとポートが衝突する)): `TPCDAQ_DEMO_LOOP=true` で run を 3 分回し、`/api/status` の events_built が周回に応じて増え、late_fragments が 0 のまま。
   monitor に後から繋いだ WS クライアントに 0x02/0x03 が届く(`reference/_spike/demo/ws_probe.py --seconds 20` で 0x02 が数えられる)。
 - 注意: graw_writer が書く .graw も付け替え後のヘッダになる(demo 用途なので可。docs/VIRTUAL_ZCOBO_ja.md に 1 行追記)。
 

@@ -318,3 +318,37 @@ TPCDAQ_XCFG_TEMPLATE=/Users/aogaki/Workspace/tpcdaq-rs/reference/config/configur
 - **SPEC v1.32 §3.3 に契約を固定**(ノブ 11、スコープ、展開規則、除去規則、受け入れ)。§2 の JSON 例の `peakingTime_ns` は AGET スコープ、`pulser` は CoBo スコープと読み替える(表は PARAMS_KNOBS_ja.md §7 が正)。
 - 次 = レーン B(controller REST + run/start 結線 + 監査ログ、Sonnet)→ レーン C(UI、Sonnet)。§5-3(実 ECC)は新 DAQ 機。
 
+## 10. レーン B 発注(controller REST + run/start 結線 + ログブック — Sonnet、2026-09-23)
+
+前提: レーン A 済(`src/params/{schema,render,paths}.rs`、`render(&Params, template_xml) -> Rendered`、`Params` は serde、`ParamsError` は文言付き)。
+契約 = SPEC v1.32 §3.3。着手前に worktree で `git merge --ff-only main`(ff できなければ固有コミットが無いことを確認して `git reset --hard main`)。
+発注書は本体の絶対パス `/Users/aogaki/Workspace/tpcdaq-rs/TODO/078_param_ui_json_xcfg.md`(§2–§4、§9 結果節、本節)で読んでよい。UI(レーン C)は含めない。
+
+### 作るもの
+1. `src/config.rs` `[controller]` に **`ecc_config_dir: Option<PathBuf>`**(ECC の config repo = 生成 xcfg の出力先。テンプレート `template` もこの下から読む)と
+   **`params_dir: Option<PathBuf>`**(JSON の保存先。省略 = `<output_root>/params`)。`ecc_config_dir` 省略時は params 系 REST が **503 `{"error":"ecc_config_dir is not configured"}`**
+   を返す(黙って無効にしない)。`deny_unknown_fields` 維持、既存 TOML は無変更で読める。
+2. `src/controller.rs` REST(§8.1 に追加、token は run/start と同じ操作権 token):
+   - `GET /api/params` → 現在の JSON があれば `{ "id": "<stem>__<sha8>", "sha256": "...", "exceptions": N, "params": {...}, "files": {"configure": path, "prepare": path} }`、無ければ 404。
+   - `PUT /api/params` body `{ "token": "...", "params": {...} }` → `Params` として検証(失敗 = **400** に `ParamsError` の文言)→ テンプレートを
+     `<ecc_config_dir>/<template>` から読む(無ければ 400)→ `render` → `<ecc_config_dir>/configure-<id>.xcfg` と `prepare-<id>.xcfg` を書く
+     (**既存なら上書きしない** = 同じ JSON は同じファイル)→ JSON を `<params_dir>/current.json` と `<params_dir>/<id>.json` に保存 → GET と同じ形を返す。
+     監査 `audit` レコード(`action: "params/put"`、`params: {id, exceptions}`)を書く。
+   - `GET /api/params/render?template=<name>` + body 無し(dry run): current.json を指定テンプレートで render し **書かずに** `{ "id", "exceptions", "configure_xcfg": "<text>" }` を返す
+     (UI の diff 表示用。テンプレート省略時は current.json の template)。
+   - Run 中(phase ≠ Idle)の PUT は **409**(次 run から効くという半端を作らない)。
+3. **run/start 結線**: current.json があれば **prepare / configure の config_id = `<id>`**(describe は TOML のまま)。無ければ従来どおり TOML の config_id。
+   logbook `run_start` に **`params: {id, sha256, exceptions}`(nullable、無ければ省略)**、`audit run/start` の params に `params_id`。
+   `run_start_config_fields` の `config_ids` 分岐(§9.2 v1.13: 非同値時のみ出す)は params 由来でも同じ規則で出す。
+4. `GET /api/status` に `params: {id, exceptions} | null` を足す(status バーの `params <id> · exceptions N` の元。UI はレーン C)。
+
+### テスト(`tests/controller_integration.rs` の Harness / MockTransport の流儀、TDD)
+- テンプレート = レーン A の合成フィクスチャ `tests/fixtures/params/template_mini.xcfg` を一時ディレクトリ(= `ecc_config_dir`)にコピーして使う。
+- ① GET 404 → PUT(有効 JSON = `tests/fixtures/params/params_roundtrip.json`)→ 2 ファイル生成・GET 200・`exceptions` 件数 ② PUT(範囲外 / スコープより細かい例外 / 未知ノブ)→ 400 と文言
+  ③ 同じ JSON を再 PUT → ファイルのタイムスタンプ不変 ④ `ecc_config_dir` 無し TOML → 503 ⑤ run/start → MockTransport が受けた prepare / configure の `config_id` が `<id>`、
+  describe は TOML の値、logbook `run_start.params` と `audit.params_id` ⑥ Running 中の PUT → 409 ⑦ dry-run render が書かないこと(ディレクトリの一覧不変)。
+- `cargo fmt && cargo clippy --tests -- -D warnings && cargo test` green(現 784)。production `.unwrap()` 無し。
+
+### 受け入れ・逸脱
+結果節に: エンドポイントの最終形(JSON 例)、テスト数 before → after、承認が要る逸脱。SPEC §8.1 / §9.2 / §3.1 への転記は Fable(触らない)。
+設計判断が残る分岐(例: run 中 PUT の扱いを 409 以外にしたい、`<id>` 衝突時の扱い)は実装せず報告。
