@@ -156,6 +156,12 @@ pub enum LogbookRecord {
         /// 省略**(空オブジェクトを書かない —— null / 省略 ≠ 空値の nullable 規律)。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         slow: Option<Value>,
+        /// パラメータ JSON 由来の config id(078 レーン B §10、nullable)。
+        /// `{"id", "sha256", "exceptions"}`。**`current.json` が無ければ省略**(TOML の
+        /// config_id だけで run した、という記録と「params を使ったが空」を混同しない
+        /// —— slow と同じ nullable 規律)。末尾に置く(slow より後 = 導入がいちばん新しい)。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<Value>,
     },
 
     #[serde(rename = "run_stop")]
@@ -277,6 +283,20 @@ pub mod schema {
         "comment",
         "expected_fragments",
         "slow",
+    ];
+
+    /// `run_start` に params(078 レーン B)の id が載るとき。`params` は**さらに末尾**
+    /// (`slow` より後 —— 導入がいちばん新しい)。
+    pub const RUN_START_WITH_PARAMS: &[&str] = &[
+        "run",
+        "config_id",
+        "geometry",
+        "cobos",
+        "operator",
+        "comment",
+        "expected_fragments",
+        "slow",
+        "params",
     ];
 
     /// `run_start` の `actor` 以降で、ConfigId の 3 相が**非同値**のとき(v1.13)。
@@ -544,6 +564,7 @@ mod tests {
             comment: "gas test".to_string(),
             expected_fragments: vec![(0, 0)],
             slow: None,
+            params: None,
         }
     }
 
@@ -773,6 +794,7 @@ mod tests {
             comment: "gas test".to_string(),
             expected_fragments: vec![(0, 0)],
             slow: None,
+            params: None,
         }
     }
 
@@ -1074,6 +1096,7 @@ mod tests {
                 comment,
                 expected_fragments,
                 slow: Some(slow.clone()),
+                params: None,
             },
         };
         let json = serde_json::to_string(&with_slow).unwrap();
@@ -1137,6 +1160,65 @@ mod tests {
         })
         .unwrap();
         assert!(!without.contains("slow"));
+        assert!(!without.contains("params"));
+    }
+
+    /// 078 レーン B §10-3: `run_start.params` は `slow` よりさらに末尾に出て、
+    /// current.json が無ければ(= `sample_run_start()` の既定)キーごと省略される。
+    #[test]
+    fn run_start_carries_the_params_id_after_slow_and_omits_it_when_there_is_no_current_json() {
+        let params = serde_json::json!({
+            "id": "physics-zCobo1k__a1b2c3d4",
+            "sha256": "a1b2c3d4e5f60718293a4b5c6d7e8f901234567890abcdef1234567890abcd",
+            "exceptions": 2,
+        });
+        let slow = serde_json::json!({
+            "gas/4/fmeasure": {"value": 130.5, "unit": "mbar", "ts": "2026-09-22T10:00:00.000+03:00"}
+        });
+
+        let LogbookRecord::RunStart {
+            actor,
+            run,
+            config_id,
+            config_ids,
+            geometry,
+            cobos,
+            operator,
+            comment,
+            expected_fragments,
+            ..
+        } = sample_run_start()
+        else {
+            panic!("sample_run_start が RunStart でない");
+        };
+        let line = LogbookLine {
+            ts: "2026-08-12T00:00:00.000+00:00".to_string(),
+            seq: 1,
+            record: LogbookRecord::RunStart {
+                actor,
+                run,
+                config_id,
+                config_ids,
+                geometry,
+                cobos,
+                operator,
+                comment,
+                expected_fragments,
+                slow: Some(slow),
+                params: Some(params.clone()),
+            },
+        };
+        let json = serde_json::to_string(&line).unwrap();
+        assert_eq!(
+            top_level_keys(&json),
+            expected_keys(schema::RUN_START_WITH_PARAMS)
+        );
+        assert!(
+            json.contains(r#""params":{"exceptions":2,"id":"physics-zCobo1k__a1b2c3d4","sha256":"a1b2c3d4e5f60718293a4b5c6d7e8f901234567890abcdef1234567890abcd"}"#),
+            "{json}"
+        );
+        let back: LogbookLine = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, line);
     }
 
     #[test]

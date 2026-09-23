@@ -352,3 +352,109 @@ TPCDAQ_XCFG_TEMPLATE=/Users/aogaki/Workspace/tpcdaq-rs/reference/config/configur
 ### 受け入れ・逸脱
 結果節に: エンドポイントの最終形(JSON 例)、テスト数 before → after、承認が要る逸脱。SPEC §8.1 / §9.2 / §3.1 への転記は Fable(触らない)。
 設計判断が残る分岐(例: run 中 PUT の扱いを 409 以外にしたい、`<id>` 衝突時の扱い)は実装せず報告。
+
+## 結果(レーン B — REST + run/start 結線、2026-09-23、Sonnet レーン)
+
+実行環境: macOS 26.6.2 (arm64) / rustc 1.97.1。着手前に worktree で `git merge --ff-only main`
+→ `71a857c`(a11013a 以降)に到達、`cargo test` 784 passed を確認してから着手。
+
+### 実行コマンド
+
+```
+cargo fmt && cargo clippy --tests -- -D warnings && cargo test
+```
+
+### テスト数
+
+**784 passed → 793 passed / 0 failed / 1 ignored**(+9、`ignored` はレーン A から既存で未変更)。
+内訳: `tests/controller_integration.rs` に発注 §10 の ①〜⑦ + 「作るもの」④(status)の **8 本**
+(`params_get_404_then_put_creates_the_xcfg_pair_and_get_returns_the_same_shape` / `params_put_rejects_schema_violations_with_400_and_the_params_error_text` /
+`params_put_is_idempotent_and_leaves_existing_file_timestamps_alone` / `params_rest_returns_503_when_ecc_config_dir_is_not_configured` /
+`params_id_drives_prepare_and_configure_config_id_at_run_start` / `params_put_is_refused_with_409_while_a_run_is_active` /
+`params_render_dry_run_does_not_write_any_file` / `status_reports_the_current_params_id_and_exceptions_or_null`)、
+`src/logbook.rs` に `run_start.params` の位置・省略を固定する単体 **1 本**
+(`run_start_carries_the_params_id_after_slow_and_omits_it_when_there_is_no_current_json`)。
+production コードに `.unwrap()` 無し(新規追加分は grep で確認済み — `.unwrap()` が付いたのはテスト内の 2 箇所のみ)。
+`config.rs` の既存 2 テスト(`controller_016_keys_default_to_the_spec_port_table` /
+`controller_016_keys_are_overridable`)を拡張して `ecc_config_dir` / `params_dir` の既定(`None`)と
+上書きを追加検証(新規テスト関数は増やさず、既存の「016 追記キー」の流儀に合わせた)。
+
+TDD の逸脱: `src/params/` 側(レーン A、変更禁止)の契約が固まっていたため、REST 層のテスト(①〜⑦)は
+ハーネス配線(`ControllerParams` へのフィールド追加、`harness_full` への `ecc_config_dir` 引数追加)と
+ハンドラ実装を同じセッションでまとめて書き、`cargo test` で最初に確認したのは green(実装込み)だった
+—— 個々のテストを実装前に赤で確認する古典的な手順は踏めていない。`src/logbook.rs` の `params` フィールド
+(schema 定数 `RUN_START_WITH_PARAMS` を含む新設テスト)は先にテストを書いてから struct に手を入れており、
+そちらは赤→緑を実測している。
+
+### エンドポイント最終形(実行例、`tests/fixtures/params/params_roundtrip.json` を PUT した場合)
+
+`PUT /api/params` req: `{"token": "<token>", "params": <params_roundtrip.json の中身>}`
+
+`PUT` / `GET /api/params` 応答(同じ形。パスは実行毎の一時ディレクトリなので値は例):
+
+```json
+{
+  "id": "mini-fixture__797d5dc2",
+  "sha256": "797d5dc245553d3aaae0c7172993e6a311de94e7d48f211855ecc6c762112ac5",
+  "exceptions": 0,
+  "params": {
+    "schema": "tpcdaq-params/1",
+    "template": "configure-mini-fixture.xcfg",
+    "knobs": { "triggerDelay": 1748, "writingClockFrequency_MHz": 25.0, "triggerMode": "external",
+      "globalThreshold": 1, "lsbThreshold": 15, "gain": "120fC", "triggerInhibition": "none",
+      "peakingTime_ns": 232, "readout": "full",
+      "zeroSuppression": { "enabled": false, "threshold": 600 },
+      "pulser": { "enabled": false, "voltage_mV": -1000.0, "period_ms": 1000 } },
+    "exceptions": [],
+    "note": "template_mini.xcfg の現行値そのまま(078 §5-1 の往復テスト)"
+  },
+  "files": {
+    "configure": "<ecc_config_dir>/configure-mini-fixture__797d5dc2.xcfg",
+    "prepare": "<ecc_config_dir>/prepare-mini-fixture__797d5dc2.xcfg"
+  }
+}
+```
+
+`GET /api/params/render`(省略時 = current.json の template)応答: `{"id", "exceptions", "configure_xcfg": "<xcfg テキスト>"}`(書かない)。
+
+`GET /api/status` の追加分: `"params": {"id": "mini-fixture__797d5dc2", "exceptions": 0}`(current.json 無し / ecc_config_dir 未設定 / render 失敗はどれも `null`)。
+
+`run/start` 成功時の `logbook.run_start.params`: `{"id": "...", "sha256": "...", "exceptions": 0}`(current.json が無ければキーごと省略)。
+同じ run の `audit run/start` の `params` に `"params_id": "..."`(current.json 無しは `null`)を追加。
+
+### 承認が必要な逸脱
+
+1. **`ControllerConfig.ecc_config_dir` / `params_dir` は `Option` のまま持ち回り**、`config.rs::resolve()` では
+   既定を解決しない(§10 発注の型注記どおり)。`params_dir` の既定 `<output_root>/params` は
+   `Controller::params_dir()`(呼び出し側)で解決する ——既存の `router_ip: Option<String>` と同じ
+   「Option を持ち回り、既定は使う側で足す」流儀に揃えた(`output_root` が `[system]` セクションの値で
+   `[controller]` 単独では解決できないのも `router_ip` と同型の事情)。
+2. **PUT の検証順序**: authorize(401)→ `ecc_config_dir` の有無(503)→ JSON スキーマ検証(400)→
+   相が Idle か(409)→ テンプレート読込 + render(400)→ 書き込み。発注書はこの順序を明記していない
+   (既存の `post_run_next` の「authorize → 入力の形 → 相」の順に、503 の可用性チェックを
+   authorize の直後に足した形)。
+3. **GET と PUT/render での render 失敗の HTTP コードを分けた**: PUT・`GET /api/params/render` は
+   リクエストの入力(JSON 本体やクエリの `template`)が原因なので 400、`GET /api/params` は
+   「保存済み current.json をそのまま映すだけ」の閲覧系なので同じ失敗を 500(サーバ側の不整合、
+   例えば PUT 後にテンプレートファイルが消された)として返す。発注書に明記が無いための解釈。
+4. **PUT の本文の正本化**: axum の `Json` extractor は受信バイト列を `serde_json::Value` へ parse
+   済みで、生バイト列そのものは残らない。`request.params.to_string()`(`serde_json::Map` は
+   `preserve_order` 機能を有効にしていないので `BTreeMap` 裏付け = キー常に辞書順)を「正本の
+   JSON テキスト」とし、`Params::from_json_str` の検証・sha256・`current.json`/`<id>.json` の
+   保存すべてこの文字列を使う。空白の揺れは吸収されるが、これは §3-3「同じ JSON → 同じファイル」を
+   REST 越しでも保つのに必要な性質だと判断した。
+5. **`current.json` は content-addressed 扱いにしない**(常に上書き)。`<id>.json` /
+   configure-`<id>`.xcfg / prepare-`<id>`.xcfg は既存なら書かない(§3-3 の規則そのまま)。
+6. **run/start で current.json はあるが render できない場合は run を始めず `Err`**
+   (黙って TOML の config_id へ後退しない — CLAUDE.md の silent failure 禁止を優先)。
+   `ecc_config_dir` が(current.json 保存後に)外された場合も同様に run を拒否する。
+7. **`GET /api/status` の `params` は失敗しても `null` + `notes` に一言、status 応答自体は
+   200 のまま**(他コンポーネントの不達と同じ「集約 view は落とさない」既存の設計に合わせた)。
+8. **`audit params/put` の `params` は常に `{id, exceptions}` の 2 キー**(sha256 は載せない —
+   発注書の例に忠実。`GET`/`PUT` 応答には sha256 を含める)。
+
+### 未実施 / 範囲外
+
+- UI(レーン C)、SPEC §3.3/§8.1/§9.2 への転記(Fable)は本ユニットの範囲外(発注書どおり)。
+- `src/params/{schema,render,paths}.rs` は無変更(発注どおり「既存の src/params/ を使い、変えない」)。
+- 実 ECC(vcobo)での describe→prepare→configure 通し確認(078 §5-3)は新 DAQ 機作業として未実施(レーン A から持ち越し、レーン B の範囲外)。

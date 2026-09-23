@@ -700,6 +700,7 @@ mod tests {
                 comment: "gas test".to_string(),
                 expected_fragments: vec![(0, 0)],
                 slow: None,
+                params: None,
             },
         }
     }

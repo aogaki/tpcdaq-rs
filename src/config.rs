@@ -452,6 +452,15 @@ pub struct ControllerConfig {
     /// DataLinkSet の `router_ip`(SPEC §8.2)。`None` なら receiver の実 bind アドレスから
     /// 導く(`0.0.0.0` のような不定アドレスなら `127.0.0.1` に落として警告する)。
     pub router_ip: Option<String>,
+    /// 078 レーン B: ECC の config repo(生成 xcfg の出力先。パラメータ JSON の `template` も
+    /// この下から読む)。省略時は params 系 REST(`/api/params*`)が 503 を返す
+    /// (黙って無効にしない — CLAUDE.md)。`router_ip` と同じ「Option のまま持ち回り、
+    /// 既定は呼び出し側で足す」流儀(ここは既定が無い)。
+    pub ecc_config_dir: Option<PathBuf>,
+    /// 078 レーン B: パラメータ JSON(current.json / `<id>.json`)の保存先。省略時の既定
+    /// `<output_root>/params` は `router_ip` と同じく呼び出し側([`crate::controller::Controller`])
+    /// で解決する(ここでは解決しない — output_root は同じ `Config` の別セクションにある)。
+    pub params_dir: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------
@@ -576,6 +585,11 @@ struct RawController {
     ecc_command: Option<String>,
     #[serde(default)]
     router_ip: Option<String>,
+    // ---- 078 レーン B で追記(省略可、既存 TOML は無変更で読める)----
+    #[serde(default)]
+    ecc_config_dir: Option<PathBuf>,
+    #[serde(default)]
+    params_dir: Option<PathBuf>,
 }
 
 /// `[controller] config_id` の 2 通りの書き方(SPEC §3.1 v1.13)。
@@ -780,6 +794,8 @@ fn resolve(raw: RawConfig) -> Config {
             .ecc_command
             .unwrap_or_else(|| DEFAULT_ECC_COMMAND_ENDPOINT.to_string()),
         router_ip: raw.controller.router_ip,
+        ecc_config_dir: raw.controller.ecc_config_dir,
+        params_dir: raw.controller.params_dir,
     };
 
     Config {
@@ -2054,6 +2070,10 @@ ws_listen = "0.0.0.0:9000"
         );
         assert_eq!(config.controller.ecc_command, "tcp://127.0.0.1:47200");
         assert_eq!(config.controller.router_ip, None);
+        // 078 レーン B: 新設キー。省略時は両方 `None`(`router_ip` と同じ「既定は無い/
+        // 呼び出し側で足す」流儀 —— controller.rs の `Controller::params_dir` 参照)。
+        assert_eq!(config.controller.ecc_config_dir, None);
+        assert_eq!(config.controller.params_dir, None);
 
         let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
     }
@@ -2078,6 +2098,8 @@ decoder_command = "tcp://10.0.0.4:47101"
 receiver_commands = ["tcp://10.0.0.5:47110", "tcp://10.0.0.6:47111"]
 ecc_command = "tcp://10.0.0.7:47200"
 router_ip = "10.0.0.1"
+ecc_config_dir = "/srv/tpcdaq-ecc-config"
+params_dir = "/srv/tpcdaq-params"
 "#,
         );
         let config = parse(&toml_str).unwrap();
@@ -2101,6 +2123,14 @@ router_ip = "10.0.0.1"
         );
         assert_eq!(config.controller.ecc_command, "tcp://10.0.0.7:47200");
         assert_eq!(config.controller.router_ip.as_deref(), Some("10.0.0.1"));
+        assert_eq!(
+            config.controller.ecc_config_dir,
+            Some(PathBuf::from("/srv/tpcdaq-ecc-config"))
+        );
+        assert_eq!(
+            config.controller.params_dir,
+            Some(PathBuf::from("/srv/tpcdaq-params"))
+        );
 
         let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
     }

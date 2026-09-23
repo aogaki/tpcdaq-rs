@@ -289,6 +289,8 @@ async fn a_run_start_gives_up_when_the_ecc_stalls_past_the_ecc_timeout() {
         ],
         ecc_endpoint: ecc.endpoint.clone(),
         router_ip: None,
+        ecc_config_dir: None,
+        params_dir: None,
         eos_timeout: Duration::from_millis(400),
         eos_quiesce: Duration::from_millis(200),
         eos_poll: Duration::from_millis(50),
