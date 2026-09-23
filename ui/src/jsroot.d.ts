@@ -24,6 +24,20 @@ declare module 'jsroot/core' {
   export const gStyle: { fOptStat: number };
 }
 
+declare module 'jsroot/colors' {
+  /**
+   * 指定パレット番号の配色(255 色、`rgb(r, g, b)` 形式)を取得する。
+   * 086 は 57(kBird)の生の配色をここから取って反転する。
+   */
+  export function getColorPalette(id: number): { palette: string[] };
+
+  /**
+   * カスタムパレットを登録する(既存の標準番号 51–113 と衝突しない id を渡す)。
+   * 086 は「反転前提のカスタムパレット」(kBird を反転したもの)をここで登録する。
+   */
+  export function setColorPalette(id: number, colors: string[]): boolean;
+}
+
 declare module 'jsroot/draw' {
   /** 初回描画。返り値は painter(以後の更新に使う)。 */
   export function draw(dom: HTMLElement | string, obj: unknown, opt?: string): Promise<unknown>;
