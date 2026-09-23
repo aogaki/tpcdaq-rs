@@ -84,3 +84,57 @@
   `a_slow_client_drops_live_frames_but_never_the_json_control_channel` にも全体 `cargo test`
   負荷下でのみ再現する同種のタイミング依存が疑われる(単体では再現せず)。本チケットの対象外
   ファイルかつ production 変更不可の縛りなので、ここでは触れず**報告のみ**。別チケット化を推奨。
+  → **レビューで本チケットへの追補として承認、下記「追補」節で対応**。
+
+## 追補(2026-09-23、Sonnet レーン): `tests/monitor_ws.rs` の同種フレーク
+
+### 事実
+- 088 完了報告で見つけた別件(上記)をレビューでそのまま本チケットに追補することが承認された。
+- `tests/monitor_ws.rs::a_slow_client_drops_live_frames_but_never_the_json_control_channel` は
+  全体 `cargo test` の負荷下で `no status JSON within 5s` で 1 回だけ FAILED していた
+  (単体・全体とも再実行では再現せず)。原因はこのテストに固有の待ち方ではなく、ファイル内の
+  全テストが共有する条件待ちループ(`Client::next_json` / `next_binary`、「来るまで読む」形は
+  既に条件待ち)の**上限が固定 5 s だった**こと — 全体実行の並列負荷で monitor 側タスクの
+  スケジューリングが遅れると、この 5 s 上限を素で超えることがある。
+
+### 変更ファイル
+- `tests/monitor_ws.rs` のみ(`src/monitor.rs` を含む production コードは無変更、`git status
+  --short` で確認済み)。
+
+### やったこと
+- `RECV_TIMEOUT` 定数(ファイル冒頭、`Client::next_json` / `next_binary` / `Monitor::start` の
+  bind 待ち / `Monitor::stop` の join 待ちなど、ファイル内 8 テスト・30 箇所で共有)を
+  `Duration::from_secs(5)` → `Duration::from_secs(15)` に変更。
+  - 読み取りループ自体(`next_json` / `next_binary`)はもともと「型が一致するまで読み続け、
+    deadline を超えたら panic」という条件待ちの形になっている(088 の趣旨どおり)。今回の
+    フレークは「待ち方」ではなく「上限が短すぎる」ことが原因だったため、上限のみを 088 の
+    `CONDITION_DEADLINE`(10 s)相当以上に伸ばした(コーディネータ指定のレンジ 10〜15 s の
+    上限側 15 s を採用 — このテストは 400 イベントを読まずに流し込んで queue overflow を
+    起こす分、他テストより monitor 側の負荷が高いため)。
+  - 定数がファイル全体で共有されているため、「同ファイルの他テストにも同種の固定待ちがあれば
+    同じ流儀に」という指示は、この 1 箇所の変更で全 8 テストに自動的に及ぶ(重複コードを
+    作らない — KISS)。
+  - それ以外の固定 `sleep`(スロー・ジョイナ猶予 300 ms、切断掃除待ち 300 ms、drain の
+    400/500/700 ms など)は「特定のメッセージが届くまで」型の待ちではなく「副作用が伝播する
+    のに十分な猶予」という別種のものであり、今回の失敗(`no status JSON within 5s`)にも
+    再現テストにも関与していないため、発注書の指示どおり手を付けていない。
+
+### テスト結果
+- `cargo test --test monitor_ws` を 20 回連続実行 — **全 20 回 green**(各回 8 passed /
+  0 failed、1 回あたり 2.16–4.09 s、合計 59 s)。
+- `cargo fmt` — 差分なし(コメント込みで整形済みの形で編集)。
+- `cargo clippy --tests -- -D warnings` — warning 0 件で clean。
+- `cargo test`(全体)を 3 回連続実行 — **3 回とも green**:
+  - 1 回目: 57 バイナリすべて `test result: ok`、FAILED 0 件、合計 803 passed(所要 17 s)
+  - 2 回目: 57 バイナリすべて `test result: ok`、FAILED 0 件(所要 17 s)
+  - 3 回目: 57 バイナリすべて `test result: ok`、FAILED 0 件、合計 803 passed(所要 18 s)
+- スキップしたテストは無し。
+
+### 実行環境
+- macOS(Darwin 25.6.0)、2026-09-23、同一 worktree
+  (`/Users/aogaki/Workspace/tpcdaq-rs/.claude/worktrees/agent-a2b0c31b9c1922986`)。
+
+### 発注書(追補分)からの逸脱
+- 逸脱なし。固定待ち(5 s)を条件待ち + 上限(15 s、指定レンジ 10〜15 s の範囲内)に置換、
+  待ちのループは既存の「届くまで読む」形のまま、production コード不可、同ファイルの他テストは
+  共有定数の変更で同じ流儀が自動的に及ぶことを確認した。
