@@ -627,3 +627,10 @@ npx prettier --check "src/app/**/*.{ts,html,scss}"
   token を PUT 直前に取り直して解決。生成 xcfg 2 組は GDED の config dir に残置(純正ファイルは無改変)。
 - 078 は §5-4(REST/UI テスト = レーン B/C 済)を含め**全受け入れ完了**。UI からの操作は現地で。
 
+### 運用上の罠(2026-09-23 背景 run 開始時、Fable が踏んだ)
+- `params_dir/current.json` が残っていると **TOML の config_id(pedestals / physics)を黙って上書き**する(§3.3 の仕様どおり)。今日の GDED では P2(pulser、gain 240fC)の
+  current.json が残っており、「pedestal」「physics」のつもりの run 1 / 2 が pulser 設定で走った(frames 1 Hz = 内蔵パルサーの周期トリガ)。status の `params` と
+  `run_start.params` には出ていたが、スクリプト運用で見落とした。
+- 対処: current.json を退避してやり直し。**改善案(要検討 → 小チケット)**: run/start の応答と audit に「config_id は params で上書き」を明示する notes を出す、
+  もしくは TOML の config_id と current.json の template stem が食い違うとき(pulser vs physics)は warn。UI では status バーの `params <id>` が見えるので人は気づける。
+

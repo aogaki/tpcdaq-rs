@@ -39,6 +39,7 @@
 - 特定 ch だけ変える(ノイズ ch の閾値など)は **Exceptions** に行を足す。件数は status バーの `exceptions N` に常に出る —
   **N ≠ 0 のまま physics run に入るときは logbook にその理由を書く**。
 - Save は操作権 token が要る(Run control で acquire)。Running 中は保存できない(次の run の前に変える)。
+- **注意**: 保存済みの params(`current.json`)がある限り、**TOML の config_id より params が優先**される(ラン種別を TOML で切り替えても効かない)。run 種別を変えるときは Parameters を変えるか、status バーの `params <id>` が意図した template か確認する(2026-09-23 に pulser 設定のまま「physics」run を始めた事故)。
 - テンプレートは ECC の config repo(`ecc_config_dir`)にある正典 xcfg。Warsaw から新しい xcfg が来たら repo に置き、Parameters の template 名を変えて Save し直す(JSON は変えない)。
 
 ## 4. 監視すべきもの(UI)
