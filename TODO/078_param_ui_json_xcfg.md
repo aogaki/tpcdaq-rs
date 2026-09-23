@@ -458,3 +458,11 @@ TDD の逸脱: `src/params/` 側(レーン A、変更禁止)の契約が固ま�
 - UI(レーン C)、SPEC §3.3/§8.1/§9.2 への転記(Fable)は本ユニットの範囲外(発注書どおり)。
 - `src/params/{schema,render,paths}.rs` は無変更(発注どおり「既存の src/params/ を使い、変えない」)。
 - 実 ECC(vcobo)での describe→prepare→configure 通し確認(078 §5-3)は新 DAQ 機作業として未実施(レーン A から持ち越し、レーン B の範囲外)。
+
+### Fable レビュー(レーン B、2026-09-23、マージ `worktree-agent-af680f503dd115338` → main `a69ad50`)
+- 逸脱 1–8 **承認**(Option のまま持ち回り / 検証順序 401→503→400→409→400 / GET の render 失敗は 500・PUT は 400 / 正本は serde_json 再直列化(辞書順)の
+  テキスト = **id の正規化規則として SPEC §3.3 に固定** / current.json は上書き・`<id>` 系は書かない / render 不能なら run を始めない / status は null + notes / audit は `{id, exceptions}`)。
+- TDD の逸脱(REST 層は実装と同時に緑を見た)は記録のみ。logbook 側は赤→緑を実測済み。
+- **SPEC v1.33** に転記(§3.1 `ecc_config_dir` / `params_dir`、§3.3 id と REST の状態規則、§8.1 エンドポイント、§9.2 `run_start.params` / `audit.params_id`)。
+- 次 = レーン C(UI: Parameters ビュー、Exceptions (N) テーブル、diff 表示、status バー、Sonnet)。§5-3(実 ECC で describe→prepare→configure)は新 DAQ 機。
+

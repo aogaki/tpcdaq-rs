@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.32(2026-09-22 — 実装の正本)**
+- **status**: **v1.33(2026-09-23 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -151,7 +151,7 @@
   topology frame は来ない(decoder カウンタ 0)= 確定**、§13-5 実 ECC(20190315)をホストで
   ネイティブ起動し e2e 成立、§13-7 `extra_connections=0` 実測(mini)。初回 configure 7 s
   (261 s コールドスタートは再現せず)。データは frameType 2 rev 5(compact)278,784 B/frame。
-  / **v1.30(2026-09-17)Wave 1 反映(TODO/080)**: §5.4 に **AsAd 電子回路座標パネル**(TODO/077 — monitor タブの Event Display の下、(cobo,asad) 毎 nAget×nCh × nBuckets の 2D、0x03 由来)を追加、§10.3 の 0x03 購読条件を「波形ビュー**または monitor タブ**」に改訂。§6.7 に **raw ツリー契約の共有**(ガス圧シミュレーション gas-pressure-test の Stage 4 が同一契約で `_raw.root` を書き macros を共有 — 契約変更は両リポ同時、合成 raw は §5.5 QA 再構成のフィクスチャ供給元、080 D-8)を明記。 / **v1.31(2026-09-22)slowctl 骨格の契約(TODO/079 Phase 2、監視のみ)**: §2.3 に slowctl → monitor の PUB ペイロード(kind=`slow`)、§3.1 に `[slowctl]` / `[[slowctl.device]]` / `[monitor] slow_sub` の例、§3.2 に slowctl status PUB `47006` と source_id 200 = slowctl(旧 psu)、§9.2 の `psu` レコードを **`slow`** に一般化(IDENT / VALUE / ALARM / RECOVER / ERROR、値は機器の単位文字列つき)し run_start / run_stop に `slow`(直近値、nullable)を追加、§10.3 の status JSON に `slow` を同梱。作動 API は引き続き無し(§11)。 / **v1.32(2026-09-22)パラメータ JSON の契約(TODO/078 レーン A)**: §3.3 を新設 — JSON が正・xcfg は生成物、11 ノブとスコープ、例外は「一様値 + 例外リスト」、**CompoundConfig の継承は粗い例外を発注どおりには解決しない(Search.hpp の backtrack、オラクル実測)ので粗い例外は実在 id の直積へ展開**、生成物名 `<stem>__<sha256 8>`、受け入れは CompoundConfig オラクル(tools/ccfg_resolve、env-gated)。
+  / **v1.30(2026-09-17)Wave 1 反映(TODO/080)**: §5.4 に **AsAd 電子回路座標パネル**(TODO/077 — monitor タブの Event Display の下、(cobo,asad) 毎 nAget×nCh × nBuckets の 2D、0x03 由来)を追加、§10.3 の 0x03 購読条件を「波形ビュー**または monitor タブ**」に改訂。§6.7 に **raw ツリー契約の共有**(ガス圧シミュレーション gas-pressure-test の Stage 4 が同一契約で `_raw.root` を書き macros を共有 — 契約変更は両リポ同時、合成 raw は §5.5 QA 再構成のフィクスチャ供給元、080 D-8)を明記。 / **v1.31(2026-09-22)slowctl 骨格の契約(TODO/079 Phase 2、監視のみ)**: §2.3 に slowctl → monitor の PUB ペイロード(kind=`slow`)、§3.1 に `[slowctl]` / `[[slowctl.device]]` / `[monitor] slow_sub` の例、§3.2 に slowctl status PUB `47006` と source_id 200 = slowctl(旧 psu)、§9.2 の `psu` レコードを **`slow`** に一般化(IDENT / VALUE / ALARM / RECOVER / ERROR、値は機器の単位文字列つき)し run_start / run_stop に `slow`(直近値、nullable)を追加、§10.3 の status JSON に `slow` を同梱。作動 API は引き続き無し(§11)。 / **v1.32(2026-09-22)パラメータ JSON の契約(TODO/078 レーン A)**: §3.3 を新設 — JSON が正・xcfg は生成物、11 ノブとスコープ、例外は「一様値 + 例外リスト」、**CompoundConfig の継承は粗い例外を発注どおりには解決しない(Search.hpp の backtrack、オラクル実測)ので粗い例外は実在 id の直積へ展開**、生成物名 `<stem>__<sha256 8>`、受け入れは CompoundConfig オラクル(tools/ccfg_resolve、env-gated)。 / **v1.33(2026-09-23)パラメータ REST と run/start 結線(TODO/078 レーン B)**: §8.1 に `GET/PUT /api/params`・`GET /api/params/render`・`/api/status.params`、§3.1 `[controller]` に `ecc_config_dir` / `params_dir`、§9.2 `run_start.params`(nullable)と `audit run/start.params_id`、§3.3 に id の正規化規則(serde_json 辞書順の JSON テキストの sha256)と REST の状態規則(Running 中の PUT は 409、ecc_config_dir 未設定は 503)。
   / **v1.29(2026-09-15)安全境界を明文化(§11、ユーザー裁定 — TODO/079 の発端)**: web 操作面(controller REST / UI)は DAQ の run 制御と監視のみ。**物理的作動(HV・ガス圧 setpoint・バルブ)は web に経路を作らず、ローカル限定**。§1.1 の psu 行を「監視のみ」に改め、名称を slowctl(HV / ガス / 環境の汎用スローコントロール)へ。根拠 = token + passphrase は事故防止であって認証ではない(§3.1)、TLS/認証は自前実装しない。
   / **v1.28(2026-09-14)§6.7 を実装前に精度上げ(TODO/075 着手、Fable)**: adc ブロック数は
   「観測」ではなく**期待フラグメント集合(§6.3 `--expect`)から起動時に確定**(ブランチは最初の
@@ -556,6 +556,8 @@ rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"               # 操作権取得時の共有パスフレーズ(事故防止であり認証ではない)
 ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"  # servant identity は "Ecc"(v1.13 訂正)
 config_id = "default"                        # 略記 = 3 相同値。相ごとに変える場合(v1.13):
+# ecc_config_dir = "/opt/get/configs"        # v1.33(§3.3): ECC の config repo = テンプレート xcfg の置き場 = 生成 xcfg の出力先。省略 = params 系 REST は 503
+# params_dir = "/data/tpcdaq/params"         # v1.33: パラメータ JSON(current.json / <id>.json)の保存先。省略 = <output_root>/params
 # config_id = { describe = "zCobo-ZC706", prepare = "pulser", configure = "pulser" }
 ```
 
@@ -595,7 +597,11 @@ receiver プロセスは `tpcdaq-receiver --config x.toml --cobo-id K` で CoBo 
 - **除去規則**: 管理ノブは当該ノブの全インスタンスノード(`*` と明示 id)をテンプレートから除去してから一様値を `*` に、例外を明示 id に書く(除去を省くとテンプレートの明示ノードが勝つ — 負性テストで固定)。
 - **受け入れ**: ①往復(例外なし + テンプレート値 = バイト一致)②**CompoundConfig オラクル** `tools/ccfg_resolve/`(C++11、reference/ の CompoundConfig をビルド時参照、コミットしない、
   env `TPCDAQ_CCFG_RESOLVE_BIN` + `TPCDAQ_XCFG_TEMPLATE` があるときだけ照合し、無ければ skip を明示)で全インスタンス一致(実テンプレート 4,423)③実 ECC で describe → prepare → configure(新 DAQ 機)。
-- REST(`/api/params`)/ UI(Parameters ビュー、Exceptions (N) バッジ、status バーの `params <id> · exceptions N`)/ 監査ログ(`params_hash`、`exceptions: N`)は 078 レーン B/C(§8.1 / §9 / §11 に着手時追記)。
+- **id と保存(v1.33、レーン B)**: `<id>` = `<テンプレート stem(configure-/prepare- を除いた部分)>__<sha256 先頭 8 桁>`、sha256 は **serde_json で再直列化した JSON テキスト(キー辞書順)**に対して取る(整形の違いで id が変わらない)。
+  JSON は `<params_dir>/current.json`(常に上書き)と `<params_dir>/<id>.json`、生成 xcfg は `<ecc_config_dir>/configure-<id>.xcfg` と `prepare-<id>.xcfg`(**既存なら書かない**)。
+- **REST(v1.33、§8.1)**: `GET /api/params`(無ければ 404)/ `PUT /api/params {token, params}`(検証 400、**Running 中は 409**、`ecc_config_dir` 未設定は **503**、成功で render + 保存 + `audit params/put`)/
+  `GET /api/params/render?template=…`(dry run、書かない)。**run/start は current.json があれば prepare / configure の config_id に `<id>` を使う**(describe は TOML のまま)。
+  current.json があるのに render できないときは run を始めない(TOML へ黙って後退しない)。UI(Parameters ビュー、Exceptions (N) バッジ、status バーの `params <id> · exceptions N`)はレーン C(§11 に着手時追記)。
 
 ## 4. ジオメトリ仕様
 
@@ -1064,6 +1070,9 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
   - `POST /api/ecc/{describe|prepare|configure|start|stop|breakup|reset} {token}` — 段階操作
     (R6: GET controller と同じ操作感)
   - `GET /api/logbook?since_seq=N` / `POST /api/logbook/comment {author, text}`(R11)
+  - **パラメータ(v1.33、§3.3、TODO/078)**: `GET /api/params` → `{id, sha256, exceptions, params, files: {configure, prepare}}`(無ければ 404)/
+    `PUT /api/params {token, params}` → 同形(検証失敗 400 + `ParamsError` 文言、Running 中 409、`ecc_config_dir` 未設定 503)/
+    `GET /api/params/render?template=<name>` → `{id, exceptions, configure_xcfg}`(dry run、書かない)。`GET /api/status` に `params: {id, exceptions} | null`(失敗は null + `notes`)。
   - 状態変更系はすべて token 必須 + 監査ログ(audit レコード)。閲覧系は認証なし(二層アクセス制御)。
     **例外(v1.10 明文化)**: `POST /api/logbook/comment` は **token 不要** — DAQ 状態を変えない
     記録系であり、R11(シフト全員が書けるログブック)を操作権 1 名モデルより優先する。
@@ -1132,9 +1141,9 @@ fake-ECC servant(C++ 版のテストハーネス)相手の e2e を CI に置く(
 
 | type | 追加フィールド |
 |---|---|
-| `run_start` | `run`, `config_id`(3 相同値ならその文字列。非同値なら configure 相の id)、**`config_ids`(v1.13 追加、非同値時のみ**: `{describe, prepare, configure}`。同値時は省略 — nullable 規律)、`geometry: {path, sha256}`, `cobos: [{id, listen}]`, `operator`, `comment`, `expected_fragments`(期待 (cobo,asad) 集合)、**`slow`(v1.31、nullable — slowctl が動いていなければ省略)**: `{"<device>/<node>/<param>": {value, unit, ts}}` = controller が受け取った `slow` レコードの直近値(VALUE/ALARM/RECOVER 由来) |
+| `run_start` | `run`, `config_id`(3 相同値ならその文字列。非同値なら configure 相の id)、**`config_ids`(v1.13 追加、非同値時のみ**: `{describe, prepare, configure}`。同値時は省略 — nullable 規律)、`geometry: {path, sha256}`, `cobos: [{id, listen}]`, `operator`, `comment`, `expected_fragments`(期待 (cobo,asad) 集合)、**`slow`(v1.31、nullable — slowctl が動いていなければ省略)**: `{"<device>/<node>/<param>": {value, unit, ts}}` = controller が受け取った `slow` レコードの直近値(VALUE/ALARM/RECOVER 由来)、**`params`(v1.33、nullable — current.json が無ければ省略)**: `{id, sha256, exceptions}`(§3.3。prepare / configure の config_id がこの `id`) |
 | `run_stop` | `run`, `duration_s`, `ok: bool`, `reason`(**"normal" / "error:eos-timeout" / "abort:<原因>"** — abort は停止開始時点の起因。EOS の顛末は次の 2 フィールドが持ち、reason には合成しない)、**`forced_eos: bool`**(EOS を receiver `Stop` で注入したか。**実機 TCP flow では通常 true**(§1.3 v1.12 — stop はデータリンクを close しない)。EOF 由来の自然 EOS のみ false)、**`eos_closed: bool`**(EOS がチェーンを流れ切ったことを観測できたか。**false は異常の印**であり、reason が abort でも eos-timeout の事実はここで読める)(v1.12 追加。**v1.14 注記**: 実機 TCP flow では `forced_eos:true` が常態なので、**`forced_eos:false` は「stop 前にリンクが死んだ」ことの強い印** — CoBo 突然死は OS の正常 FIN により自然 EOF として normal クローズし、他に痕跡が残らない(041 D-2 実測)。リーダ・UI は `eos_closed:false` と並んで `forced_eos:false` にも注意を向けること)、`counters: {events_built, events_incomplete, late_fragments, frames: {cobo: n}, overflow_frames, malformed}`(**v1.10: 各項目は nullable — null = 「その時点で取得不能」であり 0 と混同しない**。root-sink が REP を持たない間、events_built/events_incomplete/late_fragments は null。取れる分は GetStatus 実測)、`files: [{path, bytes}]`(graw 群 + root + monitor.root 実績)、**`slow`(v1.31、nullable)**: run_start と同形の直近値(run 平均は後続で追加) |
-| `audit` | `action`(REST エンドポイント名), `params`(要約), `operator`, `ok`, `error` |
+| `audit` | `action`(REST エンドポイント名), `params`(要約。**v1.33**: `run/start` は `params_id`(無ければ null)、`params/put` は `{id, exceptions}`), `operator`, `ok`, `error` |
 | `comment` | `author`, `text`(自由記述、R11) |
 | `slow` | **v1.31、旧 `psu` を一般化(TODO/079)**。`device`(TOML の `name`)、`node`(機器内アドレス: FLOW-BUS ノード番号 / HV ch 番号 / 無ければ null)、`event`(`"IDENT"` 起動時の識別 / `"VALUE"` 計測値 / `"ALARM"` / `"RECOVER"` / `"ERROR"` 読み出し失敗の集計)、`values`: VALUE/ALARM/RECOVER は `{<param>: {value: f64, unit: "<機器が返した単位文字列>"}}`、IDENT は `{<field>: "<string>"}`、ERROR は `{poll_err, parse_err, reconnects, identity_mismatch}` の増分。**1 Hz の全サンプルは書かない**: 前回書いた値から 2 % 以上動いたか `log_every_s` 経過で VALUE、ALARM/RECOVER は即時、ERROR は 1 分毎の集計(0 なら書かない)。actor = `slowctl` |
 
