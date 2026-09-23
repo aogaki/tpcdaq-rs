@@ -42,16 +42,25 @@
 ## 結果(2026-09-23、Sonnet レーン)
 
 ### 実装したファイル
+**初回実装**:
 - `src/slowctl/hivolta_driver.rs`(新規): `HiVoltaDriver<T: Read + Write>`(`Driver` 実装)+ `open_tcp` / `open_serial`。
 - `src/slowctl/hmp_driver.rs`(新規): `HmpDriver<T: Read + Write>`(`Driver` 実装)+ `open_serial`。
 - `src/slowctl/component.rs`: `open_driver` の `"hivolta"` / `"hmp2020"`(旧 "not implemented yet")を実装に配線
-  + 経路確認テスト 6 本追加。
+  + 経路確認テスト 5 本追加。
 - `src/slowctl/fake_hmp.rs`: `FakeHmp::push_response`(要求行ごとの FIFO キュー)を追加(既存 `set_response` は無変更)。
-  理由は下記「§1/§2 との食い違い」の HMP 節参照。
 - `src/slowctl/mod.rs`: 末尾に `pub mod hivolta_driver;` / `pub mod hmp_driver;` を追加(既存の宣言は無変更)。
-- `TODO/089_hv_drivers.md`: 本節・Status 更新。
 
-`hivolta.rs` / `hmp.rs` / `fake_hv.rs`(コーデックと fake 本体)は無変更。
+**レビュー反映(追加コミット、2026-09-23)**:
+- `src/config.rs`: `validate_slowctl` に `hivolta` 専用の addr-or-port OR 検証 + テスト 3 本。
+- `src/slowctl/hmp.rs`: `ScpiLink::send`(書くだけ)+ `nsel_query()`(`"INST:NSEL?"`)を追加
+  (085 の変更禁止はレビューで解除。既存の `exchange` / 既存テストは無変更)+ テスト 3 本。
+- `src/slowctl/hmp_driver.rs`: `poll` の `INST:NSEL` を `exchange` から `send` + `nsel_query` 確認
+  に差し替え、不一致検知テストを追加。
+- `src/slowctl/fake_hmp.rs`: `selected_channel: Option<u8>` の状態と `INST:NSEL`/`INST:NSEL?` の
+  特別扱いを追加(明示登録があればそちらを優先)+ テスト 2 本。
+- `TODO/089_hv_drivers.md`: 本節を更新。
+
+`hivolta.rs` / `fake_hv.rs`(HiVolta 側のコーデックと fake 本体)は最後まで無変更。
 
 ### 単位文字列の一覧
 | device | param | unit | 備考 |
@@ -79,8 +88,16 @@
 (TCP 優先のときは無関係。運用は TCP 前提にするか、serial 運用時は poll_hz を下げる/
 VSET 等を間引く——発注書 §1 が示唆する緩和を実装するかどうかは §4 の設計判断待ち)。
 
-**HMP2020(serial のみ、9600 8N1)**: `INST:NSEL`×2 + `MEAS:VOLT?`/`MEAS:CURR?`/`OUTP?`×2ch +
-`SYST:ERR?`×1 = **9 往復**。実文字列で概算 ~360 バイト → 伝送 **約 0.38 秒**。1 Hz に桁で収まる。
+**HMP2020(serial のみ、9600 8N1、レビュー反映後)**: ch あたり `INST:NSEL n`(**一方向書き込み、
+応答を待たない** `ScpiLink::send`)1 回 + `INST:NSEL?`(選択確認)/`MEAS:VOLT?`/`MEAS:CURR?`/
+`OUTP?` の **4 往復**、最後に `SYST:ERR?` 1 往復 = **往復(応答あり)は 9 のまま**(旧設計と同数
+——旧設計は `INST:NSEL n` 自体を空応答つきの疑似往復として数えていたが、新設計はそれを
+一方向書き込みに変え、代わりに `INST:NSEL?` という本物の往復が増えたので往復数は相殺されて
+変わらない)。ただし一方向書き込みが ch あたり 1 回(計 2 回)増えた。実文字列(例
+`INST:NSEL 1\n`→(無応答)、`INST:NSEL?\n`→`1\n`、`MEAS:VOLT?\n`→`5.000\n` 等)で総バイト数を
+積むと **160 バイト**(ch あたり 68 B × 2 + `SYST:ERR?` 24 B)。9600 8N1 で伝送だけ
+**約 0.167 秒**。1 Hz に桁で収まる(レビュー前の見積もり ~0.38 秒より実測が精緻になっただけで
+結論は変わらない)。
 
 ### 発注書との食い違い(§1/§2、実装前に確認できなかったため実装 + 報告で対応)
 発注書 §1 は HiVolta の 1 ch あたりパラメータを `VMON`/`IMON`/`STATUS`/`VSET` の **4 項目**とだけ
@@ -90,59 +107,73 @@ VSET 等を間引く——発注書 §1 が示唆する緩和を実装するか�
 (`4×nch+2` 往復、nch=2 で 10 サンプル)、この食い違いをそのまま報告する**(5 個目を憶測で足すのは
 設計判断の代行になるため避けた)。5 個目が必要であれば追加チケットでパラメータ名を指定してほしい。
 
-### 設計判断が必要な分岐(実装していない)
-1. **HiVolta port フォールバックの by-id 警告**: 発注書 §1 は「`port`(serial 9600 8N1、
-   `open_serial` と同じ by-id 警告)」と書くが、実際の by-id 警告は `config.rs::validate_slowctl`
-   が `SLOWCTL_SERIAL_TYPES`(`bronkhorst_flowbus`/`arduino_env`/`hmp2020`/`fake`)に対してのみ
-   発火する仕組みで、`"hivolta"` はこの一覧に無い(= `addr` 必須・`port` は任意という現行の検証)。
-   `hivolta` を dual-transport(addr **または** port)として正しく検証するには
-   `validate_slowctl` の「serial 系は port 必須 / それ以外は addr 必須」という二分法自体を
-   変える必要があり、これは発注書が対象ファイルに挙げていない `config.rs` への設計変更になる。
-   本チケットでは `component.rs::open_driver` 側のフォールバック配線(addr 優先・無ければ port)
-   だけを実装し、`config.rs` の検証ロジックは**変更していない**——現状、TOML 経由では `hivolta`
-   に `addr` が必須のままなので、port-only 構成は設定検証で先に弾かれる(直接 `SlowDeviceConfig`
-   を組み立てる単体テストでは port フォールバックの経路そのものは確認済み)。要判断: `hivolta`
-   を addr-or-port の OR 検証にするか、当面 addr 必須のままにするか。
-2. **HMP2020 `INST:NSEL` の無応答疑義**: `INST:NSEL n` は SCPI のクエリ(`?` 終端)ではなく、
-   実機が応答を返す保証は無い。`ScpiLink::exchange`(085、変更禁止)は「書いて 1 行読む」の対
-   でしか提供されないため、他に手段が無く `exchange` 経由で送り、返信は意味を持たないものとして
-   読み捨てる実装にした(fake には空行を登録)。**実機が本当に無応答なら、毎 poll 周期
-   `READ_TIMEOUT_MS`(2000 ms)分ブロックして `DriverError::Timeout` になる**——これは
-   `hmp_driver.rs` の doc コメントに明記した。書き込み専用の経路を `ScpiLink` に足すかどうかは
-   `hmp.rs`(変更禁止指定)への変更を伴うため、実機検証の上で判断してほしい。
+### 設計判断が必要な分岐 → レビュー裁定により実装済み(2026-09-23、追加コミット)
+初回実装では以下 2 点を「設計判断が残る」として実装せず報告のみに留めていたが、レビュー
+(2026-09-23)で裁定が下ったため追加コミットで実装した。
+
+1. **HiVolta の `config.rs::validate_slowctl`**: `hivolta` は `addr` と `port` の**どちらか
+   1 つ以上**を必須にするよう変更(両方あれば `component.rs::open_driver` は addr 優先、
+   従来どおり)。他の型の「serial 系は port 必須 / それ以外は addr 必須」という二分法は崩さず
+   (`SLOWCTL_SERIAL_TYPES` は無変更)、`device.device_type == "hivolta"` だけ特別扱いの OR 検証
+   にした。エラー文言は `"needs an \`addr\` (TCP :1470) or \`port\` (USB VCP)"`。
+   単体テスト 3 本(`config::tests`): `a_hivolta_device_with_only_an_addr_is_accepted` /
+   `a_hivolta_device_with_only_a_port_is_accepted` /
+   `a_hivolta_device_without_addr_or_port_is_a_startup_failure`。
+2. **HMP2020 の `INST:NSEL`**: `src/slowctl/hmp.rs` の `ScpiLink` に `send(&mut self, cmd: &str)
+   -> Result<(), LinkError>`(書くだけ、応答を読まない)を追加(085 の変更禁止はレビューで解除、
+   既存の `exchange` とテスト済みの fake 挙動は変えていない)。併せて `nsel_query() -> &'static str`
+   (`"INST:NSEL?"`)も追加(**実機にこのクエリが存在するかは未確認** —— `hmp.rs` の doc コメント
+   に明記)。`HmpDriver::poll` は ch ごとに `send("INST:NSEL n")` → `exchange("INST:NSEL?")` で
+   選択を確認し、返りが `n` と一致しなければ `DriverError::Protocol`(黙って別 ch の値を読まない)。
+   `fake_hmp.rs` に `selected_channel: Option<u8>` の状態を持たせ、`INST:NSEL n`(非クエリ、応答
+   無し)で更新、`INST:NSEL?` はその状態を読み戻す(明示 `push_response`/`set_response` の登録が
+   あればそちらを優先 —— テストで「選択が効かなかった」場合を模せるように)。
+   単体テスト: `hmp.rs`(`nsel_query_matches_the_nsel_setter_form` /
+   `send_writes_without_waiting_for_a_reply` / `send_then_nsel_query_confirms_the_selected_channel`)、
+   `fake_hmp.rs`(`a_non_query_nsel_command_gets_no_reply` /
+   `nsel_query_echoes_back_the_last_selected_channel`)、`hmp_driver.rs`
+   (`a_selection_that_did_not_take_effect_is_a_protocol_error` — 新規の不一致検知経路)。
+   既存の poll テストは `register_nsel_and_measurements` → `register_measurements`(NSEL の
+   固定応答登録が不要になったため)にリネームして簡素化。
+   **実機で `INST:NSEL?` が本当に存在するかは依然未確認**(実機受け入れの範囲、下記参照)。
 
 ### テスト数(before → after)
-- `cargo test` 全体: **812 → 829 passed**(0 failed)。新規 17 件:
-  - `hivolta_driver::tests`(6): `ident_reads_all_six_board_fields_and_keeps_nch` /
-    `ident_serial_mismatch_is_an_identity_error` / `ident_serial_match_succeeds` /
-    `poll_of_two_channels_yields_four_samples_each_plus_two_board_samples` /
-    `a_loc_err_reply_is_a_protocol_error` / `a_silent_device_times_out`
-  - `hmp_driver::tests`(6): `ident_reads_idn_and_keeps_all_four_fields` /
-    `ident_serial_mismatch_is_an_identity_error` /
-    `poll_of_both_channels_yields_six_samples_and_checks_syst_err_zero` /
-    `a_nonzero_syst_err_is_a_protocol_error` / `a_silent_device_times_out` /
-    `only_channels_one_and_two_exist_for_the_hmp2020`
-  - `component::tests`(6): `open_driver_of_hivolta_with_an_addr_prefers_tcp_and_reports_connection_refused` /
-    `open_driver_of_hivolta_without_an_addr_falls_back_to_serial` /
-    `open_driver_of_hivolta_without_addr_or_port_is_a_device_error` /
-    `open_driver_routes_hmp2020_to_the_hmp_serial_opener` /
-    `open_driver_of_hmp2020_without_a_port_is_a_device_error`
-  (`fake_hmp` の `push_response` 自体はヘルパー追加のみで専用テストは足していない
-  —— `hmp_driver` の poll テストが往復して検証している)。
+**初回実装(812 → 829)**: 新規 17 件 —— `hivolta_driver::tests`(6)、`hmp_driver::tests`(6)、
+`component::tests`(5、経路確認)。詳細は git log 参照。
+
+**レビュー反映の追加コミット(829 → 838)**: 新規 9 件:
+- `config::tests`(3): `a_hivolta_device_with_only_an_addr_is_accepted` /
+  `a_hivolta_device_with_only_a_port_is_accepted` /
+  `a_hivolta_device_without_addr_or_port_is_a_startup_failure`
+- `hmp::tests`(3): `nsel_query_matches_the_nsel_setter_form` /
+  `send_writes_without_waiting_for_a_reply` /
+  `send_then_nsel_query_confirms_the_selected_channel`
+- `fake_hmp::tests`(2): `a_non_query_nsel_command_gets_no_reply` /
+  `nsel_query_echoes_back_the_last_selected_channel`
+- `hmp_driver::tests`(1): `a_selection_that_did_not_take_effect_is_a_protocol_error`
+
+**cargo test 全体: 812 → 838 passed(0 failed)。**
 
 ### 実行コマンド・結果
 ```
 $ git merge --ff-only main          # 1cead35 まで前進(既存 812 passed を確認してから着手)
 $ cargo test                        # 812 passed (着手前ベースライン)
-$ cargo test                        # 829 passed, 0 failed(実装後)
-$ cargo fmt                         # 3 ファイルに整形差分(component.rs / hivolta_driver.rs / hmp_driver.rs)、その後 --check で差分無し
-$ cargo clippy --tests -- -D warnings   # 警告 0
-$ cargo clippy --all-targets -- -D warnings  # 警告 0(念のため広い方でも確認)
+$ cargo test                        # 829 passed, 0 failed(初回実装後)
+$ cargo fmt && cargo clippy --tests -- -D warnings && cargo clippy --all-targets -- -D warnings  # 警告 0
+# --- レビュー反映(config.rs OR 検証 + hmp.rs send/nsel_query) ---
+$ cargo test                        # 838 passed, 0 failed(レビュー反映後)
+$ cargo fmt                         # 差分無し(--check も通過)
+$ cargo clippy --tests -- -D warnings        # 警告 0
+$ cargo clippy --all-targets -- -D warnings  # 警告 0
 ```
-production コードに `.unwrap()` / `.expect()` 無し(`#[cfg(test)]` より前を grep して確認)。
+production コードに `.unwrap()` / `.expect()` 無し(`#[cfg(test)]` より前を grep して確認、
+追加コミット分も含めて再確認済み)。
 
 ### 実機受け入れ(未実施)
 CAEN GUI(HiVolta)/ HMP2020 前面表示との 1 分間一致確認は**未実施**。本チケットは fake のみで
 縛る前提(発注書 冒頭)。TCP :1470 の実機疎通、USB VCP 9600 8N1 の実機疎通(HiVolta フォールバック
-・HMP2020)、`INST:NSEL` 無応答疑義の実機確認(上記「設計判断」§2)はいずれも今後の実機セッション
-待ち。
+・HMP2020)はいずれも今後の実機セッション待ち。**特に `INST:NSEL?` が HMP2020 実機に実在するか
+は完全に未確認**(SCPI 一般の類推のみで実装した——`hmp.rs::nsel_query` の doc コメント参照)。
+実機で `INST:NSEL?` が `#CMD:ERR` 相当のエラーを返す、または無応答なら、`HmpDriver::poll` は
+その ch で `DriverError::Protocol`(または `Timeout`)を返して停止する——silent に別 ch の値を
+読むことは無いが、実機セッションでの確認は必須。

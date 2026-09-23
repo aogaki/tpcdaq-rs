@@ -852,13 +852,23 @@ fn validate_slowctl(slowctl: &SlowctlConfig) -> Result<(), ConfigError> {
             )));
         }
         let serial = SLOWCTL_SERIAL_TYPES.contains(&device.device_type.as_str());
-        if serial && device.port.is_none() {
+        // TODO/089 レビュー(2026-09-23): `hivolta` は TCP(`addr`)と USB VCP(`port`)の
+        // どちらでも話せる(component.rs::open_driver は `addr` があれば優先、無ければ
+        // `port` へフォールバック)。他の型の「serial なら port 必須 / それ以外は addr 必須」
+        // という二分法は崩さず、`hivolta` だけ「どちらか 1 つ以上」の OR 検証にする。
+        if device.device_type == "hivolta" {
+            if device.addr.is_none() && device.port.is_none() {
+                return Err(ConfigError::InvalidSlowctl(format!(
+                    "device {:?} of type {:?} needs an `addr` (TCP :1470) or `port` (USB VCP)",
+                    device.name, device.device_type
+                )));
+            }
+        } else if serial && device.port.is_none() {
             return Err(ConfigError::InvalidSlowctl(format!(
                 "device {:?} of type {:?} needs a `port`",
                 device.name, device.device_type
             )));
-        }
-        if !serial && device.addr.is_none() {
+        } else if !serial && device.addr.is_none() {
             return Err(ConfigError::InvalidSlowctl(format!(
                 "device {:?} of type {:?} needs an `addr`",
                 device.name, device.device_type
@@ -2492,6 +2502,62 @@ name = "gas"
             parse(&minimal_toml(&geometry, extra)),
             Err(ConfigError::InvalidSlowctl(_))
         ));
+    }
+
+    /// TODO/089 レビュー: `hivolta` は `addr` だけでも起動できる(TCP 優先経路)。
+    #[test]
+    fn a_hivolta_device_with_only_an_addr_is_accepted() {
+        let geometry = make_temp_geometry_file();
+        let extra = r#"
+[slowctl]
+[[slowctl.device]]
+type = "hivolta"
+name = "hv"
+addr = "192.168.1.50:1470"
+"#;
+        let config = parse(&minimal_toml(&geometry, extra)).unwrap();
+        let device = &config.slowctl.unwrap().device[0];
+        assert_eq!(device.addr.as_deref(), Some("192.168.1.50:1470"));
+        assert_eq!(device.port, None);
+    }
+
+    /// `hivolta` は `port` だけでも起動できる(USB VCP フォールバック経路)。
+    #[test]
+    fn a_hivolta_device_with_only_a_port_is_accepted() {
+        let geometry = make_temp_geometry_file();
+        let extra = r#"
+[slowctl]
+[[slowctl.device]]
+type = "hivolta"
+name = "hv"
+port = "/dev/serial/by-id/usb-CAEN_xxx-if00-port0"
+"#;
+        let config = parse(&minimal_toml(&geometry, extra)).unwrap();
+        let device = &config.slowctl.unwrap().device[0];
+        assert_eq!(device.addr, None);
+        assert_eq!(
+            device.port.as_deref(),
+            Some("/dev/serial/by-id/usb-CAEN_xxx-if00-port0")
+        );
+    }
+
+    /// `hivolta` に `addr` も `port` も無ければ起動失敗(黙って何も読まないデバイスを作らない)。
+    #[test]
+    fn a_hivolta_device_without_addr_or_port_is_a_startup_failure() {
+        let geometry = make_temp_geometry_file();
+        let extra = r#"
+[slowctl]
+[[slowctl.device]]
+type = "hivolta"
+name = "hv"
+"#;
+        match parse(&minimal_toml(&geometry, extra)) {
+            Err(ConfigError::InvalidSlowctl(message)) => {
+                assert!(message.contains("addr"), "message = {message:?}");
+                assert!(message.contains("port"), "message = {message:?}");
+            }
+            other => panic!("expected InvalidSlowctl, got {other:?}"),
+        }
     }
 
     /// リポに置いた見本 TOML が**実際に読める**こと(腐った見本を配らない)。

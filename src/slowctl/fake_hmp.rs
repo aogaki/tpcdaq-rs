@@ -20,6 +20,11 @@ pub struct FakeHmp {
     /// 表現できないので、要求行ごとに **先入れ先出しのキュー**を別に持つ
     /// ([`FakeHmp::push_response`])。
     sequenced: HashMap<String, VecDeque<String>>,
+    /// TODO/089 レビュー(2026-09-23): `INST:NSEL n`(非クエリ、応答なしで送るだけ —
+    /// [`super::hmp::ScpiLink::send`])が選んだチャンネル。`INST:NSEL?`(クエリ)は
+    /// この状態を読み戻す —— 実機の「選択は効いたが SET コマンド自体には応答が無い」
+    /// 挙動を模す。
+    selected_channel: Option<u8>,
     silent: bool,
     incoming: Vec<u8>,
     outgoing: VecDeque<u8>,
@@ -36,6 +41,7 @@ impl FakeHmp {
         Self {
             responses: HashMap::new(),
             sequenced: HashMap::new(),
+            selected_channel: None,
             silent: false,
             incoming: Vec::new(),
             outgoing: VecDeque::new(),
@@ -94,7 +100,17 @@ impl Write for FakeHmp {
                 .and_then(VecDeque::pop_front)
                 .or_else(|| self.responses.get(&line).cloned())
             {
+                // 明示登録があれば最優先(テストが `INST:NSEL?` の答えを強制上書きして
+                // 「選択が効かなかった」実機挙動を模すのにも使う、TODO/089 レビュー)。
                 self.outgoing.extend(reply.as_bytes());
+            } else if line == "INST:NSEL?\n" {
+                // クエリ: 直前の `INST:NSEL n` で選んだチャンネルを読み戻す(TODO/089)。
+                // まだ選んでいなければ 0(どの ch でもない)——テストが必ず先に選ぶ前提。
+                let ch = self.selected_channel.unwrap_or(0);
+                self.outgoing.extend(format!("{ch}\n").into_bytes());
+            } else if let Some(ch) = parse_nsel_set(&line) {
+                // 非クエリ(`INST:NSEL n`)。実機はここに応答を返さない —— 積まずに状態だけ持つ。
+                self.selected_channel = Some(ch);
             } else {
                 // テスト設定漏れ、または本来生成できないはずのコマンド(VOLT/CURR/OUTP ON 等)。
                 // silent にせず可視化する(CLAUDE.md)。
@@ -129,6 +145,14 @@ impl Read for FakeHmp {
         }
         Ok(n)
     }
+}
+
+/// `"INST:NSEL {n}\n"`(非クエリ、末尾に `?` が無い)ならチャンネル番号を取り出す。
+/// `"INST:NSEL?\n"`(クエリ)はここでは `None`(呼び出し側で先に完全一致を見ている)。
+fn parse_nsel_set(line: &str) -> Option<u8> {
+    let rest = line.strip_prefix("INST:NSEL ")?;
+    let rest = rest.strip_suffix('\n')?;
+    rest.trim().parse::<u8>().ok()
 }
 
 // ---------------------------------------------------------------------
@@ -183,5 +207,46 @@ mod tests {
         let mut b = [0u8; 1];
         let err = fake.read(&mut b).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    fn read_line(fake: &mut FakeHmp) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut b = [0u8; 1];
+            match fake.read(&mut b) {
+                Ok(1) => out.push(b[0]),
+                _ => break,
+            }
+            if out.ends_with(b"\n") {
+                break;
+            }
+        }
+        out
+    }
+
+    /// TODO/089: `INST:NSEL n`(非クエリ)には応答が積まれない —— 実機と同じ
+    /// (呼んだだけでは `read` は WouldBlock のまま)。
+    #[test]
+    fn a_non_query_nsel_command_gets_no_reply() {
+        let mut fake = FakeHmp::new();
+        fake.write_all(b"INST:NSEL 1\n").unwrap();
+
+        let mut b = [0u8; 1];
+        let err = fake.read(&mut b).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    /// `INST:NSEL?` は直前の `INST:NSEL n` を読み戻す(fake が状態を持つ、TODO/089 レビュー)。
+    #[test]
+    fn nsel_query_echoes_back_the_last_selected_channel() {
+        let mut fake = FakeHmp::new();
+        fake.write_all(b"INST:NSEL 2\n").unwrap();
+        fake.write_all(b"INST:NSEL?\n").unwrap();
+        assert_eq!(read_line(&mut fake), b"2\n");
+
+        // 選び直せば追従する。
+        fake.write_all(b"INST:NSEL 1\n").unwrap();
+        fake.write_all(b"INST:NSEL?\n").unwrap();
+        assert_eq!(read_line(&mut fake), b"1\n");
     }
 }

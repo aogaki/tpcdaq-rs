@@ -3,16 +3,15 @@
 //! `hmp.rs`(TODO/085)の `ScpiLink` に USB CDC(`/dev/ttyACM*`)を差しただけのもの
 //! (`bronkhorst.rs` / `arduino.rs` と同じ形)。**書き込みは無い**(085 と同じ安全境界)。
 //!
-//! # `INST:NSEL` の応答待ちについて(2026-09-23、報告事項)
+//! # `INST:NSEL` の送り方(2026-09-23、レビュー反映)
 //!
-//! `ScpiLink::exchange`(085、変更禁止)は「1 行書いて 1 行読む」の対でしか提供されない。
-//! `INST:NSEL n` は SCPI のクエリ(`?` 終端)ではないため、実機が何か応答を返す保証は無い
-//! (むしろ SCPI の通例では非クエリコマンドは無応答)。`ScpiLink` に書き込み専用の経路が
-//! 無く、`hmp.rs` を変更しない制約があるため、本実装は他に手段が無く `exchange` 経由で
-//! `INST:NSEL` を送り、返ってきた行は意味を持たないものとして読み捨てる形にした
-//! (fake には空行を登録する)。**実機が無応答だと毎 poll 周期 `READ_TIMEOUT_MS` 分
-//! ブロックして `DriverError::Timeout` になる**——これは HMP2020 実機で検証していない
-//! 部分なので、完了報告で明記する(発注書も実機受け入れは未実施と明記)。
+//! `INST:NSEL n` は SCPI のクエリ(`?` 終端)ではないため、実機が応答を返す保証が無い。
+//! 089 の初回実装では `ScpiLink::exchange`(書いて 1 行読む)しか使えず、応答を読み捨てる
+//! 形にしていたが、レビューで `ScpiLink::send`(書くだけ、応答を待たない)が解禁されたため
+//! 差し替えた: `send("INST:NSEL n")` の後に `exchange("INST:NSEL?")` で選択を確認し、
+//! 返りが `n` と一致しなければ `DriverError::Protocol`(黙って別 ch の値を読まない)。
+//! **`INST:NSEL?` が実機に存在するかは未確認**(`hmp.rs::nsel_query` の doc 参照)——
+//! 実機受け入れは本チケットの範囲外(未実施と明記)。
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -21,7 +20,7 @@ use std::time::Duration;
 use tracing::info;
 
 use super::hmp::{
-    idn, meas_curr, meas_volt, nsel, outp_query, parse_bool01, parse_f64, parse_idn,
+    idn, meas_curr, meas_volt, nsel, nsel_query, outp_query, parse_bool01, parse_f64, parse_idn,
     parse_syst_err, syst_err, LinkError, ScpiLink, MAX_CH, MIN_CH,
 };
 use super::{now_ms, Driver, DriverError, Ident, Sample};
@@ -109,8 +108,21 @@ impl<T: Read + Write> Driver for HmpDriver<T> {
 
         for ch in MIN_CH..=MAX_CH {
             let nsel_cmd = nsel(ch).map_err(|e| DriverError::Protocol(e.to_string()))?;
-            // 応答の中身は使わない(このファイル冒頭の doc 参照) —— 書けるのは exchange だけ。
-            self.link.exchange(&nsel_cmd).map_err(driver_error)?;
+            // 非クエリなので送るだけ(応答は待たない、このファイル冒頭の doc 参照)。
+            self.link.send(&nsel_cmd).map_err(driver_error)?;
+
+            // 選択が効いたかを確認する —— 黙って別 ch の値を読まない(CLAUDE.md)。
+            let selected_reply = self.link.exchange(nsel_query()).map_err(driver_error)?;
+            let selected: u8 = selected_reply.trim().parse().map_err(|_| {
+                DriverError::Protocol(format!(
+                    "INST:NSEL?: not a channel number: {selected_reply:?}"
+                ))
+            })?;
+            if selected != ch {
+                return Err(DriverError::Protocol(format!(
+                    "INST:NSEL {ch} did not take effect (INST:NSEL? reports {selected})"
+                )));
+            }
 
             let volt_reply = self.link.exchange(meas_volt()).map_err(driver_error)?;
             let volt = parse_f64(&volt_reply).map_err(|e| DriverError::Protocol(e.to_string()))?;
@@ -198,18 +210,10 @@ mod tests {
     use super::*;
     use crate::slowctl::fake_hmp::FakeHmp;
 
-    /// `INST:NSEL n` は固定応答(空行、このファイル冒頭の doc 参照)。
-    /// `MEAS:VOLT?`/`MEAS:CURR?`/`OUTP?` は ch1 → ch2 の順で同じ要求文字列を再利用するので
-    /// [`FakeHmp::push_response`](順番に消費するキュー)へ積む(ch を選ぶのは `INST:NSEL`
-    /// であって要求文字列自体は変わらないため —— 実機の SCPI と同じ)。
-    fn register_nsel_and_measurements(
-        fake: &mut FakeHmp,
-        ch: u8,
-        volt: &str,
-        curr: &str,
-        outp: &str,
-    ) {
-        fake.set_response(format!("{}\n", nsel(ch).unwrap()), "\n");
+    /// `INST:NSEL n` は fake が状態として持つので登録不要(`INST:NSEL?` はその状態を
+    /// 読み戻す、TODO/089 レビュー)。`MEAS:VOLT?`/`MEAS:CURR?`/`OUTP?` は ch1 → ch2 の順で
+    /// 同じ要求文字列を再利用するので [`FakeHmp::push_response`](順番に消費するキュー)へ積む。
+    fn register_measurements(fake: &mut FakeHmp, volt: &str, curr: &str, outp: &str) {
         fake.push_response("MEAS:VOLT?\n", format!("{volt}\n"));
         fake.push_response("MEAS:CURR?\n", format!("{curr}\n"));
         fake.push_response("OUTP?\n", format!("{outp}\n"));
@@ -250,8 +254,8 @@ mod tests {
     #[test]
     fn poll_of_both_channels_yields_six_samples_and_checks_syst_err_zero() {
         let mut fake = FakeHmp::new();
-        register_nsel_and_measurements(&mut fake, 1, "5.000", "0.5000", "1");
-        register_nsel_and_measurements(&mut fake, 2, "12.000", "1.2000", "0");
+        register_measurements(&mut fake, "5.000", "0.5000", "1");
+        register_measurements(&mut fake, "12.000", "1.2000", "0");
         fake.set_response("SYST:ERR?\n", "0, \"No error\"\n");
 
         let mut driver = HmpDriver::new("hv_hmp", fake, String::new());
@@ -278,12 +282,30 @@ mod tests {
         );
     }
 
+    /// `INST:NSEL n` が効かなかった(実機が別 ch を報告する)場合は `Protocol` —— 黙って
+    /// 別 ch の値を読まない(TODO/089 レビュー 2026-09-23)。
+    #[test]
+    fn a_selection_that_did_not_take_effect_is_a_protocol_error() {
+        let mut fake = FakeHmp::new();
+        // `INST:NSEL?` の答えを強制的に ch1 の選択と食い違わせる(実機が選択を無視した体)。
+        fake.push_response("INST:NSEL?\n", "9\n");
+
+        let mut driver = HmpDriver::new("hv_hmp", fake, String::new());
+        match driver.poll() {
+            Err(DriverError::Protocol(message)) => {
+                assert!(message.contains("INST:NSEL 1"), "message = {message:?}");
+                assert!(message.contains('9'), "message = {message:?}");
+            }
+            other => panic!("expected Protocol, got {other:?}"),
+        }
+    }
+
     /// `SYST:ERR?` が非 0 なら `Protocol`(発注書 §1)。
     #[test]
     fn a_nonzero_syst_err_is_a_protocol_error() {
         let mut fake = FakeHmp::new();
-        register_nsel_and_measurements(&mut fake, 1, "5.000", "0.5000", "1");
-        register_nsel_and_measurements(&mut fake, 2, "12.000", "1.2000", "0");
+        register_measurements(&mut fake, "5.000", "0.5000", "1");
+        register_measurements(&mut fake, "12.000", "1.2000", "0");
         fake.set_response("SYST:ERR?\n", "-102, \"Syntax error\"\n");
 
         let mut driver = HmpDriver::new("hv_hmp", fake, String::new());

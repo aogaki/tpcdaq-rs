@@ -78,6 +78,16 @@ pub fn syst_err() -> &'static str {
     "SYST:ERR?"
 }
 
+/// `INST:NSEL?` 要求文字列 —— 現在選択中のチャンネルを読み戻すクエリ形(SCPI は多くの
+/// `[SOURce]/INSTrument` 系設定コマンドに同名の `?` クエリを持つ —— 手元にページ番号の
+/// 確証は無いが、実機の応答有無を確認する以外に選択が効いたことを知る手段が無いため
+/// TODO/089 レビュー(2026-09-23)で導入した。**実機での存在確認は未実施**、`nsel()` は
+/// 非クエリなので実機が応答する保証が無く、[`ScpiLink::send`] で送った後にこのクエリで
+/// 選択を確認する設計にした。
+pub fn nsel_query() -> &'static str {
+    "INST:NSEL?"
+}
+
 /// `*IDN?` の応答(p.18: `HAMEG,‹device type›,‹serial number›,‹firmwareversion›`)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Idn {
@@ -200,6 +210,18 @@ impl<T: Read + Write> ScpiLink<T> {
         let trimmed = raw.trim_end_matches(['\r', '\n']);
         Ok(trimmed.to_string())
     }
+
+    /// `cmd` に LF を付けて送るだけで、応答は待たない。TODO/089 レビュー(2026-09-23)で解禁:
+    /// `nsel()`(`INST:NSEL n`)のような非クエリ(`?` の無い)コマンドは実機が応答を返す
+    /// 保証が無く、[`ScpiLink::exchange`] を使うと来ない応答をタイムアウトまで待ってしまう。
+    /// 呼び出し側は必要なら別のクエリ(例 [`nsel_query`])で結果を確認する。
+    pub fn send(&mut self, cmd: &str) -> Result<(), LinkError> {
+        let mut line = String::with_capacity(cmd.len() + 1);
+        line.push_str(cmd);
+        line.push('\n');
+        self.io.write_all(line.as_bytes())?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -243,6 +265,12 @@ mod tests {
         assert_eq!(outp_query(), "OUTP?");
         // p.20 コマンド表 "SYSTem:ERRor[:NEXT]?" の短縮形。
         assert_eq!(syst_err(), "SYST:ERR?");
+    }
+
+    /// TODO/089 レビュー: `nsel()` は非クエリなので選択の確認に使うクエリ形。
+    #[test]
+    fn nsel_query_matches_the_nsel_setter_form() {
+        assert_eq!(nsel_query(), "INST:NSEL?");
     }
 
     // ---- ②応答の解析。 ----
@@ -357,5 +385,28 @@ mod tests {
         let mut link = ScpiLink::new(fake);
         let err = link.exchange(meas_volt()).unwrap_err();
         assert!(matches!(err, LinkError::Io(_)));
+    }
+
+    /// TODO/089 レビュー: `send` は書くだけで応答を待たない —— fake は非クエリの
+    /// `INST:NSEL n` に応答を積まないので、`exchange` と違って `Ok(())` ですぐ返る。
+    #[test]
+    fn send_writes_without_waiting_for_a_reply() {
+        use crate::slowctl::fake_hmp::FakeHmp;
+
+        let fake = FakeHmp::new();
+        let mut link = ScpiLink::new(fake);
+        link.send(&nsel(1).unwrap()).unwrap();
+    }
+
+    /// `send` の後に `nsel_query` で選択を確認できる(fake が状態を持つ、TODO/089)。
+    #[test]
+    fn send_then_nsel_query_confirms_the_selected_channel() {
+        use crate::slowctl::fake_hmp::FakeHmp;
+
+        let fake = FakeHmp::new();
+        let mut link = ScpiLink::new(fake);
+        link.send(&nsel(2).unwrap()).unwrap();
+        let reply = link.exchange(nsel_query()).unwrap();
+        assert_eq!(reply, "2");
     }
 }
