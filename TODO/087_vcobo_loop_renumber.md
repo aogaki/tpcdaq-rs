@@ -23,3 +23,67 @@
 
 ## 2. 参照
 077 結果 第 2 弾、docs/VIRTUAL_ZCOBO_ja.md、SPEC §6.3(ビルダは順序に依存しない / late fragment)、tools/vcobo/vcobo_core.hpp(peek_event_idx)。
+
+## 結果(2026-09-23、Sonnet レーン)
+
+**実装**: `tools/vcobo/vcobo_core.hpp` に純関数 `write_header_uint`(`read_header_uint` の逆)と
+`patch_frame_header(frame, len, idx_offset, time_offset)` を追加(ゲートは `peek_event_idx` と同一 —
+28B 未満 / frameType ∉ {1,2} は無改変・false)。`tools/vcobo/vcobo_link.hpp`:
+`GrawSet` に `max_event_idx` / `has_data_frame` を追加(`load_graw_set` が既存の eventIdx スキャンで
+そのまま計算、二度手間なし)。`DataLink` に `idx_offset_per_lap_`(`start()` で 1 回計算 =
+`has_data_frame ? max_event_idx+1 : 0`)と `lap_`(`daqStart` で 0 に戻る。`worker()` が
+`cursor_` を先頭へ戻すたびに `++lap_`)を追加。ホットパスでは `pending_` へコピーした**後**の
+領域に対してのみ `patch_frame_header(..., idx_offset_per_lap_ * lap_, /*time_offset=*/0)` を呼ぶ
+(`loop_ && lap_for_frame != 0` の時だけ — `loop=false` および 1 周目は一切呼ばないので既存の
+バイト一致 CI(`run_vcobo_ci.sh`)は無改造で green)。`span` と同様に `lap_` もロック内でスナップ
+ショットしてからロック外(ホットパス)で使う(データ競合なし)。heap 確保・ログ整形は追加していない。
+
+**ビルド・テストコマンド**:
+```
+make -C tools/vcobo test
+make -C tools/vcobo -j8 TPCDAQ_ICE_DIR=/Users/aogaki/Workspace/tpcdaq-rs/reference/20190315_patched
+make -C tools/vcobo ci TPCDAQ_ICE_DIR=/Users/aogaki/Workspace/tpcdaq-rs/reference/20190315_patched
+```
+
+**テスト数**: `test_vcobo_core` 148 passed → **188 passed, 0 failed**(新規 4 関数、+40 CHECK)。
+新規テスト名:
+- `test_patch_frame_header_adds_offsets_and_preserves_other_bytes`(①: little/big 両方、
+  eventIdx 100+250=350・eventTime 1,000,000+2,500,000=3,500,000 の手計算、[16,26) 外は
+  `std::equal` で丸ごと不変照合)
+- `test_patch_frame_header_leaves_control_frames_untouched`(②: frameType 7 と 28B 未満の
+  2 パターン、バイト列を丸ごと `==` 照合)
+- `test_loop_renumbering_is_monotonic_and_duplicate_free`(③: 非対称セット eventIdx {2,5,9}
+  を 2 周、idx_offset_per_lap=10 で `{2,5,9,12,15,19}` — 全体で単調増加・重複なしを
+  `std::adjacent_find` で確認)
+- `test_patch_frame_header_is_a_noop_with_zero_offsets`(offset 0/0 はバイト不変 —
+  `loop_ && lap_for_frame != 0` ゲートの根拠)
+
+既存 148 テストは無改造のまま green。`make -j8`(Ice ビルド、`vcobo_daq`/`vcobo_ice_client`)は
+警告ゼロで通過。`make ci`(`run_vcobo_ci.sh`)も green(`vcobo_ice_client(full): 57 passed`,
+`vcobo_ice_client(heartbeat): 6 passed`、バイト一致チェック含め全 PASS)。
+
+**承認が要る逸脱(発注書からの逸脱)**: eventTime(offset 16..22)の周回オフセットは
+**未配線**(`vcobo_link.hpp` の呼び出し側で `time_offset=0` 固定)。発注書 §1 は
+「セットの時間幅(最大−最小 eventTime)+ 1 フレーム分」× 周回数を加算せよと書いているが、
+「1 フレーム分」の定量化(平均イベント間隔から逆算するのか / 固定 tick 幅にするのか /
+1 フレームあたりの eventIdx 増分 1 と同じ意味で「+1」なのか)が発注書だけでは一意に決まらず、
+CLAUDE.md の「設計判断はしない」原則に従い実装せず報告する(呼び出し元の指示でも名指しで
+同じ懸念が挙がっていた)。`patch_frame_header` 自体は `time_offset` を汎用的に受け取り、
+①のテストで(任意の合成オフセット値により)加算ロジックそのものは検証済み — 残るのは
+「ループ 1 周ごとに実際いくつ足すか」という運用ポリシーの決定のみ。root-sink のイベント
+ビルダは eventIdx のみで late fragment を判定し eventTime には依存しない
+(TODO/archive/031_load_harness.md)ため、077 で観測された late_fragments 化はこの
+eventIdx 側の付け替えだけで解消する(eventTime 未配線は demo の「ずっと流れる」用途の
+成立を妨げない)。docs/VIRTUAL_ZCOBO_ja.md §5.2 にもこの未実装を明記した。
+
+**demo 受け入れ未実施**: 発注書の指示どおり、実装レーンは demo スタックを立てていない
+(ユーザーのスタックとポートが衝突するため)。`TPCDAQ_DEMO_LOOP=true` での 3 分run・
+`/api/status` の events_built 増加・late_fragments=0・後から繋いだ WS クライアントへの
+0x02/0x03 到達(`ws_probe.py`)は **Fable がマージ後に実施**。
+
+**実行環境**: macOS(Darwin 25.6.0)、g++ (`c++ -std=c++17 -O2`)、Ice 3.7 keg
+(`/opt/homebrew/opt/ice@3.7`)、`TPCDAQ_ICE_DIR=reference/20190315_patched`、2026-09-23。
+
+**スキップしたテスト**: `run_vcobo_oracle.sh`(実 ECC 相手)は `TPCDAQ_SPIKE_PREFIX` 未設定のため
+未実行(元々オンデマンド、本チケットの変更範囲外)。`run_vcobo_ci.sh` 内の実データ回帰は
+`TPCDAQ_REAL_GRAW_DIR` 未設定でスキップ(既存の任意回帰、本チケット無関係)。

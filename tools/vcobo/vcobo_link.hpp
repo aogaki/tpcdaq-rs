@@ -64,6 +64,8 @@ inline void log_error(const std::string& m) { log_line("ERROR", m); }
 struct GrawSet {
   std::vector<uint8_t> bytes;      ///< 全ファイルの連結(**バイト無変換**)
   std::vector<FrameSpan> frames;   ///< 連結後の座標
+  uint32_t max_event_idx = 0;      ///< データフレームの最大 eventIdx(loop 付け替え用、087)
+  bool has_data_frame = false;     ///< true なら max_event_idx が有効(全フレーム制御フレームなら false)
 
   size_t total_bytes() const { return bytes.size(); }
 };
@@ -144,6 +146,10 @@ inline bool load_graw_set(const std::vector<std::string>& paths, GrawSet& set, s
            std::to_string(set.frames.size()) + " frames (" + std::to_string(data_frames) +
            " data), " + std::to_string(set.total_bytes()) + " bytes, eventIdx " + range +
            (paths.size() > 1 ? " (merged by eventIdx)" : ""));
+
+  // 087: loop 時の周回オフセット計算に使う(上のスキャンをもう一度やらずに済ませる)。
+  set.has_data_frame = data_frames != 0;
+  set.max_event_idx = ev_max;
   return true;
 }
 
@@ -165,6 +171,9 @@ class DataLink {
     loop_ = cfg.loop;
     flush_bytes_ = cfg.flush_bytes;
     heartbeat_ = std::chrono::milliseconds(cfg.heartbeat_flush_ms);
+    // 087: 周回ごとに足す eventIdx オフセット = セット内の最大 eventIdx + 1。
+    // データフレームが 1 つも無ければ足しようがないので 0(= 無改変)。
+    idx_offset_per_lap_ = set_->has_data_frame ? (set_->max_event_idx + 1) : 0;
     // 1 回の flush 分 + 最大フレーム 1 個が入る容量を先に確保する(以後 heap を触らない)。
     size_t max_frame = 0;
     for (const FrameSpan& s : set_->frames) max_frame = std::max(max_frame, s.length);
@@ -262,6 +271,7 @@ class DataLink {
       std::lock_guard<std::mutex> lk(m_);
       if (running_) return true;  // 冪等
       cursor_ = 0;                // run 毎に同じデータを流す(バイト一致の基準)
+      lap_ = 0;                   // 087: 周回番号も run 毎にリセット
       running_ = true;
       stopped_ = false;
       restart_pacing_ = true;
@@ -398,6 +408,7 @@ class DataLink {
     while (true) {
       FrameSpan span;
       bool have_frame = false;
+      size_t lap_for_frame = 0;
       {
         std::unique_lock<std::mutex> lk(m_);
         if (quit_) break;
@@ -419,8 +430,10 @@ class DataLink {
         if (cursor_ < set_->frames.size()) {
           span = set_->frames[cursor_++];
           have_frame = true;
+          lap_for_frame = lap_;  // ロック内で読んだスナップショット(span と同じ扱い)
         } else if (loop_) {
           cursor_ = 0;
+          ++lap_;  // 087: 周回ごとに 1 段進める(eventIdx オフセットの乗数)
           continue;
         }
       }
@@ -435,7 +448,24 @@ class DataLink {
 
       // ホットパス: memcpy のみ。heap 確保もログ整形もしない。
       const uint8_t* src = set_->bytes.data() + span.offset;
+      const size_t insert_at = pending_.size();
       pending_.insert(pending_.end(), src, src + span.length);
+      // 087: 2 周目以降だけ、pending_ にコピーした**後**のバイト列へ eventIdx
+      // オフセットを適用する(元の set_->bytes は不変)。loop=false では lap_ が
+      // 常に 0 のままなのでここには来ない = 1 周目はバイト一致のまま(既存回帰どおり)。
+      // eventTime(offset 16..22)は今回のワイヤリングでは**加算しない**
+      // (time_offset=0): 発注書 087 §1 は「セットの時間幅 + 1 フレーム分」を足すよう
+      // 求めているが、「1 フレーム分」の定量化(平均イベント間隔で決めるか / 固定 tick
+      // にするか等)は発注書だけでは一意に決まらない設計判断のため、ここでは実装せず
+      // 上位へ報告する(patch_frame_header 自体は time_offset を汎用的に受け取れる —
+      // ①のテストで直接検証済み)。eventIdx の付け替えだけで 077 で観測された
+      // late_fragments 化(root-sink のビルダは eventIdx のみで判定、eventTime には
+      // 依存しない — archive/031)は解消する。
+      if (loop_ && lap_for_frame != 0) {
+        patch_frame_header(pending_.data() + insert_at, span.length,
+                            idx_offset_per_lap_ * uint32_t(lap_for_frame),
+                            /*time_offset=*/0);
+      }
       maybe_flush(false);
       pace(next_frame);
     }
@@ -459,6 +489,7 @@ class DataLink {
   bool loop_ = false;
   size_t flush_bytes_ = 8192;
   std::chrono::milliseconds heartbeat_{3000};
+  uint32_t idx_offset_per_lap_ = 0;  ///< 087: start() で 1 回だけ計算、以後不変
 
   mutable std::mutex m_;
   std::condition_variable cv_;
@@ -469,6 +500,7 @@ class DataLink {
   bool restart_pacing_ = false;
   int asad_mask_ = 0;
   size_t cursor_ = 0;
+  size_t lap_ = 0;  ///< 087: cursor_ が先頭へ戻るたびに 1 進む(daqStart で 0 に戻る)
 
   std::atomic<bool> always_flush_{false};
   std::atomic<int> fd_{-1};

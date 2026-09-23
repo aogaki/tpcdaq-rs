@@ -7,6 +7,7 @@
 // 添字の取り違えがテストを素通りしないようにしてある。
 #include "vcobo_core.hpp"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -315,11 +316,14 @@ void write_uint(std::vector<uint8_t>& bytes, size_t offset, uint64_t value, size
 }
 
 /// データフレーム(frameType 1/2)を 1 本作る。frameType は bytes[5..7]、
-/// eventIdx は bytes[22..26](共通 MFM ヘッダ — src/decode.rs::peek_event_idx)。
+/// eventTime は bytes[16..22](6B)、eventIdx は bytes[22..26](共通 MFM ヘッダ —
+/// src/decode.rs::peek_event_idx)。`event_time` は既定 0(呼ばない既存テストはそのまま)。
 std::vector<uint8_t> make_data_frame(size_t total, bool little, uint16_t frame_type,
-                                     uint32_t event_idx, uint8_t fill) {
+                                     uint32_t event_idx, uint8_t fill,
+                                     uint64_t event_time = 0) {
   std::vector<uint8_t> f = make_frame(total, little, fill);
   write_uint(f, 5, frame_type, 2, little);
+  write_uint(f, 16, event_time, 6, little);
   write_uint(f, 22, event_idx, 4, little);
   return f;
 }
@@ -442,6 +446,116 @@ void test_merge_of_nothing_is_nothing() {
 }
 
 // ---------------------------------------------------------------------------
+// 5c. loop 周回時のヘッダ付け替え(TODO/087)
+// ---------------------------------------------------------------------------
+
+void test_patch_frame_header_adds_offsets_and_preserves_other_bytes() {
+  // 手計算: eventIdx 100 + idx_offset 250 = 350。
+  //         eventTime 1,000,000 + time_offset 2,500,000 = 3,500,000。
+  // fill=0x7E でフレーム全体を埋めておくので、[16,26) の外側が 1 バイトも変わって
+  // いないことも同じテストで確認できる(手を触れていい範囲だけ触れたか、の照合)。
+  const uint32_t event_idx = 100;
+  const uint32_t idx_offset = 250;
+  const uint64_t event_time = 1000000ull;
+  const uint64_t time_offset = 2500000ull;
+
+  for (bool little : {false, true}) {
+    std::vector<uint8_t> frame =
+        make_data_frame(64, little, /*frame_type=*/2, event_idx, /*fill=*/0x7E, event_time);
+    const std::vector<uint8_t> original = frame;
+
+    CHECK(vcobo::patch_frame_header(frame.data(), frame.size(), idx_offset, time_offset));
+
+    uint32_t got_idx = 0;
+    CHECK(vcobo::peek_event_idx(frame.data(), frame.size(), got_idx));
+    CHECK_EQ(got_idx, 350u);
+    const uint64_t got_time = vcobo::read_header_uint(frame.data() + 16, 6, little);
+    CHECK_EQ(got_time, 3500000ull);
+
+    // [16,26) の外側は 1 バイトも変わっていない(前区間・後区間を丸ごと照合)。
+    CHECK(std::equal(frame.begin(), frame.begin() + 16, original.begin()));
+    CHECK(std::equal(frame.begin() + 26, frame.end(), original.begin() + 26));
+  }
+}
+
+void test_patch_frame_header_leaves_control_frames_untouched() {
+  // frameType 7(topology 等)は peek_event_idx と同じゲートで制御フレーム扱い。
+  std::vector<uint8_t> ctrl = make_data_frame(64, false, /*frame_type=*/7, /*event_idx=*/9,
+                                              /*fill=*/0x33, /*event_time=*/12345);
+  const std::vector<uint8_t> ctrl_original = ctrl;
+  CHECK(!vcobo::patch_frame_header(ctrl.data(), ctrl.size(), /*idx_offset=*/77,
+                                   /*time_offset=*/999));
+  CHECK(ctrl == ctrl_original);  // 1 バイトも変わっていない
+
+  // 28 バイト未満も制御フレーム扱い(共通ゲート)。
+  std::vector<uint8_t> tiny = make_frame(24, false, 0x44);
+  const std::vector<uint8_t> tiny_original = tiny;
+  CHECK(!vcobo::patch_frame_header(tiny.data(), tiny.size(), 1, 1));
+  CHECK(tiny == tiny_original);
+}
+
+void test_loop_renumbering_is_monotonic_and_duplicate_free() {
+  // vcobo_link.hpp::DataLink::worker() は cursor_ が末尾から先頭に戻るたびに周回番号
+  // (lap)を 1 つ進め、**pending_ へコピーした後の**バイト列へ idx_offset_per_lap × lap
+  // を足す(元の set_->bytes は不変)。ここではソケット/スレッドを使わず、同じ計算を
+  // 素の frames + patch_frame_header で再現する(このファイルは Ice も socket も
+  // 要らない単体テストなので DataLink そのものは対象外)。
+  //
+  // セット(merge_by_event_idx 後の送出順を模した、既に eventIdx 昇順のフレーム列。
+  // 非対称: 連番でも 0 始まりでもない 2, 5, 9)。
+  const std::vector<std::vector<uint8_t>> set_frames = {
+      make_data_frame(64, true, 2, 2, 0x11, 100),
+      make_data_frame(64, true, 2, 5, 0x22, 400),
+      make_data_frame(64, true, 2, 9, 0x33, 900),
+  };
+  // 発注書どおり: idx_offset_per_lap = セット内の最大 eventIdx + 1 = 9 + 1 = 10。
+  const uint32_t idx_offset_per_lap = 10;
+
+  std::vector<uint32_t> sent;  // 2 周分、送出順
+  for (size_t lap = 0; lap < 2; ++lap) {
+    for (const std::vector<uint8_t>& original : set_frames) {
+      // DataLink::worker と同じ手順: pending_ 相当へコピーしてから、コピーへ適用する
+      // (元の original / set_frames は変更しない)。
+      std::vector<uint8_t> copy = original;
+      if (lap != 0) {
+        CHECK(vcobo::patch_frame_header(copy.data(), copy.size(),
+                                        idx_offset_per_lap * uint32_t(lap),
+                                        /*time_offset=*/0));
+      }
+      uint32_t ev = 0;
+      CHECK(vcobo::peek_event_idx(copy.data(), copy.size(), ev));
+      sent.push_back(ev);
+    }
+  }
+
+  // 手計算: 1 周目 = 2,5,9(無改変)/ 2 周目 = 2+10,5+10,9+10 = 12,15,19。
+  const std::vector<uint32_t> want = {2, 5, 9, 12, 15, 19};
+  CHECK_EQ(sent.size(), want.size());
+  for (size_t i = 0; i < want.size() && i < sent.size(); ++i) {
+    CHECK_EQ(sent[i], want[i]);
+  }
+
+  // 単調増加(全体を通して非減少)。
+  for (size_t i = 1; i < sent.size(); ++i) {
+    CHECK(sent[i] > sent[i - 1]);
+  }
+
+  // 重複なし。
+  std::vector<uint32_t> sorted_sent = sent;
+  std::sort(sorted_sent.begin(), sorted_sent.end());
+  CHECK(std::adjacent_find(sorted_sent.begin(), sorted_sent.end()) == sorted_sent.end());
+}
+
+void test_patch_frame_header_is_a_noop_with_zero_offsets() {
+  // idx_offset=0 かつ time_offset=0 なら(データフレームとして true は返しつつ)バイトは
+  // 1 個も変わらない —— DataLink::worker が 1 周目(lap_for_frame==0)を素通しできる根拠。
+  const std::vector<uint8_t> frame = make_data_frame(64, false, 2, 42, 0x99, 555555ull);
+  std::vector<uint8_t> copy = frame;
+  CHECK(vcobo::patch_frame_header(copy.data(), copy.size(), 0, 0));
+  CHECK(copy == frame);
+}
+
+// ---------------------------------------------------------------------------
 // 6. 設定
 // ---------------------------------------------------------------------------
 void test_config_parse() {
@@ -522,6 +636,10 @@ int main() {
   test_merge_gives_control_frames_priority_like_graw_replay();
   test_merge_preserves_source_order_when_event_idx_goes_backwards();
   test_merge_of_nothing_is_nothing();
+  test_patch_frame_header_adds_offsets_and_preserves_other_bytes();
+  test_patch_frame_header_leaves_control_frames_untouched();
+  test_loop_renumbering_is_monotonic_and_duplicate_free();
+  test_patch_frame_header_is_a_noop_with_zero_offsets();
   test_config_parse();
   test_asad_mask_check();
   return tpccheck::report("test_vcobo_core");
