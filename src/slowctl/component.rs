@@ -224,14 +224,17 @@ pub enum DeviceEvent {
 
 /// TOML の `type` からドライバを作る。
 ///
-/// **実装済みなのは `bronkhorst_flowbus` / `arduino_env` / `fake` だけ**(TODO/079 Phase 2
-/// / Phase 3)。他の種別(`hivolta` / `hmp2020`)は設定としては受理されるが
-/// (SPEC §3.1 の列挙)、ここで明示的に失敗する —— 黙って何も読まないデバイスを作らない
-/// (CLAUDE.md)。
+/// **実装済み**: `bronkhorst_flowbus` / `arduino_env`(TODO/079)、`hivolta` / `hmp2020`
+/// (TODO/089)、`fake`。知らない `type` はここで明示的に失敗する —— 黙って何も読まない
+/// デバイスを作らない(CLAUDE.md)。
 fn open_driver(device: &SlowDeviceConfig) -> Result<Box<dyn Driver + Send>, SlowctlError> {
     let missing_port = || SlowctlError::Device {
         device: device.name.clone(),
         message: "no `port` in the config (should have been caught by validation)".to_string(),
+    };
+    let to_device_error = |e: DriverError| SlowctlError::Device {
+        device: device.name.clone(),
+        message: e.to_string(),
     };
     match device.device_type.as_str() {
         "bronkhorst_flowbus" => {
@@ -242,20 +245,41 @@ fn open_driver(device: &SlowDeviceConfig) -> Result<Box<dyn Driver + Send>, Slow
                 device.nodes.clone(),
                 device.expect_serial.clone(),
             )
-            .map_err(|e| SlowctlError::Device {
-                device: device.name.clone(),
-                message: e.to_string(),
-            })?;
+            .map_err(to_device_error)?;
             Ok(Box::new(driver))
         }
         "arduino_env" => {
             let port = device.port.as_deref().ok_or_else(missing_port)?;
-            let driver = super::arduino::open_serial(&device.name, port).map_err(|e| {
-                SlowctlError::Device {
-                    device: device.name.clone(),
-                    message: e.to_string(),
-                }
-            })?;
+            let driver =
+                super::arduino::open_serial(&device.name, port).map_err(to_device_error)?;
+            Ok(Box::new(driver))
+        }
+        "hivolta" => {
+            // TODO/089 §1: `addr`(TCP)優先、無ければ `port`(serial 9600 8N1)。
+            if let Some(addr) = device.addr.as_deref() {
+                let driver = super::hivolta_driver::open_tcp(
+                    &device.name,
+                    addr,
+                    device.expect_serial.clone(),
+                )
+                .map_err(to_device_error)?;
+                Ok(Box::new(driver))
+            } else {
+                let port = device.port.as_deref().ok_or_else(missing_port)?;
+                let driver = super::hivolta_driver::open_serial(
+                    &device.name,
+                    port,
+                    device.expect_serial.clone(),
+                )
+                .map_err(to_device_error)?;
+                Ok(Box::new(driver))
+            }
+        }
+        "hmp2020" => {
+            let port = device.port.as_deref().ok_or_else(missing_port)?;
+            let driver =
+                super::hmp_driver::open_serial(&device.name, port, device.expect_serial.clone())
+                    .map_err(to_device_error)?;
             Ok(Box::new(driver))
         }
         #[cfg(any(test, feature = "slowctl-fake"))]
@@ -954,6 +978,110 @@ mod tests {
     fn open_driver_of_arduino_env_without_a_port_is_a_device_error() {
         let mut config = device("env", Vec::new());
         config.device_type = "arduino_env".to_string();
+        config.port = None;
+
+        assert!(matches!(
+            open_driver(&config),
+            Err(SlowctlError::Device { .. })
+        ));
+    }
+
+    // -----------------------------------------------------------------
+    // open_driver の経路(TODO/089): `hivolta` は `addr` があれば TCP を優先し、
+    // `hmp2020` は `port`(serial)経路。実機は無いので「開こうとして失敗する」
+    // ところまでで止める(arduino_env のテストの流儀そのもの)。
+    // -----------------------------------------------------------------
+
+    /// `addr` があれば TCP 接続を試みる(接続拒否まで確認 = ルーティングが効いている証拠)。
+    #[test]
+    fn open_driver_of_hivolta_with_an_addr_prefers_tcp_and_reports_connection_refused() {
+        let mut config = device("hv", Vec::new());
+        config.device_type = "hivolta".to_string();
+        config.port = None;
+        // 誰も listen していないポート(bind して即 drop —— tests/…/ecc_bridge.rs と同じ流儀)。
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let dead_port = probe.local_addr().unwrap().port();
+        drop(probe);
+        config.addr = Some(format!("127.0.0.1:{dead_port}"));
+
+        let error = match open_driver(&config) {
+            Err(e) => e,
+            Ok(_) => panic!("nobody is listening on that port"),
+        };
+        let SlowctlError::Device { device, message } = error else {
+            panic!("expected SlowctlError::Device");
+        };
+        assert_eq!(device, "hv");
+        assert!(
+            message.contains("cannot connect to hivolta"),
+            "message = {message:?}(addr 優先で TCP を試みたことの確認)"
+        );
+        assert!(!message.contains("not implemented yet"));
+    }
+
+    /// `addr` が無ければ `port`(serial)経路にフォールバックする。
+    #[test]
+    fn open_driver_of_hivolta_without_an_addr_falls_back_to_serial() {
+        let mut config = device("hv", Vec::new());
+        config.device_type = "hivolta".to_string();
+        config.addr = None;
+        config.port = Some("/dev/serial/by-id/does-not-exist-089-hivolta-test".to_string());
+
+        let error = match open_driver(&config) {
+            Err(e) => e,
+            Ok(_) => panic!("a nonexistent serial port should not open"),
+        };
+        let SlowctlError::Device { device, message } = error else {
+            panic!("expected SlowctlError::Device");
+        };
+        assert_eq!(device, "hv");
+        assert!(
+            message.contains("cannot open serial port"),
+            "message = {message:?}(addr が無ければ port へ落ちることの確認)"
+        );
+    }
+
+    /// `addr` も `port` も無ければ設定検証で弾かれるはずだが、`open_driver` 自体も防御を持つ。
+    #[test]
+    fn open_driver_of_hivolta_without_addr_or_port_is_a_device_error() {
+        let mut config = device("hv", Vec::new());
+        config.device_type = "hivolta".to_string();
+        config.addr = None;
+        config.port = None;
+
+        assert!(matches!(
+            open_driver(&config),
+            Err(SlowctlError::Device { .. })
+        ));
+    }
+
+    /// `hmp2020` は `port`(serial)経路(arduino_env のテストの流儀)。
+    #[test]
+    fn open_driver_routes_hmp2020_to_the_hmp_serial_opener() {
+        let mut config = device("hmp", Vec::new());
+        config.device_type = "hmp2020".to_string();
+        config.port = Some("/dev/serial/by-id/does-not-exist-089-hmp-test".to_string());
+
+        let error = match open_driver(&config) {
+            Err(e) => e,
+            Ok(_) => panic!("a nonexistent serial port should not open"),
+        };
+        let SlowctlError::Device { device, message } = error else {
+            panic!("expected SlowctlError::Device");
+        };
+        assert_eq!(device, "hmp");
+        assert!(
+            message.contains("cannot open serial port"),
+            "message = {message:?}(open_driver がルーティングされていない可能性)"
+        );
+        assert!(!message.contains("not implemented yet"));
+    }
+
+    /// `port` が無いのは設定検証で弾かれるはずだが、`open_driver` 自体も防御を持つ。
+    #[test]
+    fn open_driver_of_hmp2020_without_a_port_is_a_device_error() {
+        let mut config = device("hmp", Vec::new());
+        config.device_type = "hmp2020".to_string();
         config.port = None;
 
         assert!(matches!(

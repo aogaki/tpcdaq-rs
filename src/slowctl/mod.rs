@@ -438,3 +438,13 @@ mod domain_tests {
         assert_eq!(sample("fmeasure", 1.0, None).key(), "gas/-/fmeasure");
     }
 }
+
+// =====================================================================
+// TODO/089 —— HiVolta / HMP2020 の `Driver` 実装(085 コーデックの配線)
+// =====================================================================
+
+/// CAEN DT1415ET(HiVolta)ドライバ(`Driver` 実装)。TODO/089。
+pub mod hivolta_driver;
+
+/// R&S/HAMEG HMP2020 ドライバ(`Driver` 実装)。TODO/089。
+pub mod hmp_driver;
