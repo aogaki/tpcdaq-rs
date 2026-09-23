@@ -214,6 +214,8 @@ impl Topology {
             ],
             ecc_endpoint: bridge.banner.clone(),
             router_ip: None,
+            ecc_config_dir: None,
+            params_dir: None,
             eos_timeout: options.eos_timeout,
             eos_quiesce: options.eos_quiesce,
             eos_poll: Duration::from_millis(100),

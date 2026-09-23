@@ -259,6 +259,8 @@ async fn a_run_start_drives_the_real_bridge_through_to_ecc_start() {
         ],
         ecc_endpoint: bridge.banner.clone(),
         router_ip: None,
+        ecc_config_dir: None,
+        params_dir: None,
         eos_timeout: Duration::from_millis(400),
         // TODO/033-E で新設(SPEC §1.3 v1.12)。eos_timeout と同じく短く ——
         // ここは静止検出そのものではなく既存シナリオの再現が目的。
@@ -420,6 +422,8 @@ async fn the_step_by_step_ecc_endpoints_reach_the_real_bridge() {
         ],
         ecc_endpoint: bridge.banner.clone(),
         router_ip: None,
+        ecc_config_dir: None,
+        params_dir: None,
         eos_timeout: Duration::from_millis(400),
         // TODO/033-E で新設(SPEC §1.3 v1.12)。eos_timeout と同じく短く ——
         // ここは静止検出そのものではなく既存シナリオの再現が目的。

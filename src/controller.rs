@@ -171,6 +171,12 @@ pub struct ControllerParams {
     pub ecc_endpoint: String,
     /// DataLinkSet の `router_ip`。`None` なら receiver の実 bind アドレスから導く。
     pub router_ip: Option<String>,
+    /// 078 レーン B §10: ECC の config repo(生成 xcfg の出力先 + テンプレートの読み先)。
+    /// `None` なら params 系 REST は 503(§3.1 と同じ意味、既定は無い)。
+    pub ecc_config_dir: Option<PathBuf>,
+    /// 078 レーン B §10: パラメータ JSON の保存先。`None` なら
+    /// `<output_root>/params`([`Controller::params_dir`]で解決)。
+    pub params_dir: Option<PathBuf>,
     /// EOS 待ちの**ハード上限**(両段。SPEC §1.3)。
     pub eos_timeout: Duration,
     /// 停止第一段の受信静止(quiesce)判定時間(SPEC §1.3 v1.12、TODO/033-E)。
@@ -230,6 +236,8 @@ impl ControllerParams {
             components,
             ecc_endpoint: config.controller.ecc_command.clone(),
             router_ip: config.controller.router_ip.clone(),
+            ecc_config_dir: config.controller.ecc_config_dir.clone(),
+            params_dir: config.controller.params_dir.clone(),
             eos_timeout: Duration::from_secs(config.controller.eos_timeout_s),
             eos_quiesce: Duration::from_millis(config.controller.eos_quiesce_ms),
             eos_poll: DEFAULT_EOS_POLL,
@@ -1568,6 +1576,70 @@ impl Controller {
             Some(s) => Ok(s.operator.clone()),
         }
     }
+
+    // ---- パラメータ JSON(078 レーン B §10)----
+
+    /// `params_dir` の既定(省略 = `<output_root>/params`)。`router_ip` と同じ
+    /// 「`Option` のまま持ち回り、既定は呼び出し側で足す」流儀(config.rs は解決しない
+    /// —— `output_root` は `[system]` セクションの値なので、`[controller]` だけでは解決できない)。
+    fn params_dir(&self) -> PathBuf {
+        self.params
+            .params_dir
+            .clone()
+            .unwrap_or_else(|| self.params.output_root.join("params"))
+    }
+
+    /// 現在保存されている params(`<params_dir>/current.json`)。無ければ `Ok(None)`
+    /// (= まだ PUT されていない = TOML の config_id をそのまま使う、078 §10-3)。
+    /// 読めるが検証に落ちる(壊れた保存)なら `Err`(silent にしない — CLAUDE.md)。
+    fn current_params(&self) -> Result<Option<CurrentParams>, String> {
+        let path = self.params_dir().join("current.json");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        };
+        let params = crate::params::Params::from_json_str(&text)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Some(CurrentParams {
+            sha256: sha256_hex(&text),
+            text,
+            params,
+        }))
+    }
+
+    /// `ecc_config_dir` の下からテンプレートを読んで render する。`ecc_config_dir` の
+    /// 有無(= 503 かどうか)は呼び手が確認済みという前提(ここでは判定しない —— エラー
+    /// 文字列で分岐させないため。078 §10 の「503 とテンプレート不備の 400」は呼び手が
+    /// 別々のタイミングでチェックすることで作り分ける)。
+    fn render_with_template_dir(
+        &self,
+        ecc_config_dir: &Path,
+        params: &crate::params::Params,
+    ) -> Result<crate::params::Rendered, String> {
+        let template_path = ecc_config_dir.join(&params.template);
+        let template_xml = std::fs::read_to_string(&template_path)
+            .map_err(|e| format!("cannot read template {}: {e}", template_path.display()))?;
+        crate::params::render(params, &template_xml).map_err(|e| e.to_string())
+    }
+}
+
+/// [`Controller::current_params`] の戻り値(078 レーン B §10)。
+struct CurrentParams {
+    params: crate::params::Params,
+    /// 受け取った JSON テキストの sha256(フル、`Params::json_hash8` と同じ元テキストから
+    /// 計算 —— 先頭 8 桁が id の suffix と一致する)。
+    sha256: String,
+    /// 保存されている JSON テキストそのもの(GET `/api/params` の `params` フィールドを
+    /// 素通しで返すのに使う —— `Params` は往復用の全フィールドを公開していないため)。
+    text: String,
+}
+
+/// テキストの sha256(16 進、小文字)。`geometry_record` と同じ手順。
+fn sha256_hex(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 /// controller の起動時エラー。
@@ -1742,6 +1814,10 @@ async fn get_status(State(controller): State<Arc<Controller>>) -> Reply {
             }),
             Err(e) => json!({"ok": false, "state": "Unknown", "error": e, "ecc_error": "Unknown"}),
         };
+        // 078 レーン B §10-4: `params <id> · exceptions N` の元(UI はレーン C)。
+        // status は必ず 200 を返す既存の姿勢を崩さない —— params 側の不整合は `notes` へ
+        // 積んで `params: null` にする(このリクエスト自体は失敗させない)。
+        let params_status = params_status_json(&controller, &mut notes);
         let run_state = lock(&controller.run);
         let operator = lock(&controller.session)
             .as_ref()
@@ -1758,6 +1834,7 @@ async fn get_status(State(controller): State<Arc<Controller>>) -> Reply {
             "operator": operator,
             "components": components,
             "ecc": ecc,
+            "params": params_status,
             "log_posts": {
                 "accepted": controller.log_posts.accepted.load(Ordering::Relaxed),
                 "rejected": controller.log_posts.rejected.load(Ordering::Relaxed),
@@ -1772,6 +1849,34 @@ async fn get_status(State(controller): State<Arc<Controller>>) -> Reply {
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("status task: {e}"),
         ),
+    }
+}
+
+/// `GET /api/status` の `params: {id, exceptions} | null`(078 レーン B §10-4)。
+/// current.json が無い、ecc_config_dir 未設定、render 失敗のいずれも `null` + `notes` へ
+/// 一言(silent にしない)。status 応答そのものは落とさない。
+fn params_status_json(controller: &Controller, notes: &mut Vec<String>) -> Value {
+    let current = match controller.current_params() {
+        Ok(Some(current)) => current,
+        Ok(None) => return Value::Null,
+        Err(e) => {
+            notes.push(format!("params: {e}"));
+            return Value::Null;
+        }
+    };
+    let Some(ecc_config_dir) = &controller.params.ecc_config_dir else {
+        notes.push("params: ecc_config_dir is not configured".to_string());
+        return Value::Null;
+    };
+    match controller.render_with_template_dir(ecc_config_dir, &current.params) {
+        Ok(rendered) => json!({
+            "id": rendered.config_id,
+            "exceptions": current.params.exceptions.len(),
+        }),
+        Err(e) => {
+            notes.push(format!("params: {e}"));
+            Value::Null
+        }
     }
 }
 
@@ -1933,6 +2038,44 @@ fn start_run_blocking(
         }
     };
 
+    // 078 レーン B §10-3: current.json があれば prepare/configure の config_id を
+    // その `<id>` に差し替える(describe は TOML のまま)。無ければ従来どおり TOML の id
+    // (= `params_snapshot` が `None`)。**現在の params が壊れている / render できないのに
+    // 黙って TOML の id へ後退はしない** —— run のデータ取得条件が記録と食い違うほうが
+    // 静かなフォールバックより危険(CLAUDE.md「silent failure を作らない」)。
+    let params_snapshot = match run_start_params_snapshot(controller) {
+        Ok(snapshot) => snapshot,
+        Err(detail) => {
+            controller.audit(
+                "run/start",
+                json!({"comment": comment}),
+                operator,
+                false,
+                Some(detail.clone()),
+            );
+            return Err(detail);
+        }
+    };
+    let params_id = params_snapshot
+        .as_ref()
+        .map(|(_, rendered)| rendered.config_id.clone());
+    let params_field = params_snapshot.as_ref().map(|(current, rendered)| {
+        json!({
+            "id": rendered.config_id,
+            "sha256": current.sha256,
+            "exceptions": current.params.exceptions.len(),
+        })
+    });
+
+    let mut params_for_run = controller.params.clone();
+    if let Some(id) = &params_id {
+        params_for_run.config_ids = ConfigIds {
+            describe: params_for_run.config_ids.describe.clone(),
+            prepare: id.clone(),
+            configure: id.clone(),
+        };
+    }
+
     // run 番号採番(015、controller 単一書き手)。
     let run = match crate::state::take_next_run(&controller.state_path) {
         Ok(run) => run,
@@ -1952,14 +2095,14 @@ fn start_run_blocking(
     let run_start_ts = run_start_timestamp();
     let mut transport = controller.transport.clone();
     let result = {
-        let mut sequencer = Sequencer::new(&controller.params, &mut transport);
+        let mut sequencer = Sequencer::new(&params_for_run, &mut transport);
         sequencer.start_run(run, comment, &run_start_ts)
     };
 
     match result {
         Ok(report) => {
             let (geometry, expected_fragments) = geometry;
-            let (config_id, config_ids) = run_start_config_fields(&controller.params.config_ids);
+            let (config_id, config_ids) = run_start_config_fields(&params_for_run.config_ids);
             // ここから先(run_start をログブックへ書いた後)は **絶対に採番を巻き戻さない** ——
             // 記録に残った run 番号を次の run が撃ち直すことになる(034 = 論点 C)。
             controller.append(LogbookRecord::RunStart {
@@ -1973,6 +2116,7 @@ fn start_run_blocking(
                 comment: comment.to_string(),
                 expected_fragments,
                 slow: controller.slow_snapshot(),
+                params: params_field,
             });
             controller.audit(
                 "run/start",
@@ -1986,7 +2130,10 @@ fn start_run_blocking(
                     // 036: **歩き戻しの各段**。実機で歩き戻しが効いているかはここで機械確認する
                     // (2 本目以降が `["status->Ready","breakup->Prepared","reset->Described",
                     //  "reset->Idle"]` になっていること)。
-                    "ecc_walk_back": report.ecc_walk_back}),
+                    "ecc_walk_back": report.ecc_walk_back,
+                    // 078 レーン B §10-3: この run が使った params の `<id>`(無ければ null =
+                    // TOML の config_id だけで走った)。
+                    "params_id": params_id}),
                 operator,
                 true,
                 None,
@@ -2016,6 +2163,7 @@ fn start_run_blocking(
                     "comment": comment,
                     "stage": failure.stage,
                     "next_run_rewound": rewound,
+                    "params_id": params_id,
                 }),
                 operator,
                 false,
@@ -2024,6 +2172,25 @@ fn start_run_blocking(
             Err(detail)
         }
     }
+}
+
+/// [`start_run_blocking`] の params 部分だけを切り出したもの(078 レーン B §10-3)。
+/// current.json が無ければ `Ok(None)`(= 従来どおり TOML の config_id)。
+/// current.json はあるが検証/render に失敗したら `Err`(黙って TOML へ後退しない)。
+#[allow(clippy::type_complexity)]
+fn run_start_params_snapshot(
+    controller: &Controller,
+) -> Result<Option<(CurrentParams, crate::params::Rendered)>, String> {
+    let Some(current) = controller.current_params()? else {
+        return Ok(None);
+    };
+    let ecc_config_dir = controller.params.ecc_config_dir.as_ref().ok_or_else(|| {
+        "params/current.json exists but ecc_config_dir is not configured — \
+         refusing to start a run with a stale config_id"
+            .to_string()
+    })?;
+    let rendered = controller.render_with_template_dir(ecc_config_dir, &current.params)?;
+    Ok(Some((current, rendered)))
 }
 
 /// run 番号の手動設定(SPEC v1.10 §8.1)。次の `run/start` から有効になる。
@@ -2353,6 +2520,251 @@ async fn post_comment(
 }
 
 // ---------------------------------------------------------------------
+// パラメータ JSON REST(078 レーン B §10、SPEC §3.3)
+// ---------------------------------------------------------------------
+
+/// GET/PUT `/api/params` と PUT の 400/503 応答が共有する「ecc_config_dir 未設定 = 503」。
+/// **黙って無効にしない**(CLAUDE.md)—— 発注書 §10 のとおり `{"error": "..."}` は固定文言。
+const ECC_CONFIG_DIR_NOT_CONFIGURED: &str = "ecc_config_dir is not configured";
+
+/// GET/PUT `/api/params` の共通の応答本体(078 §10「GET と同じ形を返す」)。
+fn params_body(
+    ecc_config_dir: &Path,
+    current: &CurrentParams,
+    rendered: &crate::params::Rendered,
+) -> Value {
+    let configure_path = ecc_config_dir.join(&rendered.configure_file_name);
+    let prepare_path = ecc_config_dir.join(&rendered.prepare_file_name);
+    let params_value: Value = serde_json::from_str(&current.text).unwrap_or(Value::Null);
+    json!({
+        "id": rendered.config_id,
+        "sha256": current.sha256,
+        "exceptions": current.params.exceptions.len(),
+        "params": params_value,
+        "files": {
+            "configure": configure_path.display().to_string(),
+            "prepare": prepare_path.display().to_string(),
+        },
+    })
+}
+
+/// `GET /api/params`(閲覧系 = 認証なし)。current.json が無ければ 404、
+/// ecc_config_dir が無ければ 503(078 §10)。
+async fn get_params(State(controller): State<Arc<Controller>>) -> Reply {
+    let reply = tokio::task::spawn_blocking(move || {
+        let Some(ecc_config_dir) = controller.params.ecc_config_dir.clone() else {
+            return err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ECC_CONFIG_DIR_NOT_CONFIGURED,
+            );
+        };
+        let current = match controller.current_params() {
+            Ok(Some(current)) => current,
+            Ok(None) => return err_json(StatusCode::NOT_FOUND, "no params configured"),
+            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+        match controller.render_with_template_dir(&ecc_config_dir, &current.params) {
+            // GET は「保存済みの current.json をそのまま映す」だけの閲覧系なので、
+            // render に失敗するのは current.json の PUT 後にテンプレートが消えた等の
+            // サーバ側の不整合 —— 400(このリクエストの入力の問題)ではなく 500。
+            Ok(rendered) => ok_json(params_body(&ecc_config_dir, &current, &rendered)),
+            Err(e) => err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+        }
+    })
+    .await;
+    match reply {
+        Ok(reply) => reply,
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("params task: {e}"),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ParamsPutRequest {
+    token: String,
+    params: Value,
+}
+
+/// `PUT /api/params { token, params }`(078 §10)。検証順序: authorize(401)→
+/// ecc_config_dir の有無(503)→ JSON のスキーマ検証(400)→ 相が Idle か(409)→
+/// テンプレート読込 + render(400)→ 書き込み。**同じ JSON → 同じファイル**
+/// (既存の configure/prepare/`<id>.json` は上書きしない)。
+async fn put_params(
+    State(controller): State<Arc<Controller>>,
+    Json(request): Json<ParamsPutRequest>,
+) -> Reply {
+    let operator = match controller.authorize(&request.token) {
+        Ok(operator) => operator,
+        Err(why) => return unauthorized(&controller, "params/put", json!({}), why),
+    };
+
+    let Some(ecc_config_dir) = controller.params.ecc_config_dir.clone() else {
+        controller.audit(
+            "params/put",
+            json!({}),
+            &operator,
+            false,
+            Some(ECC_CONFIG_DIR_NOT_CONFIGURED.to_string()),
+        );
+        return err_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            ECC_CONFIG_DIR_NOT_CONFIGURED,
+        );
+    };
+
+    // axum の `Json` extractor は本文を `Value` として parse 済みなので、受け取ったバイト列
+    // そのものはもう無い。`Value` を再直列化した**この文字列**を正本として扱う
+    // (`serde_json::Map` は `preserve_order` 機能を有効にしていないので `BTreeMap` 裏付け =
+    // キーは常に辞書順。空白の揺れは吸収され、同じ内容の JSON は常に同じバイト列になる ——
+    // これは §3-3「同じ JSON → 同じファイル」を REST 越しでも保つのに必要)。
+    let text = request.params.to_string();
+    let params = match crate::params::Params::from_json_str(&text) {
+        Ok(params) => params,
+        Err(e) => {
+            let why = e.to_string();
+            controller.audit("params/put", json!({}), &operator, false, Some(why.clone()));
+            return err_json(StatusCode::BAD_REQUEST, why);
+        }
+    };
+
+    {
+        let run_state = lock(&controller.run);
+        if run_state.phase != Phase::Idle {
+            let why = format!(
+                "controller is {} — not Idle (次 run から効くという半端は作らない)",
+                run_state.phase
+            );
+            drop(run_state);
+            controller.audit("params/put", json!({}), &operator, false, Some(why.clone()));
+            return err_json(StatusCode::CONFLICT, why);
+        }
+    }
+
+    let reply = tokio::task::spawn_blocking(move || {
+        let rendered = match controller.render_with_template_dir(&ecc_config_dir, &params) {
+            Ok(rendered) => rendered,
+            Err(e) => {
+                controller.audit("params/put", json!({}), &operator, false, Some(e.clone()));
+                return err_json(StatusCode::BAD_REQUEST, e);
+            }
+        };
+
+        // §3-3: 生成物は content-addressed(`<id>` = stem + JSON の sha256 先頭 8 桁)なので、
+        // 既存なら書かない(同じ JSON の再 PUT でタイムスタンプが動かない)。
+        let configure_path = ecc_config_dir.join(&rendered.configure_file_name);
+        let prepare_path = ecc_config_dir.join(&rendered.prepare_file_name);
+        for (path, content) in [
+            (&configure_path, &rendered.xml),
+            (&prepare_path, &rendered.xml),
+        ] {
+            if !path.exists() {
+                if let Err(e) = std::fs::write(path, content) {
+                    let why = format!("cannot write {}: {e}", path.display());
+                    controller.audit("params/put", json!({}), &operator, false, Some(why.clone()));
+                    return err_json(StatusCode::INTERNAL_SERVER_ERROR, why);
+                }
+            }
+        }
+
+        let params_dir = controller.params_dir();
+        if let Err(e) = std::fs::create_dir_all(&params_dir) {
+            let why = format!("cannot create {}: {e}", params_dir.display());
+            controller.audit("params/put", json!({}), &operator, false, Some(why.clone()));
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, why);
+        }
+        // `current.json` は「今の設定」なので常に上書きする(§3-3 の content-addressed 規則は
+        // configure/prepare/`<id>.json` だけの話 —— これは固定名で「最新」を指す)。
+        if let Err(e) = std::fs::write(params_dir.join("current.json"), &text) {
+            let why = format!("cannot write current.json: {e}");
+            controller.audit("params/put", json!({}), &operator, false, Some(why.clone()));
+            return err_json(StatusCode::INTERNAL_SERVER_ERROR, why);
+        }
+        let id_path = params_dir.join(format!("{}.json", rendered.config_id));
+        if !id_path.exists() {
+            if let Err(e) = std::fs::write(&id_path, &text) {
+                let why = format!("cannot write {}: {e}", id_path.display());
+                controller.audit("params/put", json!({}), &operator, false, Some(why.clone()));
+                return err_json(StatusCode::INTERNAL_SERVER_ERROR, why);
+            }
+        }
+
+        let current = CurrentParams {
+            sha256: sha256_hex(&text),
+            text,
+            params,
+        };
+        let exceptions = current.params.exceptions.len();
+        controller.audit(
+            "params/put",
+            json!({"id": rendered.config_id, "exceptions": exceptions}),
+            &operator,
+            true,
+            None,
+        );
+        info!(id = rendered.config_id, exceptions, "params saved");
+        ok_json(params_body(&ecc_config_dir, &current, &rendered))
+    })
+    .await;
+    match reply {
+        Ok(reply) => reply,
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("params/put task: {e}"),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ParamsRenderQuery {
+    template: Option<String>,
+}
+
+/// `GET /api/params/render?template=<name>`(dry run、閲覧系 = 認証なし)。
+/// current.json を(省略時はその `template`、指定時はそのテンプレート名で)render して
+/// **書かずに**返す(UI の diff 表示用、078 §10)。
+async fn get_params_render(
+    State(controller): State<Arc<Controller>>,
+    Query(query): Query<ParamsRenderQuery>,
+) -> Reply {
+    let reply = tokio::task::spawn_blocking(move || {
+        let Some(ecc_config_dir) = controller.params.ecc_config_dir.clone() else {
+            return err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ECC_CONFIG_DIR_NOT_CONFIGURED,
+            );
+        };
+        let current = match controller.current_params() {
+            Ok(Some(current)) => current,
+            Ok(None) => return err_json(StatusCode::NOT_FOUND, "no params configured"),
+            Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, e),
+        };
+        let mut params = current.params.clone();
+        if let Some(template) = &query.template {
+            params.template = template.clone();
+        }
+        match controller.render_with_template_dir(&ecc_config_dir, &params) {
+            Ok(rendered) => ok_json(json!({
+                "id": rendered.config_id,
+                "exceptions": params.exceptions.len(),
+                "configure_xcfg": rendered.xml,
+            })),
+            // dry run の入力(current.json + クエリの template)が原因で失敗しているので 400。
+            Err(e) => err_json(StatusCode::BAD_REQUEST, e),
+        }
+    })
+    .await;
+    match reply {
+        Ok(reply) => reply,
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("params/render task: {e}"),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------
 // ログ投稿 PULL(SPEC §2.3 LogPost / §3.2)
 // ---------------------------------------------------------------------
 
@@ -2459,6 +2871,8 @@ pub fn router(controller: Arc<Controller>) -> Router {
         .route("/api/run/stop", post(post_run_stop))
         .route("/api/run/next", post(post_run_next))
         .route("/api/ecc/{action}", post(post_ecc))
+        .route("/api/params", get(get_params).put(put_params))
+        .route("/api/params/render", get(get_params_render))
         .route("/api/logbook", get(get_logbook))
         .route("/api/logbook/comment", post(post_comment));
     if let Some(dir) = ui_dir {
@@ -2964,6 +3378,8 @@ mod tests {
             components,
             ecc_endpoint: "inproc://ecc".to_string(),
             router_ip: None,
+            ecc_config_dir: None,
+            params_dir: None,
             eos_timeout: Duration::from_secs(5),
             eos_quiesce: Duration::from_millis(500),
             eos_poll: Duration::from_millis(200),

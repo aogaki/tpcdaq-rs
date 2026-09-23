@@ -374,6 +374,8 @@ impl Topology {
             ],
             ecc_endpoint: bridge.banner.clone(),
             router_ip: None,
+            ecc_config_dir: None,
+            params_dir: None,
             eos_timeout: options.eos_timeout,
             // TODO/033-E で新設(SPEC §1.3 v1.12)。ここは production の既定のまま
             // = 実運用と同じ停止の畳み方でシナリオを回す。

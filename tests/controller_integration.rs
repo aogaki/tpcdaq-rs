@@ -12,7 +12,7 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -65,6 +65,10 @@ fn get(addr: SocketAddr, path: &str) -> (u16, Value) {
 
 fn post(addr: SocketAddr, path: &str, body: Value) -> (u16, Value) {
     http("POST", addr, path, Some(&body.to_string()))
+}
+
+fn put(addr: SocketAddr, path: &str, body: Value) -> (u16, Value) {
+    http("PUT", addr, path, Some(&body.to_string()))
 }
 
 // ---------------------------------------------------------------------
@@ -349,6 +353,19 @@ async fn harness_with_config_ids(
     ui_dir: Option<PathBuf>,
     config_ids: ConfigIds,
 ) -> Harness {
+    harness_full(tag, cobo_ids, eos_closed, ui_dir, config_ids, None).await
+}
+
+/// [`harness_with_config_ids`] の `ecc_config_dir` 指定版(078 レーン B: params 系 REST の
+/// テスト用 — `None` なら従来どおり params REST は 503)。
+async fn harness_full(
+    tag: &str,
+    cobo_ids: &[u32],
+    eos_closed: bool,
+    ui_dir: Option<PathBuf>,
+    config_ids: ConfigIds,
+    ecc_config_dir: Option<PathBuf>,
+) -> Harness {
     let (shutdown, _) = broadcast::channel(1);
     let output_root = temp_root(tag);
 
@@ -443,6 +460,10 @@ async fn harness_with_config_ids(
         components,
         ecc_endpoint: ecc.endpoint.clone(),
         router_ip: None,
+        ecc_config_dir,
+        // 既定(`<output_root>/params`)をそのまま使う — テストごとに output_root が
+        // 一意なので、これだけで test 間の干渉は無い。
+        params_dir: None,
         // 強制 EOS 分岐を秒単位で待たずに試せるよう、テストでは短くする。
         eos_timeout: Duration::from_millis(400),
         // TODO/033-E で新設(SPEC §1.3 v1.12)。eos_timeout と同じく短く ——
@@ -1420,5 +1441,424 @@ async fn the_ui_directory_is_served_when_configured() {
     assert_eq!(status, 200);
 
     let _ = std::fs::remove_dir_all(&ui_dir);
+    harness.shutdown();
+}
+
+// ---------------------------------------------------------------------
+// パラメータ JSON REST(078 レーン B §10、SPEC §3.3)
+// ---------------------------------------------------------------------
+
+/// レーン A の合成フィクスチャを `ecc_config_dir` に置いた params 専用ハーネス。
+/// `tests/fixtures/params/params_roundtrip.json` の `"template"` は
+/// `"configure-mini-fixture.xcfg"` なので、`template_mini.xcfg` を**その名前で**コピーする
+/// (078 §9 発注のとおり「一時ディレクトリにコピーして使う」)。
+async fn params_harness(tag: &str) -> (Harness, PathBuf) {
+    let ecc_config_dir = temp_root(&format!("{tag}-ecc-config"));
+    std::fs::create_dir_all(&ecc_config_dir).unwrap();
+    let template_src =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/params/template_mini.xcfg");
+    std::fs::copy(
+        &template_src,
+        ecc_config_dir.join("configure-mini-fixture.xcfg"),
+    )
+    .unwrap();
+
+    let harness = harness_full(
+        tag,
+        &[0],
+        true,
+        None,
+        ConfigIds::same("integration"),
+        Some(ecc_config_dir.clone()),
+    )
+    .await;
+    (harness, ecc_config_dir)
+}
+
+/// `tests/fixtures/params/params_roundtrip.json`(078 §5-1 の往復オラクル — レーン A の
+/// テンプレート現行値そのまま、`exceptions: []`)を `Value` として読む。
+fn roundtrip_params_json() -> Value {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/params/params_roundtrip.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    serde_json::from_str(&text).unwrap()
+}
+
+/// ディレクトリのファイル名一覧(ソート済み)。「dry run が書かなかった」ことの証拠に使う。
+fn dir_listing(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// ① GET 404(未 PUT)→ PUT(有効 JSON)→ 2 ファイル生成 + GET 200(exceptions 件数含む)。
+/// 監査 `params/put` の記録も確認する。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn params_get_404_then_put_creates_the_xcfg_pair_and_get_returns_the_same_shape() {
+    let (harness, ecc_config_dir) = params_harness("params-roundtrip").await;
+
+    let (status, body) = get(harness.rest, "/api/params");
+    assert_eq!(status, 404, "{body}");
+
+    let token = harness.acquire("aogaki");
+    let (status, put_body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": roundtrip_params_json()}),
+    );
+    assert_eq!(status, 200, "{put_body}");
+    let id = put_body["id"].as_str().expect("id string").to_string();
+    // stem = template_stem("configure-mini-fixture.xcfg") = "mini-fixture"(078 §3-3)。
+    assert!(id.starts_with("mini-fixture__"), "{id}");
+    assert_eq!(put_body["sha256"].as_str().unwrap().len(), 64, "{put_body}");
+    assert_eq!(put_body["exceptions"], json!(0), "{put_body}");
+    assert_eq!(
+        put_body["params"]["template"],
+        json!("configure-mini-fixture.xcfg")
+    );
+
+    let configure_path = ecc_config_dir.join(format!("configure-{id}.xcfg"));
+    let prepare_path = ecc_config_dir.join(format!("prepare-{id}.xcfg"));
+    assert_eq!(
+        put_body["files"],
+        json!({
+            "configure": configure_path.display().to_string(),
+            "prepare": prepare_path.display().to_string(),
+        })
+    );
+    assert!(configure_path.exists(), "configure xcfg が生成されていない");
+    assert!(prepare_path.exists(), "prepare xcfg が生成されていない");
+    // レーン A の往復規則: knobs がテンプレート現行値のままなら生成 xcfg はテンプレートと
+    // バイト一致(078 §5-1)。
+    let template_text = std::fs::read_to_string(template_src(&ecc_config_dir)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&configure_path).unwrap(),
+        template_text
+    );
+    assert_eq!(
+        std::fs::read_to_string(&prepare_path).unwrap(),
+        template_text
+    );
+
+    let (status, get_body) = get(harness.rest, "/api/params");
+    assert_eq!(status, 200, "{get_body}");
+    assert_eq!(get_body, put_body, "GET は PUT と同じ形を返す(078 §10)");
+
+    let records = harness.logbook();
+    let audit = records
+        .iter()
+        .find(|r| r["action"] == json!("params/put"))
+        .expect("params/put audit record");
+    assert_eq!(audit["ok"], json!(true));
+    assert_eq!(audit["params"], json!({"id": id, "exceptions": 0}));
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+fn template_src(ecc_config_dir: &Path) -> PathBuf {
+    ecc_config_dir.join("configure-mini-fixture.xcfg")
+}
+
+/// ② スキーマ違反は 400 + `ParamsError` の文言(範囲外 / スコープより細かい例外 / 未知ノブ)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn params_put_rejects_schema_violations_with_400_and_the_params_error_text() {
+    let (harness, ecc_config_dir) = params_harness("params-400").await;
+    let token = harness.acquire("aogaki");
+
+    // 範囲外(globalThreshold は 0..7 — schema.rs の KNOBS)。
+    let mut out_of_range = roundtrip_params_json();
+    out_of_range["knobs"]["globalThreshold"] = json!(99);
+    let (status, body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": out_of_range}),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("globalThreshold"),
+        "{body}"
+    );
+
+    // スコープより細かい例外(zeroSuppression.enabled は CoBo スコープ = 深さ 0、
+    // どんな `at` も細かすぎる — 078 §2.1)。
+    let mut too_fine = roundtrip_params_json();
+    too_fine["exceptions"] = json!([
+        {"knob": "zeroSuppression.enabled", "at": {"asad": 0}, "value": true}
+    ]);
+    let (status, body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": too_fine}),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("zeroSuppression.enabled"),
+        "{body}"
+    );
+
+    // 未知のノブ。
+    let mut unknown_knob = roundtrip_params_json();
+    unknown_knob["exceptions"] = json!([
+        {"knob": "bogusKnob", "at": {"asad": 0}, "value": 1}
+    ]);
+    let (status, body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": unknown_knob}),
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("bogusKnob"),
+        "{body}"
+    );
+
+    // 3 件とも書かない(400 は失敗であって半端な生成物を残さない)。
+    assert_eq!(
+        dir_listing(&ecc_config_dir),
+        vec!["configure-mini-fixture.xcfg"]
+    );
+
+    let records = harness.logbook();
+    let failed = records
+        .iter()
+        .filter(|r| r["action"] == json!("params/put") && r["ok"] == json!(false))
+        .count();
+    assert_eq!(failed, 3, "{records:?}");
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+/// ③ 同じ JSON を再 PUT してもファイルのタイムスタンプは動かない(078 §3-3「同じ JSON →
+/// 同じファイル」)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn params_put_is_idempotent_and_leaves_existing_file_timestamps_alone() {
+    let (harness, ecc_config_dir) = params_harness("params-idempotent").await;
+    let token = harness.acquire("aogaki");
+    let body = json!({"token": token, "params": roundtrip_params_json()});
+
+    let (status, first) = put(harness.rest, "/api/params", body.clone());
+    assert_eq!(status, 200, "{first}");
+    let id = first["id"].as_str().unwrap().to_string();
+    let configure_path = ecc_config_dir.join(format!("configure-{id}.xcfg"));
+    let prepare_path = ecc_config_dir.join(format!("prepare-{id}.xcfg"));
+    let mtime = |p: &PathBuf| {
+        std::fs::metadata(p)
+            .unwrap()
+            .modified()
+            .expect("mtime is supported")
+    };
+    let configure_mtime_1 = mtime(&configure_path);
+    let prepare_mtime_1 = mtime(&prepare_path);
+
+    // ファイルシステムの mtime 分解能(秒単位のことがある)に負けないよう一呼吸置く。
+    std::thread::sleep(Duration::from_millis(1100));
+
+    let (status, second) = put(harness.rest, "/api/params", body);
+    assert_eq!(status, 200, "{second}");
+    assert_eq!(second["id"], first["id"]);
+    assert_eq!(
+        mtime(&configure_path),
+        configure_mtime_1,
+        "configure が再書き込みされた(078 §3-3 違反)"
+    );
+    assert_eq!(
+        mtime(&prepare_path),
+        prepare_mtime_1,
+        "prepare が再書き込みされた(078 §3-3 違反)"
+    );
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+/// ④ `ecc_config_dir` 未設定なら params 系 REST(GET/PUT/render)はすべて 503。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn params_rest_returns_503_when_ecc_config_dir_is_not_configured() {
+    // `harness()` は `ecc_config_dir: None`(harness_full の既定)。
+    let harness = harness("params-no-eccdir", &[0], true, None).await;
+
+    let (status, body) = get(harness.rest, "/api/params");
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"], json!("ecc_config_dir is not configured"));
+
+    let (status, body) = get(harness.rest, "/api/params/render");
+    assert_eq!(status, 503, "{body}");
+
+    let token = harness.acquire("aogaki");
+    let (status, body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": roundtrip_params_json()}),
+    );
+    assert_eq!(status, 503, "{body}");
+
+    harness.shutdown();
+}
+
+/// ⑤ current.json があれば run/start の prepare/configure の config_id が `<id>`、
+/// describe は TOML の値のまま(078 §10-3)。logbook `run_start.params` と
+/// `audit run/start` の `params_id` にも同じ `<id>` が載る。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn params_id_drives_prepare_and_configure_config_id_at_run_start() {
+    let (harness, ecc_config_dir) = params_harness("params-run-start").await;
+    let token = harness.acquire("aogaki");
+    let (status, put_body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": roundtrip_params_json()}),
+    );
+    assert_eq!(status, 200, "{put_body}");
+    let id = put_body["id"].as_str().unwrap().to_string();
+
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "params wired"}),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    // describe は TOML の config_id("integration")、prepare/configure は params の id。
+    assert_eq!(
+        harness.ecc.request("describe").unwrap()["config_id"],
+        json!("integration")
+    );
+    assert_eq!(
+        harness.ecc.request("prepare").unwrap()["config_id"],
+        json!(id)
+    );
+    assert_eq!(
+        harness.ecc.request("configure").unwrap()["config_id"],
+        json!(id)
+    );
+
+    let records = harness.logbook();
+    let run_start = records
+        .iter()
+        .find(|r| r["type"] == json!("run_start"))
+        .expect("run_start record");
+    assert_eq!(run_start["params"]["id"], json!(id));
+    assert_eq!(run_start["params"]["exceptions"], json!(0));
+    assert_eq!(run_start["params"]["sha256"], put_body["sha256"]);
+    // 3 相が非同値(describe != prepare/configure)なので §9.2 v1.13 の分岐で
+    // `config_id` は configure 相、`config_ids` に 3 相全部が載る。
+    assert_eq!(run_start["config_id"], json!(id));
+    assert_eq!(
+        run_start["config_ids"],
+        json!({"describe": "integration", "prepare": id, "configure": id})
+    );
+
+    let run_start_audit = records
+        .iter()
+        .rev()
+        .find(|r| r["action"] == json!("run/start") && r["ok"] == json!(true))
+        .expect("run/start audit record");
+    assert_eq!(run_start_audit["params"]["params_id"], json!(id));
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+/// ⑥ run 実行中(phase ≠ Idle)の PUT は 409(次 run から効くという半端を作らない)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn params_put_is_refused_with_409_while_a_run_is_active() {
+    let (harness, ecc_config_dir) = params_harness("params-running").await;
+    let token = harness.acquire("aogaki");
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": roundtrip_params_json()}),
+    );
+    assert_eq!(status, 409, "{body}");
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+/// ⑦ dry-run render(`GET /api/params/render`)はファイルを 1 つも書かない
+/// (UI の diff 表示用、078 §10)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn params_render_dry_run_does_not_write_any_file() {
+    let (harness, ecc_config_dir) = params_harness("params-dry-run").await;
+    let token = harness.acquire("aogaki");
+    let (status, put_body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": roundtrip_params_json()}),
+    );
+    assert_eq!(status, 200, "{put_body}");
+
+    let before = dir_listing(&ecc_config_dir);
+
+    let (status, body) = get(harness.rest, "/api/params/render");
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["id"], put_body["id"]);
+    assert_eq!(body["exceptions"], json!(0));
+    assert_eq!(
+        body["configure_xcfg"],
+        Value::String(std::fs::read_to_string(template_src(&ecc_config_dir)).unwrap())
+    );
+
+    // テンプレート省略時は current.json の template(= `configure-mini-fixture.xcfg`)を使う。
+    let (status, explicit_body) = get(
+        harness.rest,
+        "/api/params/render?template=configure-mini-fixture.xcfg",
+    );
+    assert_eq!(status, 200, "{explicit_body}");
+    assert_eq!(explicit_body["configure_xcfg"], body["configure_xcfg"]);
+
+    let after = dir_listing(&ecc_config_dir);
+    assert_eq!(before, after, "dry run がディレクトリの中身を変えた");
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+/// 「作るもの」④: `GET /api/status` の `params`(PUT 前は null、PUT 後は `{id, exceptions}`)。
+/// status バーの `params <id> · exceptions N` の元(UI はレーン C)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn status_reports_the_current_params_id_and_exceptions_or_null() {
+    let (harness, ecc_config_dir) = params_harness("params-status").await;
+
+    let (status, body) = get(harness.rest, "/api/status");
+    assert_eq!(status, 200);
+    assert_eq!(body["params"], Value::Null, "{body}");
+
+    let token = harness.acquire("aogaki");
+    let (status, put_body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": roundtrip_params_json()}),
+    );
+    assert_eq!(status, 200, "{put_body}");
+
+    let (status, body) = get(harness.rest, "/api/status");
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["params"],
+        json!({"id": put_body["id"], "exceptions": 0})
+    );
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
     harness.shutdown();
 }
