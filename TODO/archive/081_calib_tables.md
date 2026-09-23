@@ -62,3 +62,10 @@ pedestal run と pulser run(実機 .graw、AsAd 毎ファイル)から **per-cha
   (ファイル名からのラン推定はしない)/ merge は両方に存在する ch のみ、片側欠落は stderr 警告 — いずれも承認。
 - 使い方: `calib pedestal <graw...> --out pedestal.json` / `calib pulser <graw...> --out pulser.json` /
   `calib merge pedestal.json pulser.json --out calib.json --k 5`。
+
+## 追記(2026-09-23、tpcdaq-rs で取った pedestal run への適用 — 本番機経路の初受け入れ)
+- データ: GDED 遠隔、run 6(`out_bg/run0006/CoBo0_AsAd0_2026-09-23T15:05:18.171_0000.graw`、126,567,936 B、**454 frames、malformed 0**)。設定は params 生成
+  `pedestals__706aabd4`(pedestals テンプレート → triggerMode periodically、240fC、25 MHz、peaking 70 ns、パルサー off、HV 断)。Mac 側 `reference/exp_data/2026/tpcdaq_pedestal/run0006/`。
+- `calib pedestal`(272 ch): signal ch ベースライン中央値 **454.2 ADC**(362–546)、ノイズ RMS 中央値 **6.17**(4.93–7.33)/ FPN ベースライン 460.9、RMS 3.36(2.97–3.89)。
+  068(GET 純正 DAQ の pedestal run、別ゲイン設定)の signal RMS 6.64 と同オーダー、FPN は 2.05 より高め(設定差: 240fC / 70 ns)。→ **tpcdaq-rs の .graw を 081 がそのまま食える**ことを実機で確認。
+
