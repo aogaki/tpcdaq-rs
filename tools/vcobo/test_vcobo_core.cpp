@@ -496,22 +496,28 @@ void test_patch_frame_header_leaves_control_frames_untouched() {
 
 void test_loop_renumbering_is_monotonic_and_duplicate_free() {
   // vcobo_link.hpp::DataLink::worker() は cursor_ が末尾から先頭に戻るたびに周回番号
-  // (lap)を 1 つ進め、**pending_ へコピーした後の**バイト列へ idx_offset_per_lap × lap
-  // を足す(元の set_->bytes は不変)。ここではソケット/スレッドを使わず、同じ計算を
-  // 素の frames + patch_frame_header で再現する(このファイルは Ice も socket も
-  // 要らない単体テストなので DataLink そのものは対象外)。
+  // (lap)を 1 つ進め、**pending_ へコピーした後の**バイト列へ idx_offset_per_lap × lap /
+  // time_offset_per_lap × lap を足す(元の set_->bytes は不変)。ここではソケット/
+  // スレッドを使わず、同じ計算を素の frames + patch_frame_header で再現する
+  // (このファイルは Ice も socket も要らない単体テストなので DataLink そのものは対象外)。
   //
   // セット(merge_by_event_idx 後の送出順を模した、既に eventIdx 昇順のフレーム列。
-  // 非対称: 連番でも 0 始まりでもない 2, 5, 9)。
+  // 非対称: 連番でも 0 始まりでもない eventIdx 2, 5, 9 / eventTime 1000, 2000, 4000)。
   const std::vector<std::vector<uint8_t>> set_frames = {
-      make_data_frame(64, true, 2, 2, 0x11, 100),
-      make_data_frame(64, true, 2, 5, 0x22, 400),
-      make_data_frame(64, true, 2, 9, 0x33, 900),
+      make_data_frame(64, true, 2, 2, 0x11, 1000),
+      make_data_frame(64, true, 2, 5, 0x22, 2000),
+      make_data_frame(64, true, 2, 9, 0x33, 4000),
   };
   // 発注書どおり: idx_offset_per_lap = セット内の最大 eventIdx + 1 = 9 + 1 = 10。
   const uint32_t idx_offset_per_lap = 10;
+  // 087 Fable 裁定(2026-09-23): time_offset_per_lap = span + step、
+  //   span = max_event_time − min_event_time = 4000 − 1000 = 3000、
+  //   step = span / (n_data_frames − 1) = 3000 / (3 − 1) = 1500(整数除算)、
+  //   time_offset_per_lap = 3000 + 1500 = 4500。
+  const uint64_t time_offset_per_lap = 4500;
 
-  std::vector<uint32_t> sent;  // 2 周分、送出順
+  std::vector<uint32_t> sent_idx;   // 2 周分、送出順
+  std::vector<uint64_t> sent_time;  // 同上、eventTime
   for (size_t lap = 0; lap < 2; ++lap) {
     for (const std::vector<uint8_t>& original : set_frames) {
       // DataLink::worker と同じ手順: pending_ 相当へコピーしてから、コピーへ適用する
@@ -520,30 +526,62 @@ void test_loop_renumbering_is_monotonic_and_duplicate_free() {
       if (lap != 0) {
         CHECK(vcobo::patch_frame_header(copy.data(), copy.size(),
                                         idx_offset_per_lap * uint32_t(lap),
-                                        /*time_offset=*/0));
+                                        time_offset_per_lap * uint64_t(lap)));
       }
       uint32_t ev = 0;
       CHECK(vcobo::peek_event_idx(copy.data(), copy.size(), ev));
-      sent.push_back(ev);
+      sent_idx.push_back(ev);
+      sent_time.push_back(vcobo::read_header_uint(copy.data() + 16, 6, /*little=*/true));
     }
   }
 
-  // 手計算: 1 周目 = 2,5,9(無改変)/ 2 周目 = 2+10,5+10,9+10 = 12,15,19。
-  const std::vector<uint32_t> want = {2, 5, 9, 12, 15, 19};
-  CHECK_EQ(sent.size(), want.size());
-  for (size_t i = 0; i < want.size() && i < sent.size(); ++i) {
-    CHECK_EQ(sent[i], want[i]);
+  // 手計算(eventIdx): 1 周目 = 2,5,9(無改変)/ 2 周目 = 2+10,5+10,9+10 = 12,15,19。
+  const std::vector<uint32_t> want_idx = {2, 5, 9, 12, 15, 19};
+  CHECK_EQ(sent_idx.size(), want_idx.size());
+  for (size_t i = 0; i < want_idx.size() && i < sent_idx.size(); ++i) {
+    CHECK_EQ(sent_idx[i], want_idx[i]);
   }
 
-  // 単調増加(全体を通して非減少)。
-  for (size_t i = 1; i < sent.size(); ++i) {
-    CHECK(sent[i] > sent[i - 1]);
+  // 手計算(eventTime): 1 周目 = 1000,2000,4000(無改変)/
+  //   2 周目 = 1000+4500,2000+4500,4000+4500 = 5500,6500,8500。
+  const std::vector<uint64_t> want_time = {1000, 2000, 4000, 5500, 6500, 8500};
+  CHECK_EQ(sent_time.size(), want_time.size());
+  for (size_t i = 0; i < want_time.size() && i < sent_time.size(); ++i) {
+    CHECK_EQ(sent_time[i], want_time[i]);
   }
 
-  // 重複なし。
-  std::vector<uint32_t> sorted_sent = sent;
-  std::sort(sorted_sent.begin(), sorted_sent.end());
-  CHECK(std::adjacent_find(sorted_sent.begin(), sorted_sent.end()) == sorted_sent.end());
+  // eventIdx: 単調増加(全体を通して非減少)+ 重複なし。
+  for (size_t i = 1; i < sent_idx.size(); ++i) {
+    CHECK(sent_idx[i] > sent_idx[i - 1]);
+  }
+  std::vector<uint32_t> sorted_idx = sent_idx;
+  std::sort(sorted_idx.begin(), sorted_idx.end());
+  CHECK(std::adjacent_find(sorted_idx.begin(), sorted_idx.end()) == sorted_idx.end());
+
+  // eventTime も周回境界で「巻き戻り」に見えない(全体を通して単調増加)。
+  for (size_t i = 1; i < sent_time.size(); ++i) {
+    CHECK(sent_time[i] > sent_time[i - 1]);
+  }
+}
+
+void test_time_offset_per_lap_is_zero_with_at_most_one_data_frame() {
+  // 087 Fable 裁定: データフレームが 1 枚以下だと step = (max−min)/(n−1) の分母が
+  // 0 になり定義できないので、time_offset_per_lap は 0(= eventTime は周回をまたいでも
+  // 無改変)とする。eventIdx 側は通常どおり付け替わる(最大 eventIdx 7 + 1 = 8)。
+  const std::vector<uint8_t> only = make_data_frame(64, true, 2, 7, 0x44, 123456ull);
+  const uint32_t idx_offset_per_lap = 8;
+  const uint64_t time_offset_per_lap = 0;  // n_data_frames == 1 → 裁定どおり 0
+
+  std::vector<uint8_t> copy = only;
+  CHECK(vcobo::patch_frame_header(copy.data(), copy.size(), idx_offset_per_lap * 1,
+                                  time_offset_per_lap * 1));
+
+  uint32_t ev = 0;
+  CHECK(vcobo::peek_event_idx(copy.data(), copy.size(), ev));
+  CHECK_EQ(ev, 15u);  // 手計算: 7 + 8 = 15
+
+  const uint64_t got_time = vcobo::read_header_uint(copy.data() + 16, 6, /*little=*/true);
+  CHECK_EQ(got_time, 123456ull);  // eventTime は無改変のまま
 }
 
 void test_patch_frame_header_is_a_noop_with_zero_offsets() {
@@ -639,6 +677,7 @@ int main() {
   test_patch_frame_header_adds_offsets_and_preserves_other_bytes();
   test_patch_frame_header_leaves_control_frames_untouched();
   test_loop_renumbering_is_monotonic_and_duplicate_free();
+  test_time_offset_per_lap_is_zero_with_at_most_one_data_frame();
   test_patch_frame_header_is_a_noop_with_zero_offsets();
   test_config_parse();
   test_asad_mask_check();

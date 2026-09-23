@@ -87,3 +87,49 @@ eventIdx 側の付け替えだけで解消する(eventTime 未配線は demo の
 **スキップしたテスト**: `run_vcobo_oracle.sh`(実 ECC 相手)は `TPCDAQ_SPIKE_PREFIX` 未設定のため
 未実行(元々オンデマンド、本チケットの変更範囲外)。`run_vcobo_ci.sh` 内の実データ回帰は
 `TPCDAQ_REAL_GRAW_DIR` 未設定でスキップ(既存の任意回帰、本チケット無関係)。
+
+### 追補(2026-09-23、Fable 裁定反映 — eventTime 配線)
+
+上記「承認が要る逸脱」を Fable がレビューし裁定。以下の式で eventTime も配線した(追加コミット、
+同 worktree):
+
+```
+time_offset_per_lap = (max_event_time − min_event_time) + step
+step = (max_event_time − min_event_time) / (n_data_frames − 1)   ※整数除算・データフレーム 2 枚以上のとき
+n_data_frames <= 1 のときは step = 0 → time_offset_per_lap = 0
+```
+
+**実装**: `tools/vcobo/vcobo_link.hpp` の `GrawSet` に `min_event_time` / `max_event_time` /
+`n_data_frames` を追加(`load_graw_set` の既存 eventIdx スキャンへ相乗り — `peek_event_idx` が
+true を返した各データフレームで `read_header_uint(fp+16, 6, little)` も同時に読む。二度手間なし)。
+`DataLink` に `time_offset_per_lap_`(`start()` で上式により 1 回計算)を追加。ホットパスの
+`patch_frame_header` 呼び出しは `time_offset=0` 固定をやめ、
+`time_offset_per_lap_ * uint64_t(lap_for_frame)` を渡すよう変更(`idx_offset` と対称)。
+48-bit 桁あふれは考慮しない(裁定どおり、demo 用途)。
+
+**テスト**: `test_loop_renumbering_is_monotonic_and_duplicate_free` を eventTime にも拡張
+(既存の eventIdx {2,5,9} のフレームに eventTime {1000,2000,4000} を持たせ、
+span=4000−1000=3000・step=3000/(3−1)=1500・time_offset_per_lap=3000+1500=4500 を手計算、
+2 周目は eventTime {5500,6500,8500} になることと、6 個を通して eventTime も単調増加する
+ことを確認)。新規 1 本追加: `test_time_offset_per_lap_is_zero_with_at_most_one_data_frame`
+(データフレーム 1 枚のセットは time_offset_per_lap=0 → eventTime 無改変、eventIdx は
+通常どおり付け替わる、を確認)。
+
+**ビルド・テストコマンド**(前節と同一):
+```
+make -C tools/vcobo test
+make -C tools/vcobo -j8 TPCDAQ_ICE_DIR=/Users/aogaki/Workspace/tpcdaq-rs/reference/20190315_patched
+make -C tools/vcobo ci TPCDAQ_ICE_DIR=/Users/aogaki/Workspace/tpcdaq-rs/reference/20190315_patched
+```
+
+**テスト数**: `test_vcobo_core` **188 passed → 204 passed, 0 failed**(新規 1 関数 + 既存 1 関数の
+拡張、+16 CHECK)。`make -j8`(Ice ビルド)は警告ゼロで通過。`make ci` も green
+(`vcobo_ice_client(full): 57 passed`, `vcobo_ice_client(heartbeat): 6 passed`、バイト一致
+チェック含め全 PASS、`loop=false` パスは無改造のまま)。
+
+**docs**: `docs/VIRTUAL_ZCOBO_ja.md` §5.2 の「eventTime は未実装」を上式へ書き換え。
+
+**残る逸脱・懸念**: なし(前節の懸念は本追補で解消)。demo 受け入れは前節のとおり未実施のまま
+(引き続き Fable がマージ後に実施)。
+
+**実行環境**: 前節と同一(macOS Darwin 25.6.0、Ice 3.7 keg、2026-09-23)。

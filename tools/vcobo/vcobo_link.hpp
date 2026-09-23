@@ -65,7 +65,10 @@ struct GrawSet {
   std::vector<uint8_t> bytes;      ///< 全ファイルの連結(**バイト無変換**)
   std::vector<FrameSpan> frames;   ///< 連結後の座標
   uint32_t max_event_idx = 0;      ///< データフレームの最大 eventIdx(loop 付け替え用、087)
-  bool has_data_frame = false;     ///< true なら max_event_idx が有効(全フレーム制御フレームなら false)
+  uint64_t min_event_time = 0;     ///< データフレームの最小 eventTime(loop 付け替え用、087)
+  uint64_t max_event_time = 0;     ///< データフレームの最大 eventTime(loop 付け替え用、087)
+  size_t n_data_frames = 0;        ///< データフレーム数(eventTime の周回ステップ計算用、087)
+  bool has_data_frame = false;     ///< true なら上記 4 つが有効(全フレーム制御フレームなら false)
 
   size_t total_bytes() const { return bytes.size(); }
 };
@@ -128,15 +131,23 @@ inline bool load_graw_set(const std::vector<std::string>& paths, GrawSet& set, s
 
   set.frames = merge_by_event_idx(set.bytes, per_file);
 
-  // 送出順の素性を起動ログに出す(silent にしない)。
+  // 送出順の素性を起動ログに出す(silent にしない)。ついでに loop 付け替え(087)に
+  // 要る eventIdx / eventTime の最小・最大とデータフレーム数もここで拾う(二度手間にしない)。
   uint32_t ev_min = 0;
   uint32_t ev_max = 0;
+  uint64_t et_min = 0;
+  uint64_t et_max = 0;
   size_t data_frames = 0;
   for (const FrameSpan& s : set.frames) {
+    const uint8_t* fp = set.bytes.data() + s.offset;
     uint32_t ev = 0;
-    if (!peek_event_idx(set.bytes.data() + s.offset, s.length, ev)) continue;
+    if (!peek_event_idx(fp, s.length, ev)) continue;
+    const bool little = (fp[0] & 0x80) != 0;
+    const uint64_t et = read_header_uint(fp + 16, 6, little);
     if (data_frames == 0 || ev < ev_min) ev_min = ev;
     if (data_frames == 0 || ev > ev_max) ev_max = ev;
+    if (data_frames == 0 || et < et_min) et_min = et;
+    if (data_frames == 0 || et > et_max) et_max = et;
     ++data_frames;
   }
   const std::string range =
@@ -150,6 +161,9 @@ inline bool load_graw_set(const std::vector<std::string>& paths, GrawSet& set, s
   // 087: loop 時の周回オフセット計算に使う(上のスキャンをもう一度やらずに済ませる)。
   set.has_data_frame = data_frames != 0;
   set.max_event_idx = ev_max;
+  set.min_event_time = et_min;
+  set.max_event_time = et_max;
+  set.n_data_frames = data_frames;
   return true;
 }
 
@@ -174,6 +188,17 @@ class DataLink {
     // 087: 周回ごとに足す eventIdx オフセット = セット内の最大 eventIdx + 1。
     // データフレームが 1 つも無ければ足しようがないので 0(= 無改変)。
     idx_offset_per_lap_ = set_->has_data_frame ? (set_->max_event_idx + 1) : 0;
+    // 087 Fable 裁定(2026-09-23): eventTime も周回ごとに付け替える。
+    //   time_offset_per_lap = (max_event_time − min_event_time) + step
+    //   step = (max_event_time − min_event_time) / (n_data_frames − 1)  [整数除算]
+    // データフレームが 2 枚未満なら step が定義できないので 0(= time_offset も 0)。
+    // 48-bit 桁あふれは考えない(demo 用途)。
+    time_offset_per_lap_ = 0;
+    if (set_->has_data_frame && set_->n_data_frames >= 2) {
+      const uint64_t span = set_->max_event_time - set_->min_event_time;
+      const uint64_t step = span / uint64_t(set_->n_data_frames - 1);
+      time_offset_per_lap_ = span + step;
+    }
     // 1 回の flush 分 + 最大フレーム 1 個が入る容量を先に確保する(以後 heap を触らない)。
     size_t max_frame = 0;
     for (const FrameSpan& s : set_->frames) max_frame = std::max(max_frame, s.length);
@@ -450,21 +475,14 @@ class DataLink {
       const uint8_t* src = set_->bytes.data() + span.offset;
       const size_t insert_at = pending_.size();
       pending_.insert(pending_.end(), src, src + span.length);
-      // 087: 2 周目以降だけ、pending_ にコピーした**後**のバイト列へ eventIdx
-      // オフセットを適用する(元の set_->bytes は不変)。loop=false では lap_ が
-      // 常に 0 のままなのでここには来ない = 1 周目はバイト一致のまま(既存回帰どおり)。
-      // eventTime(offset 16..22)は今回のワイヤリングでは**加算しない**
-      // (time_offset=0): 発注書 087 §1 は「セットの時間幅 + 1 フレーム分」を足すよう
-      // 求めているが、「1 フレーム分」の定量化(平均イベント間隔で決めるか / 固定 tick
-      // にするか等)は発注書だけでは一意に決まらない設計判断のため、ここでは実装せず
-      // 上位へ報告する(patch_frame_header 自体は time_offset を汎用的に受け取れる —
-      // ①のテストで直接検証済み)。eventIdx の付け替えだけで 077 で観測された
-      // late_fragments 化(root-sink のビルダは eventIdx のみで判定、eventTime には
-      // 依存しない — archive/031)は解消する。
+      // 087: 2 周目以降だけ、pending_ にコピーした**後**のバイト列へ eventIdx /
+      // eventTime オフセットを適用する(元の set_->bytes は不変)。loop=false では
+      // lap_ が常に 0 のままなのでここには来ない = 1 周目はバイト一致のまま
+      // (既存回帰どおり)。eventTime のオフセット量は Fable 裁定の式(start() 参照)。
       if (loop_ && lap_for_frame != 0) {
         patch_frame_header(pending_.data() + insert_at, span.length,
                             idx_offset_per_lap_ * uint32_t(lap_for_frame),
-                            /*time_offset=*/0);
+                            time_offset_per_lap_ * uint64_t(lap_for_frame));
       }
       maybe_flush(false);
       pace(next_frame);
@@ -490,6 +508,7 @@ class DataLink {
   size_t flush_bytes_ = 8192;
   std::chrono::milliseconds heartbeat_{3000};
   uint32_t idx_offset_per_lap_ = 0;  ///< 087: start() で 1 回だけ計算、以後不変
+  uint64_t time_offset_per_lap_ = 0; ///< 087: 同上(eventTime 版、Fable 裁定の式)
 
   mutable std::mutex m_;
   std::condition_variable cv_;
