@@ -23,13 +23,31 @@
 //! **`tpcdaq::bin_support::init_tracing` は使わない**——既定の書き込み先が stdout で、
 //! それだと `BIND` 1 行きり(SPEC §8.2)の契約を壊す(実測: `info!` が BIND の直後に
 //! stdout へ混ざる)ので、[`init_tracing_to_stderr`] で明示的に stderr へ向ける。
+//!
+//! **SIGINT/SIGTERM(076 Phase 3 追補)**: 実機(GDED)で SIGINT が効かず SIGTERM でしか
+//! 止まらない事象を確認(ZMQ `recv` でブロックしたまま既定のシグナル動作を待っていたと
+//! 推定)。他の Rust bin は SIGINT で止まる運用(`daq_down.sh`)なので揃える —— この bin は
+//! `tokio` を起動しない同期 REP ループなので `tpcdaq::bin_support::spawn_sigint`(tokio 版)は
+//! 使えず、代わりに `signal-hook`(唯一の追加依存)で `AtomicBool` を立てるだけの
+//! async-signal-safe なハンドラを登録し、REP の `recv` を `ZMQ_RCVTIMEO` 付きにして
+//! 定期的にフラグを見る(最大 500 ms 遅延で応答)。
 
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
+use signal_hook::consts::{SIGINT, SIGTERM};
 use tpcdaq::ecc::core;
 use tpcdaq::ecc::proxy::{EccProxy, Observed, CONNECT_TIMEOUT};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+/// REP の `recv` がタイムアウト(`EAGAIN`/`EINTR`)したとき、ループを抜けるかどうか。
+/// ZMQ に依存しない純粋関数 —— signal-hook 無しでも「終了フラグを見て 1 周で抜ける」を
+/// 検査できる(076 Phase 3 追補)。
+fn should_stop_after_timeout(stopping: &AtomicBool) -> bool {
+    stopping.load(Ordering::Relaxed)
+}
 
 /// 他の Rust bin と同じ `RUST_LOG`(既定 `info`)フィルタだが、**stderr へ書く**
 /// (`bin_support::init_tracing` は stdout に書くため、この bin にだけは使えない)。
@@ -41,6 +59,9 @@ fn init_tracing_to_stderr() {
         )
         .init();
 }
+
+/// REP の recv タイムアウト(SIGINT/SIGTERM をポーリングする周期、076 Phase 3 追補)。
+const RECV_POLL_MS: i32 = 500;
 
 struct Options {
     /// ZMQ REP の bind(SPEC §3.2)。
@@ -199,6 +220,18 @@ fn main() -> ExitCode {
         }
     };
 
+    // SIGINT/SIGTERM は「フラグを立てるだけ」(signal-hook の async-signal-safe な既製ハンドラ)。
+    // REP の recv がタイムアウト付きで定期的にこのフラグを見る(下記ループ)。
+    let stopping = Arc::new(AtomicBool::new(false));
+    if let Err(e) = signal_hook::flag::register(SIGINT, Arc::clone(&stopping)) {
+        error!(error = %e, "cannot register SIGINT handler");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = signal_hook::flag::register(SIGTERM, Arc::clone(&stopping)) {
+        error!(error = %e, "cannot register SIGTERM handler");
+        return ExitCode::FAILURE;
+    }
+
     let context = zmq::Context::new();
     let rep = match context.socket(zmq::REP) {
         Ok(socket) => socket,
@@ -209,6 +242,11 @@ fn main() -> ExitCode {
     };
     if let Err(e) = rep.set_linger(0) {
         error!(error = %e, "cannot set ZMQ_LINGER");
+        return ExitCode::FAILURE;
+    }
+    // SIGINT/SIGTERM をポーリングできるよう、recv を無限ブロックにしない(076 Phase 3 追補)。
+    if let Err(e) = rep.set_rcvtimeo(RECV_POLL_MS) {
+        error!(error = %e, "cannot set ZMQ_RCVTIMEO");
         return ExitCode::FAILURE;
     }
     if let Err(e) = rep.bind(&options.bind) {
@@ -240,6 +278,16 @@ fn main() -> ExitCode {
     loop {
         let request = match rep.recv_bytes(0) {
             Ok(bytes) => bytes,
+            // タイムアウト(RECV_POLL_MS 毎)またはシグナルによる中断: 停止フラグが
+            // 立っていればここで抜ける、立っていなければ黙って `recv` に戻るだけ
+            // (silent ではない —— 通常運転の一部で、ログにする話ではない)。
+            Err(zmq::Error::EAGAIN) | Err(zmq::Error::EINTR) => {
+                if should_stop_after_timeout(&stopping) {
+                    info!("stopping (signal)");
+                    break;
+                }
+                continue;
+            }
             Err(e) => {
                 error!(error = %e, "recv failed");
                 break;
@@ -397,5 +445,23 @@ mod tests {
         for key in ["ok", "state", "error", "ecc_error"] {
             assert!(reply.get(key).is_some(), "{key} が無い: {reply}");
         }
+    }
+
+    /// SIGINT/SIGTERM 対応(076 Phase 3 追補): recv タイムアウトのたびに 1 回だけ
+    /// フラグを見る —— 立っていれば即座にループを抜ける判断になる、立っていなければ
+    /// 抜けない判断になる。ZMQ もシグナルも使わない純粋関数なので、実機依存の
+    /// signal-hook 経路を持ち出さずに「1 周で抜ける」条件を固定できる。
+    #[test]
+    fn should_stop_after_timeout_reads_the_flag_each_cycle() {
+        let stopping = AtomicBool::new(false);
+        assert!(
+            !should_stop_after_timeout(&stopping),
+            "フラグが立っていないのに抜ける判断になった"
+        );
+        stopping.store(true, Ordering::Relaxed);
+        assert!(
+            should_stop_after_timeout(&stopping),
+            "フラグが立っているのに抜けない判断になった"
+        );
     }
 }

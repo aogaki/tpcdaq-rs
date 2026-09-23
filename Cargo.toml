@@ -21,6 +21,9 @@ serde_json = "1.0.151"
 serialport = { version = "4", default-features = false }
 # controller が run_start に載せる geometry.sha256(SPEC §9.2)。std に SHA-256 は無い。
 sha2 = "0.10.9"
+# ecc_bridge(tokio 不使用の同期 bin)の SIGINT/SIGTERM を「フラグを立てるだけ」の
+# async-signal-safe な形で受けるための最小ライブラリ(TODO/076 Phase 3 追補)。
+signal-hook = "0.3"
 thiserror = "2.0.20"
 tmq = "0.4"
 tokio = { version = "1.53.1", features = [

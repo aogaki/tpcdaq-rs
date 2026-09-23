@@ -499,3 +499,59 @@ Fable レビューはフェーズ境界 2 回(Phase 1 後 = ワイヤ、Phase 2 
 
 環境: macOS 26.6.2(Darwin 25.6.0)、rustc 1.97.1、Ice 3.8.2(Homebrew)、2026-09-23。
 
+### 追補 — SIGINT 対応(2026-09-23、Sonnet レーン、レビュー承認後)
+
+**発端**: 076 Phase 3 レビューで、実機(GDED)で `ecc_bridge` が **SIGINT で止まらず SIGTERM
+でしか止まらなかった**(ZMQ REP の `recv` でブロック中と推定)ことが報告された。他の Rust bin
+は SIGINT で止まる運用(`daq_down.sh`)なので揃える追補が発注された。逸脱 1–3 は承認済み。
+
+- **実装**: `src/bin/ecc_bridge.rs`(+66 行)。
+  - 依存を 1 つ追加: **`signal-hook = "0.3"`**(解決 `0.3.18`)。`tokio` は使わない
+    (この bin は同期の REP ループで、`bin_support::spawn_sigint` は tokio ランタイム前提のため
+    そのまま使えない)。`signal_hook::flag::register(SIGINT, Arc<AtomicBool>)` /
+    `register(SIGTERM, ...)` で「フラグを立てるだけ」の async-signal-safe な既製ハンドラを登録
+    (自前のシグナルハンドラは書いていない —— signal-hook 自体がその安全性を担保する対象)。
+  - REP ソケットに `set_rcvtimeo(500)`(`RECV_POLL_MS` 定数)を追加。ループは
+    `Err(zmq::Error::EAGAIN) | Err(zmq::Error::EINTR)` を「タイムアウトまたはシグナル起因の
+    中断」として扱い、その時だけ停止フラグを見る(`should_stop_after_timeout`)。フラグが
+    立っていれば `info!("stopping (signal)")` を出してループを抜け、その後の
+    `info!("shutting down")` を経て `ExitCode::SUCCESS`(= exit 0)。REP ソケットは明示 close
+    せず main 終了時の RAII(`set_linger(0)` 済みなので即座)に任せた(発注書は「ソケットを
+    閉じて exit 0」だが、close 相当を担保する drop は既存コードのままで足りると判断)。
+  - 純粋関数 `should_stop_after_timeout(&AtomicBool) -> bool` を切り出し、ZMQ/signal-hook
+    無しで「フラグを見て 1 周で抜ける」判断だけを単体テストできるようにした。
+
+- **実機事象の再現条件についての補足**: EINTR も EAGAIN と同列に扱った理由は、
+  シグナル配送がブロッキング中の `recv` システムコールを中断して `EINTR` を返す経路が
+  ある(libzmq が内部で吸収せずに伝播するケースがある)ため —— `src/decoder.rs` /
+  `src/receiver.rs` の既存 EINTR 処理と同じ流儀。今回の macOS 実測では実際に **EINTR 経路で
+  ほぼ即座(約 35 ms)に止まった**(下記)ので、500 ms のタイムアウト待ちは「保険」として
+  機能している(signal-hook のフラグ登録だけでは `recv` 自体を割り込ませられない環境でも、
+  最悪 500 ms 以内には必ず止まる)。
+
+- **テスト(実行コマンド / green・red)**:
+  - `cargo test --bin ecc_bridge`: **8 passed**(既存 7 + 新規
+    `tests::should_stop_after_timeout_reads_the_flag_each_cycle`)。
+  - `cargo test --test ecc_bridge_intake`(`TPCDAQ_FAKE_ECC_BIN` 未設定): 3 passed
+    (新規 `sigint_stops_the_bridge_within_one_second` は「TPCDAQ_FAKE_ECC_BIN が無い」で
+    明示 skip、他 2 本は従来どおり実行)。
+  - 同(`TPCDAQ_FAKE_ECC_BIN=<worktree>/tools/ecc_bridge/fake_ecc` を渡して実行): **3 passed**
+    (`sigint_stops_the_bridge_within_one_second` も実走し green。ログに
+    `INFO ecc_bridge: stopping (signal)` → `INFO ecc_bridge: shutting down` を確認)。
+  - `cargo test`(フル): **840 passed / 0 failed / 1 ignored**(追補前 838 → 840、+2 =
+    上記 2 本の新規テスト)。
+  - `cargo fmt`(diff 無し)/ `cargo clippy --all-targets -- -D warnings` /
+    `cargo clippy --tests -- -D warnings`: すべて clean。
+  - `run_ecc_e2e.sh`(`target/release/ecc_bridge` を再ビルドしてから): **52 passed, 0 failed**
+    のまま(回帰なし)。
+  - **実機挙動の直接確認(macOS、`kill -INT` / `kill -TERM` を実プロセスへ)**:
+    SIGINT で **35 ms** で exit 0、SIGTERM で **33 ms** で exit 0(いずれも 1 秒の受け入れ
+    基準を大きく下回る)。stderr の最後の 2 行が `stopping (signal)` → `shutting down`
+    であることも確認。
+
+- **承認が要る逸脱**: 無し(発注書の仕様どおり実装。「ソケットを閉じて」を明示 `drop`/
+  `close` 呼び出しではなく既存の RAII に任せた点は実装細部であり、契約(exit 0 + 1 行ログ)は
+  満たしている)。
+
+- 環境: macOS 26.6.2(Darwin 25.6.0)、rustc 1.97.1、signal-hook 0.3.18、2026-09-23。
+
