@@ -1,8 +1,8 @@
 # tpcdaq-rs
 
 A new DAQ and online-monitoring system for GET-based TPC readout — the mini eTPC at ELI-NP
-and the ELITPC at the Faculty of Physics, Warsaw University. Rust core + C++ satellites
-(ROOT, ZeroC Ice), connected as ZeroMQ components in the style of
+and the ELITPC at the Faculty of Physics, Warsaw University. Rust core + a C++ satellite
+(ROOT, for the event-builder/histogram sink), connected as ZeroMQ components in the style of
 [delila-rs](https://github.com/ELI-NP/delila-rs).
 
 **Status: receive → decode → dual storage → online monitoring → web UI complete (P0–P3),
@@ -59,7 +59,9 @@ for a control that works.
 - `TODO/` — numbered task units + `CURRENT.md` (session entry point)
 - `src/` — Rust components (receiver / decoder / graw-writer / monitor / controller / psu)
 - `ui/` — Angular operator UI (served by the controller from `ui_dir`)
-- `tools/` — C++ satellites (root-sink, ecc-bridge)
+- `tools/` — C++ satellites (root-sink) and the ECC test doubles used by its tests
+  (`tools/ecc_bridge/fake_ecc`, `ecc_e2e_client` — the bridge itself is Rust,
+  [`src/bin/ecc_bridge.rs`](src/bin/ecc_bridge.rs))
 - `third_party/` — isolated vendored code with its own licenses (CeCILL etc.), when needed
 - `tests/fixtures/` — synthetic fixtures only (no real run data in this repository)
 

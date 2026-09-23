@@ -6,34 +6,38 @@
 //! を Rust 側の回帰として置いておく。状態遷移そのものの網羅は C++ 側の
 //! `tools/ecc_bridge/run_ecc_e2e.sh` が担当(こちらは契約の口だけ見る)。
 //!
-//! **env 未設定なら skip** —— C++/Ice ビルドを `cargo test` の前提にしない:
+//! ecc_bridge は 076 Phase 3 以降 **Rust bin が既定**(`env!("CARGO_BIN_EXE_ecc_bridge")`
+//! —— `cargo test` が必ずビルドするので env 無しで走る)。fake-ECC(Ice servant のテストダブル)
+//! だけは C++/Ice のままなので、**それが無ければ skip**:
 //!
 //! ```text
 //! make -C tools/ecc_bridge TPCDAQ_ICE_DIR=$PWD/reference/20190315_patched
-//! TPCDAQ_ECC_BRIDGE_BIN=$PWD/tools/ecc_bridge/ecc_bridge \
 //! TPCDAQ_FAKE_ECC_BIN=$PWD/tools/ecc_bridge/fake_ecc \
 //!   cargo test --test ecc_bridge_intake
 //! ```
+//!
+//! C++ 版ブリッジと比較したいときだけ `TPCDAQ_ECC_BRIDGE_BIN` で明示的に上書きする。
 
 #![allow(clippy::unwrap_used)]
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-/// 2 つの env が揃っていなければ skip(片方だけなら「揃っていない」と分かるように出す)。
+/// ecc_bridge は Rust bin が既定(cargo test が必ずビルドする)。fake_ecc(C++/Ice)が
+/// 無ければ skip(理由を出す)。
 fn bins() -> Option<(PathBuf, PathBuf)> {
-    let bridge = std::env::var_os("TPCDAQ_ECC_BRIDGE_BIN").map(PathBuf::from);
+    let bridge = std::env::var_os("TPCDAQ_ECC_BRIDGE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_ecc_bridge")));
     let fake = std::env::var_os("TPCDAQ_FAKE_ECC_BIN").map(PathBuf::from);
-    match (bridge, fake) {
-        (Some(b), Some(f)) => Some((b, f)),
-        (b, f) => {
-            eprintln!(
-                "skip: TPCDAQ_ECC_BRIDGE_BIN={:?} TPCDAQ_FAKE_ECC_BIN={:?}",
-                b, f
-            );
+    match fake {
+        Some(fake) => Some((bridge, fake)),
+        None => {
+            eprintln!("skip: TPCDAQ_FAKE_ECC_BIN が無い(fake_ecc は C++/Ice のまま。ecc_bridge={bridge:?})");
             None
         }
     }
@@ -273,4 +277,48 @@ fn unreachable_ecc_answers_unknown_instead_of_dying() {
     }
     // 落ちずに応答し続ける。
     assert_reply(&call(&sock, r#"{"action":"status"}"#), false, "Unknown");
+}
+
+/// SIGINT で止まる(TODO/076 Phase 3 追補)。GDED 実機で ZMQ `recv` ブロック中に SIGINT が
+/// 効かず SIGTERM でしか止まらなかった事象の回帰 —— 他の Rust bin(`daq_down.sh` が SIGINT で
+/// 止める運用)と揃える。fake_ecc が無ければ skip(理由を出す、`bins()` と同じゲート)。
+#[test]
+fn sigint_stops_the_bridge_within_one_second() {
+    let Some((bridge_bin, fake_bin)) = bins() else {
+        return;
+    };
+
+    let mut fake_cmd = Command::new(&fake_bin);
+    fake_cmd.args(["--port", "0"]);
+    let fake = Proc::spawn(fake_cmd, "PROXY");
+
+    let mut bridge_cmd = Command::new(&bridge_bin);
+    bridge_cmd.args(["--bind", "tcp://127.0.0.1:*", "--ecc-proxy", &fake.banner]);
+    let mut bridge = Proc::spawn(bridge_cmd, "BIND");
+
+    // `Child::kill` は SIGKILL 固定なので使えない —— `kill(1)` で SIGINT を送る
+    // (`tests/common::signal` と同じ流儀、この bin だけは `mod common;` を引いていないので
+    // ここに直書き)。
+    let pid = bridge.child.id();
+    let status = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .expect("run kill(1)");
+    assert!(status.success(), "kill -INT {pid} failed");
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if let Some(exit) = bridge.child.try_wait().expect("try_wait") {
+            assert!(
+                exit.success(),
+                "SIGINT 後に非 0 で終わった(実機で観測した SIGTERM 専用の症状の再発): {exit:?}"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "ecc_bridge が SIGINT から 1 秒以内に終了しなかった(実機で観測した症状そのもの)"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

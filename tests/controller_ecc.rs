@@ -6,14 +6,17 @@
 //! DataLinkSet は receiver が実際に bind した口で組まれるので、fake-ECC の CoBo 役が
 //! その口へ実際に繋いで来ることまで確認できる(= listen-before-start の実証)。
 //!
-//! **env 未設定なら skip** —— C++/Ice ビルドを `cargo test` の前提にしない:
+//! ecc_bridge は 076 Phase 3 以降 **Rust bin が既定**(`env!("CARGO_BIN_EXE_ecc_bridge")`
+//! —— `cargo test` が必ずビルドするので env 無しで走る)。fake-ECC(Ice servant のテストダブル)
+//! だけは C++/Ice のままなので、**それが無ければ skip**:
 //!
 //! ```text
 //! make -C tools/ecc_bridge TPCDAQ_ICE_DIR=$PWD/reference/20190315_patched
-//! TPCDAQ_ECC_BRIDGE_BIN=$PWD/tools/ecc_bridge/ecc_bridge \
 //! TPCDAQ_FAKE_ECC_BIN=$PWD/tools/ecc_bridge/fake_ecc \
 //!   cargo test --test controller_ecc
 //! ```
+//!
+//! C++ 版ブリッジと比較したいときだけ `TPCDAQ_ECC_BRIDGE_BIN` で明示的に上書きする。
 
 #![allow(clippy::unwrap_used)]
 
@@ -33,14 +36,19 @@ use tpcdaq::controller::{
     run_controller, BoundEndpoints, CoboSpec, ComponentEndpoint, ComponentKind, ControllerParams,
 };
 
-/// 2 つの env が揃っていなければ skip(片方だけなら「揃っていない」と分かるように出す)。
+/// ecc_bridge は Rust bin が既定(cargo test が必ずビルドする)。fake_ecc(C++/Ice)が
+/// 無ければ skip(理由を出す)。
 fn bins() -> Option<(PathBuf, PathBuf)> {
-    let bridge = std::env::var_os("TPCDAQ_ECC_BRIDGE_BIN").map(PathBuf::from);
+    let bridge = std::env::var_os("TPCDAQ_ECC_BRIDGE_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_ecc_bridge")));
     let fake = std::env::var_os("TPCDAQ_FAKE_ECC_BIN").map(PathBuf::from);
-    match (bridge, fake) {
-        (Some(bridge), Some(fake)) => Some((bridge, fake)),
-        (bridge, fake) => {
-            eprintln!("skip: TPCDAQ_ECC_BRIDGE_BIN={bridge:?} TPCDAQ_FAKE_ECC_BIN={fake:?}");
+    match fake {
+        Some(fake) => Some((bridge, fake)),
+        None => {
+            eprintln!(
+                "skip: TPCDAQ_FAKE_ECC_BIN が無い(fake_ecc は C++/Ice のまま。ecc_bridge={bridge:?})"
+            );
             None
         }
     }

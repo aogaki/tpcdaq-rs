@@ -1,8 +1,12 @@
-# tools/ecc_bridge/Makefile — ecc-bridge(C++/Ice)+ fake-ECC(TODO/017、SPEC §8.2/§8.3)。
+# tools/ecc_bridge/Makefile — fake-ECC(Ice servant のテストダブル)+ e2e クライアント
+# (TODO/017、TODO/076 Phase 3、SPEC §8.2/§8.3)。
 #
-#   make test       **Ice 非依存**の単体テストをビルドして実行(g++ 一発、常に走る)
-#   make            ecc_bridge / fake_ecc / ecc_e2e_client をビルド(Ice + libzmq が要る)
-#   make e2e        統合テスト run_ecc_e2e.sh(fake-ECC ↔ ecc_bridge ↔ ZMQ REQ)
+# ecc-bridge 本体は 076 Phase 3 で Rust 化・C++ 版は撤去済み(`cargo build --bin
+# ecc_bridge` → `target/{debug,release}/ecc_bridge`)。ここに残るのは、Rust bin を
+# 実 Ice サーバに擬した相手で叩くための C++ 一式(照合相手を変えないため)だけ:
+#
+#   make            fake_ecc / ecc_e2e_client をビルド(Ice + libzmq が要る)
+#   make e2e        統合テスト run_ecc_e2e.sh(fake-ECC ↔ ecc_bridge(Rust bin)↔ ZMQ REQ)
 #   make clean
 #
 # **Ice スタブは .ice から毎回生成し、コミットしない**(.gitignore)。`.ice` 自体も
@@ -11,7 +15,6 @@
 #   make TPCDAQ_ICE_DIR=$(cd ../.. && pwd)/reference/20190315_patched
 #
 # 未設定なら Ice を使うターゲットは**明示的に skip**(黙って劣化させない)。
-# `make test` は Ice 無しでも走る —— 核(ecc_core.hpp / json_min.hpp)は Ice も ZMQ も知らない。
 
 CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -g -Wall -Wextra
@@ -45,18 +48,16 @@ ICE_OK := $(strip $(if $(TPCDAQ_ICE_DIR),$(if $(SLICE2CPP),$(if $(ICE_PREFIX),ye
 ICE_CFLAGS := -I$(ICE_PREFIX)/include -Islice
 ICE_LIBS   := -L$(ICE_PREFIX)/lib -lIce
 
+# ecc_bridge.cpp / test_ecc_bridge.cpp は撤去したが、この 3 つは fake_ecc.cpp
+# (ecc::State / ecc::next_state / ecc::parse_data_link_set = 共有状態機械)と
+# ecc_e2e_client.cpp(check.hpp の CHECK マクロ、json_min.hpp の応答パース)が
+# 今もそのまま使っている —— C++ 側に残る 2 バイナリの土台なので削除しない。
 HEADERS := ecc_core.hpp json_min.hpp check.hpp
 
-# 049: ECC 状態機械の **共有 golden 遷移表**。Rust 側(src/controller.rs の
-# `the_ecc_state_machine_matches_the_shared_golden_table`)が読むのと**同じ 1 ファイル**を
-# test_ecc_bridge にも渡す —— 片側だけの修正(ドリフト)を落とすのが目的なので、
-# ここを別ファイルに向けたらテストの意味が消える。
-ECC_TRANSITIONS ?= ../../tests/fixtures/ecc_transitions.txt
-
-.PHONY: all test e2e clean ice-skip
+.PHONY: all e2e clean ice-skip
 
 ifeq ($(ICE_OK),yes)
-all: ecc_bridge fake_ecc ecc_e2e_client
+all: fake_ecc ecc_e2e_client
 else
 all: ice-skip
 endif
@@ -67,7 +68,6 @@ ice-skip:
 	@echo "  slice2cpp      = '$(SLICE2CPP)'"
 	@echo "  Ice prefix     = '$(ICE_PREFIX)'"
 	@echo "  例: make TPCDAQ_ICE_DIR=\$$(cd ../.. && pwd)/reference/20190315_patched"
-	@echo "  (単体テストは Ice 不要: make test)"
 
 # --- Ice スタブ生成 --------------------------------------------------------
 # 相互 include があるので **全部まとめて 1 回**生成し、スタンプで依存を張る。
@@ -89,10 +89,6 @@ slice/%.o: slice/%.cpp
 	$(CXX) $(CXXFLAGS) -w -I$(ICE_PREFIX)/include -Islice -c $< -o $@
 
 # --- 実行ファイル ----------------------------------------------------------
-ecc_bridge: ecc_bridge.cpp $(HEADERS) $(SLICE_OBJ)
-	$(CXX) $(CXXFLAGS) $(ICE_CFLAGS) $(ZMQ_CFLAGS) ecc_bridge.cpp $(SLICE_OBJ) \
-	  $(ICE_LIBS) $(ZMQ_LIBS) $(LDFLAGS) -pthread -o $@
-
 fake_ecc: fake_ecc.cpp $(HEADERS) $(SLICE_OBJ)
 	$(CXX) $(CXXFLAGS) $(ICE_CFLAGS) fake_ecc.cpp $(SLICE_OBJ) \
 	  $(ICE_LIBS) $(LDFLAGS) -pthread -o $@
@@ -101,13 +97,7 @@ fake_ecc: fake_ecc.cpp $(HEADERS) $(SLICE_OBJ)
 ecc_e2e_client: ecc_e2e_client.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS) $(ZMQ_CFLAGS) ecc_e2e_client.cpp $(ZMQ_LIBS) $(LDFLAGS) -pthread -o $@
 
-test_ecc_bridge: test_ecc_bridge.cpp $(HEADERS)
-	$(CXX) $(CXXFLAGS) $< -o $@
-
 # --- テスト ----------------------------------------------------------------
-test: test_ecc_bridge
-	./test_ecc_bridge $(ECC_TRANSITIONS)
-
 ifeq ($(ICE_OK),yes)
 e2e: all
 	./run_ecc_e2e.sh
@@ -116,5 +106,5 @@ e2e: ice-skip
 endif
 
 clean:
-	rm -f ecc_bridge fake_ecc ecc_e2e_client test_ecc_bridge
+	rm -f fake_ecc ecc_e2e_client
 	rm -rf slice *.dSYM
