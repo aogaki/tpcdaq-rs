@@ -392,3 +392,7 @@ Fable レビューはフェーズ境界 2 回(Phase 1 後 = ワイヤ、Phase 2 
   demo が動いていないときに)。
 - 結果節: 削除した行数、テスト数、e2e 出力、demo の run 1 本の結果、承認が要る逸脱。
 
+### 観察(2026-09-23、GDED 後始末): Rust `ecc_bridge` は **SIGINT で止まらず SIGTERM で停止**した(ZMQ の REP `recv` でブロック中と推定)。
+他の Rust bin は SIGINT で止まる(028 付録 A の運用 = `daq_down.sh` は SIGINT)ので、Phase 3 で **SIGINT/SIGTERM ハンドラ(recv のタイムアウト付きループ + 終了フラグ)**を
+足して揃えること(Phase 3 レーンが進行中なら追補、済んでいれば小チケット)。
+
