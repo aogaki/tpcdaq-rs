@@ -466,3 +466,40 @@ TDD の逸脱: `src/params/` 側(レーン A、変更禁止)の契約が固ま�
 - **SPEC v1.33** に転記(§3.1 `ecc_config_dir` / `params_dir`、§3.3 id と REST の状態規則、§8.1 エンドポイント、§9.2 `run_start.params` / `audit.params_id`)。
 - 次 = レーン C(UI: Parameters ビュー、Exceptions (N) テーブル、diff 表示、status バー、Sonnet)。§5-3(実 ECC で describe→prepare→configure)は新 DAQ 機。
 
+## 11. レーン C 発注(UI: Parameters ビュー — Sonnet、2026-09-23)
+
+前提: レーン A/B 済(REST は SPEC v1.33 §8.1、契約は §3.3。`GET /api/params` 404 = 未設定、`PUT /api/params {token, params}`、
+`GET /api/params/render?template=`、`/api/status.params`)。着手前に worktree で `git merge --ff-only main`(`79df4b2` 以降)。ui/node_modules は
+`ln -s /Users/aogaki/Workspace/tpcdaq-rs/ui/node_modules ui/node_modules`。発注書は本体の絶対パスで読んでよい。
+**同時に別レーン(079 Phase 4)が `app.routes.ts`(NAV_ITEMS の `power` 行を `slow` に変える)と `status-bar.{ts,html}`(`slow` バッジを足す)を触る。**
+あなたは `app.routes.ts` に `params` の 1 行(NAV は `run` の直後、route は `run` の直後)、`status-bar.html` に `params` の `<span class="item">` 1 個を
+**既存行の末尾に追加するだけ**にする(既存行の並び替え・整形をしない = 衝突を小さく)。
+
+### 作るもの
+1. `ui/src/app/api/params-api.ts` + spec: `fetch` 直(controller-api.ts と同じ流儀、`FetchLike` 注入でテスト)。
+   `getParams(): Promise<ParamsInfo | null>`(404 → null、503 → `{error}` を throw)/ `putParams(token, params): Promise<ParamsInfo>`
+   (400 / 401 / 409 / 503 はサーバの `error` 文言を `ParamsApiError { status, message }` で throw)/ `renderParams(template?): Promise<{id, exceptions, configure_xcfg}>`。
+   型: `ParamsJson { schema, template, knobs, exceptions: ExceptionRow[], note? }`、`ParamsInfo { id, sha256, exceptions, params, files }`(§10 結果節の JSON 例が正)。
+2. `ui/src/app/params/knob-spec.ts` + spec: **11 ノブ(葉 13)の表**(`docs/PARAMS_KNOBS_ja.md` §7 を写す: キー / スコープ深さ / 型 / 範囲・選択肢 / 単位)。
+   焼き込みではなく「サーバ `src/params/schema.rs` の写し」であることをコメントし、spec で `tests/fixtures/params/params_roundtrip.json` の全キーが表に
+   在ること(過不足なし)を検査する(サーバ側の表が変わったら赤になる = 二重管理の検知)。最終検証はサーバ(400 の文言をそのまま見せる)。
+3. `ui/src/app/params/params-view.{ts,html,scss}` + spec(遅延ルート `params`、NAV `{ path: 'params', label: 'Parameters', icon: 'tune' }`):
+   - 読み込み時に `getParams()`。無ければ「No parameters yet」+ テンプレート名入力 + 「Load defaults from template」(= `renderParams(template)` は使えないので、
+     **knobs は表の既定値(configure-physics 25 MHz の現行値 = params_roundtrip.json の値)で空フォームを作る**。それを保存すると生成される)。
+   - フォーム: ノブ 11 個(select / number / checkbox、範囲は表由来)。**スコープは見せない**(§0)。
+   - 折りたたみ「Exceptions (N)」: 行 = `at`(asad / aget / ch、接頭辞。空欄 = 粗い指定)、knob(select)、value、note、削除。追加ボタン、「Reset to uniform」(全削除)。
+     件数バッジは常に見える(隠れているが黙らない)。
+   - 「Preview xcfg」= `renderParams()` の `configure_xcfg` を `<pre>` に表示(**テンプレートとの diff は出さない** — テンプレート本文が REST に無い。
+     代わりに管理ノブの要素名を含む行をハイライト)。「Save」= `putParams(token, …)`(token は `RunControlApiService` の sessionStorage、無ければ
+     「Acquire control in Run control first」と表示して無効化)。成功で `id` / `exceptions` / `files` を表示、失敗はサーバ文言をそのまま。
+   - Running 中(WS status の `state === 'running'`)は Save を無効化し理由を表示(サーバも 409 を返す)。
+4. `status-bar`: `params <id> · exceptions N`(`getParams()` を 15 s 毎に poll、404/503/失敗は `—`)。既存の項目の後ろに 1 個追加。
+5. 英語 UI(063 の方針)。モックの値を出さない。
+
+### テスト(vitest、`npm test -- --watch=false`)
+params-api(200 / 404 / 400 文言 / 409 / 503 / 401)、knob-spec(fixture との過不足)、params-view(読み込み表示、例外の追加・削除・件数、
+Save 無効化条件、Preview のハイライト)。`npm run build` green、prettier。現 204 passed から増分を結果節に。
+
+### 受け入れ・逸脱
+結果節に: 画面構成の要旨(スクリーンショットは不要、テストで縛る)、テスト数 before → after、承認が要る逸脱(特に diff 表示を出さない件の代替)。
+SPEC §11 への転記は Fable。設計判断が残る分岐は実装せず報告。

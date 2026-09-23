@@ -248,6 +248,36 @@ monitor の SUB を 1 本にするか 2 本にするか)。
 - `open_driver("arduino_env")` の経路は config パースの単体(既存の `[[slowctl.device]]` テストの流儀)で `type` と `port` の検証まで。
 - `cargo fmt && cargo clippy --tests -- -D warnings && cargo test` green(現 784)、production `.unwrap()` 無し。実機受け入れ(現地でシールド接続、1 分間 FlowSuite 相当の目視)は未実施と明記。
 
+## 2.8 Phase 4 発注(UI: Slow control ビュー + status バッジ — Sonnet、2026-09-23 着手)
+
+前提: Phase 2 済(monitor の WS `status` JSON に `slow` が同梱される — SPEC v1.31 §10.3、形は §2.3: `{kind:"slow", ts_ms, samples:[{device,node,param,value,unit,ts_ms,alarm}], counters:{poll_ok,poll_err,parse_err,reconnects,identity_mismatch,…}}`。
+`[monitor] slow_sub` 未設定なら `slow` キー自体が無い)。着手前に worktree で `git merge --ff-only main`(`79df4b2` 以降)。ui/node_modules は
+`ln -s /Users/aogaki/Workspace/tpcdaq-rs/ui/node_modules ui/node_modules`。
+**同時に別レーン(078 レーン C)が `app.routes.ts`(`params` の行を `run` の直後に足す)と `status-bar.{ts,html}`(`params` の項目を足す)を触る。**
+あなたは `app.routes.ts` の `power` 行を `slow` に**書き換えるだけ**、`status-bar.html` は `slow` の `<span class="item">` を末尾に 1 個足すだけにする。
+
+### 作るもの
+1. `ui/src/app/ws/wire.ts`: `StatusMessage` に `slow?: SlowPayload`(上の形。`samples[].node` は `number | null`)。`ws-client.ts` の status 解析で `slow` を
+   既知キーにする(unknownKeys に数えない)。**`slow` が無い status は従来どおり**(既存テスト無変更で green)。
+2. `power/` を `slow/` に置き換え: NAV `{ path: 'slow', label: 'Slow control', icon: 'thermostat' }`、遅延ルート `slow` → `slow/slow-view`。`power-view.ts` は削除
+   (P6 プレースホルダの役目は終わり)。
+3. `slow/slow-view.{ts,html,scss}` + spec:
+   - 「Latest」表: device / node / param / value unit / age(`now − ts_ms`、5 s 超は薄く)/ alarm バッジ。device → node → param の順で安定ソート。
+     `slow` が無ければ「No slow-control data (monitor `slow_sub` not configured or slowctl not running)」— **モック値は出さない**。
+   - 「Trend」: ECharts(`waveform/echarts-loader.ts` の `loadECharts()` を共用)。選択した (device,node,param) の時系列を描く。データは **status の到着ごとに
+     UI 内のリングバッファ**(1 系列 1,800 点 = 1 Hz × 30 min、`slow/slow-history.ts` 純関数 + spec)。複数系列の重ね描き可(最大 4)。
+   - 「Counters」: `counters` をそのまま表(poll_err > 0 は注意色)。
+   - **操作は一切置かない**(SPEC §11 安全境界: setpoint / バルブ / HV の API は存在しない)。
+4. `status-bar`: `slow` バッジ = alarm=true のサンプル数(0 なら通常色、>0 は注意色、`slow` 無しは `—`)、tooltip に device/param の一覧。
+5. 英語 UI。
+
+### テスト(vitest)
+wire/ws-client(`slow` 付き status の解析、無い場合は従来と同一)、slow-history(リングバッファの上限・順序・系列分離)、slow-view(表の並び・age・alarm・
+「No data」表示、trend の系列選択)、status-bar の `slow` バッジ。`npm run build` green、prettier。現 204 passed から増分を結果節に。
+
+### 受け入れ・逸脱
+結果節に画面構成の要旨、テスト数 before → after、承認が要る逸脱。SPEC §11 への転記は Fable。設計判断が残る分岐は実装せず報告。
+
 ## 3. 確認事項(着手は止めない — 既定で進め、現地で確定)
 1. ~~Bronkhorst の機種・接続~~ → **判明**(§1.1–1.2)。残: 先頭機器・ノード番号(Phase 0 で scan)、
    **RS232 の現在の相手 PC**(第 2 local host が使えるかで運用が変わる、§1.5)。
