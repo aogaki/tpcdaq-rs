@@ -1,0 +1,129 @@
+.slow {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem 1.25rem 2rem;
+  max-width: 74rem;
+}
+
+h2 {
+  margin: 0 0 0.5rem;
+  font: var(--mat-sys-title-small);
+}
+
+.card {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: var(--tpc-radius);
+  background: var(--mat-sys-surface-container-low);
+  padding: 0.75rem 0.9rem;
+}
+
+.card > header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.sub {
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-small);
+}
+
+.empty {
+  margin: 1rem 1.25rem;
+  color: var(--mat-sys-on-surface-variant);
+  font: var(--mat-sys-body-medium);
+}
+
+.dim {
+  color: var(--mat-sys-on-surface-variant);
+}
+
+/* ---- Latest 表 ---- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font: var(--mat-sys-body-small);
+  font-variant-numeric: tabular-nums;
+}
+
+th {
+  text-align: left;
+  color: var(--mat-sys-on-surface-variant);
+  font-weight: 500;
+  font-size: 0.68rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--mat-sys-outline-variant);
+  padding: 0.25rem 0.75rem 0.25rem 0;
+}
+
+td {
+  padding: 0.25rem 0.75rem 0.25rem 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--mat-sys-outline-variant) 40%, transparent);
+}
+
+tr.alarm td {
+  color: var(--tpc-warn);
+}
+
+td.stale {
+  color: var(--mat-sys-on-surface-variant);
+  opacity: 0.6;
+}
+
+.badge {
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.badge.alarm {
+  border: 1px solid var(--tpc-warn);
+  color: var(--tpc-warn);
+}
+
+tr.attention td {
+  color: var(--tpc-warn);
+  font-weight: 600;
+}
+
+/* ---- Trend ---- */
+
+.picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.chip {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--mat-sys-on-surface-variant);
+  font: inherit;
+  font-size: 0.75rem;
+  padding: 0.1rem 0.6rem;
+  cursor: pointer;
+}
+
+.chip.on {
+  background: var(--mat-sys-primary);
+  color: var(--mat-sys-on-primary);
+  border-color: var(--mat-sys-primary);
+}
+
+.issue {
+  margin: 0.25rem 0 0;
+  color: var(--tpc-warn);
+  font: var(--mat-sys-body-small);
+}
+
+.chart {
+  margin-top: 0.5rem;
+  min-height: 18rem;
+}

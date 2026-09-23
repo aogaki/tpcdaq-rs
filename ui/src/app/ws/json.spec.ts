@@ -74,6 +74,111 @@ describe('SPEC §10.3 status', () => {
   });
 });
 
+describe('SPEC §10.3 v1.31 status.slow — slowctl → monitor PUB(§2.3)の同梱', () => {
+  it('slow キーが無ければ従来と同一(undefined、既存テスト無変更で green の裏取り)', () => {
+    const parsed = parseJsonMessage(statusText());
+    if (parsed.kind !== 'status') throw new Error('expected status');
+    expect(parsed.status.slow).toBeUndefined();
+    expect(parsed.unknownKeys).toEqual([]);
+  });
+
+  it('slow があれば samples / counters をそのまま読む(既知キー扱い、unknownKeys に数えない)', () => {
+    const parsed = parseJsonMessage(
+      statusText({
+        slow: {
+          kind: 'slow',
+          ts_ms: 1_700_000_000_000,
+          samples: [
+            {
+              device: 'gas',
+              node: 3,
+              param: 'fmeasure',
+              value: 100.5,
+              unit: 'mbar',
+              ts_ms: 1_700_000_000_000,
+              alarm: false,
+            },
+            {
+              device: 'env',
+              node: null,
+              param: 't_c',
+              value: 24.31,
+              unit: 'degC',
+              ts_ms: 1_700_000_000_000,
+              alarm: true,
+            },
+          ],
+          counters: { poll_ok: 7, poll_err: 1, parse_err: 0, reconnects: 0, identity_mismatch: 0 },
+        },
+      }),
+    );
+    if (parsed.kind !== 'status') throw new Error('expected status');
+    const slow = parsed.status.slow;
+    if (!slow) throw new Error('expected slow');
+    expect(slow.kind).toBe('slow');
+    expect(slow.ts_ms).toBe(1_700_000_000_000);
+    expect(slow.samples).toEqual([
+      {
+        device: 'gas',
+        node: 3,
+        param: 'fmeasure',
+        value: 100.5,
+        unit: 'mbar',
+        ts_ms: 1_700_000_000_000,
+        alarm: false,
+      },
+      {
+        device: 'env',
+        node: null,
+        param: 't_c',
+        value: 24.31,
+        unit: 'degC',
+        ts_ms: 1_700_000_000_000,
+        alarm: true,
+      },
+    ]);
+    expect(slow.counters).toEqual({
+      poll_ok: 7,
+      poll_err: 1,
+      parse_err: 0,
+      reconnects: 0,
+      identity_mismatch: 0,
+    });
+    expect(parsed.unknownKeys).toEqual([]);
+  });
+
+  it('slow の中身が壊れていれば status 全体を bad-field にする(silent に無視しない)', () => {
+    const missingCounters = parseJsonMessage(
+      statusText({ slow: { kind: 'slow', ts_ms: 1, samples: [] } }),
+    );
+    expect(missingCounters.kind).toBe('error');
+
+    const badSample = parseJsonMessage(
+      statusText({
+        slow: {
+          kind: 'slow',
+          ts_ms: 1,
+          samples: [
+            {
+              device: 'gas',
+              node: 3,
+              param: 'fmeasure' /* value 欠落 */,
+              unit: 'mbar',
+              ts_ms: 1,
+              alarm: false,
+            },
+          ],
+          counters: { poll_ok: 0, poll_err: 0, parse_err: 0, reconnects: 0, identity_mismatch: 0 },
+        },
+      }),
+    );
+    expect(badSample.kind).toBe('error');
+
+    const notAnObject = parseJsonMessage(statusText({ slow: 'nope' }));
+    expect(notAnObject.kind).toBe('error');
+  });
+});
+
 describe('SPEC §5.2 飽和率 = saturated / counted * 100', () => {
   it('counted > 0 なら %、counted == 0 は null(= 画面では「—」)', () => {
     // 手計算: 1/4 = 25 %、3/6 = 50 %

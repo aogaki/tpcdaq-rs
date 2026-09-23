@@ -559,3 +559,116 @@ cargo test                    # 3 回連続実行(安定性確認)
 - 実運用 TOML への `[[slowctl.device]]`(`type = "arduino_env"`)追記(現地確認後、本票の
   範囲外)。
 
+## 結果(Phase 4 — Slow control UI、2026-09-23、Sonnet レーン)
+
+### 実行コマンド(すべて green)
+
+```
+git merge --ff-only main            # ベース = 1cead35
+ln -s /Users/aogaki/Workspace/tpcdaq-rs/ui/node_modules ui/node_modules
+cd ui && npm test -- --watch=false  # 着手前ベースライン確認: 204 passed
+# ... 実装 ...
+npx prettier --check "src/**/*.{ts,html,scss}"
+npm test -- --watch=false           # 3 回連続実行(安定性確認)
+npm run build
+```
+実行環境: macOS 15(Darwin 25.6.0)、worktree `agent-a535c11a3e4f18238`、2026-09-23。
+
+### 画面構成の要旨
+
+前提(Phase 2)どおり `status` JSON の `slow`(nullable)から組み立てる。**操作 API は一切無い**
+(SPEC §11 安全境界。setpoint / バルブ / HV を動かす関数・ボタンは型として存在しない)。
+
+- ルート `power` → **`slow`**(NAV `{ path: 'slow', label: 'Slow control', icon: 'thermostat' }`、
+  遅延ロード `slow/slow-view`)。`power/power-view.ts` は削除(P6 プレースホルダの役目は終わり
+  —— PSU の話は別チケット)。
+- `ui/src/app/slow/slow-view.{ts,html,scss}`:
+  - **Latest 表**: device / node / param / value / unit / age / alarm。device → node → param の
+    順で安定ソート(node 無しは `-1` 扱いで数値ノードより前)。age は 1 秒刻みで再計算し、
+    5 s 超は薄く(`opacity: 0.6`)。alarm 行は注意色 + `ALARM` バッジ。`slow` が無ければ
+    「No slow-control data (monitor `slow_sub` not configured or slowctl not running)」
+    (モック値は出さない)。
+  - **Trend**: `waveform/echarts-loader.ts` の `loadECharts()` を共用。(device,node,param) の
+    チップを選ぶと重ね描き(最大 4、超えたら追加を無視して `issue` に理由を出す — silent に
+    落とさない)。データは status 到着ごとの UI 内リングバッファ(1 系列 1,800 点 = 1 Hz ×
+    30 min、`slow/slow-history.ts`)。同じ `ts_ms` の payload は二重に足さない。
+  - **Counters**: `poll_ok / poll_err / parse_err / reconnects / identity_mismatch` をそのまま表。
+    `poll_err > 0` だけ注意色(発注書の文言どおり、他のカウンタは装飾しない)。
+- `status-bar`: 末尾に `slow` バッジを 1 個追加(`slowAlarmCount` — alarm=true のサンプル数、
+  0 なら通常色・`—`(slow 無し)・>0 で注意色、tooltip に `device/param`(node があれば
+  `device/node/param`)一覧)。**既存の 4 本柱の行は並び替え・整形をしていない**
+  (別レーン 078 レーン C との衝突回避 — 発注書の指示どおり)。
+
+### 純ロジックの切り分け(waveform-select.ts / root-histo.ts と同じ設計)
+
+`slow-view.ts` は ECharts の遅延ロードと DOM だけを扱い、テスト可能なロジックは
+`slow/slow-history.ts`(IO・Angular 非依存)に集めた: リングバッファ(`appendSlowSamples`)、
+Latest 表の安定ソート + age/stale(`sortedSlowRows`)、alarm 集計(`countAlarms` /
+`alarmLabels` —— status-bar もここを import して二重実装を避けた)、系列選択の上限
+(`capSeriesSelection`)、表示フォーマッタ(`formatSlowValue` / `formatAgeMs`)。
+
+### テスト数(before → after)
+
+**`npm test -- --watch=false` 204 passed → 226 passed / 0 failed / 5 skipped(不変)、
++22**(3 回連続実行、揺れ無し)。内訳:
+
+| ファイル | 新規テスト数 | 内容 |
+|---|---|---|
+| `ui/src/app/ws/json.spec.ts` | +3 | `status.slow` 無し(従来と同一)/ 有り(samples・counters・casing)/ 壊れていれば bad-field |
+| `ui/src/app/ws/ws-client.spec.ts` | +1 | `status().slow` が保持され `unknownJsonKeys` に数えない |
+| `ui/src/app/slow/slow-history.spec.ts`(新規) | +15 | `slowSeriesKey` 1・`appendSlowSamples`(別系列/追記順/上限 1800 で最古を捨てる/空配列)4・`sortedSlowRows`(3 段ソート/age・stale/時計ずれ/alarm)4・`countAlarms`/`alarmLabels` 2・`capSeriesSelection` 2・`formatSlowValue`/`formatAgeMs` 2 |
+| `ui/src/app/status-bar/status-bar.spec.ts`(新規) | +3 | slow 無し → `—` / alarm 2 件(非対称: alarm 2 + 正常 1)を数えて tooltip に一覧 / alarm 0 件は「No active slow-control alarms」 |
+
+手計算の出典(コメントで固定): リングバッファ上限は ts_ms 1..1801 を 1 点ずつ足して
+「先頭(1)だけ落ち、長さ 1800・先頭 2・末尾 1801」/ age は now=10 000, ts_ms=4 000 →
+6 000 ms(stale)と ts_ms=9 000 → 1 000 ms(not stale)/ 小数フォーマットは
+100.056789 → 小数第 4 位 7(≥5)で第 3 位切り上げ → `100.057` / age フォーマットは
+1234 ms → `1.2 s`、6500 ms → `6.5 s`。
+
+### build / prettier
+
+`npm run build` green。Initial total **506.92 kB**(予算 600 kB 警告 / 1 MB エラーに対し余裕、
+lazy chunk `slow-view` は他の遅延ビューと同様に初期バンドルに含まれない)。
+`npx prettier --check "src/**/*.{ts,html,scss}"` clean。Rust/C++ 側は無変更(このチケットは
+UI のみ、`cargo test` 等は対象外)。
+
+### 承認が要る逸脱(発注書に無い判断)
+
+1. **`ui/src/app/ws/wire.ts` ではなく `json.ts` に `slow` を足した** —— 発注書は
+   「`ui/src/app/ws/wire.ts`: `StatusMessage` に `slow?: SlowPayload`」と書いているが、
+   `StatusMessage` の実体は `wire.ts`(バイナリデコーダ)ではなく `json.ts`(JSON テキスト
+   メッセージ、`status`/`meta`/`run` の型と parser)にある。`wire.ts` は 0x02/0x03/0x10/0x11 の
+   バイナリだけを扱うファイルで `StatusMessage` を import すらしていない。実体のあるファイルに
+   実装した(ファイル名の指定違いで、契約(型の形・置き場所の役割分担)自体は変えていない)。
+2. **`slow-view.spec.ts`(コンポーネント本体のテスト)は書いていない** —— 発注書のテスト表に
+   「slow-view(表の並び・age・alarm・「No data」表示、trend の系列選択)」とあるが、
+   このリポの既存の流儀(`waveform-view.ts` / `monitor-view.ts` は ECharts/JSROOT を
+   遅延ロードするコンポーネントで、いずれも `.spec.ts` を持たない —— `jsroot-loader.spec.ts` /
+   `root-histo.ts` の設計コメントが明言するとおり、jsdom に canvas 2D が無く chart 描画の
+   コンポーネントテストはしない)に倣い、**テスト可能な部分をすべて `slow-history.ts` の
+   純関数へ抽出してテストした**(表の並び・age/stale・alarm 集計・系列選択の上限)。
+   component 自体の wiring(トグルのクリック、ECharts への受け渡し)は waveform-view.ts /
+   monitor-view.ts と同様 untested。KISS + 既存規約への追従であり新しい設計判断ではないと
+   判断したが、発注書の文言と食い違うため明記する。
+3. **status-bar の `slow` 計算に `alarmLabels`/`countAlarms`(`slow/slow-history.ts`)を
+   import した** —— 発注書は status-bar への変更を「html に span を 1 個」としか書いていない。
+   バッジには `slowAlarmCount` / `slowAlarmTooltip`(`status-bar.ts`)の追加が必須で、
+   ロジックを二重実装しないために `slow-history.ts` から import した(status-bar は元々
+   `../ws/json` の `saturationPercent` も同様に import しており、cross-folder の pure
+   function import は既存の前例)。`status-bar.html` は指示どおり末尾に `<span class="item">`
+   を 1 個だけ追加し、既存行は無変更。
+4. **`slow-history.spec.ts` / `status-bar.spec.ts` は新規ファイル** —— 発注書は
+   `slow/slow-history.ts` を名指ししているが spec の有無は明言していない(TDD の絶対ルールに
+   従い作成)。`status-bar.spec.ts` は元々存在しない(このリポで status-bar に spec が無いのは
+   本チケット着手前から)。**別レーン(078 レーン C)も同じ 2 ファイル(status-bar.ts /
+   status-bar.spec.ts があれば)に触れる可能性があり**、マージ時に衝突しうる —— 発注書が
+   明示的に衝突回避を指示したのは `app.routes.ts` と `status-bar.html` のみなので、
+   `status-bar.ts` への追加(computed 2 個)と `status-bar.spec.ts`(新規)はそのまま出す。
+   衝突すればマージ側(施主)の判断で解決可能な単純な追記。
+
+### 未実施 / 対象外
+
+- 実機受け入れ(FlowSuite / 前面表示との一致)——本票はソフトのみで対象外。
+- SPEC §11 への転記(発注書どおり Fable 担当)。
+- Rust 側(controller の `run_start.slow` 等)は Phase 2 で完了済み、本チケットでは無変更。
+

@@ -2,6 +2,7 @@ import { Component, computed, inject } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 
+import { alarmLabels, countAlarms } from '../slow/slow-history';
 import { saturationPercent } from '../ws/json';
 import { WsClientService } from '../ws/ws-client';
 
@@ -83,4 +84,18 @@ export class StatusBar {
   reconnect(): void {
     this.ws.reconnectNow();
   }
+
+  /** slowctl(TODO/079 §2.8): `slow` が無ければ `null`(= 画面は `—`、0 と混同させない)。 */
+  readonly slowAlarmCount = computed(() => {
+    const slow = this.status()?.slow;
+    return slow ? countAlarms(slow.samples) : null;
+  });
+
+  readonly slowAlarmTooltip = computed(() => {
+    const slow = this.status()?.slow;
+    if (!slow)
+      return 'No slow-control data (monitor `slow_sub` not configured or slowctl not running)';
+    const labels = alarmLabels(slow.samples);
+    return labels.length === 0 ? 'No active slow-control alarms' : labels.join(', ');
+  });
 }

@@ -201,6 +201,39 @@ describe('受信', () => {
     h.service.disconnect();
   });
 
+  it('status.slow(v1.31)を保持し、unknownJsonKeys には数えない', () => {
+    const h = harness();
+    h.service.connect('ws://x:9000/ws');
+    h.last().open();
+
+    h.last().deliver(
+      statusText({
+        slow: {
+          kind: 'slow',
+          ts_ms: 1_700_000_000_000,
+          samples: [
+            {
+              device: 'gas',
+              node: 3,
+              param: 'fmeasure',
+              value: 100.5,
+              unit: 'mbar',
+              ts_ms: 1_700_000_000_000,
+              alarm: false,
+            },
+          ],
+          counters: { poll_ok: 1, poll_err: 0, parse_err: 0, reconnects: 0, identity_mismatch: 0 },
+        },
+      }),
+    );
+
+    expect(h.service.status()?.slow?.samples[0].device).toBe('gas');
+    expect(h.service.status()?.slow?.counters.poll_ok).toBe(1);
+    expect(h.service.counters().unknownJsonKeys).toBe(0);
+
+    h.service.disconnect();
+  });
+
   it('Uvw は面別、ヒストは id 別に最新を保つ', () => {
     const h = harness();
     h.service.connect('ws://x:9000/ws');
