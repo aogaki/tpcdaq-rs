@@ -1,6 +1,6 @@
 # 086 — 2D パネルのパレット: 最上位色が白で飽和 ch が見分けにくい(077 目視の指摘)
 
-**Status: READY(追補)**(2026-09-22 起票 Fable。Sonnet 0.5 日。**目視確認は未実施 — Fable/ユーザー待ち**)
+**Status: COMPLETED**(2026-09-22 起票 Fable。Sonnet 0.5 日。**目視確認は未実施 — Fable/ユーザー待ち**)
 
 ## 0. 結論
 - `ui/src/app/monitor/jsroot-loader.ts` の `PALETTE = 56` は最上位色が**白**。ダークテーマの黒地では最大値付近(パルサー run で 4095 飽和の FPN、
@@ -203,4 +203,12 @@
   `fda4ec3`(「086 追補2 発注」コミット)まで同期済み)。
 - Node/npm は本体 `ui/node_modules` をシンボリックリンクで再利用
   (`ln -s /Users/aogaki/Workspace/tpcdaq-rs/ui/node_modules ui/node_modules`)。
+
+### Fable 目視(追補 2、2026-09-23、マージ `worktree-agent-ae7309f2098878299` → main `e70acfa`)
+- ユーザーの demo(run 1 継続中)に対し、閲覧のみの headless Chrome(`reference/_spike/demo/cdp_shot.py`)で Event display タブを撮影(`scratchpad/monitor_086_ramp.png`)。
+- **合格**: ゼロ付近はほぼ黒(ダーク面に馴染む)、パルスは青 → シアン → 緑 → 黄 → 頂上が橙寄りの黄、**4095 飽和の FPN 16 行は橙の細線**として
+  通常 ch の頂上と別色で判読できる。カラーバーは 0 = 黒 → 3500 = 橙。1D ヒストは影響なし。UVW 3 面も同じ配色で一貫。
+- 経緯: 56(反転後 黒 → 白、029)は最上位が白で飽和が潰れる → kBird 事前反転は反転後にゼロ付近が青一面(colz の最下位レベルが 5 % 位置の色)で
+  ダークに眩しい(ユーザー「Light モードに最高」)→ 自前ランプ(先頭 15 % を黒〜暗紫、最上位のみ橙)で両立。029 の「低は暗く」を守り、
+  最上位だけ色相で飽和を示す。56 に戻したい場合は `TPCDAQ_DARK_STOPS` を差し替えるだけ(方式は不変)。
 
