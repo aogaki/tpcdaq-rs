@@ -174,3 +174,16 @@ Phase 4。root-sink(ROOT)は GDED に無く未検証 — run.root 経路は次�
 構成・手順 = メモリ geteccserver-native-gded(09-23 追記)。**残**: #8–#10(zCoBo 側の切断は遠隔では不可、ECC halt と receiver 余分接続は遠隔で可能 — 次回)、
 #13/#14、#16(compact のオラクル照合 = 今日の run 6–11 で可)、Phase 4(root-sink は新機)。
 
+## #16 発注(compact フレームの MFM オラクル照合 — Sonnet、2026-09-23、Mac 側)
+- 目的: 実機 compact(frameType 2 / rev 5、blkSize 256、`CoboFormats-Rev-5-Compact.xcfg`)の実データを **GET 純正 MFM ライブラリ**で復号し、我々の decoder と全一致を示す
+  (067 B は frameType 1 で実施済み。compact は未照合 = SPEC §12-1 の穴)。
+- 照合元: `reference/_spike/prefix/lib/libMultiFrame.dylib`(既存ビルド成果物、本体の絶対パス)に直接リンクする使い捨てダンパ(C++、`reference/_spike/mfm_compact/` に置く、
+  gitignore、リポにはコミットしない)。経路 = 067 B と同じ(`mfm::FrameDictionary::addFormats(reference/config/CoboFormats.xcfg)` → `mfm::Frame::read` → item 走査)。
+  compact の item は `<Item>` 定義が sample のみ(chan/bucket はブロック構造から決まる)なので、CoBoFrameViewer の compact 経路(`CoBoEvent::decodeSamples` の compact 分岐)を読んで同じ順序で並べる。
+- 対象: `/Users/aogaki/Workspace/tpcdaq-rs/reference/exp_data/2026/d3_pulser_scan/run0011/*.graw`(60 frames、278,784 B 固定)と run0006。
+- 我々側: `graw_replay` / `decoder` の出力ではなく **`src/decode.rs` を直接呼ぶ小さな Rust テスト**(`tests/decode_real_compact.rs`、env `TPCDAQ_EXP_DATA_2026` 配下のときだけ)で、
+  frame 毎の header(frameType/rev/cobo/asad/eventIdx/eventTime/readOffset/status/mult/windowOut/lastCell)と全 item(aget, ch, bucket, sample)の **sha256** を出し、
+  ダンパの同形式 sha256 と一致させる(ダンパは JSON/CSV でヘッダと sha256 を出す。全 item を吐くと巨大なので sha256 で比較)。
+- 受け入れ: 2 run × 60 frames で全一致(ヘッダ全項目 + item sha256)、item 総数 60 × 139,264。オラクル値を 1 ずらすと赤になること。`cargo test` green、fmt / clippy。
+  結果節に照合表(067 B と同じ体裁)を書く。
+
