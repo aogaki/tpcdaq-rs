@@ -224,9 +224,10 @@ pub enum DeviceEvent {
 
 /// TOML の `type` からドライバを作る。
 ///
-/// **この Phase で実装済みなのは `bronkhorst_flowbus` と `fake` だけ**。他の種別は
-/// 設定としては受理されるが(SPEC §3.1 の列挙)、ここで明示的に失敗する —— 黙って
-/// 何も読まないデバイスを作らない(CLAUDE.md)。
+/// **実装済みなのは `bronkhorst_flowbus` / `arduino_env` / `fake` だけ**(TODO/079 Phase 2
+/// / Phase 3)。他の種別(`hivolta` / `hmp2020`)は設定としては受理されるが
+/// (SPEC §3.1 の列挙)、ここで明示的に失敗する —— 黙って何も読まないデバイスを作らない
+/// (CLAUDE.md)。
 fn open_driver(device: &SlowDeviceConfig) -> Result<Box<dyn Driver + Send>, SlowctlError> {
     let missing_port = || SlowctlError::Device {
         device: device.name.clone(),
@@ -244,6 +245,16 @@ fn open_driver(device: &SlowDeviceConfig) -> Result<Box<dyn Driver + Send>, Slow
             .map_err(|e| SlowctlError::Device {
                 device: device.name.clone(),
                 message: e.to_string(),
+            })?;
+            Ok(Box::new(driver))
+        }
+        "arduino_env" => {
+            let port = device.port.as_deref().ok_or_else(missing_port)?;
+            let driver = super::arduino::open_serial(&device.name, port).map_err(|e| {
+                SlowctlError::Device {
+                    device: device.name.clone(),
+                    message: e.to_string(),
+                }
             })?;
             Ok(Box::new(driver))
         }
@@ -901,6 +912,54 @@ mod tests {
             ts_ms,
             alarm: false,
         }
+    }
+
+    // -----------------------------------------------------------------
+    // open_driver の経路(TODO/079 §2.7: `arduino_env` — 実機には触らない。
+    // config パースの単体として `type` と `port` の検証まで)。
+    // -----------------------------------------------------------------
+
+    /// `type = "arduino_env"` は開こうとする(= ルーティングが効いている)。実機は無いので
+    /// 「存在しないポートを開こうとして失敗する」ところまでで止める —— これで
+    /// `open_driver` が `arduino::open_serial` に配線されていることが確認できる
+    /// (未実装のままなら "not implemented yet" というメッセージになり、この assert は落ちる)。
+    #[test]
+    fn open_driver_routes_arduino_env_to_the_arduino_serial_opener() {
+        let mut config = device("env", Vec::new());
+        config.device_type = "arduino_env".to_string();
+        config.port = Some("/dev/serial/by-id/does-not-exist-079-arduino-test".to_string());
+
+        // `Box<dyn Driver>` は `Debug` を持たないので `unwrap_err()` は使えない。
+        let error = match open_driver(&config) {
+            Err(e) => e,
+            Ok(_) => panic!("a nonexistent serial port should not open"),
+        };
+        let SlowctlError::Device { device, message } = error else {
+            panic!("expected SlowctlError::Device");
+        };
+        assert_eq!(device, "env");
+        assert!(
+            message.contains("cannot open serial port"),
+            "message = {message:?}(open_driver がルーティングされていない可能性)"
+        );
+        assert!(
+            !message.contains("not implemented yet"),
+            "arduino_env は Phase 3 で実装済みのはず: {message:?}"
+        );
+    }
+
+    /// `port` が無いのは設定検証で弾かれるはずだが、`open_driver` 自体も
+    /// bronkhorst と同じ防御を持つ(TODO/079 §2.6 の `missing_port` と同じ形)。
+    #[test]
+    fn open_driver_of_arduino_env_without_a_port_is_a_device_error() {
+        let mut config = device("env", Vec::new());
+        config.device_type = "arduino_env".to_string();
+        config.port = None;
+
+        assert!(matches!(
+            open_driver(&config),
+            Err(SlowctlError::Device { .. })
+        ));
     }
 
     fn events(records: &[LogbookRecord]) -> Vec<&str> {

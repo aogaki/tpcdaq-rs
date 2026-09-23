@@ -443,3 +443,89 @@ slowctl が controller より先に落ちればキューの中身は失われる
 - マージ時の衝突は `src/slowctl/mod.rs` の `pub mod` ブロック(085 と本票)のみ、両方残して解決。
 - 次(Phase 3 = Arduino スケッチ + ドライバ、Phase 4 = UI トレンド、+ 085 のコーデックを `Driver` に載せる小チケット)は現地 Phase 0 と並行で可。
 
+## 結果(Phase 3 — Arduino MKR ENV スケッチ + ドライバ、2026-09-23、Sonnet レーン)
+
+### 実行コマンド(すべて green / 警告ゼロ)
+
+```
+git merge --ff-only main      # ベース = a11013a
+cargo test                    # 着手前ベースライン確認
+cargo fmt && cargo fmt --check
+cargo clippy --tests -- -D warnings
+cargo clippy --all-targets -- -D warnings
+cargo build --features slowctl-fake
+cargo clippy --all-targets --features slowctl-fake -- -D warnings
+cargo test                    # 3 回連続実行(安定性確認)
+```
+実行環境: macOS 15(Darwin 25.6.0)、worktree `agent-aa08b0edab240cf62`、2026-09-23。
+
+### テスト数(before → after)
+
+**`cargo test` 784 passed → 803 passed / 0 failed / 1 ignored(+19)**。
+着手前ベースラインの `cargo test` 実行で `tests/slowctl_integration.rs` の
+`records_from_before_the_controller_was_up_arrive_in_order_starting_with_ident` が
+1 度だけ FAILED(タイミング依存、Phase 2 結果節に記載済みの既知の揺れ)。同テストを
+単体で 3 回連続実行すると green — 本チケットの変更とは無関係(`src/slowctl/component.rs`
+の LogPost 再送タイミングの話で、Phase 3 では触っていない)。以後の `cargo test` 全体実行
+(fmt/clippy 後 + 最終確認の計 3 回)はすべて 0 failed。
+
+内訳(新規 19): `src/slowctl/arduino.rs` 14(ident 6: 正常行 / error 行 / dev 不一致 /
+壊れ行 3 回リトライで成功 / 3 回とも壊れて失敗 / 無応答 Timeout。poll 8: 6 サンプル + 単位 /
+複数行溜まりで最後だけ採用 / 尻切れ末尾行は不使用 / 壊れ JSON / キー欠落 / error 行 /
+無応答 Timeout / seq 飛びでも失敗しない)、`src/slowctl/fake_arduino.rs` 3(push_line の
+読み戻し / 空キューは WouldBlock / push_raw は終端を足さない)、
+`src/slowctl/component.rs` 2(`open_driver("arduino_env")` が
+`arduino::open_serial` にルーティングされている確認 —— 実在しないポート名を渡して
+「open_driver 未実装」ではなく「シリアルポートを開けない」で落ちることを見る / `port` 省略は
+`SlowctlError::Device`)。
+
+### スケッチの書き込み手順の要旨(`tools/arduino_env/README.md` に詳細)
+
+- ボード = Arduino MKR 系 + MKR ENV Shield(ASX00011、配線は装着のみ)。
+- `arduino-cli core install arduino:samd` → `arduino-cli lib install "Arduino_MKRENV"` →
+  `arduino-cli compile --fqbn arduino:samd:mkr1000 tools/arduino_env/env_json.ino` →
+  `arduino-cli upload -p /dev/serial/by-id/... --fqbn arduino:samd:mkr1000 ...`。
+- 出力は 1 秒毎 JSON 1 行(`{"dev":"mkr_env","seq":...,"t_c":...,"rh":...,"p_hpa":...,"lux":...,"uva":...,"uvb":...}`、
+  小数 2 桁)。`ENV.begin()` 失敗時は `{"dev":"mkr_env","error":"ENV shield not found"}` を
+  1 秒毎に出し続ける(復旧はシールドの物理的な再装着のみ、自己修復しない)。
+- `p_hpa` は `ENV.readPressure(MILLIBAR)` を使う(既定の kPa ではなく hPa 相当の桁に揃える —
+  発注書の JSON 例(1003.7)は hPa 桁なので、単位換算をスケッチ側で済ませた)。
+
+### 承認が要る逸脱(発注書に無い判断)
+
+1. **`ident` の「無応答」と「壊れた内容」を明確に分けた** —— 発注書は「最大 3 行を読み…」
+   としか書いていないが、無応答(1 バイト目からタイムアウト)をリトライすると本来の
+   `Timeout` 経路と「3 回壊れた行を試して Protocol」経路が曖昧になる。実装は
+   **無応答は即座に `Timeout` を伝播(リトライしない)、壊れた JSON だけ最大 3 行まで
+   リトライする**とした(open 直後にスケッチの出力の途中から読み始める場合の救済が
+   「最大 3 行」の狙いと解釈)。テスト `ident_times_out_when_no_line_arrives` /
+   `ident_skips_malformed_lines_up_to_three_attempts_then_succeeds` /
+   `ident_fails_after_three_malformed_lines` で 3 経路を別々に固定した。
+2. **`poll` の「バッファに溜まった行を全部読む」の停止条件** —— 実際のシリアル IO では
+   「もう読めるバイトが無い」を検出する唯一の手段が read のタイムアウト/WouldBlock なので、
+   `drain_lines` は「1 バイト読もうとしてタイムアウトしたら、そこまでに集めた完全な行を
+   返す」とした。終端 `\n` が来ていない末尾の断片は**捨てる**(次の `poll` 呼び出しで
+   また 1 から読み直す —— モニタ系なので CLAUDE.md の drop-with-count の範囲。テスト
+   `a_trailing_partial_line_is_not_used` で固定)。
+3. **`poll` は `dev` フィールドを再照合しない** —— 発注書の poll の記述に `dev` 確認は無く
+   (`ident` だけが「名乗りで照合」する)、`open_driver` 経由では一度 `ident` した後の
+   同じシリアルポートを使い続けるので、`poll` 毎に `dev` を見直す理由が無い(KISS)。
+4. **UV(`uva`/`uvb`)の単位は `"raw"`** —— 発注書の表に単位の指定が無い(較正単位が
+   存在しない)。bronkhorst の valve output(生値 + `unit: "raw"`)と同じ扱いにした。
+5. **1 行の上限 512 バイト**(`MAX_LINE_BYTES`)—— 発注書に無い値。終端 `\n` が来ない
+   壊れた入力でバッファが無制限に伸びないための防御(CLAUDE.md のメモリ規律)。
+   通常行は ≈100 バイトなので実運用には無関係。
+6. **`open_driver` の component.rs テストは実機を使わず「存在しないポート名を開こうとして
+   失敗する」ところまでで止めた**(発注書 §2.7-2「config パースの単体で `type` と `port` の
+   検証まで」の実装として、`arduino::open_serial` へのルーティングと `missing_port` 防御の
+   2 本)。実機の識別・計測確認は Phase 0 後の現地作業(未実施)。
+
+### 未実施
+
+- **実機受け入れ**(現地でシールド接続、1 分間 FlowSuite 相当の目視/前面表示との一致確認)
+  —— **本票では未実施**(発注書どおり)。ボード購入・現物は reference/Arduino(gitignore)に
+  記録済みだが、Phase 0(現地)後の作業。
+- UI トレンド / status バッジ(Phase 4、未着手)。
+- 実運用 TOML への `[[slowctl.device]]`(`type = "arduino_env"`)追記(現地確認後、本票の
+  範囲外)。
+
