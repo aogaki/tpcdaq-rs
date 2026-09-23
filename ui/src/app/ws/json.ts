@@ -15,7 +15,38 @@ export interface Saturation {
   readonly counted: number;
 }
 
-/** SPEC §10.3 `status` = §5.3 の 11 キー + monitor の 3 キー。 */
+/** slowctl → monitor PUB の 1 サンプル(SPEC §2.3 v1.31 `samples[]`)。 */
+export interface SlowSample {
+  readonly device: string;
+  /** FLOW-BUS ノード番号など。無いデバイス(Arduino 等)は `null`(§9.2 の node 無し)。 */
+  readonly node: number | null;
+  readonly param: string;
+  readonly value: number;
+  /** 機器が返した単位文字列そのまま(コードで決め打ちしない)。 */
+  readonly unit: string;
+  readonly ts_ms: number;
+  /** 機器側 Alarm info ≠ 0、または `[lo, hi]` 逸脱。 */
+  readonly alarm: boolean;
+}
+
+/** slowctl → monitor PUB の `counters`(SPEC §2.3 v1.31、Rust `SlowCounters` そのまま)。 */
+export interface SlowCounters {
+  readonly poll_ok: number;
+  readonly poll_err: number;
+  readonly parse_err: number;
+  readonly reconnects: number;
+  readonly identity_mismatch: number;
+}
+
+/** slowctl → monitor PUB ペイロード(SPEC §2.3 v1.31、`status` の `slow` に同梱される)。 */
+export interface SlowPayload {
+  readonly kind: string;
+  readonly ts_ms: number;
+  readonly samples: readonly SlowSample[];
+  readonly counters: SlowCounters;
+}
+
+/** SPEC §10.3 `status` = §5.3 の 11 キー + monitor の 3 キー + `slow`(v1.31、任意)。 */
 export interface StatusMessage {
   readonly type: 'status';
   readonly run: number;
@@ -34,6 +65,9 @@ export interface StatusMessage {
   readonly clients: number;
   /** monitor が足す(camelCase): live キューの drop-oldest 数。 */
   readonly wsDropped: number;
+  /** slowctl の最新ペイロード(v1.31)。`[monitor] slow_sub` 未設定なら**キー自体が無い**
+   * (省略、`undefined`)—— 従来の status と同一に見える。 */
+  readonly slow?: SlowPayload;
 }
 
 /** SPEC §10.3 `meta`(接続時・run 変化時)。 */
@@ -89,6 +123,11 @@ function stringAt(object: Record<string, unknown>, key: string): string | null {
   return typeof value === 'string' ? value : null;
 }
 
+function booleanAt(object: Record<string, unknown>, key: string): boolean | null {
+  const value = object[key];
+  return typeof value === 'boolean' ? value : null;
+}
+
 function objectAt(object: Record<string, unknown>, key: string): Record<string, unknown> | null {
   const value = object[key];
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -135,6 +174,93 @@ function saturationAt(object: Record<string, unknown>): Record<string, Saturatio
   return out;
 }
 
+/** `samples[]` の 1 要素(SPEC §2.3)。壊れていれば `null`(呼び手が status 全体を bad-field にする)。 */
+function slowSampleAt(value: unknown): SlowSample | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const object = value as Record<string, unknown>;
+  const device = stringAt(object, 'device');
+  const param = stringAt(object, 'param');
+  const sampleValue = numberAt(object, 'value');
+  const unit = stringAt(object, 'unit');
+  const tsMs = numberAt(object, 'ts_ms');
+  const alarm = booleanAt(object, 'alarm');
+  if (
+    device === null ||
+    param === null ||
+    sampleValue === null ||
+    unit === null ||
+    tsMs === null ||
+    alarm === null
+  ) {
+    return null;
+  }
+
+  const nodeRaw = object['node'];
+  let node: number | null;
+  if (nodeRaw === null) node = null;
+  else if (typeof nodeRaw === 'number' && Number.isFinite(nodeRaw)) node = nodeRaw;
+  else return null;
+
+  return { device, node, param, value: sampleValue, unit, ts_ms: tsMs, alarm };
+}
+
+/** `counters`(SPEC §2.3、Rust `SlowCounters` の 5 キーそのまま)。 */
+function slowCountersAt(value: unknown): SlowCounters | null {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
+  const object = value as Record<string, unknown>;
+  const pollOk = numberAt(object, 'poll_ok');
+  const pollErr = numberAt(object, 'poll_err');
+  const parseErr = numberAt(object, 'parse_err');
+  const reconnects = numberAt(object, 'reconnects');
+  const identityMismatch = numberAt(object, 'identity_mismatch');
+  if (
+    pollOk === null ||
+    pollErr === null ||
+    parseErr === null ||
+    reconnects === null ||
+    identityMismatch === null
+  ) {
+    return null;
+  }
+  return {
+    poll_ok: pollOk,
+    poll_err: pollErr,
+    parse_err: parseErr,
+    reconnects,
+    identity_mismatch: identityMismatch,
+  };
+}
+
+/**
+ * `status.slow`(SPEC §10.3 v1.31)。**キーが無ければ `value: undefined`**(従来と同一の
+ * status = 省略、`[monitor] slow_sub` 未設定)。キーはあるが壊れていれば `bad: true` にして
+ * 呼び手が status 全体を bad-field にする(silent に無視しない)。
+ */
+function slowAt(object: Record<string, unknown>): { value: SlowPayload | undefined; bad: boolean } {
+  const raw = object['slow'];
+  if (raw === undefined) return { value: undefined, bad: false };
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { value: undefined, bad: true };
+  }
+  const object2 = raw as Record<string, unknown>;
+  const kind = stringAt(object2, 'kind');
+  const tsMs = numberAt(object2, 'ts_ms');
+  const samplesRaw = object2['samples'];
+  const counters = slowCountersAt(object2['counters']);
+  if (kind === null || tsMs === null || !Array.isArray(samplesRaw) || counters === null) {
+    return { value: undefined, bad: true };
+  }
+
+  const samples: SlowSample[] = [];
+  for (const item of samplesRaw) {
+    const sample = slowSampleAt(item);
+    if (sample === null) return { value: undefined, bad: true };
+    samples.push(sample);
+  }
+
+  return { value: { kind, ts_ms: tsMs, samples, counters }, bad: false };
+}
+
 const META_KEYS = [
   'type',
   'nBuckets',
@@ -164,6 +290,7 @@ const STATUS_KEYS = [
   'monitorGaps',
   'clients',
   'wsDropped',
+  'slow',
 ] as const;
 
 const RUN_KEYS = ['type', 'state', 'run', 'ts'] as const;
@@ -269,6 +396,9 @@ function parseStatus(object: Record<string, unknown>): JsonParseResult {
   if (clients === null) return fail('bad-field', 'status.clients');
   if (wsDropped === null) return fail('bad-field', 'status.wsDropped');
 
+  const slow = slowAt(object);
+  if (slow.bad) return fail('bad-field', 'status.slow');
+
   return {
     kind: 'status',
     status: {
@@ -286,6 +416,7 @@ function parseStatus(object: Record<string, unknown>): JsonParseResult {
       monitorGaps,
       clients,
       wsDropped,
+      ...(slow.value !== undefined ? { slow: slow.value } : {}),
     },
     unknownKeys: unknownKeysOf(object, STATUS_KEYS),
   };

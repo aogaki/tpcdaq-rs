@@ -1,0 +1,103 @@
+<div class="slow">
+  @if (noData()) {
+    <p class="empty">
+      No slow-control data (monitor <code>slow_sub</code> not configured or slowctl not running).
+    </p>
+  } @else {
+    <section class="card">
+      <h2>Latest</h2>
+      <table class="latest">
+        <thead>
+          <tr>
+            <th>device</th>
+            <th>node</th>
+            <th>param</th>
+            <th>value</th>
+            <th>unit</th>
+            <th>age</th>
+            <th>alarm</th>
+          </tr>
+        </thead>
+        <tbody>
+          @for (row of rows(); track row.key) {
+            <tr [class.alarm]="row.alarm">
+              <td>{{ row.device }}</td>
+              <td>{{ row.node ?? '—' }}</td>
+              <td>{{ row.param }}</td>
+              <td class="value">{{ formatValue(row.value) }}</td>
+              <td>{{ row.unit }}</td>
+              <td [class.stale]="row.stale">{{ formatAge(row.ageMs) }}</td>
+              <td>
+                @if (row.alarm) {
+                  <span class="badge alarm">ALARM</span>
+                } @else {
+                  <span class="dim">—</span>
+                }
+              </td>
+            </tr>
+          } @empty {
+            <tr>
+              <td colspan="7" class="dim">No samples</td>
+            </tr>
+          }
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <header>
+        <h2>Trend</h2>
+        <span class="sub">select up to {{ maxTrendSeries }} series</span>
+      </header>
+      <div class="picks">
+        @for (key of seriesKeys(); track key) {
+          <button
+            type="button"
+            class="chip"
+            [class.on]="selectedKeys().includes(key)"
+            (click)="toggleSeries(key)"
+          >
+            {{ key }}
+          </button>
+        }
+        @if (seriesKeys().length === 0) {
+          <span class="dim">—</span>
+        }
+      </div>
+      @if (issue(); as text) {
+        <p class="issue">{{ text }}</p>
+      }
+      <div class="chart" #chart></div>
+    </section>
+
+    @if (slow(); as payload) {
+      <section class="card">
+        <h2>Counters</h2>
+        <table class="counters">
+          <tbody>
+            <tr>
+              <td>poll_ok</td>
+              <td class="value">{{ payload.counters.poll_ok }}</td>
+            </tr>
+            <tr [class.attention]="payload.counters.poll_err > 0">
+              <td>poll_err</td>
+              <td class="value">{{ payload.counters.poll_err }}</td>
+            </tr>
+            <tr>
+              <td>parse_err</td>
+              <td class="value">{{ payload.counters.parse_err }}</td>
+            </tr>
+            <tr>
+              <td>reconnects</td>
+              <td class="value">{{ payload.counters.reconnects }}</td>
+            </tr>
+            <tr>
+              <td>identity_mismatch</td>
+              <td class="value">{{ payload.counters.identity_mismatch }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    }
+  }
+</div>

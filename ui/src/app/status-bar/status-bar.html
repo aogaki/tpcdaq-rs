@@ -56,4 +56,8 @@
       <mat-icon aria-hidden="true">report</mat-icon>{{ issue }}
     </span>
   }
+
+  <span class="item" [class.bad]="(slowAlarmCount() ?? 0) > 0" [matTooltip]="slowAlarmTooltip()">
+    <span class="key">slow</span>{{ slowAlarmCount() === null ? '—' : slowAlarmCount() }}
+  </span>
 </div>

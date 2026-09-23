@@ -12,7 +12,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { path: 'waveform', label: 'Waveform', icon: 'show_chart' },
   { path: 'logbook', label: 'Logbook', icon: 'history_edu' },
   { path: 'run', label: 'Run control', icon: 'play_circle' },
-  { path: 'power', label: 'Power', icon: 'bolt' },
+  { path: 'slow', label: 'Slow control', icon: 'thermostat' },
 ];
 
 export const routes: Routes = [
@@ -37,8 +37,8 @@ export const routes: Routes = [
     loadComponent: () => import('./run/run-view').then((m) => m.RunView),
   },
   {
-    path: 'power',
-    loadComponent: () => import('./power/power-view').then((m) => m.PowerView),
+    path: 'slow',
+    loadComponent: () => import('./slow/slow-view').then((m) => m.SlowView),
   },
   { path: '**', redirectTo: 'monitor' },
 ];
