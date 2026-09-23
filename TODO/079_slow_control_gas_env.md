@@ -672,3 +672,8 @@ UI のみ、`cargo test` 等は対象外)。
 - SPEC §11 への転記(発注書どおり Fable 担当)。
 - Rust 側(controller の `run_start.slow` 等)は Phase 2 で完了済み、本チケットでは無変更。
 
+### Fable レビュー(Phase 4、2026-09-23、マージ `worktree-agent-a535c11a3e4f18238` → main `d0781c7`)
+- 自分でも再実行: `npm test` **226 passed / 5 skipped**、`npm run build` green(Initial 506.9 kB)。操作 API への経路なし(grep で確認)。
+- 逸脱 1–4 **承認**(`StatusMessage` の実体は `ws/json.ts` / slow-view の spec は純関数 `slow-history.ts` に寄せる = 既存規約 / status-bar の computed 追加 / 新規 spec)。
+- 残 = 実機(現地 Phase 0 → 各ドライバの 1 分間一致)、SPEC §11 への「Slow control ビュー」1 行(078 レーン C のマージ時にまとめて v1.34)。
+
