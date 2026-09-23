@@ -1,6 +1,6 @@
 # 086 — 2D パネルのパレット: 最上位色が白で飽和 ch が見分けにくい(077 目視の指摘)
 
-**Status: COMPLETED**(2026-09-22 起票 Fable。Sonnet 0.5 日。**目視確認は未実施 — Fable/ユーザー待ち**)
+**Status: READY(追補)**(2026-09-22 起票 Fable。Sonnet 0.5 日。**目視確認は未実施 — Fable/ユーザー待ち**)
 
 ## 0. 結論
 - `ui/src/app/monitor/jsroot-loader.ts` の `PALETTE = 56` は最上位色が**白**。ダークテーマの黒地では最大値付近(パルサー run で 4095 飽和の FPN、
@@ -123,3 +123,18 @@
 - `ui/src/app/monitor/jsroot-loader.ts`(`invertColors` 追加・`loadJsroot` を `jsroot/colors` 経由のカスタムパレット登録に変更・コメント全面書き直し)
 - `ui/src/app/monitor/jsroot-loader.spec.ts`(新設)
 - `ui/src/jsroot.d.ts`(`declare module 'jsroot/colors'` 追加)
+
+## 追補 2 発注(2026-09-23、ユーザー目視「Light モードに最高」= ダークで眩しい — Sonnet)
+
+- 目視(ユーザー + Fable の headless スクリーンショット `reference/_spike/demo/cdp_shot.py`): kBird 反転方式は最上位が黄で飽和 FPN は見えるが、
+  **ゼロ付近が一面の鮮やかな青**になりダークテーマで眩しい。JSROOT の colz は最下位レベルに `calcColorIndex(0, 20)` ≈ 255 色中 13 番目を使うため、
+  kBird の先頭(53,42,135)ではなく (38,62,170) 相当の青になる。
+- 裁定: **自前のダーク用ランプ**(9 stop、線形補間で 255 色)を pre-invert して登録する(方式は同じ、配色だけ差し替え):
+  `0.000 (0,0,0)` 黒 / `0.125 (30,10,60)` 暗紫 / `0.250 (60,20,140)` 藍 / `0.375 (30,80,200)` 青 / `0.500 (0,160,200)` シアン / `0.625 (40,200,120)` 緑 /
+  `0.750 (180,220,60)` 黄緑 / `0.875 (255,210,0)` 黄 / `1.000 (255,120,0)` 橙。ゼロ付近(5 %)は ≈ (12,4,24) の黒に近い色、パルス頂上(≈ 3500/3700)は黄、
+  4095 飽和の FPN は橙で区別できる。
+- 実装: `jsroot-loader.ts` に純関数 `rampPalette(stops: ReadonlyArray<[number, [r,g,b]]>, n = 255): string[]`(位置で線形補間、`rgb(r,g,b)`)を export し、
+  `TPCDAQ_DARK_STOPS` 定数 → `rampPalette` → `invertColors` → `setColorPalette(1057, …)`。`getColorPalette(57)` は使わない(kBird 依存を外す)。
+  spec: ①`rampPalette` の端点と中点(0.0625 = 黒と暗紫の中間)の手計算オラクル ②長さ 255 ③既存の `invertColors` 3 本は不変。
+- 受け入れ: `npm test`(268 → +2〜3)、`npm run build`、prettier。目視は Fable が `cdp_shot.py` で行う。
+
