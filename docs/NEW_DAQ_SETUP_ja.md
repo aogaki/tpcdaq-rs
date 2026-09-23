@@ -1,4 +1,4 @@
-# 新 DAQ 機セットアップ手順(Ubuntu 24.04 LTS)— v0.1
+# 新 DAQ 機セットアップ手順(Ubuntu 24.04 LTS)— v0.2(2026-09-23: Rust ブリッジ・slowctl・params を反映)
 
 **位置づけ**: TODO/080 A-1。順序は TODO/076 §6 の裁定どおり —
 **OS → ネットワーク → ツールチェーン → ROOT → 実 ECC(ホストでネイティブ、Ice 3.7)→ tpcdaq-rs → UI →
@@ -83,7 +83,7 @@ ECC ブリッジ(Rust 076、当面は C++ 併存)→ 疎通チェック → 常�
 
 ```sh
 git clone https://github.com/aogaki/tpcdaq-rs && cd tpcdaq-rs
-cargo build --release && cargo test           # 470 件超 green
+cargo build --release && cargo test           # 812 件 green(2026-09-23 時点)
 cd tools/root_sink && make -j && cd -
 cd ui && npm ci && npm run build && cd -       # → ui/dist/ui/browser(controller が配信)
 ```
@@ -105,19 +105,25 @@ event_publish_hz = 20.0
 raw_tree = true                                  # run{N}_raw.root(macros 直結、075)
 [monitor]
 ws_listen = "0.0.0.0:9000"
+slow_sub = "tcp://127.0.0.1:47006"               # slowctl の status PUB(v1.31)。slowctl を動かすまでは省略可
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "<環境変数か別ファイルから>"
 ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "pulser"                             # 実験に合わせる(078 のプリセットが来るまで手動)
 ui_dir = "/opt/tpcdaq/ui"                        # ui/dist/ui/browser のコピー
+ecc_config_dir = "<ECC の config repo>"          # v1.33: テンプレート xcfg の置き場 = 生成 xcfg の出力先(getEccServer --config-repo-url と同じ)
+params_dir = "/data/tpcdaq/params"               # v1.33: パラメータ JSON(current.json / <id>.json)
+# [slowctl] は現地 Phase 0(node scan、by-id の実名)の後に config/slowctl_example.toml を写して足す(§9)
 ```
 - ✅ `cargo test` green、`root_sink --help`、`ls ui/dist/ui/browser/index.html`。
 
 ## 7. ECC ブリッジ
 
-- **Rust(TODO/076)**: `target/release/ecc_bridge --bind tcp://*:47200 --ecc-proxy "Ecc:tcp -h 127.0.0.1 -p 46002"`。
-  最初の実機確認はここ(076 Phase 3 の前提 = describe → … → reset の 1 周と audit `ecc_walk_back` の一致)。
+- **Rust(TODO/076 Phase 2 済、2026-09-22)**: `target/release/ecc_bridge --bind tcp://*:47200 --ecc-proxy "Ecc:tcp -h 127.0.0.1 -p 46002"`。
+  依存無し(Ice ライブラリ不要)。宅内では fake ECC の e2e 52 本と既存統合テスト 14 本を通してある。**最初の実機確認はここ**
+  (076 Phase 3 の前提 = describe → … → stop → breakup → reset → reset の 1 周と audit `ecc_walk_back` が C++ 時と同一)。
+  合格したら C++ ブリッジと Ice 3.8 は不要(Phase 3 で撤去)。
 - **C++ 併存(Rust が通るまで)**: Ice 3.8 が要る → ZeroC の apt リポ(noble)から `libzeroc-ice3.8-dev` 相当、
   `cd tools/ecc_bridge && make TPCDAQ_ICE_DIR=<20190315_patched のパス> -j`。**Ice 3.7 と 3.8 を同一プロセスに混ぜない**
   (無言 SIGSEGV — VIRTUAL_ZCOBO §4.1 の罠)。ECC(3.7)とブリッジ(3.8)は別プロセスなので共存可。
@@ -127,7 +133,7 @@ ui_dir = "/opt/tpcdaq/ui"                        # ui/dist/ui/browser のコピ�
 ## 8. 起動順序と常駐化
 
 順序は `reference/_spike/demo/start_demo.sh` と同じ(下流から): **root_sink → monitor → graw_writer → decoder →
-receiver → getEccServer → ecc_bridge → controller**。停止は逆順、Rust bin は **SIGINT**(SIGTERM ハンドラ無し — 028 付録 A)、
+receiver → getEccServer → ecc_bridge → controller → slowctl**(slowctl は最後でよい: controller 不在中の IDENT/ALARM は再送キューで届く — 079 Phase 2)。停止は逆順、Rust bin は **SIGINT**(SIGTERM ハンドラ無し — 028 付録 A)、
 root_sink は両方 graceful。まずは `daq_up.sh` / `daq_down.sh`(GDED の `bench_up.sh` を整えたもの)で運用し、
 安定したら systemd ユーザーユニット(`After=` で順序、`KillSignal=SIGINT`)へ。**listen-before-start**(receiver が
 46005 を listen してから ECC start)は controller が担保するので、手順として気にするのは「receiver が上がっていること」だけ。
@@ -138,7 +144,12 @@ root_sink は両方 graceful。まずは `daq_up.sh` / `daq_down.sh`(GDED の `b
 - `/dev/serial/by-id/` で固定名を確認(`ls -l /dev/serial/by-id/`)。同型で個体シリアルが無いものは `by-path`。
 - Bronkhorst: USB-RS232 → 先頭機器 D-sub(ProPar 38400 8N1)。HMP2020: USB-B(CDC → `/dev/ttyACM*`、HO720)。Arduino MKR1000: USB。
 - HiVolta: Ethernet(TCP :1470、LOCAL モードのまま読むだけ)。
-- ✅ 各ポートで機器が名乗る(ProPar node 128 の 113/3、SCPI `*IDN?`、Arduino の JSON 行)— slowctl 実装後は起動ログで確認。
+- ドライバは実装済み(2026-09-23): `bronkhorst_flowbus`(079 Phase 2)/ `arduino_env`(Phase 3、スケッチは `tools/arduino_env/`)/
+  `hivolta` / `hmp2020`(089)。**現地 Phase 0 = node scan** は Python を入れず、`[[slowctl.device]] type = "bronkhorst_flowbus", nodes = "scan"` の
+  TOML で `target/release/slowctl --config x.toml` を起動し、logbook の `slow` レコード(`event: "IDENT"`)と `RUST_LOG=info` の起動ログで
+  ノード番号・機種・シリアル・単位を確認する。確定したら `nodes = [..]` と `expect_serial` を書く。
+- ✅ 各ポートで機器が名乗る(ProPar node 128 の 113/3、SCPI `*IDN?`、HiVolta `BDSNUM`、Arduino の JSON 行)= IDENT レコードが揃う。
+  不一致は `identity_mismatch` カウンタ(status の `slow.counters`)に出る。
 
 ## 10. 疎通チェック(TODO/069 Phase 1–2 の抜粋 — 全部 ✅ で「本番機」)
 
@@ -152,8 +163,10 @@ root_sink は両方 graceful。まずは `daq_up.sh` / `daq_down.sh`(GDED の `b
 | 6 | UI | 別 PC のブラウザで monitor / waveform / logbook が更新 |
 | 7 | stop → reset | audit `ecc_walk_back` が `["status->Ready","breakup->Prepared","reset->Described","reset->Idle"]` |
 | 8 | logbook | `run_start` / `run_stop` 行、`forced_eos` / `eos_closed` が期待どおり |
+| 9 | slowctl(079) | logbook に各機器の `IDENT`、WS status JSON に `slow`(UI の Slow control ビュー)、`run_start.slow` に直近値 |
+| 10 | params(078) | UI の Parameters で保存 → `<ecc_config_dir>/configure-<id>.xcfg` が生え、run/start の audit `params_id` と ECC の configure が `<id>` |
 
 ## 11. 未確定・追記予定
 
-- 5-B の 3.7.10 コンパイル可否、ROOT の具体版、systemd ユニットの実体、slowctl の起動(079 Phase 2 後)。
+- 5-B の 3.7.10 コンパイル可否、ROOT の具体版、systemd ユニットの実体。slowctl / params は実装済み(上記 §6 / §9 / §10-9・10)— 実機で初めて通す。
 - 実施ログは TODO/080 A-1 の結果節へ(日付・版・所要時間・つまずき)。
