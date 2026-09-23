@@ -15,6 +15,11 @@ use std::io::{self, Read, Write};
 /// 要求行 → 応答行の完全一致で応答するインメモリ応答器。
 pub struct FakeHmp {
     responses: HashMap<String, String>,
+    /// TODO/089: `INST:NSEL` でチャンネルを切り替えると、以後の同じ要求行
+    /// (`MEAS:VOLT?` 等)への応答がチャンネルごとに変わる。固定の 1 対 1 map では
+    /// 表現できないので、要求行ごとに **先入れ先出しのキュー**を別に持つ
+    /// ([`FakeHmp::push_response`])。
+    sequenced: HashMap<String, VecDeque<String>>,
     silent: bool,
     incoming: Vec<u8>,
     outgoing: VecDeque<u8>,
@@ -30,6 +35,7 @@ impl FakeHmp {
     pub fn new() -> Self {
         Self {
             responses: HashMap::new(),
+            sequenced: HashMap::new(),
             silent: false,
             incoming: Vec::new(),
             outgoing: VecDeque::new(),
@@ -45,6 +51,22 @@ impl FakeHmp {
     ) -> &mut Self {
         self.responses
             .insert(request_line.into(), reply_line.into());
+        self
+    }
+
+    /// `request_line` への応答を**順番に消費するキュー**へ 1 個積む(呼ぶたびに末尾へ追加)。
+    /// 同じ要求文字列でもチャンネル選択(`INST:NSEL`)によって答えが変わる場合に使う
+    /// (TODO/089: `hmp_driver` の poll は ch1 → ch2 の順で同じ `MEAS:*?`/`OUTP?` を送るため)。
+    /// キューが尽きれば [`FakeHmp::set_response`] の固定応答にフォールバックする。
+    pub fn push_response(
+        &mut self,
+        request_line: impl Into<String>,
+        reply_line: impl Into<String>,
+    ) -> &mut Self {
+        self.sequenced
+            .entry(request_line.into())
+            .or_default()
+            .push_back(reply_line.into());
         self
     }
 
@@ -66,7 +88,12 @@ impl Write for FakeHmp {
 
             if self.silent {
                 // outgoing に何も積まない → read() が WouldBlock を返す。
-            } else if let Some(reply) = self.responses.get(&line) {
+            } else if let Some(reply) = self
+                .sequenced
+                .get_mut(&line)
+                .and_then(VecDeque::pop_front)
+                .or_else(|| self.responses.get(&line).cloned())
+            {
                 self.outgoing.extend(reply.as_bytes());
             } else {
                 // テスト設定漏れ、または本来生成できないはずのコマンド(VOLT/CURR/OUTP ON 等)。
