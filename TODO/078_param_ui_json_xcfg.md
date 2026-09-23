@@ -601,3 +601,11 @@ npx prettier --check "src/app/**/*.{ts,html,scss}"
 - SPEC §11 への転記(Fable)。
 - 実 ECC / 実機での確認(078 §5-3/§5-5)は本レーンの範囲外。
 - demo スタック起動は行っていない(指示どおり)。
+
+### Fable レビュー(レーン C、2026-09-23、マージ `worktree-agent-add54223d5e1c8051` → main)
+- 079 Phase 4 と `app.routes.ts` / `status-bar.{ts,html,spec}` で衝突 → 両方残して解決(NAV は `params` → `slow` の順、spec は `status-bar.spec.ts`(params)と
+  `status-bar-slow.spec.ts`(slow)に分割、template の閉じタグ抜けを修正)。マージ後 `npm test` **268 passed / 5 skipped**、`npm run build` green(Initial 512 kB)、prettier clean。
+- 逸脱 1–6 **承認**(xcfgElements の手動転記は許容 — 変更頻度が低く、Preview のハイライトだけの用途 / status-bar.ts の poll / `[selected]` / 503 では新規導線を出さない /
+  例外 value の型別コントロール / テストの flush)。
+- **SPEC v1.34 §11** に Parameters ビューを固定。残 = §5-3(実 ECC、新 DAQ 機)と §5-5(実データへの反映)。**078 のソフト側は完了**(A/B/C)。
+
