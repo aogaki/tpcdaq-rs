@@ -22,7 +22,7 @@
 - **Goal:** GET ベース TPC(mini eTPC @ ELI-NP → ELITPC @ Warsaw)のフル DAQ 置換
   (受信 → デコード → 保存二系統 → ライブモニタ + run 制御 + Web UI)。最低目標トリガー 100 Hz。
 - **Architecture:** delila-rs 型コンポーネントシステム(ZMQ)。
-  receiver(CoBo 毎) → decoder → {graw-writer, root-sink(C++), monitor} + controller → ecc-bridge(C++)
+  receiver(CoBo 毎) → decoder → {graw-writer, root-sink(C++), monitor} + controller → ecc-bridge(Rust)
 - **Reference(ローカル参照、リポには入れない):**
   - `~/test/get/tpcdaq/` — C++ 版 = リファレンス + テストオラクル(events=108/items=15,040,512)+ サテライト供給元
   - `~/WorkSpace/delila-rs/` — コンポーネントシステムの手本。`tools/root_sink`(C++)= イベントビルダ + ROOT 書き出しの流用元
@@ -35,9 +35,9 @@
 
 Rust 2021 + tokio + ZMQ + serde 系(delila-rs に揃える。確定は仕様書)。
 UI: Angular + Angular Material + ECharts(delila-rs operator UI と同一スタック)。
-C++ サテライト(tools/): ROOT(root-sink)、ZeroC Ice(ecc-bridge、**encoding 1.1 固定**。
-ローカル実態は Ice 3.8 系 — 旧「3.6.3」表記は 2026-08-14 訂正。実 ECC ローカルビルドは
-3.7 keg(unlinked)で共存、docs/VIRTUAL_ZCOBO_ja.md §4.1)。
+C++ サテライト(tools/): ROOT(root-sink)のみ。**ecc-bridge は 2026-09-23 に Rust 化**(076 Phase 3 —
+`src/ice/` が Ice プロトコル 1.0 / encoding 1.1 を自前実装、Ice ライブラリ非依存)。tools/ecc_bridge に残る C++ は
+fake_ecc(テストダブル)と e2e クライアントだけで、これらのビルドにだけ Ice 3.8(Mac)/ 3.7(GDED、VM 採取)が要る。
 
 ## Design Principles (Priority Order)
 
