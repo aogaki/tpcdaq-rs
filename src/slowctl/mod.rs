@@ -46,6 +46,13 @@ pub mod component;
 #[cfg(any(test, feature = "slowctl-fake"))]
 pub mod fake_device;
 
+/// Arduino MKR ENV Shield ドライバ(`Driver` 実装)。TODO/079 §2.3 / §2.7。
+pub mod arduino;
+
+/// インメモリ Arduino ENV 応答器(テスト専用、または `slowctl-fake` feature)。TODO/079 §2.7。
+#[cfg(any(test, feature = "slowctl-fake"))]
+pub mod fake_arduino;
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
