@@ -369,3 +369,26 @@ Fable レビューはフェーズ境界 2 回(Phase 1 後 = ワイヤ、Phase 2 
 - → **Phase 3 の前提(実 ECC + 実 zCoBo で Rust bridge の run 1 周、walk-back 一致)は満たした。** C++ 撤去(Phase 3 本体)は次の起票で。
 - 残懸念: bin のログは `eprintln!`(tracing 未初期化、Phase 2 レビューの持ち越し①)。ACM のアイドル切断は 2 run の間隔 20 s では未観測。
 
+## Phase 3 発注(C++ ecc_bridge の撤去 — Sonnet、2026-09-23。前提 = 上の「Phase 3 前提 — 実機確認」節で充足、ユーザー裁定 3)
+
+着手前に worktree で `git merge --ff-only main`。発注書は本体の絶対パスで読んでよい。reference/ は worktree に無い(本票では不要)。
+
+### 消すもの / 残すもの(tools/ecc_bridge)
+- **削除**: `ecc_bridge.cpp`、`ecc_core.hpp`、`test_ecc_bridge.cpp`、`json_min.hpp`、`check.hpp`(test_ecc_bridge 専用なら)、ビルド生成物(`ecc_bridge`、`test_ecc_bridge`、`*.dSYM`)。
+- **残す**: `fake_ecc.cpp`(Ice servant のテストダブル)、`ecc_e2e_client.cpp`(Rust bin の e2e 相手)、`run_ecc_e2e.sh`(既定を Rust bin に:
+  `ECC_BRIDGE_BIN` の既定 = `<repo>/target/release/ecc_bridge` があればそれ、無ければ `target/debug/ecc_bridge`、無ければエラー文言)、`tap_*.py`、`slice/`。
+  `Makefile` は fake_ecc / ecc_e2e_client だけを作る形に縮める(`TPCDAQ_ICE_DIR` は残る)。
+- `tests/*.rs` の `TPCDAQ_ECC_BRIDGE_BIN` は残す(既定を Rust bin に倒す: env 無しなら `env!("CARGO_BIN_EXE_ecc_bridge")` を使う。`TPCDAQ_FAKE_ECC_BIN` は従来どおり)。
+  → **env 無しでも統合テストが Rust bin で走る**(skip しない)。fake_ecc が無いときだけ skip(理由を出力)。
+- `reference/_spike/demo/start_demo.sh`: `ECC_BRIDGE` を Rust bin に。`docs/VIRTUAL_ZCOBO_ja.md` §4.1(Ice 3.8 の記述を「ブリッジは Rust、Ice ライブラリ不要」に)、
+  `docs/NEW_DAQ_SETUP_ja.md` §7(C++ 併存の段落を削除)、`README.md` の該当行。**SPEC §1.1 / §8.2 と CLAUDE.md の Tech Stack 行は Fable が直す(触らない)。**
+- `src/bin/ecc_bridge.rs`: Phase 2 レビューの持ち越し①を同時に消化 — 他の Rust bin と同じ `tracing_subscriber`(env-filter)初期化にし、
+  `eprintln!` を `tracing` に置き換える(stdout の `BIND …` 1 行は不変)。
+
+### テスト
+- `cargo fmt && cargo clippy --tests -- -D warnings && cargo test` green(現 838。env 無しで `ecc_bridge_intake` 等が skip でなく走ること)。
+- `make -C tools/ecc_bridge -j TPCDAQ_ICE_DIR=/Users/aogaki/Workspace/tpcdaq-rs/reference/20190315_patched` が fake_ecc / ecc_e2e_client を作り、
+  `run_ecc_e2e.sh` が Rust bin で **52 passed**。`bash reference/_spike/demo/start_demo.sh` → `run_once.sh 12` → `stop_demo.sh` が通る(Mac、ユーザーの
+  demo が動いていないときに)。
+- 結果節: 削除した行数、テスト数、e2e 出力、demo の run 1 本の結果、承認が要る逸脱。
+
