@@ -336,3 +336,203 @@ fn pedestal_table_round_trips_through_a_json_file() {
     assert_eq!(read_back.channels, ped_table.channels);
     assert_eq!(read_back.meta, ped_table.meta);
 }
+
+// ---------------------------------------------------------------------
+// scan: 振幅ラダー(既存 pulser と同じ peak-baseline 定義)+ 平均波形(TODO/091 §1)。
+// ---------------------------------------------------------------------
+
+/// aget/chan の 512 バケット全部に `baseline` を書き、`spike_bucket` だけ `spike_adc` に
+/// 差し替える(full-readout を模す。未書き込みバケットを残すと「ペデスタル差引後は
+/// ほぼ 0」という平均波形オラクルが汚れるので避ける)。
+fn flat_waveform_with_spike(
+    aget: u8,
+    chan: u8,
+    baseline: u16,
+    spike_bucket: u16,
+    spike_adc: u16,
+) -> Vec<(u8, u8, u16, u16)> {
+    (0u16..512)
+        .map(|b| {
+            (
+                aget,
+                chan,
+                b,
+                if b == spike_bucket {
+                    spike_adc
+                } else {
+                    baseline
+                },
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn scan_compute_matches_hand_calculation_for_slope_intercept_residual_and_average_waveform() {
+    use tpcdaq::calib::scan::{self, ScanRun};
+
+    let dir = ScratchDir::new("scan");
+
+    // 3 振幅(−100/−300/−1000 mV)× 2 イベント。ch0(信号, aget0, ch0): baseline=50、
+    // bucket100 のピークが中心値 ±10 で振れる(平均・中央値とも中心値に一致するので
+    // 手計算が単純)。中心値は 100/300/700(−1000 だけ線形予測 1000 を大きく下回る =
+    // 圧縮を模す)。ch1(信号, aget0, ch1): baseline=50、中心値は 50/150/500(圧縮なし、
+    // 線形のまま、±5 で振れる)。ch11(FPN, aget0): baseline=100、ピークは常に 4095
+    // (飽和、振幅に依らず一定)。
+    let make_run = |ch0_center: u16, ch1_center: u16, name: &str| -> PathBuf {
+        let ch0_lo = flat_waveform_with_spike(0, 0, 50, 100, 50 + ch0_center - 10);
+        let ch0_hi = flat_waveform_with_spike(0, 0, 50, 100, 50 + ch0_center + 10);
+        let ch1_lo = flat_waveform_with_spike(0, 1, 50, 100, 50 + ch1_center - 5);
+        let ch1_hi = flat_waveform_with_spike(0, 1, 50, 100, 50 + ch1_center + 5);
+        let ch11 = flat_waveform_with_spike(0, 11, 100, 100, 4095);
+
+        let mut event0 = ch0_lo;
+        event0.extend(ch1_lo);
+        event0.extend(ch11.clone());
+        let mut event1 = ch0_hi;
+        event1.extend(ch1_hi);
+        event1.extend(ch11);
+
+        write_graw(
+            &dir,
+            name,
+            &[
+                make_frame_type1(0, 0, &event0),
+                make_frame_type1(0, 1, &event1),
+            ],
+        )
+    };
+
+    let runs = vec![
+        ScanRun {
+            amp_mv: -100.0,
+            path: make_run(100, 50, "amp_m100.graw"),
+        },
+        ScanRun {
+            amp_mv: -300.0,
+            path: make_run(300, 150, "amp_m300.graw"),
+        },
+        ScanRun {
+            amp_mv: -1000.0,
+            path: make_run(700, 500, "amp_m1000.graw"),
+        },
+    ];
+
+    let table = scan::compute(&runs).unwrap();
+
+    assert_eq!(table.amps, vec![-100.0, -300.0, -1000.0]);
+    assert_eq!(table.meta.inputs.len(), 3);
+    assert_eq!(table.meta.events, 6, "2 events x 3 runs");
+
+    let find = |ch: u8| {
+        table
+            .channels
+            .iter()
+            .find(|c| c.asad == 0 && c.aget == 0 && c.ch == ch)
+            .unwrap_or_else(|| panic!("ch{ch} missing"))
+    };
+
+    // ch0: 振幅ラダー = [100, 300, 700](中央値。±10 の 2 イベント平均/中央値は中心値に一致)。
+    let ch0 = find(0);
+    assert!(!ch0.is_fpn);
+    assert_eq!(ch0.amplitude, vec![100.0, 300.0, 700.0]);
+    // 手計算: フィットは |mV|<=700 の 2 点 (-100,100),(-300,300) のみ使う(発注書「振幅
+    // ≤ −700mV(圧縮前)」の解釈 — src/calib/scan.rs のモジュール doc 参照。全振幅が負なので
+    // 文字どおりの実数比較では圧縮側の 2 点しか残らず「圧縮前」の意図と逆になるため、
+    // 絶対値 <=700mV と読む)。
+    // slope=(300-100)/(-300-(-100))=-1.0, intercept=100-(-1.0*-100)=0。
+    assert!(
+        (ch0.fit.slope - (-1.0)).abs() < 1e-9,
+        "slope={}",
+        ch0.fit.slope
+    );
+    assert!(
+        (ch0.fit.intercept - 0.0).abs() < 1e-9,
+        "intercept={}",
+        ch0.fit.intercept
+    );
+    // -1000 での予測 = -1.0*-1000+0 = 1000、実測 700 → 残差 (700-1000)/1000 = -0.3。
+    assert!(
+        (ch0.fit.max_resid_frac - 0.3).abs() < 1e-9,
+        "max_resid_frac={}",
+        ch0.fit.max_resid_frac
+    );
+    // 平均波形: bucket100 だけ中心値、他は 0(baseline=pedestal なので差引後 0)。
+    assert_eq!(ch0.waveform.len(), 3);
+    for (wave, expected_peak) in ch0.waveform.iter().zip([100.0, 300.0, 700.0]) {
+        assert_eq!(wave.len(), 512);
+        assert!(
+            (wave[100] - expected_peak).abs() < 1e-9,
+            "wave[100]={}",
+            wave[100]
+        );
+        assert!((wave[0] - 0.0).abs() < 1e-9, "wave[0]={}", wave[0]);
+        assert!((wave[511] - 0.0).abs() < 1e-9, "wave[511]={}", wave[511]);
+    }
+
+    // ch1: 圧縮なし(線形)。3 点目(-1000)まで外挿しても残差 0。
+    let ch1 = find(1);
+    assert_eq!(ch1.amplitude, vec![50.0, 150.0, 500.0]);
+    assert!(
+        (ch1.fit.slope - (-0.5)).abs() < 1e-9,
+        "slope={}",
+        ch1.fit.slope
+    );
+    assert!(
+        (ch1.fit.intercept - 0.0).abs() < 1e-9,
+        "intercept={}",
+        ch1.fit.intercept
+    );
+    assert!(
+        ch1.fit.max_resid_frac < 1e-9,
+        "max_resid_frac={} (linear, no compression)",
+        ch1.fit.max_resid_frac
+    );
+
+    // ch11: FPN、常時飽和(4095)。振幅ラダーは全振幅で 3995 一定 → slope=0, intercept=3995。
+    let ch11 = find(11);
+    assert!(ch11.is_fpn);
+    assert_eq!(ch11.amplitude, vec![3995.0, 3995.0, 3995.0]);
+    assert!(
+        (ch11.fit.slope - 0.0).abs() < 1e-9,
+        "slope={}",
+        ch11.fit.slope
+    );
+    assert!(
+        (ch11.fit.intercept - 3995.0).abs() < 1e-9,
+        "intercept={}",
+        ch11.fit.intercept
+    );
+    assert!(ch11.fit.max_resid_frac < 1e-9);
+    for wave in &ch11.waveform {
+        assert!((wave[100] - 3995.0).abs() < 1e-9);
+    }
+}
+
+#[test]
+fn scan_table_round_trips_through_a_json_file() {
+    use tpcdaq::calib::scan::{self, ScanRun};
+
+    let dir = ScratchDir::new("scan_roundtrip");
+    let wave_a = flat_waveform_with_spike(0, 0, 50, 100, 150); // amp=100
+    let wave_b = flat_waveform_with_spike(0, 0, 50, 100, 350); // amp=300
+    let path_a = write_graw(&dir, "a.graw", &[make_frame_type1(0, 0, &wave_a)]);
+    let path_b = write_graw(&dir, "b.graw", &[make_frame_type1(0, 0, &wave_b)]);
+    let table = scan::compute(&[
+        ScanRun {
+            amp_mv: -100.0,
+            path: path_a,
+        },
+        ScanRun {
+            amp_mv: -300.0,
+            path: path_b,
+        },
+    ])
+    .unwrap();
+
+    let out = dir.path().join("scan.json");
+    scan::write(&table, &out).unwrap();
+    let read_back = scan::read(&out).unwrap();
+    assert_eq!(read_back.amps, table.amps);
+    assert_eq!(read_back.channels, table.channels);
+}

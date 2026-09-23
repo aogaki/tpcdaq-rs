@@ -22,6 +22,7 @@
 
 pub mod pedestal;
 pub mod pulser;
+pub mod scan;
 pub mod table;
 
 use std::collections::BTreeSet;
