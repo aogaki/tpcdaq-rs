@@ -24,6 +24,13 @@
 // No Bragg-peak test yet: a track leaving through a strip gap or a dead region
 // would be counted as stopped.
 //
+// Fourth pad: energy AT EMISSION assuming the alpha started at the source
+// (SRC_X, SRC_Y): path to the wall L = (CAGE_XLO - SRC_X) / dir_x (no z
+// needed), total range = L + residual range -> ASTAR. A real source alpha
+// gives a line (228Th chain: 6.05 / 6.29 / 6.78 / 8.78 MeV); an alpha born in
+// the gas on the way gives a continuum. Feed it the *_src.root of
+// sourceTracks.C to test whether the direction filter isolates the source.
+//
 // Usage:  root -l 'stoppedAlphas.C("CoBo_xxx_tracks.root")'
 
 const double PRESSURE_MBAR = 100.0;
@@ -34,6 +41,7 @@ const double CAGE_YLO = -58.0, CAGE_YHI = 48.0;
 const double Z_LO = 0.0, Z_HI = 89.0;  // 512 cells x mm/cell (analyzeUVW)
 const double EDGE_MM = 10.0, Z_EDGE_MM = 10.0;
 const double MIN_LENGTH_MM = 15.0;
+const double SRC_X = -470.0, SRC_Y = 0.0;  // source position (09-25 setup)
 
 // NIST ASTAR, alpha in CO2: kinetic energy [MeV], CSDA range [g/cm2]
 const double ASTAR[][2] = {
@@ -133,6 +141,10 @@ void stoppedAlphas(const char *trackFile)
   auto hXend = new TH1D("hXend", "stopped inside: stop point;x_{end} [mm];tracks", 72, -54, 54);  // 1.5 mm = strip pitch
   auto hQvsE = new TH2D("hQvsE", "stopped inside: track charge vs E;E [MeV];charge (3 views) [ADC]", 60, 0, 3, 100, 0, 1.5e6);
   auto pQvsE = new TProfile("pQvsE", "", 30, 0, 3);
+  auto hEgen = new TH1D(
+      "hEgen",
+      Form("energy at emission if born at the source (x = %.0f);E [MeV];tracks", SRC_X),
+      100, 4, 10);
 
   Long64_t nStop = 0;
   std::cout << Form("CO2 density %.4f mg/cm3 (%.0f mbar, %.1f K); ASTAR CSDA "
@@ -171,12 +183,14 @@ void stoppedAlphas(const char *trackFile)
     hXend->Fill(x1);
     hQvsE->Fill(E, charge);
     pQvsE->Fill(E, charge);
+    const double dirx = dx / std::sqrt(dx * dx + dy * dy + dz * dz);
+    hEgen->Fill(energyFromRange(r + (CAGE_XLO - SRC_X) / dirx));
   }
   std::cout << "stopped inside (source-like, |phi| <= " << PHI_MAX_DEG
             << " deg): " << nStop << " tracks" << std::endl;
 
-  auto canvas = new TCanvas("canvasStopped", "Stopped Alphas", 1500, 500);
-  canvas->Divide(3, 1);
+  auto canvas = new TCanvas("canvasStopped", "Stopped Alphas", 1200, 900);
+  canvas->Divide(2, 2);
   canvas->cd(1);
   hE->Draw();
   canvas->cd(2);
@@ -187,5 +201,7 @@ void stoppedAlphas(const char *trackFile)
   pQvsE->SetMarkerStyle(20);
   pQvsE->SetMarkerSize(0.6);
   pQvsE->Draw("same");
+  canvas->cd(4);
+  hEgen->Draw();
   canvas->Update();
 }

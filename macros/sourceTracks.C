@@ -20,7 +20,7 @@ const double SRC_X = -470.0;      // source x [mm] (09-25 setup; the xy fit give
 const double SRC_Y = 0.0;         // source y [mm]
 const double SRC_R_MM = 30.0;     // accepted miss distance at the source
 const double PHI_MAX_DEG = 15.0;  // |in-plane angle| w.r.t. +x
-const double MIN_LENGTH_MM = 50.0;
+const double MIN_LENGTH_MM = 15.0;  // short enough to keep alphas stopping just inside
 
 void sourceTracks(const char *trackFile)
 {
