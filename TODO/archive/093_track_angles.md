@@ -27,3 +27,7 @@ tan(phi) = -0.0053 + 0.00289 * y  ->  source at x = -399 (D = 346 +- 7 mm from t
   → 対処は [094](094_tracker_peak_time_z.md)(ストリップ毎のパルスピーク時刻を z にする)。
 - 図: `reference/_spike/angles_0925/angles.png`(3 パッド)、`thetaVsLen.png`(|θ| vs L_xy、|dz| vs L_xy)。
 - 付随変更: `analyzeTracks.C` histSource を ±500 mm(500 bin)に。テストなし(ROOT マクロ、目視 + 上記数値)。
+
+## 追記(2026-09-28、ユーザー要望「ある φ でドリフトケージが見えているか」)
+- `analyzeAngles.C` に 4 パッド目 **θ vs φ(全飛跡、1° ビン、±60°)** を追加(キャンバスは 2×2)。094 後の 09-25 データ: 中央のビーム塊(|φ| ≲ 25°、θ は ±50° まで)、|φ| ≈ 25–35° にほぼ空の帯、|φ| > 35° に広角の一様成分(ガス中 ²²⁰Rn 系列)。
+  図: `reference/_spike/angles_0925/v2r3_angles4.png`。

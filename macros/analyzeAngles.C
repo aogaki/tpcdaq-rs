@@ -63,6 +63,9 @@ void analyzeAngles(const char *trackFile)
       "hPhiVsY", "through: tan#phi vs entrance y;y at x = -53 [mm];tan#phi",
       60, -60, 60, 100, -0.5, 0.5);
   auto pPhiVsY = new TProfile("pPhiVsY", "", 60, -60, 60);
+  auto hThetaVsPhi = new TH2D(
+      "hThetaVsPhi", "all: #theta vs #phi;#phi [deg];#theta [deg]", 120, -60,
+      60, 120, -60, 60);
 
   Long64_t nAll = 0, nThr = 0;
   const auto nEvents = tree->GetEntries();
@@ -87,6 +90,7 @@ void analyzeAngles(const char *trackFile)
     ++nAll;
     hPhiAll->Fill(phi);
     hThetaAll->Fill(theta);
+    hThetaVsPhi->Fill(phi, theta);
     if (!through) continue;
     ++nThr;
     hPhiThr->Fill(phi);
@@ -101,8 +105,8 @@ void analyzeAngles(const char *trackFile)
   std::cout << "selected " << nAll << " tracks (length >= " << MIN_LENGTH_MM
             << " mm), through (left -> right) " << nThr << std::endl;
 
-  auto canvas = new TCanvas("canvasAngles", "Track Angles", 1500, 500);
-  canvas->Divide(3, 1);
+  auto canvas = new TCanvas("canvasAngles", "Track Angles", 1200, 900);
+  canvas->Divide(2, 2);
 
   canvas->cd(1);
   hPhiAll->SetLineColor(kAzure + 1);
@@ -121,6 +125,10 @@ void analyzeAngles(const char *trackFile)
   hThetaThr->Draw("same");
 
   canvas->cd(3);
+  hThetaVsPhi->SetStats(0);
+  hThetaVsPhi->Draw("COLZ");
+
+  canvas->cd(4);
   hPhiVsY->SetStats(0);
   hPhiVsY->Draw("COLZ");
   pPhiVsY->SetLineColor(kBlack);
