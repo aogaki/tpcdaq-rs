@@ -15,7 +15,8 @@
 //
 // Usage:  root -l -b -q 'sourceTracks.C("CoBo_xxx_tracks.root")'
 
-const double SRC_X = -410.0;      // source x [mm] (analyzeAngles fit, 09-25)
+const double SRC_X = -470.0;      // source x [mm] (09-25 setup; the xy fit gives -410, biased
+                                  // closer by the Rn cloud + port aperture, see TODO/095)
 const double SRC_Y = 0.0;         // source y [mm]
 const double SRC_R_MM = 30.0;     // accepted miss distance at the source
 const double PHI_MAX_DEG = 15.0;  // |in-plane angle| w.r.t. +x

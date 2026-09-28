@@ -30,6 +30,7 @@ Feed that file straight into analyzeUVW.C. graw2root.C stays the tool for
 | analyzeUVW.C | `*_raw.root` | `*_uvw.root`   | ALL analysis: pedestal, ONE hit per strip (peak time -> z, integrated charge q, halo cut `STRIP_Q_MIN`), channel map, z scale; tree `uvw`: per-view charge, signal width, band-selected strip hits; histograms `hCharge` (strip-hit charge), `hWidth_U/V/W`; example UVW canvases |
 | makeTracks.C | `*_uvw.root` | `*_tracks.root` | tree `tracks`: straight-line 3D track per event (start/end, direction, length, charge, dEdx = charge/length). xy direction from the charge-weighted variances of the U/V/W strip positions (no z), dip from a z-vs-path-length fit |
 | sourceTracks.C | `*_tracks.root` | `*_src.root` | event filter: tracks re-oriented to +x, `|phi| <= PHI_MAX_DEG` and the extended line within `SRC_R_MM` of (`SRC_X`, `SRC_Y`); same `tracks` tree, so analyzeTracks.C / analyzeAngles.C run on it unchanged |
+| stoppedAlphas.C | `*_tracks.root` | (canvas) | alphas that stop inside the cage (source-like, enter at the left wall, end away from every boundary): residual range -> energy with the NIST ASTAR CSDA range in CO2 at the run density; E histogram, stop point, charge vs E |
 
 ## The `uvw` strip-hit branches (the analyzeUVW -> makeTracks interface)
 
