@@ -60,7 +60,7 @@ void InitHists()
   }
   if (!histSource) {
     histSource =
-        new TH2D("histSource", "Source", 160, -160, 160, 160, -160, 160);
+        new TH2D("histSource", "Source", 500, -500, 500, 500, -500, 500);
     histSource->GetXaxis()->SetTitle("X [mm]");
     histSource->GetYaxis()->SetTitle("Y [mm]");
   }
