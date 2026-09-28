@@ -24,6 +24,6 @@ tan(phi) = -0.0053 + 0.00289 * y  ->  source at x = -399 (D = 346 +- 7 mm from t
   **|dz| に ≈ 20 mm の床が全長で一定**、貫通飛跡の (L_xy, dz) の尾根は dz が小さいほど L_xy が縮む(≈ 106 → 80 mm)。
   = **makeTracks の「ドリフト z スライス重心」トラッカーの系統**: 各ヒットはパルスの時間幅ぶん z に伸びる(閾値 35 ADC 超の幅 ≈ 20 mm ≈ 115 cell ≈ 4.6 µs @ 0.174 mm/cell)ので、
   測定 dz = 真 dz + w_z、測定 L_xy = L − w_z/tanθ。浅い飛跡は xy が潰れて z 向きになり(長さカットで落ちる)、残りは ±17° に積み上がる。**現状の dip 角は |θ| ≲ 20° で信用できない**(面内角 φ と入口 y 回帰は影響なし)。
-  → 対処は [094](../094_tracker_peak_time_z.md)(ストリップ毎のパルスピーク時刻を z にする)。
+  → 対処は [094](094_tracker_peak_time_z.md)(ストリップ毎のパルスピーク時刻を z にする)。
 - 図: `reference/_spike/angles_0925/angles.png`(3 パッド)、`thetaVsLen.png`(|θ| vs L_xy、|dz| vs L_xy)。
 - 付随変更: `analyzeTracks.C` histSource を ±500 mm(500 bin)に。テストなし(ROOT マクロ、目視 + 上記数値)。

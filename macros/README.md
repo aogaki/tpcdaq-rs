@@ -27,44 +27,48 @@ Feed that file straight into analyzeUVW.C. graw2root.C stays the tool for
 | rateVsTime.C | .graw       | `*_rate.root/.png` | header-only scan (no waveforms): event rate vs time (bin width in s), inter-event Δt (linear + log10), DAQ restarts marked. CoBo timestamp = 10 ns ticks (checked against wall clock). Fast: 10k frames in seconds |
 | chargeVsTime.C | `*_uvw.root` + `*_raw.root` | `*_charge_vs_time.root/.png` | joins per-event charge (analyzeUVW) with the CoBo timestamp (graw2root): median charge / hits per time bin, early-vs-late charge spectra, rate. Tells a counting effect (decaying source) from a signal effect (attachment, gain) |
 | graw2root.C  | .graw       | `*_raw.root`    | tree `raw`: PURE lossless conversion - full waveforms `adc[4][68][512]`, eventId, 48-bit eventTime. No pedestal / threshold / geometry. Reads frameType 1 (2018, 4-byte items) and frameType 2 (rev 5 compact, 2-byte items — what tpcdaq-rs/zCoBo write today) |
-| analyzeUVW.C | `*_raw.root` | `*_uvw.root`   | ALL analysis: pedestal, threshold, channel map, z scale; tree `uvw`: per-view charge, signal width, drift-slice charge centroids; histograms `hCharge`, `hWidth_U/V/W`; example UVW canvases |
-| makeTracks.C | `*_uvw.root` | `*_tracks.root` | tree `tracks`: straight-line 3D track per event (start/end, direction, length, charge, dEdx = charge/length) |
+| analyzeUVW.C | `*_raw.root` | `*_uvw.root`   | ALL analysis: pedestal, ONE hit per strip (peak time -> z, integrated charge q, halo cut `STRIP_Q_MIN`), channel map, z scale; tree `uvw`: per-view charge, signal width, band-selected strip hits; histograms `hCharge` (strip-hit charge), `hWidth_U/V/W`; example UVW canvases |
+| makeTracks.C | `*_uvw.root` | `*_tracks.root` | tree `tracks`: straight-line 3D track per event (start/end, direction, length, charge, dEdx = charge/length). xy direction from the charge-weighted variances of the U/V/W strip positions (no z), dip from a z-vs-path-length fit |
+| sourceTracks.C | `*_tracks.root` | `*_src.root` | event filter: tracks re-oriented to +x, `|phi| <= PHI_MAX_DEG` and the extended line within `SRC_R_MM` of (`SRC_X`, `SRC_Y`); same `tracks` tree, so analyzeTracks.C / analyzeAngles.C run on it unchanged |
 
-## The `uvw` slice branches (the analyzeUVW -> makeTracks interface)
+## The `uvw` strip-hit branches (the analyzeUVW -> makeTracks interface)
 
-analyzeUVW.C cuts the drift axis into fixed 3 mm slices (`SLICE_MM`) on a
-GLOBAL grid: slice index = `floor(z / 3 mm)`. The grid depends on neither the
-event nor the view, so the U/V/W centroids of the same physical z interval
-carry the same index - that alignment is the whole point: it is what lets
-makeTracks.C combine the three 2D views into 3D points.
-
-Only hits that survived the per-view band cut (within `BAND_MM` of the line
-fit) contribute. For every (view, slice) that received any charge, ONE entry
-is appended to four parallel vectors (same length, same order):
+analyzeUVW.C makes ONE hit per strip (TODO/094): the cell of the largest
+pedestal-subtracted sample is the peak; the hit gets z = charge-weighted time
+of the above-threshold cells within +-`PEAK_HALF_CELLS` (5) of the peak and
+q = their summed charge. The pulse length (~4.6 us above threshold, ~20 mm of
+z) therefore no longer smears z. Strips with q < `STRIP_Q_MIN` (2000) are
+dropped: nearly every strip carries a small halo pulse at the track time
+(not seen by the FPN channels, so not AGET common mode). Per view, a
+charge-weighted line is fitted through the strip hits and only hits within
+`BAND_MM` of it are kept. For every kept hit ONE entry is appended to four
+parallel vectors (same length, same order); the branch names are those of
+the former 3 mm drift-slice centroids:
 
 | branch   | type            | meaning |
 |---|---|---|
-| `slView` | `vector<int>`   | view of this centroid: 0=U, 1=V, 2=W |
-| `slZ`    | `vector<float>` | slice CENTER in drift z [mm] = (index + 0.5) * 3 |
-| `slS`    | `vector<float>` | charge-weighted centroid of the strip coordinate in that view [mm] |
-| `slQ`    | `vector<float>` | summed band-selected charge of the slice [ADC] |
+| `slView` | `vector<int>`   | view of this strip hit: 0=U, 1=V, 2=W |
+| `slZ`    | `vector<float>` | drift z of the pulse peak [mm] (charge-weighted, +-5 cells) |
+| `slS`    | `vector<float>` | strip position in that view [mm] |
+| `slQ`    | `vector<float>` | integrated charge of the peak window [ADC], >= `STRIP_Q_MIN` |
 
-makeTracks.C groups the entries back by `floor(slZ / 3)` and, for every slice
-seen by >= 2 views, solves `s_view = pitch_view . (x,y)` by least squares ->
-one 3D point (x, y, z) with weight = summed charge, where z is the
-charge-weighted mean of the slice's `slZ`. Events with fewer than
-`MIN_SLICES` (3) such points get `ok == 0`.
+makeTracks.C fits one straight line to the hits of all three views (details
+in its header): the charge-weighted variances of s in U, V and W are the
+projections of the 2x2 (x,y) covariance of the track charge, which they
+determine; its major axis is the xy direction (no z involved, so a flat
+track keeps its in-plane angle, and a smearing common to all views - strip
+pitch, diffusion - does not bias it). The dip comes from a charge-weighted
+fit of z against the path length along that direction, the endpoints from
+the 2%-98% charge quantiles of that path length. All three views need >= 3
+hits, else `ok == 0`.
 
-Caveats:
+**Scale change**: `nhits` now counts strips (not time cells above threshold)
+and `qview` sums peak-window charges of halo-cut strips, so both are NOT
+comparable with `*_uvw.root` files written before TODO/094.
 
-- The 3 mm grid lives in TWO places: `SLICE_MM` in analyzeUVW.C and the
-  literal `3.0` in makeTracks.C. Change one, change both.
-- A slice seen by only one view cannot constrain (x,y); makeTracks.C drops it
-  (this is why a track clipping a detector corner can lose its tip).
-
-All tunable constants (thresholds, pedestal window, drift velocity, sampling
-rate, band width, slice size) sit at the top of analyzeUVW.C - re-tuning never
-requires re-reading the GRAW file. Raw files are ~130 KB/event.
+All tunable constants (thresholds, pedestal window, peak window, halo cut,
+drift velocity, sampling rate, band width) sit at the top of analyzeUVW.C -
+re-tuning never requires re-reading the GRAW file. Raw files are ~130 KB/event.
 
 **Shell note**: always single-quote the macro call - unquoted parentheses
 are shell syntax in zsh/bash: `root -l 'graw2root.C+O("file.graw")'`.
@@ -96,9 +100,10 @@ invocation with `SDKROOT=$(xcrun --sdk macosx --show-sdk-path)`, e.g.
   stopping, so there is no Bragg peak and the charge-asymmetry orientation in
   makeTracks.C carries no real information. Use `|direction|` or fix the sign
   from your source geometry.
-- Every event is fitted as ONE straight track; events with fewer than 3 usable
-  drift slices get `ok == 0`.
+- Every event is fitted as ONE straight track; events where U, V or W has
+  fewer than 3 strip hits get `ok == 0`.
 
 Validated against the full TPCReco/simplefit pipeline on run
 2026-09-02T14:30:48.869: median axis difference 0.8 deg, median length
-difference 0.4 mm, at ~125 events/s for the conversion step.
+difference 0.4 mm, at ~125 events/s for the conversion step (this was the
+drift-slice chain before TODO/094; not re-validated since).

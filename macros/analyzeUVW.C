@@ -2,19 +2,31 @@
 // analyzeUVW.C - step 2: hit building, UVW plots, charge / signal-width.
 //
 // Takes the PURE raw-waveform tree from graw2root.C and does all analysis:
-//   0. pedestal subtraction (per channel, quiet-window mean), ADC threshold,
-//      channel -> (view, strip position) mapping from channel_map.csv,
-//      time cell -> drift z [mm] with the nominal drift velocity
-//   1. per view: seed a straight line on the high-charge hits (weighted PCA)
+//   0. pedestal subtraction (per channel, quiet-window mean), channel ->
+//      (view, strip position) mapping from channel_map.csv, and ONE hit per
+//      strip: t_peak = cell of the largest pedestal-subtracted sample; if
+//      that sample is above ADC_THRESHOLD the strip gives one hit with
+//        z = charge-weighted time of the above-threshold cells in
+//            t_peak +- PEAK_HALF_CELLS, converted to drift z [mm] with the
+//            nominal drift velocity
+//        q = sum of those cells (integrated charge, the dE/dx numerator)
+//      kept only if q >= STRIP_Q_MIN (halo cut, see the constant).
+//      A (channel, time cell) hit list would stretch every strip by the
+//      pulse length (~4.6 us above threshold = ~20 mm of z) and bias the dip
+//      angle (TODO/093, 094). A strip crossed twice keeps only its largest
+//      pulse (mini-eTPC: one straight track per event).
+//   1. per view: straight line through all strip hits (charge-weighted PCA)
 //   2. keep only hits inside a band around that line (kills noise speckle)
 //   3. signal width = charge-weighted RMS of the perpendicular residuals
-//   4. slice the drift axis on a global grid and store the charge centroid of
-//      every slice (these centroids are the input for makeTracks.C)
+//   4. store every band-selected strip hit (the input for makeTracks.C)
 //
 // Output: <input>_uvw.root
-//   TTree "uvw": eventId, qview[3], width[3], nhits[3]
-//                + slice vectors slView/slZ/slS/slQ
-//   histograms:  hCharge (event charge), hWidth_U/V/W
+//   TTree "uvw": eventId, qview[3], width[3], nhits[3] (nhits = strips)
+//                + strip-hit vectors slView/slZ/slS/slQ: one entry per
+//                  band-selected strip hit = (view, drift z [mm], strip
+//                  position [mm], integrated charge [ADC]). The names are
+//                  kept from the former 3 mm drift-slice centroids.
+//   histograms:  hCharge (strip-hit charge, all views), hWidth_U/V/W
 //   canvases:    UVW hit maps of the first NDISPLAY events
 //
 // Usage:  root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root")'
@@ -31,7 +43,6 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
-#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -41,12 +52,19 @@ const double DRIFT_HV_V = 1200.0;    // drift cage voltage [V]
 const double DRIFT_LEN_CM = 20.0;    // drift length [cm]
 const double PRESSURE_MBAR = 100.0;  // CO2 pressure [mbar]
 const double SAMPLING_MHZ = 25.0;    // AGET sampling rate
-const double ADC_THRESHOLD = 35.0;   // keep hits above pedestal + this
+const double ADC_THRESHOLD = 35.0;   // keep cells above pedestal + this
 const int PED_LO = 1, PED_HI = 20;   // pedestal window [time cells]
-const double SEED_ADC = 100.0;       // hits above this seed the line fit
+const int PEAK_HALF_CELLS = 5;       // z / q window around the peak cell
 const double BAND_MM = 10.0;         // half-width of the accepted band
-const double SLICE_MM = 3.0;         // drift-axis slice for track building
 const int NDISPLAY = 5;              // events to draw as example hit maps
+// Halo cut on the integrated strip charge q (~11 cells, NOT a cell value).
+// In the 2026-09-25 data almost every strip (236/256 on average) carries a
+// small 35-200 ADC pulse at the time of the track. The FPN channels do not
+// see it, so it is not AGET common mode (induction / crosstalk suspected).
+// Off-track halo strips have q < ~1500, track strips peak at ~5500; 2000 is
+// the valley. Without this cut the halo lines up with flat tracks, passes
+// the band and stretches their length (TODO/094 round 1).
+const double STRIP_Q_MIN = 2000.0;
 // -----------------------------------------------------------------------------
 
 // CO2 drift velocity from the reduced field E/p. All seven rows of the
@@ -120,7 +138,8 @@ void analyzeUVW(const char *rawFile)
     std::cout << "no tree 'raw' in " << rawFile
               << " - this macro takes the *_raw.root from graw2root.C\n"
                  "(a *_uvw.root is this macro's own OUTPUT; *_tracks.root goes "
-                 "to analyzeTracks.C)" << std::endl;
+                 "to analyzeTracks.C)"
+              << std::endl;
     return;
   }
   UInt_t eventId;
@@ -131,7 +150,7 @@ void analyzeUVW(const char *rawFile)
   TString outName(rawFile);
   outName.ReplaceAll("_raw.root", "_uvw.root");
   TFile out(outName, "RECREATE");
-  TTree utree("uvw", "per-view analysis + slice centroids");
+  TTree utree("uvw", "per-view analysis + band-selected strip hits");
   float qview[3], width[3];
   int nhits[3];
   std::vector<int> slView;
@@ -145,8 +164,8 @@ void analyzeUVW(const char *rawFile)
   utree.Branch("slS", &slS);
   utree.Branch("slQ", &slQ);
 
-  TH1F hCharge("hCharge", "event charge (all views);charge [ADC];events", 4097,
-               -0.5, 4096.5);
+  TH1F hCharge("hCharge", "strip-hit charge (all views);charge [ADC];hits", 450,
+               0, 45000);
   TH1F *hWidth[3];
   const char *vn[3] = {"U", "V", "W"};
   for (int v = 0; v < 3; ++v)
@@ -157,7 +176,7 @@ void analyzeUVW(const char *rawFile)
   for (Long64_t i = 0; i < tree->GetEntries(); ++i) {
     tree->GetEntry(i);
 
-    // 0. build hits: pedestal subtraction + threshold + mapping
+    // 0. build hits: pedestal subtraction + mapping + one hit per strip
     std::vector<double> vz[3], vs[3], vq[3];
     for (int a = 0; a < 4; ++a) {
       for (int c = 0; c < 68; ++c) {
@@ -166,13 +185,23 @@ void analyzeUVW(const char *rawFile)
         double ped = 0;
         for (int t = PED_LO; t <= PED_HI; ++t) ped += adc[a][c][t];
         ped /= (PED_HI - PED_LO + 1);
-        for (int t = 0; t < 512; ++t) {
+        int tPeak = 0;
+        for (int t = 1; t < 512; ++t)
+          if (adc[a][c][t] > adc[a][c][tPeak]) tPeak = t;
+        if (adc[a][c][tPeak] - ped <= ADC_THRESHOLD) continue;
+        const int tLo = std::max(0, tPeak - PEAK_HALF_CELLS);
+        const int tHi = std::min(511, tPeak + PEAK_HALF_CELLS);
+        double q = 0, qt = 0;
+        for (int t = tLo; t <= tHi; ++t) {
           double val = adc[a][c][t] - ped;
           if (val <= ADC_THRESHOLD) continue;
-          vz[v].push_back(t * mmPerCell);
-          vs[v].push_back(chPos[a][c]);
-          vq[v].push_back(val);
+          q += val;
+          qt += val * t;
         }
+        if (q < STRIP_Q_MIN) continue;  // halo strip
+        vz[v].push_back(qt / q * mmPerCell);
+        vs[v].push_back(chPos[a][c]);
+        vq[v].push_back(q);
       }
     }
 
@@ -189,25 +218,22 @@ void analyzeUVW(const char *rawFile)
       size_t n = vz[v].size();
       if (n < 10) continue;
 
-      // 1. charge-weighted PCA line on the high-charge (seed) hits
+      // 1. charge-weighted PCA line through all strip hits of the view
       double sw = 0, mz = 0, ms = 0;
-      for (size_t k = 0; k < n; ++k)
-        if (vq[v][k] > SEED_ADC) {
-          sw += vq[v][k];
-          mz += vq[v][k] * vz[v][k];
-          ms += vq[v][k] * vs[v][k];
-        }
-      if (sw <= 0) continue;
-      mz /= sw;
+      for (size_t k = 0; k < n; ++k) {
+        sw += vq[v][k];
+        mz += vq[v][k] * vz[v][k];
+        ms += vq[v][k] * vs[v][k];
+      }
+      mz /= sw;  // sw > 0: every hit has q >= STRIP_Q_MIN
       ms /= sw;
       double czz = 0, css = 0, czs = 0;
-      for (size_t k = 0; k < n; ++k)
-        if (vq[v][k] > SEED_ADC) {
-          double dz = vz[v][k] - mz, ds = vs[v][k] - ms;
-          czz += vq[v][k] * dz * dz;
-          css += vq[v][k] * ds * ds;
-          czs += vq[v][k] * dz * ds;
-        }
+      for (size_t k = 0; k < n; ++k) {
+        double dz = vz[v][k] - mz, ds = vs[v][k] - ms;
+        czz += vq[v][k] * dz * dz;
+        css += vq[v][k] * ds * ds;
+        czs += vq[v][k] * dz * ds;
+      }
       // principal axis of the 2x2 covariance matrix (largest eigenvalue)
       double tr = czz + css, det = czz * css - czs * czs;
       double lam = 0.5 * tr + std::sqrt(std::max(0.25 * tr * tr - det, 0.0));
@@ -222,10 +248,8 @@ void analyzeUVW(const char *rawFile)
       ds0 /= nn;
 
       // 2.+3. band selection around the line; width from kept hits;
-      // 4. slice the drift axis on a GLOBAL grid (bin = floor(z/SLICE_MM)) so
-      //    the U/V/W centroids of the same slice line up for makeTracks.C
+      // 4. every kept strip hit goes to makeTracks.C as it is
       double wsum = 0, perp2 = 0;
-      std::map<int, std::pair<double, double>> slices;  // bin -> (sum q, q*s)
       for (size_t k = 0; k < n; ++k) {
         double perp = -(vz[v][k] - mz) * ds0 + (vs[v][k] - ms) * dz0;
         if (std::fabs(perp) > BAND_MM) continue;
@@ -233,21 +257,16 @@ void analyzeUVW(const char *rawFile)
         wsum += vq[v][k];
         perp2 += vq[v][k] * perp * perp;
         ++nhits[v];
-        auto &acc = slices[(int)std::floor(vz[v][k] / SLICE_MM)];
-        acc.first += vq[v][k];
-        acc.second += vq[v][k] * vs[v][k];
+        slView.push_back(v);
+        slZ.push_back(vz[v][k]);
+        slS.push_back(vs[v][k]);
+        slQ.push_back(vq[v][k]);
       }
       if (wsum <= 0) continue;
       qview[v] = wsum;
       width[v] = std::sqrt(perp2 / wsum);
       qEvent += wsum;
       hWidth[v]->Fill(width[v]);
-      for (auto &kv : slices) {
-        slView.push_back(v);
-        slZ.push_back((kv.first + 0.5) * SLICE_MM);
-        slS.push_back(kv.second.second / kv.second.first);
-        slQ.push_back(kv.second.first);
-      }
     }
     // hCharge.Fill(qEvent);
     utree.Fill();

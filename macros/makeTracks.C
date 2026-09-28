@@ -1,14 +1,32 @@
 // =============================================================================
-// makeTracks.C - step 3: build 3D tracks from the UVW slice centroids.
+// makeTracks.C - step 3: build 3D tracks from the UVW strip hits.
 //
-// Reads the "uvw" tree from analyzeUVW.C. Every event is treated as ONE
-// straight alpha track (mini-eTPC assumption):
-//   1. for each drift slice, combine the U/V/W charge centroids into an (x,y)
-//      point:  s_view = pitch_view . (x,y)   with
-//        pitch_U = (-1, 0)   pitch_V = (0.5, +sqrt3/2)   pitch_W = (0.5, -sqrt3/2)
-//   2. charge-weighted 3D PCA of the slice points -> line direction
-//   3. endpoints = 2%-98% charge quantiles along the line
-//   4. head/tail: the charge-heavier half is called the END.
+// Reads the "uvw" tree from analyzeUVW.C: slView/slZ/slS/slQ hold one entry
+// per band-selected strip hit (view, drift z, strip position s, charge q).
+// Every event is treated as ONE straight alpha track (mini-eTPC assumption).
+// Strip coordinate of view v: s = pitch_v . (x,y) with
+//   pitch_U = (-1, 0)   pitch_V = (0.5, +sqrt3/2)   pitch_W = (0.5, -sqrt3/2)
+//   1. per view v: charge-weighted mean ms_v and variance
+//      var_v = sum q (s - ms_v)^2 / sum q over ALL its hits. U, V and W all
+//      need at least MIN_VIEW_HITS hits, else ok == 0.
+//   2. xy direction WITHOUT z (a flat track keeps its in-plane angle): the
+//      charge distribution in (x,y) has a 2x2 covariance S with
+//      var_v = pitch_v^T S pitch_v, so the three views give it back:
+//        Sxx = var_U   Sxy = (var_V - var_W) / sqrt3
+//        Syy = (var_V + var_W - 0.5 var_U) / 1.5
+//      d_xy = eigenvector of the largest eigenvalue, at
+//      phi = 0.5 atan2(2 Sxy, Sxx - Syy). A smearing that adds the same
+//      variance c to every view (strip pitch, diffusion) adds c*I to S and
+//      does not move the eigenvector. lambda_max - lambda_min below
+//      MIN_EIGEN_GAP_MM2 (no xy elongation: track along z) -> ok == 0.
+//   3. anchor (x0,y0) = least squares of pitch_v . (x0,y0) = ms_v
+//   4. xy path length of every hit, l = (s - ms_v) / (pitch_v . d_xy), from
+//      the views with |pitch_v . d_xy| >= MIN_PROJ (a smaller value means the
+//      view sees the track foreshortened); a charge-weighted straight-line
+//      fit z = z0 + tan(theta) * l over those hits pooled gives the dip and
+//      the z anchor: direction = (d_xy, tan(theta)), normalised
+//   5. endpoints = 2%-98% charge quantiles of l over the same hits
+//   6. head/tail: the charge-heavier half is called the END.
 //      WARNING: alphas cross the detector without stopping, so there is no
 //      Bragg peak and this sign is basically a coin flip - use the geometry
 //      of your source to orient tracks in analysis, or use |direction| only.
@@ -17,27 +35,47 @@
 //
 // Usage:  root -l -b -q 'makeTracks.C("CoBo_xxx_uvw.root")'
 // =============================================================================
-#include <vector>
-#include <map>
-#include <cmath>
-#include <algorithm>
 #include <TFile.h>
-#include <TTree.h>
 #include <TString.h>
-#include <TMatrixDSym.h>
-#include <TMatrixDSymEigen.h>
-#include <TVectorD.h>
+#include <TTree.h>
+
+#include <algorithm>
+#include <cmath>
+#include <utility>
+#include <vector>
 
 const double PITCH[3][2] = {{-1, 0}, {0.5, 0.8660254}, {0.5, -0.8660254}};
-const double QUANTILE = 0.02;   // charge fraction cut defining the endpoints
-const int    MIN_SLICES = 3;    // reject events with fewer 3D points
+const double QUANTILE = 0.02;          // charge fraction cut: endpoints
+const int MIN_VIEW_HITS = 3;           // strip hits EACH of U, V, W needs
+const double MIN_EIGEN_GAP_MM2 = 1.0;  // xy elongation needed for d_xy
+const double MIN_PROJ = 0.3;           // |pitch_v . d_xy| a view needs for l
 
-void makeTracks(const char *uvwFile) {
+// QUANTILE .. 1-QUANTILE charge quantiles of (position, charge) pairs
+// (sorts v; v must not be empty)
+void quantileRange(std::vector<std::pair<double, double>> &v, double &lo,
+                   double &hi)
+{
+  std::sort(v.begin(), v.end());
+  double W = 0, cum = 0;
+  for (auto &e : v) W += e.second;
+  lo = v.front().first;
+  hi = v.back().first;
+  for (auto &e : v) {
+    cum += e.second;
+    if (cum / W <= QUANTILE) lo = e.first;
+    if (cum / W <= 1 - QUANTILE) hi = e.first;
+  }
+}
+
+void makeTracks(const char *uvwFile)
+{
   TFile in(uvwFile);
-  TTree *tree = (TTree*)in.Get("uvw");
+  TTree *tree = (TTree *)in.Get("uvw");
   if (!tree) {
-    printf("no tree 'uvw' in %s - this macro takes the *_uvw.root "
-           "from analyzeUVW.C\n", uvwFile);
+    printf(
+        "no tree 'uvw' in %s - this macro takes the *_uvw.root "
+        "from analyzeUVW.C\n",
+        uvwFile);
     return;
   }
   UInt_t eventId;
@@ -53,88 +91,136 @@ void makeTracks(const char *uvwFile) {
   outName.ReplaceAll("_uvw.root", "_tracks.root");
   TFile out(outName, "RECREATE");
   TTree ttree("tracks", "3D straight-line tracks");
-  int   ok;
+  int ok;
   float xs, ys, zs, xe, ye, ze, dirx, diry, dirz, length, charge, dEdx;
   ttree.Branch("eventId", &eventId);
   ttree.Branch("ok", &ok);
-  ttree.Branch("xStart", &xs);  ttree.Branch("yStart", &ys);  ttree.Branch("zStart", &zs);
-  ttree.Branch("xEnd", &xe);    ttree.Branch("yEnd", &ye);    ttree.Branch("zEnd", &ze);
-  ttree.Branch("dirX", &dirx);  ttree.Branch("dirY", &diry);  ttree.Branch("dirZ", &dirz);
+  ttree.Branch("xStart", &xs);
+  ttree.Branch("yStart", &ys);
+  ttree.Branch("zStart", &zs);
+  ttree.Branch("xEnd", &xe);
+  ttree.Branch("yEnd", &ye);
+  ttree.Branch("zEnd", &ze);
+  ttree.Branch("dirX", &dirx);
+  ttree.Branch("dirY", &diry);
+  ttree.Branch("dirZ", &dirz);
   ttree.Branch("length", &length);
   ttree.Branch("charge", &charge);
   ttree.Branch("dEdx", &dEdx);  // charge / length: the gain metric
 
   for (Long64_t i = 0; i < tree->GetEntries(); ++i) {
     tree->GetEntry(i);
-    ok = 0; length = charge = dEdx = 0;
+    ok = 0;
+    length = charge = dEdx = 0;
+    const size_t nk = slView->size();
 
-    // 1. group the slice centroids by drift slice (same global grid as
-    //    analyzeUVW.C: bin center = (bin + 0.5) * 3 mm), triangulate (x,y)
-    std::map<int, std::vector<int>> byZ;   // slice bin -> indices
-    for (size_t k = 0; k < slView->size(); ++k)
-      byZ[(int)std::floor(slZ->at(k)/3.0)].push_back(k);
-
-    std::vector<double> px, py, pz, pw;
-    for (auto &kv : byZ) {
-      if (kv.second.size() < 2) continue;  // need >= 2 views for (x,y)
-      // least squares for s = pitch . (x,y): accumulate normal equations
-      double A00=0, A01=0, A11=0, b0=0, b1=0, wsum=0, zsum=0;
-      for (int k : kv.second) {
-        const double *p = PITCH[slView->at(k)];
-        A00 += p[0]*p[0]; A01 += p[0]*p[1]; A11 += p[1]*p[1];
-        b0  += p[0]*slS->at(k); b1 += p[1]*slS->at(k);
-        wsum += slQ->at(k); zsum += slQ->at(k)*slZ->at(k);
-      }
-      double det = A00*A11 - A01*A01;
-      if (std::fabs(det) < 1e-9) continue;
-      px.push_back(( A11*b0 - A01*b1)/det);
-      py.push_back((-A01*b0 + A00*b1)/det);
-      pz.push_back(zsum/wsum);
-      pw.push_back(wsum);
+    // 1. per view: charge-weighted mean and variance of s
+    int nv[3] = {0, 0, 0};
+    double qv[3] = {0, 0, 0}, ms[3] = {0, 0, 0};
+    for (size_t k = 0; k < nk; ++k) {
+      const int v = slView->at(k);
+      ++nv[v];
+      qv[v] += slQ->at(k);
+      ms[v] += slQ->at(k) * slS->at(k);
     }
-    if ((int)px.size() < MIN_SLICES) { ttree.Fill(); continue; }
-
-    // 2. charge-weighted 3D PCA
-    double W = 0, m[3] = {0,0,0};
-    for (size_t k = 0; k < px.size(); ++k) {
-      W += pw[k]; m[0] += pw[k]*px[k]; m[1] += pw[k]*py[k]; m[2] += pw[k]*pz[k];
+    if (nv[0] < MIN_VIEW_HITS || nv[1] < MIN_VIEW_HITS ||
+        nv[2] < MIN_VIEW_HITS) {
+      ttree.Fill();
+      continue;
     }
-    for (int j = 0; j < 3; ++j) m[j] /= W;
-    TMatrixDSym cov(3);
-    for (size_t k = 0; k < px.size(); ++k) {
-      double d[3] = {px[k]-m[0], py[k]-m[1], pz[k]-m[2]};
-      for (int r = 0; r < 3; ++r)
-        for (int c = 0; c < 3; ++c) cov(r,c) += pw[k]*d[r]*d[c];
+    for (int v = 0; v < 3; ++v) ms[v] /= qv[v];
+    double var[3] = {0, 0, 0};
+    for (size_t k = 0; k < nk; ++k) {
+      const int v = slView->at(k);
+      const double ds = slS->at(k) - ms[v];
+      var[v] += slQ->at(k) * ds * ds;
     }
-    TMatrixDSymEigen eig(cov);           // eigenvalues sorted descending:
-    const TMatrixD &evec = eig.GetEigenVectors();
-    double dir[3] = {evec(0,0), evec(1,0), evec(2,0)};  // column 0 = track axis
+    for (int v = 0; v < 3; ++v) var[v] /= qv[v];
 
-    // 3. endpoints from charge quantiles along the line
-    std::vector<std::pair<double,double>> lamq;   // (position along line, charge)
-    for (size_t k = 0; k < px.size(); ++k)
-      lamq.push_back({(px[k]-m[0])*dir[0] + (py[k]-m[1])*dir[1] + (pz[k]-m[2])*dir[2], pw[k]});
-    std::sort(lamq.begin(), lamq.end());
-    double cum = 0, lo = lamq.front().first, hi = lamq.back().first;
-    for (auto &e : lamq) { cum += e.second; if (cum/W <= QUANTILE)   lo = e.first; }
-    cum = 0;
-    for (auto &e : lamq) { cum += e.second; if (cum/W <= 1-QUANTILE) hi = e.first; }
+    // 2. xy covariance from the three projections -> major axis = d_xy
+    const double Sxx = var[0];
+    const double Sxy = (var[1] - var[2]) / std::sqrt(3.0);
+    const double Syy = (var[1] + var[2] - 0.5 * var[0]) / 1.5;
+    const double gap = std::hypot(Sxx - Syy, 2 * Sxy);  // lam_max - lam_min
+    if (gap < MIN_EIGEN_GAP_MM2) {
+      ttree.Fill();
+      continue;
+    }
+    const double phi = 0.5 * std::atan2(2 * Sxy, Sxx - Syy);
+    const double ux = std::cos(phi), uy = std::sin(phi);
 
-    // 4. orient so the charge-heavier half is the end (see WARNING above)
-    double mid = 0.5*(lo+hi), qlow = 0, qhigh = 0;
-    for (auto &e : lamq) (e.first < mid ? qlow : qhigh) += e.second;
+    // 3. anchor (x0,y0) from the view means; Q = charge of all three views.
+    //    Any two distinct pitch vectors are independent, so det > 0.
+    double A00 = 0, A01 = 0, A11 = 0, b0 = 0, b1 = 0, Q = 0;
+    for (int v = 0; v < 3; ++v) {
+      const double *p = PITCH[v];
+      A00 += p[0] * p[0];
+      A01 += p[0] * p[1];
+      A11 += p[1] * p[1];
+      b0 += p[0] * ms[v];
+      b1 += p[1] * ms[v];
+      Q += qv[v];
+    }
+    const double det = A00 * A11 - A01 * A01;
+    const double m[2] = {(A11 * b0 - A01 * b1) / det,
+                         (-A01 * b0 + A00 * b1) / det};
+
+    // 4. xy path length l of every hit; charge-weighted fit z(l) -> dip
+    double proj[3];
+    for (int v = 0; v < 3; ++v) proj[v] = PITCH[v][0] * ux + PITCH[v][1] * uy;
+    std::vector<std::pair<double, double>> lq;  // (l, q)
+    double W = 0, Sl = 0, Sz = 0, Sll = 0, Slz = 0;
+    for (size_t k = 0; k < nk; ++k) {
+      const int v = slView->at(k);
+      if (std::fabs(proj[v]) < MIN_PROJ) continue;
+      const double l = (slS->at(k) - ms[v]) / proj[v], q = slQ->at(k),
+                   z = slZ->at(k);
+      lq.push_back({l, q});
+      W += q;
+      Sl += q * l;
+      Sz += q * z;
+      Sll += q * l * l;
+      Slz += q * l * z;
+    }
+    // max_v |proj_v| >= cos 30 deg and a view has >= 3 distinct strips, so
+    // lq is never empty and varL > 0; guarded against NaN all the same
+    const double varL = W > 0 ? Sll / W - (Sl / W) * (Sl / W) : 0;
+    if (varL <= 0) {
+      ttree.Fill();
+      continue;
+    }
+    const double tanTh = (Slz / W - (Sl / W) * (Sz / W)) / varL;
+    const double z0 = Sz / W - tanTh * Sl / W;  // fit intercept at l = 0
+    const double nrm = std::sqrt(1 + tanTh * tanTh);
+    double dir[3] = {ux / nrm, uy / nrm, tanTh / nrm};
+
+    // 5. endpoints from the pooled charge quantiles of l
+    double lo, hi;
+    quantileRange(lq, lo, hi);
+
+    // 6. orient so the charge-heavier half is the end (see WARNING above)
+    double mid = 0.5 * (lo + hi), qlow = 0, qhigh = 0;
+    for (auto &e : lq) (e.first < mid ? qlow : qhigh) += e.second;
+    double lStart = lo, lEnd = hi;
     if (qhigh < qlow) {
+      std::swap(lStart, lEnd);
       for (int j = 0; j < 3; ++j) dir[j] = -dir[j];
-      double tmp = lo; lo = -hi; hi = -tmp;
     }
 
+    // point at l: (x0 + l ux, y0 + l uy, z0 + l tan(theta))
     ok = 1;
-    xs = m[0] + lo*dir[0]; ys = m[1] + lo*dir[1]; zs = m[2] + lo*dir[2];
-    xe = m[0] + hi*dir[0]; ye = m[1] + hi*dir[1]; ze = m[2] + hi*dir[2];
-    dirx = dir[0]; diry = dir[1]; dirz = dir[2];
-    length = hi - lo;
-    charge = W;
-    dEdx = length > 0 ? W/length : 0;
+    xs = m[0] + lStart * ux;
+    ys = m[1] + lStart * uy;
+    zs = z0 + lStart * tanTh;
+    xe = m[0] + lEnd * ux;
+    ye = m[1] + lEnd * uy;
+    ze = z0 + lEnd * tanTh;
+    dirx = dir[0];
+    diry = dir[1];
+    dirz = dir[2];
+    length = (hi - lo) * nrm;  // 3D length
+    charge = Q;  // all three views, independent of the MIN_PROJ selection
+    dEdx = length > 0 ? Q / length : 0;
     ttree.Fill();
   }
   out.cd();
