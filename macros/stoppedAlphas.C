@@ -25,13 +25,14 @@
 // would be counted as stopped.
 //
 // Fourth pad: energy AT EMISSION assuming the alpha started at the source
-// (SRC_X, SRC_Y): path to the wall L = (CAGE_XLO - SRC_X) / dir_x (no z
+// x = srcX (2nd argument): path to the wall L = (CAGE_XLO - srcX) / dir_x (no z
 // needed), total range = L + residual range -> ASTAR. A real source alpha
 // gives a line (228Th chain: 6.05 / 6.29 / 6.78 / 8.78 MeV); an alpha born in
 // the gas on the way gives a continuum. Feed it the *_src.root of
 // sourceTracks.C to test whether the direction filter isolates the source.
 //
-// Usage:  root -l 'stoppedAlphas.C("CoBo_xxx_tracks.root")'
+// Usage:  root -l 'stoppedAlphas.C("CoBo_xxx_tracks.root", -470)'
+//         (srcX: -470 for the 2026-09-25 run, about -386 for 2026-09-29)
 
 const double PRESSURE_MBAR = 100.0;
 const double TEMP_K = 293.15;
@@ -41,7 +42,6 @@ const double CAGE_YLO = -58.0, CAGE_YHI = 48.0;
 const double Z_LO = 0.0, Z_HI = 89.0;  // 512 cells x mm/cell (analyzeUVW)
 const double EDGE_MM = 10.0, Z_EDGE_MM = 10.0;
 const double MIN_LENGTH_MM = 15.0;
-const double SRC_X = -470.0, SRC_Y = 0.0;  // source position (09-25 setup)
 
 // NIST ASTAR, alpha in CO2: kinetic energy [MeV], CSDA range [g/cm2]
 const double ASTAR[][2] = {
@@ -113,7 +113,7 @@ double energyFromRange(double rMm)
   return -1;  // beyond the table (10 MeV)
 }
 
-void stoppedAlphas(const char *trackFile)
+void stoppedAlphas(const char *trackFile, double srcX = -470.0)
 {
   auto file = TFile::Open(trackFile);
   if (!file || file->IsZombie()) {
@@ -143,7 +143,7 @@ void stoppedAlphas(const char *trackFile)
   auto pQvsE = new TProfile("pQvsE", "", 30, 0, 3);
   auto hEgen = new TH1D(
       "hEgen",
-      Form("energy at emission if born at the source (x = %.0f);E [MeV];tracks", SRC_X),
+      Form("energy at emission if born at the source (x = %.0f);E [MeV];tracks", srcX),
       100, 4, 10);
 
   Long64_t nStop = 0;
@@ -184,7 +184,7 @@ void stoppedAlphas(const char *trackFile)
     hQvsE->Fill(E, charge);
     pQvsE->Fill(E, charge);
     const double dirx = dx / std::sqrt(dx * dx + dy * dy + dz * dz);
-    hEgen->Fill(energyFromRange(r + (CAGE_XLO - SRC_X) / dirx));
+    hEgen->Fill(energyFromRange(r + (CAGE_XLO - srcX) / dirx));
   }
   std::cout << "stopped inside (source-like, |phi| <= " << PHI_MAX_DEG
             << " deg): " << nStop << " tracks" << std::endl;
