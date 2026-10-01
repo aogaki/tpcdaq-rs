@@ -16,6 +16,8 @@
 // same semantics as minitpc fastqa (back-projection source imaging)
 const double MIN_LENGTH_MM =
     50.0;  // quality cut: direction is meaningless below
+const double MIN_ENDS_LENGTH_MM =
+    15.0;  // Track Ends only: keep alphas that stop just inside the cage
 const double EXTEND_MM =
     500.0;  // extend both ends: the source sits outside the cage
 const int MAX_3D_TRACKS = 1000;  // cap the 3D overlay (drawing cost)
@@ -115,7 +117,13 @@ void analyzeTracks(const char *trackFile)
   const auto nEvents = tree->GetEntries();
   for (auto iEvent = 0; iEvent < nEvents; ++iEvent) {
     tree->GetEntry(iEvent);
-    if (!ok || length < MIN_LENGTH_MM) continue;
+    if (!ok || length < MIN_ENDS_LENGTH_MM) continue;
+
+    // Track Ends take the short tracks too (same cut as stoppedAlphas.C);
+    // the 3D overlay and the back-projection need a usable direction
+    histTrackEnds->Fill(xStart, yStart);
+    histTrackEnds->Fill(xEnd, yEnd);
+    if (length < MIN_LENGTH_MM) continue;
 
     const bool fromSource =
         (std::fabs(xStart - ENTRY_X0) < ENTRY_DX && yStart > ENTRY_YMIN) ||
@@ -123,9 +131,6 @@ void analyzeTracks(const char *trackFile)
     if ((int)segments.size() < MAX_3D_TRACKS)
       segments.push_back(
           {xStart, yStart, zStart, xEnd, yEnd, zEnd, fromSource ? 1.f : 0.f});
-
-    histTrackEnds->Fill(xStart, yStart);
-    histTrackEnds->Fill(xEnd, yEnd);
 
     // arc-length parametrisation in xy (safe for vertical tracks)
     double ux = xEnd - xStart, uy = yEnd - yStart;
