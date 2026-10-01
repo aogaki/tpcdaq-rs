@@ -31,53 +31,34 @@
 // the gas on the way gives a continuum. Feed it the *_src.root of
 // sourceTracks.C to test whether the direction filter isolates the source.
 //
-// Usage:  root -l 'stoppedAlphas.C("CoBo_xxx_tracks.root", -470)'
+// Usage:  root -l 'stoppedAlphas.C("CoBo_xxx_tracks.root", -470, 100)'
+//         (3rd argument: run pressure [mbar]; it sets the gas density and the
+//          z window. Use the same value as for analyzeUVW.C.)
 //         (srcX: -470 for the 2026-09-25 run, about -386 for 2026-09-29)
 
-const double PRESSURE_MBAR = 100.0;
+double PRESSURE_MBAR = 100.0;  // run pressure, set from the 3rd argument
 const double TEMP_K = 293.15;
 const double PHI_MAX_DEG = 15.0;
 const double CAGE_XLO = -53.0, CAGE_XHI = 53.0;  // from fastqa
 const double CAGE_YLO = -58.0, CAGE_YHI = 48.0;
-const double Z_LO = 0.0, Z_HI = 89.0;  // 512 cells x mm/cell (analyzeUVW)
+const double Z_LO = 0.0, Z_HI = 89.0;  // 512 cells x mm/cell at 100 mbar
 const double EDGE_MM = 10.0, Z_EDGE_MM = 10.0;
 const double MIN_LENGTH_MM = 15.0;
 
 // NIST ASTAR, alpha in CO2: kinetic energy [MeV], CSDA range [g/cm2]
 const double ASTAR[][2] = {
-    {5.000E-01, 4.460E-04},
-    {5.500E-01, 4.721E-04},
-    {6.000E-01, 4.977E-04},
-    {6.500E-01, 5.231E-04},
-    {7.000E-01, 5.483E-04},
-    {7.500E-01, 5.735E-04},
-    {8.000E-01, 5.988E-04},
-    {8.500E-01, 6.243E-04},
-    {9.000E-01, 6.500E-04},
-    {9.500E-01, 6.760E-04},
-    {1.000E+00, 7.023E-04},
-    {1.250E+00, 8.395E-04},
-    {1.500E+00, 9.880E-04},
-    {1.750E+00, 1.149E-03},
-    {2.000E+00, 1.323E-03},
-    {2.250E+00, 1.510E-03},
-    {2.500E+00, 1.711E-03},
-    {2.750E+00, 1.924E-03},
-    {3.000E+00, 2.149E-03},
-    {3.500E+00, 2.638E-03},
-    {4.000E+00, 3.176E-03},
-    {4.500E+00, 3.761E-03},
-    {5.000E+00, 4.392E-03},
-    {5.500E+00, 5.068E-03},
-    {6.000E+00, 5.789E-03},
-    {6.500E+00, 6.554E-03},
-    {7.000E+00, 7.362E-03},
-    {7.500E+00, 8.212E-03},
-    {8.000E+00, 9.104E-03},
-    {8.500E+00, 1.004E-02},
-    {9.000E+00, 1.101E-02},
-    {9.500E+00, 1.203E-02},
-    {1.000E+01, 1.308E-02},};
+    {5.000E-01, 4.460E-04}, {5.500E-01, 4.721E-04}, {6.000E-01, 4.977E-04},
+    {6.500E-01, 5.231E-04}, {7.000E-01, 5.483E-04}, {7.500E-01, 5.735E-04},
+    {8.000E-01, 5.988E-04}, {8.500E-01, 6.243E-04}, {9.000E-01, 6.500E-04},
+    {9.500E-01, 6.760E-04}, {1.000E+00, 7.023E-04}, {1.250E+00, 8.395E-04},
+    {1.500E+00, 9.880E-04}, {1.750E+00, 1.149E-03}, {2.000E+00, 1.323E-03},
+    {2.250E+00, 1.510E-03}, {2.500E+00, 1.711E-03}, {2.750E+00, 1.924E-03},
+    {3.000E+00, 2.149E-03}, {3.500E+00, 2.638E-03}, {4.000E+00, 3.176E-03},
+    {4.500E+00, 3.761E-03}, {5.000E+00, 4.392E-03}, {5.500E+00, 5.068E-03},
+    {6.000E+00, 5.789E-03}, {6.500E+00, 6.554E-03}, {7.000E+00, 7.362E-03},
+    {7.500E+00, 8.212E-03}, {8.000E+00, 9.104E-03}, {8.500E+00, 1.004E-02},
+    {9.000E+00, 1.101E-02}, {9.500E+00, 1.203E-02}, {1.000E+01, 1.308E-02},
+};
 const int N_ASTAR = sizeof(ASTAR) / sizeof(ASTAR[0]);
 
 // CO2 mass density [g/cm3] of the run (ideal gas, M = 44.01 g/mol)
@@ -113,8 +94,12 @@ double energyFromRange(double rMm)
   return -1;  // beyond the table (10 MeV)
 }
 
-void stoppedAlphas(const char *trackFile, double srcX = -470.0)
+void stoppedAlphas(const char *trackFile, double srcX = -470.0,
+                   double pressureMbar = 100.0)
 {
+  PRESSURE_MBAR = pressureMbar;
+  // drift window: 89 mm at 100 mbar (v_drift ~ 1/p, analyzeUVW.C)
+  const double zHi = Z_HI * 100.0 / pressureMbar;
   auto file = TFile::Open(trackFile);
   if (!file || file->IsZombie()) {
     std::cerr << "Failed to open file: " << trackFile << std::endl;
@@ -137,22 +122,32 @@ void stoppedAlphas(const char *trackFile, double srcX = -470.0)
   tree->SetBranchAddress("charge", &charge);
   tree->SetBranchAddress("ok", &ok);
 
-  auto hE = new TH1D("hE", "stopped inside: residual energy at the entrance wall;E [MeV];tracks", 60, 0, 3);
-  auto hXend = new TH1D("hXend", "stopped inside: stop point;x_{end} [mm];tracks", 72, -54, 54);  // 1.5 mm = strip pitch
-  auto hQvsE = new TH2D("hQvsE", "stopped inside: track charge vs E;E [MeV];charge (3 views) [ADC]", 60, 0, 3, 100, 0, 1.5e6);
-  auto pQvsE = new TProfile("pQvsE", "", 30, 0, 3);
+  auto hE = new TH1D(
+      "hE",
+      "stopped inside: residual energy at the entrance wall;E [MeV];tracks", 80,
+      0, 4);
+  auto hXend =
+      new TH1D("hXend", "stopped inside: stop point;x_{end} [mm];tracks", 72,
+               -54, 54);  // 1.5 mm = strip pitch
+  auto hQvsE = new TH2D(
+      "hQvsE",
+      "stopped inside: track charge vs E;E [MeV];charge (3 views) [ADC]", 80, 0,
+      4, 100, 0, 1.5e6);
+  auto pQvsE = new TProfile("pQvsE", "", 40, 0, 4);
   auto hEgen = new TH1D(
       "hEgen",
-      Form("energy at emission if born at the source (x = %.0f);E [MeV];tracks", srcX),
-      100, 4, 10);
+      Form("energy at emission if born at the source (x = %.0f);E [MeV];tracks",
+           srcX),
+      600, 4, 10);
 
   Long64_t nStop = 0;
-  std::cout << Form("CO2 density %.4f mg/cm3 (%.0f mbar, %.1f K); ASTAR CSDA "
-                    "ranges [mm]: 212Bi 6.05 -> %.0f, 220Rn 6.29 -> %.0f, "
-                    "216Po 6.78 -> %.0f, 212Po 8.78 -> %.0f",
-                    gasDensity() * 1e3, PRESSURE_MBAR, TEMP_K,
-                    rangeFromEnergy(6.05), rangeFromEnergy(6.29),
-                    rangeFromEnergy(6.78), rangeFromEnergy(8.78))
+  std::cout << Form(
+                   "CO2 density %.4f mg/cm3 (%.0f mbar, %.1f K); ASTAR CSDA "
+                   "ranges [mm]: 212Bi 6.05 -> %.0f, 220Rn 6.29 -> %.0f, "
+                   "216Po 6.78 -> %.0f, 212Po 8.78 -> %.0f",
+                   gasDensity() * 1e3, PRESSURE_MBAR, TEMP_K,
+                   rangeFromEnergy(6.05), rangeFromEnergy(6.29),
+                   rangeFromEnergy(6.78), rangeFromEnergy(8.78))
             << std::endl;
   const auto n = tree->GetEntries();
   for (Long64_t i = 0; i < n; ++i) {
@@ -167,10 +162,10 @@ void stoppedAlphas(const char *trackFile, double srcX = -470.0)
     const double dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
     if (dx <= 0) continue;
     if (std::fabs(std::atan2(dy, dx)) * 180.0 / M_PI > PHI_MAX_DEG) continue;
-    if (x0 >= CAGE_XLO + EDGE_MM) continue;             // must enter at the wall
-    if (x1 >= CAGE_XHI - EDGE_MM) continue;             // exits through the far wall
+    if (x0 >= CAGE_XLO + EDGE_MM) continue;  // must enter at the wall
+    if (x1 >= CAGE_XHI - EDGE_MM) continue;  // exits through the far wall
     if (y1 <= CAGE_YLO + EDGE_MM || y1 >= CAGE_YHI - EDGE_MM) continue;
-    if (z1 <= Z_LO + Z_EDGE_MM || z1 >= Z_HI - Z_EDGE_MM) continue;
+    if (z1 <= Z_LO + Z_EDGE_MM || z1 >= zHi - Z_EDGE_MM) continue;
     // residual range: wall crossing point (on the line) -> stop point
     const double t = (CAGE_XLO - x0) / dx;
     const double wx = CAGE_XLO, wy = y0 + t * dy, wz = z0 + t * dz;

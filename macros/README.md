@@ -92,7 +92,9 @@ invocation with `SDKROOT=$(xcrun --sdk macosx --show-sdk-path)`, e.g.
   generated from TPCReco's `geometry_mini_eTPC.dat` (tools/eventdisplay/mapDump);
   regenerate it if the pad plane or cabling changes.
 - The z scale uses a drift velocity **computed from the run conditions**
-  (`DRIFT_HV_V`, `DRIFT_LEN_CM`, `PRESSURE_MBAR` at the top of analyzeUVW.C)
+  (`DRIFT_HV_V`, `DRIFT_LEN_CM` at the top of analyzeUVW.C; the pressure is the
+  2nd argument, default `PRESSURE_MBAR` = 100 - pass the real run pressure, and
+  the same value to stoppedAlphas.C)
   via the CO2 mobility law v = 0.7233 x (E/p) [cm/us per V/(cm*mbar)],
   interpolated from the HIGS/ELITPC operating-point table (valid for
   E/p = 0.54-1.05). It is table-derived, NOT measured: confirm with the

@@ -29,7 +29,9 @@
 //   histograms:  hCharge (strip-hit charge, all views), hWidth_U/V/W
 //   canvases:    UVW hit maps of the first NDISPLAY events
 //
-// Usage:  root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root")'
+// Usage:  root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root")'          (100 mbar)
+//         root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root", 120)'     (run pressure
+//         [mbar]: it sets the drift velocity, i.e. the z scale)
 // =============================================================================
 #include <TCanvas.h>
 #include <TFile.h>
@@ -48,15 +50,16 @@
 #include <vector>
 
 // ---- analysis constants -----------------------------------------------------
-const double DRIFT_HV_V = 1200.0;    // drift cage voltage [V]
-const double DRIFT_LEN_CM = 20.0;    // drift length [cm]
-const double PRESSURE_MBAR = 100.0;  // CO2 pressure [mbar]
-const double SAMPLING_MHZ = 25.0;    // AGET sampling rate
-const double ADC_THRESHOLD = 35.0;   // keep cells above pedestal + this
-const int PED_LO = 1, PED_HI = 20;   // pedestal window [time cells]
-const int PEAK_HALF_CELLS = 5;       // z / q window around the peak cell
-const double BAND_MM = 10.0;         // half-width of the accepted band
-const int NDISPLAY = 5;              // events to draw as example hit maps
+const double DRIFT_HV_V = 1200.0;  // drift cage voltage [V]
+const double DRIFT_LEN_CM = 20.0;  // drift length [cm]
+const double PRESSURE_MBAR =
+    100.0;  // CO2 pressure [mbar], default of the 2nd argument
+const double SAMPLING_MHZ = 25.0;   // AGET sampling rate
+const double ADC_THRESHOLD = 35.0;  // keep cells above pedestal + this
+const int PED_LO = 1, PED_HI = 20;  // pedestal window [time cells]
+const int PEAK_HALF_CELLS = 5;      // z / q window around the peak cell
+const double BAND_MM = 10.0;        // half-width of the accepted band
+const int NDISPLAY = 5;             // events to draw as example hit maps
 // Halo cut on the integrated strip charge q (~11 cells, NOT a cell value).
 // In the 2026-09-25 data almost every strip (236/256 on average) carries a
 // small 35-200 ADC pulse at the time of the track. The FPN channels do not
@@ -85,7 +88,7 @@ double driftVelocityCmUs(double hvVolt, double lenCm, double pMbar)
   return MOBILITY * eOverP;
 }
 
-void analyzeUVW(const char *rawFile)
+void analyzeUVW(const char *rawFile, double pressureMbar = PRESSURE_MBAR)
 {
   // --- channel map (aget, raw channel -> view, strip position) ---------------
   int chView[4][68];
@@ -124,10 +127,10 @@ void analyzeUVW(const char *rawFile)
     }
   const double PITCH = 1.5;  // mm, uniform in channel_map.csv (all views)
   const double driftV =
-      driftVelocityCmUs(DRIFT_HV_V, DRIFT_LEN_CM, PRESSURE_MBAR);
+      driftVelocityCmUs(DRIFT_HV_V, DRIFT_LEN_CM, pressureMbar);
   std::cout << "drift velocity " << driftV
             << " cm/us  (E = " << DRIFT_HV_V / DRIFT_LEN_CM
-            << " V/cm, E/p = " << DRIFT_HV_V / DRIFT_LEN_CM / PRESSURE_MBAR
+            << " V/cm, E/p = " << DRIFT_HV_V / DRIFT_LEN_CM / pressureMbar
             << " V/(cm*mbar))" << std::endl;
   const double mmPerCell = driftV / SAMPLING_MHZ * 10.0;
 
