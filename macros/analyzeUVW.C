@@ -59,7 +59,11 @@ const double ADC_THRESHOLD = 35.0;  // keep cells above pedestal + this
 const int PED_LO = 1, PED_HI = 20;  // pedestal window [time cells]
 const int PEAK_HALF_CELLS = 5;      // z / q window around the peak cell
 const double BAND_MM = 10.0;        // half-width of the accepted band
-const int NDISPLAY = 5;             // events to draw as example hit maps
+// A view needs this many strip hits. V and W see a track along x at half
+// pitch (s = 0.5 x +- 0.87 y), so 10 hits there meant >= 30 mm of track and
+// threw away alphas stopping in the first 3 cm of the cage (TODO/098).
+const int MIN_VIEW_HITS = 4;
+const int NDISPLAY = 5;  // events to draw as example hit maps
 // Halo cut on the integrated strip charge q (~11 cells, NOT a cell value).
 // In the 2026-09-25 data almost every strip (236/256 on average) carries a
 // small 35-200 ADC pulse at the time of the track. The FPN channels do not
@@ -219,7 +223,7 @@ void analyzeUVW(const char *rawFile, double pressureMbar = PRESSURE_MBAR)
       width[v] = 0;
       nhits[v] = 0;
       size_t n = vz[v].size();
-      if (n < 10) continue;
+      if ((int)n < MIN_VIEW_HITS) continue;
 
       // 1. charge-weighted PCA line through all strip hits of the view
       double sw = 0, mz = 0, ms = 0;
