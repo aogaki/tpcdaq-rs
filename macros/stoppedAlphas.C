@@ -47,6 +47,10 @@ const double MIN_LENGTH_MM = 15.0;
 
 // NIST ASTAR, alpha in CO2: kinetic energy [MeV], CSDA range [g/cm2]
 const double ASTAR[][2] = {
+    {1.000E-01, 1.744E-04}, {1.250E-01, 1.995E-04}, {1.500E-01, 2.222E-04},
+    {1.750E-01, 2.432E-04}, {2.000E-01, 2.628E-04}, {2.250E-01, 2.813E-04},
+    {2.500E-01, 2.989E-04}, {2.750E-01, 3.157E-04}, {3.000E-01, 3.319E-04},
+    {3.500E-01, 3.626E-04}, {4.000E-01, 3.915E-04}, {4.500E-01, 4.193E-04},
     {5.000E-01, 4.460E-04}, {5.500E-01, 4.721E-04}, {6.000E-01, 4.977E-04},
     {6.500E-01, 5.231E-04}, {7.000E-01, 5.483E-04}, {7.500E-01, 5.735E-04},
     {8.000E-01, 5.988E-04}, {8.500E-01, 6.243E-04}, {9.000E-01, 6.500E-04},
@@ -84,7 +88,8 @@ double rangeFromEnergy(double E)
 double energyFromRange(double rMm)
 {
   const double r = rMm / 10.0 * gasDensity();  // g/cm2
-  if (r <= ASTAR[0][1]) return ASTAR[0][0] * std::sqrt(r / ASTAR[0][1]);
+  if (r <= ASTAR[0][1])                        // below 0.1 MeV: E ~ sqrt(R)
+    return ASTAR[0][0] * std::sqrt(r / ASTAR[0][1]);
   for (int i = 1; i < N_ASTAR; ++i)
     if (r <= ASTAR[i][1]) {  // log-log interpolation between rows i-1 and i
       const double f = std::log(r / ASTAR[i - 1][1]) /
