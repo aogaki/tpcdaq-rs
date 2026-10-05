@@ -25,7 +25,10 @@
 //      view sees the track foreshortened); a charge-weighted straight-line
 //      fit z = z0 + tan(theta) * l over those hits pooled gives the dip and
 //      the z anchor: direction = (d_xy, tan(theta)), normalised
-//   5. endpoints = 2%-98% charge quantiles of l over the same hits
+//   5. endpoints = 2%-98% charge quantiles of l over the same hits; the
+//      outermost hits (lMin, lMax) are kept too as the "full" endpoints:
+//      the quantile trims 1-4 mm off a stopping track (more charge, more
+//      trim), which biases a range measurement (TODO/099, 100)
 //   6. head/tail: the charge-heavier half is called the END.
 //      WARNING: alphas cross the detector without stopping, so there is no
 //      Bragg peak and this sign is basically a coin flip - use the geometry
@@ -93,6 +96,7 @@ void makeTracks(const char *uvwFile)
   TTree ttree("tracks", "3D straight-line tracks");
   int ok;
   float xs, ys, zs, xe, ye, ze, dirx, diry, dirz, length, charge, dEdx;
+  float xsF, ysF, zsF, xeF, yeF, zeF, lengthF;  // outermost hits
   ttree.Branch("eventId", &eventId);
   ttree.Branch("ok", &ok);
   ttree.Branch("xStart", &xs);
@@ -106,12 +110,19 @@ void makeTracks(const char *uvwFile)
   ttree.Branch("dirZ", &dirz);
   ttree.Branch("length", &length);
   ttree.Branch("charge", &charge);
-  ttree.Branch("dEdx", &dEdx);  // charge / length: the gain metric
+  ttree.Branch("dEdx", &dEdx);    // charge / length: the gain metric
+  ttree.Branch("xStartF", &xsF);  // "full" endpoints: outermost hits, same
+  ttree.Branch("yStartF", &ysF);  // orientation as start/end
+  ttree.Branch("zStartF", &zsF);
+  ttree.Branch("xEndF", &xeF);
+  ttree.Branch("yEndF", &yeF);
+  ttree.Branch("zEndF", &zeF);
+  ttree.Branch("lengthF", &lengthF);
 
   for (Long64_t i = 0; i < tree->GetEntries(); ++i) {
     tree->GetEntry(i);
     ok = 0;
-    length = charge = dEdx = 0;
+    length = charge = dEdx = lengthF = 0;
     const size_t nk = slView->size();
 
     // 1. per view: charge-weighted mean and variance of s
@@ -196,14 +207,16 @@ void makeTracks(const char *uvwFile)
 
     // 5. endpoints from the pooled charge quantiles of l
     double lo, hi;
-    quantileRange(lq, lo, hi);
+    quantileRange(lq, lo, hi);  // sorts lq
+    double loF = lq.front().first, hiF = lq.back().first;
 
     // 6. orient so the charge-heavier half is the end (see WARNING above)
     double mid = 0.5 * (lo + hi), qlow = 0, qhigh = 0;
     for (auto &e : lq) (e.first < mid ? qlow : qhigh) += e.second;
-    double lStart = lo, lEnd = hi;
+    double lStart = lo, lEnd = hi, lStartF = loF, lEndF = hiF;
     if (qhigh < qlow) {
       std::swap(lStart, lEnd);
+      std::swap(lStartF, lEndF);
       for (int j = 0; j < 3; ++j) dir[j] = -dir[j];
     }
 
@@ -219,6 +232,13 @@ void makeTracks(const char *uvwFile)
     diry = dir[1];
     dirz = dir[2];
     length = (hi - lo) * nrm;  // 3D length
+    xsF = m[0] + lStartF * ux;
+    ysF = m[1] + lStartF * uy;
+    zsF = z0 + lStartF * tanTh;
+    xeF = m[0] + lEndF * ux;
+    yeF = m[1] + lEndF * uy;
+    zeF = z0 + lEndF * tanTh;
+    lengthF = (hiF - loF) * nrm;
     charge = Q;  // all three views, independent of the MIN_PROJ selection
     dEdx = length > 0 ? Q / length : 0;
     ttree.Fill();

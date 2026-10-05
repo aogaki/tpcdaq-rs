@@ -1,4 +1,5 @@
 #include <TCanvas.h>
+#include <TF1.h>
 #include <TFile.h>
 #include <TH1D.h>
 #include <TH2D.h>
@@ -11,7 +12,7 @@
 
 // Alphas that STOP inside the cage: residual energy at the entrance wall from
 // the residual range (entrance wall -> stop point, 3D) with the NIST ASTAR
-// CSDA range of alphas in CO2 (matno 134, https://physics.nist.gov/PhysRefData/Star/Text/ASTAR.html)
+// projected range of alphas in CO2 (matno 134, https://physics.nist.gov/PhysRefData/Star/Text/ASTAR.html)
 // scaled to the gas density of the run.
 //
 // Selection (tracks tree of makeTracks.C, re-oriented to +x):
@@ -31,6 +32,16 @@
 // the gas on the way gives a continuum. Feed it the *_src.root of
 // sourceTracks.C to test whether the direction filter isolates the source.
 //
+// Stop point = the outermost hit of the track (branches xEndF etc. of
+// makeTracks.C), not the 2%-98% charge quantile: the quantile trims 1-4 mm
+// (more for a longer track), which biases a range measurement. Direction
+// and the wall crossing still come from the fitted line.
+// After the histograms, every 228Th line predicted inside the cage is fitted
+// in the stop-point histogram and, with two or more lines, the gas density
+// and the source distance are solved from  x_i = CAGE_XLO + M_i / rho - d
+// (M_i = ASTAR mass range): the line spacing gives rho (a thermometer when
+// the pressure is known), the absolute position gives d.
+//
 // Usage:  root -l 'stoppedAlphas.C("CoBo_xxx_tracks.root", -470, 100)'
 //         (3rd argument: run pressure [mbar]; it sets the gas density and the
 //          z window. Use the same value as for analyzeUVW.C.)
@@ -43,25 +54,34 @@ const double CAGE_XLO = -53.0, CAGE_XHI = 53.0;  // from fastqa
 const double CAGE_YLO = -58.0, CAGE_YHI = 48.0;
 const double Z_LO = 0.0, Z_HI = 89.0;  // 512 cells x mm/cell at 100 mbar
 const double EDGE_MM = 10.0, Z_EDGE_MM = 10.0;
+// a track whose outermost hit is within this of the exit wall is taken as
+// leaving the cage (the last strip of a crossing track sits at x = 51-52)
+const double EXIT_EDGE_MM = 5.0;
 const double MIN_LENGTH_MM = 15.0;
+// a line depositing less than this at the wall is cut into by the trigger
+// threshold (~0.33 MeV, TODO/100): its peak is biased deeper, so it is
+// shown but not used in the density fit
+const double E_WALL_MIN_FIT = 0.6;
 
-// NIST ASTAR, alpha in CO2: kinetic energy [MeV], CSDA range [g/cm2]
+// NIST ASTAR, alpha in CO2: kinetic energy [MeV], PROJECTED range [g/cm2]
+// (what a stop point along the track measures; 0.7-1 % below the CSDA range
+// above 3 MeV, the detour factor)
 const double ASTAR[][2] = {
-    {1.000E-01, 1.744E-04}, {1.250E-01, 1.995E-04}, {1.500E-01, 2.222E-04},
-    {1.750E-01, 2.432E-04}, {2.000E-01, 2.628E-04}, {2.250E-01, 2.813E-04},
-    {2.500E-01, 2.989E-04}, {2.750E-01, 3.157E-04}, {3.000E-01, 3.319E-04},
-    {3.500E-01, 3.626E-04}, {4.000E-01, 3.915E-04}, {4.500E-01, 4.193E-04},
-    {5.000E-01, 4.460E-04}, {5.500E-01, 4.721E-04}, {6.000E-01, 4.977E-04},
-    {6.500E-01, 5.231E-04}, {7.000E-01, 5.483E-04}, {7.500E-01, 5.735E-04},
-    {8.000E-01, 5.988E-04}, {8.500E-01, 6.243E-04}, {9.000E-01, 6.500E-04},
-    {9.500E-01, 6.760E-04}, {1.000E+00, 7.023E-04}, {1.250E+00, 8.395E-04},
-    {1.500E+00, 9.880E-04}, {1.750E+00, 1.149E-03}, {2.000E+00, 1.323E-03},
-    {2.250E+00, 1.510E-03}, {2.500E+00, 1.711E-03}, {2.750E+00, 1.924E-03},
-    {3.000E+00, 2.149E-03}, {3.500E+00, 2.638E-03}, {4.000E+00, 3.176E-03},
-    {4.500E+00, 3.761E-03}, {5.000E+00, 4.392E-03}, {5.500E+00, 5.068E-03},
-    {6.000E+00, 5.789E-03}, {6.500E+00, 6.554E-03}, {7.000E+00, 7.362E-03},
-    {7.500E+00, 8.212E-03}, {8.000E+00, 9.104E-03}, {8.500E+00, 1.004E-02},
-    {9.000E+00, 1.101E-02}, {9.500E+00, 1.203E-02}, {1.000E+01, 1.308E-02},
+    {1.000E-01, 1.450E-04}, {1.250E-01, 1.692E-04}, {1.500E-01, 1.913E-04},
+    {1.750E-01, 2.118E-04}, {2.000E-01, 2.311E-04}, {2.250E-01, 2.493E-04},
+    {2.500E-01, 2.666E-04}, {2.750E-01, 2.832E-04}, {3.000E-01, 2.992E-04},
+    {3.500E-01, 3.295E-04}, {4.000E-01, 3.583E-04}, {4.500E-01, 3.858E-04},
+    {5.000E-01, 4.124E-04}, {5.500E-01, 4.383E-04}, {6.000E-01, 4.638E-04},
+    {6.500E-01, 4.891E-04}, {7.000E-01, 5.142E-04}, {7.500E-01, 5.393E-04},
+    {8.000E-01, 5.645E-04}, {8.500E-01, 5.899E-04}, {9.000E-01, 6.155E-04},
+    {9.500E-01, 6.414E-04}, {1.000E+00, 6.677E-04}, {1.250E+00, 8.045E-04},
+    {1.500E+00, 9.528E-04}, {1.750E+00, 1.114E-03}, {2.000E+00, 1.287E-03},
+    {2.250E+00, 1.474E-03}, {2.500E+00, 1.674E-03}, {2.750E+00, 1.887E-03},
+    {3.000E+00, 2.112E-03}, {3.500E+00, 2.601E-03}, {4.000E+00, 3.138E-03},
+    {4.500E+00, 3.722E-03}, {5.000E+00, 4.353E-03}, {5.500E+00, 5.029E-03},
+    {6.000E+00, 5.749E-03}, {6.500E+00, 6.513E-03}, {7.000E+00, 7.320E-03},
+    {7.500E+00, 8.170E-03}, {8.000E+00, 9.061E-03}, {8.500E+00, 9.994E-03},
+    {9.000E+00, 1.097E-02}, {9.500E+00, 1.198E-02}, {1.000E+01, 1.304E-02},
 };
 const int N_ASTAR = sizeof(ASTAR) / sizeof(ASTAR[0]);
 
@@ -71,7 +91,7 @@ double gasDensity()
   return 44.01 * PRESSURE_MBAR * 100.0 / (8.314 * TEMP_K) * 1e-6;
 }
 
-// CSDA range [mm] of an alpha of energy E [MeV] (log-log interpolation)
+// projected range [mm] of an alpha of energy E [MeV] (log-log interpolation)
 double rangeFromEnergy(double E)
 {
   for (int i = 1; i < N_ASTAR; ++i)
@@ -84,7 +104,7 @@ double rangeFromEnergy(double E)
   return -1;
 }
 
-// energy [MeV] whose CSDA range equals r [mm] in CO2 at the run density
+// energy [MeV] whose projected range equals r [mm] in CO2 at the run density
 double energyFromRange(double rMm)
 {
   const double r = rMm / 10.0 * gasDensity();  // g/cm2
@@ -117,12 +137,16 @@ void stoppedAlphas(const char *trackFile, double srcX = -470.0,
   }
   Float_t xs, ys, zs, xe, ye, ze, length, charge;
   Int_t ok;
-  tree->SetBranchAddress("xStart", &xs);
-  tree->SetBranchAddress("yStart", &ys);
-  tree->SetBranchAddress("zStart", &zs);
-  tree->SetBranchAddress("xEnd", &xe);
-  tree->SetBranchAddress("yEnd", &ye);
-  tree->SetBranchAddress("zEnd", &ze);
+  if (!tree->GetBranch("xEndF")) {
+    std::cerr << "No xEndF branch: re-run makeTracks.C (TODO/100)" << std::endl;
+    return;
+  }
+  tree->SetBranchAddress("xStartF", &xs);
+  tree->SetBranchAddress("yStartF", &ys);
+  tree->SetBranchAddress("zStartF", &zs);
+  tree->SetBranchAddress("xEndF", &xe);
+  tree->SetBranchAddress("yEndF", &ye);
+  tree->SetBranchAddress("zEndF", &ze);
   tree->SetBranchAddress("length", &length);
   tree->SetBranchAddress("charge", &charge);
   tree->SetBranchAddress("ok", &ok);
@@ -146,14 +170,15 @@ void stoppedAlphas(const char *trackFile, double srcX = -470.0,
       600, 4, 10);
 
   Long64_t nStop = 0;
-  std::cout << Form(
-                   "CO2 density %.4f mg/cm3 (%.0f mbar, %.1f K); ASTAR CSDA "
-                   "ranges [mm]: 212Bi 6.05 -> %.0f, 220Rn 6.29 -> %.0f, "
-                   "216Po 6.78 -> %.0f, 212Po 8.78 -> %.0f",
-                   gasDensity() * 1e3, PRESSURE_MBAR, TEMP_K,
-                   rangeFromEnergy(6.05), rangeFromEnergy(6.29),
-                   rangeFromEnergy(6.78), rangeFromEnergy(8.78))
-            << std::endl;
+  std::cout
+      << Form(
+             "CO2 density %.4f mg/cm3 (%.0f mbar, %.1f K); ASTAR projected "
+             "ranges [mm]: 212Bi 6.05 -> %.0f, 220Rn 6.29 -> %.0f, "
+             "216Po 6.78 -> %.0f, 212Po 8.78 -> %.0f",
+             gasDensity() * 1e3, PRESSURE_MBAR, TEMP_K, rangeFromEnergy(6.05),
+             rangeFromEnergy(6.29), rangeFromEnergy(6.78),
+             rangeFromEnergy(8.78))
+      << std::endl;
   const auto n = tree->GetEntries();
   for (Long64_t i = 0; i < n; ++i) {
     tree->GetEntry(i);
@@ -167,8 +192,8 @@ void stoppedAlphas(const char *trackFile, double srcX = -470.0,
     const double dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
     if (dx <= 0) continue;
     if (std::fabs(std::atan2(dy, dx)) * 180.0 / M_PI > PHI_MAX_DEG) continue;
-    if (x0 >= CAGE_XLO + EDGE_MM) continue;  // must enter at the wall
-    if (x1 >= CAGE_XHI - EDGE_MM) continue;  // exits through the far wall
+    if (x0 >= CAGE_XLO + EDGE_MM) continue;       // must enter at the wall
+    if (x1 >= CAGE_XHI - EXIT_EDGE_MM) continue;  // exits through the far wall
     if (y1 <= CAGE_YLO + EDGE_MM || y1 >= CAGE_YHI - EDGE_MM) continue;
     if (z1 <= Z_LO + Z_EDGE_MM || z1 >= zHi - Z_EDGE_MM) continue;
     // residual range: wall crossing point (on the line) -> stop point
@@ -204,4 +229,97 @@ void stoppedAlphas(const char *trackFile, double srcX = -470.0,
   canvas->cd(4);
   hEgen->Draw();
   canvas->Update();
+
+  // --- lines inside the cage: fit, then solve density and source distance
+  struct Line {
+    const char *name;
+    double E;     // MeV (212Bi: intensity-weighted doublet 6.051 / 6.090)
+    double mass;  // ASTAR mass range [g/cm2]
+    double xPred, xFit, xErr, sigma;
+    int n;
+    bool found;
+    TF1 *fn;
+  };
+  Line lines[] = {{"212Bi", 6.062, 0, 0, 0, 0, 0, 0, false, nullptr},
+                  {"220Rn", 6.288, 0, 0, 0, 0, 0, 0, false, nullptr},
+                  {"216Po", 6.778, 0, 0, 0, 0, 0, 0, false, nullptr},
+                  {"212Po", 8.785, 0, 0, 0, 0, 0, 0, false, nullptr}};
+  const double dNominal = CAGE_XLO - srcX;
+  int nFound = 0;
+  for (auto &L : lines) {
+    L.mass = rangeFromEnergy(L.E) / 10.0 * gasDensity();
+    L.xPred = CAGE_XLO + rangeFromEnergy(L.E) - dNominal;
+    if (L.xPred < CAGE_XLO + EDGE_MM + 12 ||
+        L.xPred > CAGE_XHI - EXIT_EDGE_MM - 4)
+      continue;
+    const double w = 9.0;  // fit window: +-9 mm around the prediction,
+    const double hiW =
+        std::min(L.xPred + w, CAGE_XHI - EXIT_EDGE_MM);  // clipped
+    auto g = new TF1(Form("g_%s", L.name), "gaus", L.xPred - w, hiW);
+    g->SetParameters(hXend->GetBinContent(hXend->FindBin(L.xPred)), L.xPred,
+                     3.5);
+    hXend->Fit(g, "QR0+");  // "0": do not redraw on the current pad
+    L.fn = g;
+    L.xFit = g->GetParameter(1);
+    L.xErr = g->GetParError(1);
+    L.sigma = g->GetParameter(2);
+    L.n = (int)hXend->Integral(hXend->FindBin(L.xFit - 2.5 * L.sigma),
+                               hXend->FindBin(L.xFit + 2.5 * L.sigma));
+    const double eWall = energyFromRange(L.xPred - CAGE_XLO);
+    L.found = L.n > 20 && std::fabs(L.xFit - L.xPred) < w && L.sigma < 8 &&
+              eWall >= E_WALL_MIN_FIT;
+    std::cout << Form(
+                     "%s %.3f MeV: predicted x = %+6.1f (%.2f MeV at the "
+                     "wall), fitted %+6.1f +- %.1f (sigma %.1f, n = %d)%s",
+                     L.name, L.E, L.xPred, eWall, L.xFit, L.xErr, L.sigma, L.n,
+                     L.found ? ""
+                             : (eWall < E_WALL_MIN_FIT
+                                    ? "  [trigger-truncated, not used]"
+                                    : "  [not used]"))
+              << std::endl;
+    if (L.found) ++nFound;
+  }
+  canvas->cd(2);
+  for (auto &L : lines)
+    if (L.fn) {
+      L.fn->SetLineColor(L.found ? kRed : kGray + 2);
+      L.fn->Draw("same");
+    }
+  canvas->Update();
+  if (nFound < 2) {
+    std::cout << "fewer than two lines inside: no density fit" << std::endl;
+    return;
+  }
+  // least squares for (1/rho, d):  x_i - CAGE_XLO = M_i * (1/rho) - d
+  double Saa = 0, Sa = 0, S1 = 0, Say = 0, Sy = 0;
+  for (auto &L : lines) {
+    if (!L.found) continue;
+    const double wgt = 1.0 / (L.xErr * L.xErr + 1.0);       // +1 mm2 systematic
+    const double a = L.mass * 10.0, y = L.xFit - CAGE_XLO;  // mm g/cm3 units
+    Saa += wgt * a * a;
+    Sa += wgt * a;
+    S1 += wgt;
+    Say += wgt * a * y;
+    Sy += wgt * y;
+  }
+  const double det = Saa * S1 - Sa * Sa;
+  const double invRho = (Say * S1 - Sa * Sy) / det;  // cm3/g
+  const double d = -(Saa * Sy - Sa * Say) / det;
+  const double rho = 1.0 / invRho;  // g/cm3
+  const double rhoN = gasDensity();
+  const double Tfit = TEMP_K * rhoN / rho;  // if the pressure is right
+  const double pFit =
+      PRESSURE_MBAR * rho / rhoN;  // if the temperature is right
+  std::cout << Form(
+                   "density fit (%d lines): rho = %.4f mg/cm3 = nominal x %.3f "
+                   "-> T = %.1f K at %.0f mbar, or p = %.1f mbar at %.1f K; "
+                   "source distance d = %.0f mm (x_src = %.0f, nominal %.0f)",
+                   nFound, rho * 1e3, rho / rhoN, Tfit, PRESSURE_MBAR, pFit,
+                   TEMP_K, d, CAGE_XLO - d, srcX)
+            << std::endl;
+  for (auto &L : lines)
+    if (L.found || L.n > 0)
+      std::cout << Form("  %s residual: %+.1f mm", L.name,
+                        L.xFit - (CAGE_XLO + L.mass * 10.0 * invRho - d))
+                << std::endl;
 }
