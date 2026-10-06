@@ -47,6 +47,25 @@ puppex は他実験の稼働中 DAQ 機:
 - tpcdaq-rs のビルドとテスト(cargo 848 前後、root_sink `make test-root`)、getEccServer の起動確認、GDED と同じ疎通チェック。
 
 ## 5. 裁定(2026-10-06 ユーザー)
-「やっぱり新規インストールから始めるべきっぽい」→ **puppex への同居デプロイは採らない**。新 DAQ 機を [docs/NEW_DAQ_SETUP_ja.md](../../docs/NEW_DAQ_SETUP_ja.md) v0.2(Ubuntu 24.04、NIC 2 本、データ用別ボリューム)どおりに新規構築する。
-- puppex の他実験サービス・/data には触らない(メモリ puppex-shared-daq-host)。
-- 本調査の副産物として手順書に足すべきもの: §0 に「データ用ボリュームの空きを最初に確認(ZFS は 90 % 超で劣化)」の一文。新機の構築時に v0.3 で反映する。
+「やっぱり新規インストールから始めるべきっぽい」+「オンボードでポートが 2 つ。ZFS のデータボリュームも掃除する」
+→ **puppex 自体を OS 新規インストールし、tpcdaq の DAQ 機にする**(当初 Opus が「別の新機」と誤読して記録 → 同日訂正)。
+- NIC: マザーボード ASUS WS X299 SAGE/10G のオンボード X550 × 2 = 実験 LAN 用 + zCoBo 直結用(手順書 §0 の要件を満たす)。
+- データ: ZFS プール `data` は入れ直し後に import して使う(システムディスクだけ消える)。ユーザーが掃除して空きを作る。
+- OS は手順書どおり 24.04 を推奨(22.04 の ZFS 2.2.2 と 24.04 の 2.2.x は互換。**`zpool upgrade` はしない** = 戻せなくなる)。
+
+## 6. 入れ直し前の退避リスト(システムディスク NVMe が消える。読み取り調査 2026-10-06)
+| 対象 | 場所 | 中身 / 退避方法 |
+|---|---|---|
+| delila 系スタック | `/home/daq/delila-rs/`(docker compose = `docker/`、InfluxDB = `docker/data/influxdb`、Grafana = `docker/data/grafana`、`docker/grafana/provisioning`、`mongo-init.js`) | ディレクトリごと /data へ。InfluxDB は停止してからコピー |
+| Mongo のデータ | snap 版 Docker の名前付きボリューム(`/var/snap/docker/common/var-lib-docker/volumes/…`) | **bind でなく volume なので要注意**。`docker exec delila_mongo mongodump --archive` で吐き出す |
+| HV 監視(CAEN N1408 + SY5527) | `/etc/systemd/system/hv-monitor.service`、`/home/daq/delila-rs/tools/hv_monitor/`(`launcher_config.yaml`) | unit ファイルと設定 |
+| elog | `/var/lib/elog`(3.1 GB)、設定ファイル(`/usr/share/elog` 周辺、elogd.cfg の実位置は要確認) | 丸ごと |
+| apache / DAQ-Middleware | `/var/www/{daqmw,html}`、`/etc/apache2/`、`/etc/xinetd.d/bootComps`、DAQ-Middleware 本体 | DAQ-Middleware を使い続けるなら再導入手順も |
+| NFS | `/etc/exports`(`/data` を別ホストへ ro) | 1 行 |
+| ユーザーと home | puppex / aogaki(200 GB)/ daq / vlad | uid を揃えて再作成(/data の所有者が uid で付いている: daq = 1002、aogaki = 1001) |
+| その他 | `/opt/caen-toolbox`、`/opt/ROOT`(6.28、入れ直し後は新しい版で良い)、NVIDIA T600 ドライバ、ssh ホスト鍵 `/etc/ssh/ssh_host_*`(残せば known_hosts の警告が出ない)、PCP の設定 | 必要なものだけ |
+
+- **ZFS の掃除**: スナップショットは無いので、消せばすぐ空く。性能のため **使用率 80 % 以下**を目安に(現在 96〜97 %、49 TB 中 47.4 TB)。
+- tpcdaq 用には専用データセットを推奨: `zfs create -o compression=lz4 -o atime=off -o recordsize=1M data/tpcdaq`(graw は大きな連続書き込み)+ `reservation` で他の書き込みに食われないように。
+  プール全体は現在 compression off / atime on(新しいデータセットだけ変えればよい)。
+- ネットワーク: 現状は NetworkManager に「Wired connection 1〜5」の古いプロファイルが残っている。入れ直し後は zCoBo 側を netplan で固定(手順書 §2、NM の「Profile 1」事故の再発防止)。
