@@ -1,11 +1,11 @@
 # 102 — デプロイ先候補 puppex の事前調査(読み取りのみ)
 
-**Status: READY**(2026-10-06 起票 Opus。ユーザー「TPCDAQ のデプロイ先として puppex を考えています。まずはログインして調査して」。
+**Status: COMPLETED**(2026-10-06 起票・調査 Opus。ユーザー「TPCDAQ のデプロイ先として puppex を考えています。まずはログインして調査して」→ 同日 **ユーザー裁定: 新規インストールから始める**(§5))
 調査は完了、**採否と前提条件はユーザー判断待ち** — 下記「判断が要る点」)
 
 ## 0. 方法
 Mac から `ssh puppex`(ユーザー aogaki、公開鍵、非対話)。**変更は一切していない**(コマンドは参照系のみ、sudo 未使用)。
-基準は [docs/NEW_DAQ_SETUP_ja.md](../docs/NEW_DAQ_SETUP_ja.md) v0.2 の §0〜§5。実 IP はここに書かない(ssh config の別名で参照)。
+基準は [docs/NEW_DAQ_SETUP_ja.md](../../docs/NEW_DAQ_SETUP_ja.md) v0.2 の §0〜§5。実 IP はここに書かない(ssh config の別名で参照)。
 
 ## 1. 結果(2026-10-06 09:2x、起動後 31 分の状態)
 
@@ -45,3 +45,8 @@ puppex は他実験の稼働中 DAQ 機:
 - NEW_DAQ_SETUP の 22.04 差分節(ROOT 6.28 の root_sink テスト、Ice 3.7.2 非 root 展開、Node は Mac ビルド持ち込み)。
 - f0 の netplan(192.168.4.2/24、MTU 9000、ゲートウェイ無し)— sudo とネットワーク変更なので **他実験の run が無い時間に、ユーザー立ち会いで**。
 - tpcdaq-rs のビルドとテスト(cargo 848 前後、root_sink `make test-root`)、getEccServer の起動確認、GDED と同じ疎通チェック。
+
+## 5. 裁定(2026-10-06 ユーザー)
+「やっぱり新規インストールから始めるべきっぽい」→ **puppex への同居デプロイは採らない**。新 DAQ 機を [docs/NEW_DAQ_SETUP_ja.md](../../docs/NEW_DAQ_SETUP_ja.md) v0.2(Ubuntu 24.04、NIC 2 本、データ用別ボリューム)どおりに新規構築する。
+- puppex の他実験サービス・/data には触らない(メモリ puppex-shared-daq-host)。
+- 本調査の副産物として手順書に足すべきもの: §0 に「データ用ボリュームの空きを最初に確認(ZFS は 90 % 超で劣化)」の一文。新機の構築時に v0.3 で反映する。
