@@ -69,3 +69,15 @@ puppex は他実験の稼働中 DAQ 機:
 - tpcdaq 用には専用データセットを推奨: `zfs create -o compression=lz4 -o atime=off -o recordsize=1M data/tpcdaq`(graw は大きな連続書き込み)+ `reservation` で他の書き込みに食われないように。
   プール全体は現在 compression off / atime on(新しいデータセットだけ変えればよい)。
 - ネットワーク: 現状は NetworkManager に「Wired connection 1〜5」の古いプロファイルが残っている。入れ直し後は zCoBo 側を netplan で固定(手順書 §2、NM の「Profile 1」事故の再発防止)。
+
+## 7. 退避状況の確認(2026-10-06、ユーザー「HV 監視・apache/DAQ-Middleware・NFS は不要。InfluxDB / Grafana は移動済み。Mongo・Grafana 関連・eLog が Luna2 にコピー済みか確認を」)
+読み取りのみ(Mongo は各コンテナの管理者資格情報を環境変数経由で使い、表示していない。Grafana / InfluxDB は匿名で読める API)。
+
+| 対象 | puppex | Luna2 | 判定 |
+|---|---|---|---|
+| **Mongo** | `delila`(runs 520 件、run_config_snapshots 483 件、最新 2026-08-28)+ `eliade_es2`(2 + 2 件)。Docker の名前付きボリューム = **システムディスク上** | 稼働中の `mongo_db` は別物の旧 `DELILA.run_information`(1,961 件、最新 2025-01-21)だけ。ダンプも見当たらず(home 深さ 4、/data・/data2 深さ 3) | **✗ 未コピー** |
+| Grafana | ダッシュボード 6 枚(最終更新 2026-05-07 以前)、フォルダ・アラート・注釈 0 | `delila_viewer` に API で書き出した 6 枚。uid・題名・パネル数とも一致、版数は同じか +1(既定時間範囲の変更分) | ○ |
+| InfluxDB | コピー済み期間は件数一致(抜き取り: 2026-07-15 / 08-29 の system_rate・channel_rate・backlog)。**ただしコピー時刻 2026-09-18 10:18 以降 09-22 10:32 まで system_rate 約 130 万行・backlog 約 35 万行**(channel_rate と HV 系は無し) | 09-18 10:18 で終了 | △(約 4 日分が未コピー) |
+| eLog「252Cf Fission July 2024」 | 1,955 ファイル / 1,101.8 MB | 同一(全ファイルのパスとサイズ一致) | ○ |
+| eLog「252Cf Fission Phase 2」 | **4,913 ファイル / 2.1 GB、最新エントリ 2026-08-28**、`/etc/elog.conf` に節あり | **無い**(/var/lib/elog にも ~/elog にも、elog.conf にも無い) | **✗ 未コピー** |
+| eLog「demo」 | 1 ファイル | 別の 1 ファイル | 無視可 |
