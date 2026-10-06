@@ -81,3 +81,11 @@ puppex は他実験の稼働中 DAQ 機:
 | eLog「252Cf Fission July 2024」 | 1,955 ファイル / 1,101.8 MB | 同一(全ファイルのパスとサイズ一致) | ○ |
 | eLog「252Cf Fission Phase 2」 | **4,913 ファイル / 2.1 GB、最新エントリ 2026-08-28**、`/etc/elog.conf` に節あり | **無い**(/var/lib/elog にも ~/elog にも、elog.conf にも無い) | **✗ 未コピー** |
 | eLog「demo」 | 1 ファイル | 別の 1 ファイル | 無視可 |
+
+## 8. 退避の実施(2026-10-06、ユーザー「組み込みはしなくていい」= Luna2 のサービスには入れず、ファイルとして退避)
+Luna2 `~/puppex_backup_2026-10-06/`(700、各ファイル 600)に:
+- `mongo_puppex_all.archive.gz`(174 kB): puppex の delila_mongo の全 DB を `mongodump --archive --gzip`。delila.runs 526 / run_config_snapshots 489 / eliade_es2 2 + 2 / admin。`gzip -t` 合格。
+  (§7 の 520 / 483 は estimatedDocumentCount の値。ダンプの数が正。)復元時は Luna2 の既存 `DELILA` と大文字小文字違いで衝突するので名前を変える(README に記載)。
+- `elog_252Cf_Fission_Phase_2.tgz`(2.0 GB): 4,913 ファイル / 2,110,950,899 バイトが両側一致、**ファイルごとの SHA-256 の束のハッシュも一致**。
+- `elog.conf.puppex`(42 行、全 4 節)と `README.txt`。
+- 未退避: InfluxDB の 2026-09-18 10:18〜09-22 10:32(ユーザーは移動済みとの認識。必要なら Luna2 README の Refresh 手順)。puppex の Mongo / elog にこの後書き込みがあればダンプは古くなる。
