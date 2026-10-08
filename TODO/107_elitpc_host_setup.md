@@ -93,12 +93,30 @@ chrony 4.8 の既定 `authselectmode mix` は NTS(認証付き)源に `require` 
 **ユーザー実施(2026-10-08 15:3x)→ ✅ 同期**: 4 源とも Reach 377、`^*` = 185.125.190.58(prod-ntp-5.ntp4.ps5.canonical.com)、Stratum 3、
 Last offset −7.3 ms、`Leap status: Normal`、`timedatectl` = `System clock synchronized: yes`。
 
+## 移設と zCoBo 接続(2026-10-08 18:00 EEST〜)
+
+ユーザーが機体を GDED の場所へ移設 → **`ssh daq@192.168.144.220`**(LAN = `enp179s0f1` DHCP)、zCoBo は `enp179s0f0` に直結済み(ユーザーは ping のみ確認)。
+
+- `enp179s0f0`(NM 接続 `netplan-enp179s0f0`): **192.168.4.1/24・MTU auto(1500)・`ipv4.gateway = 192.168.4.1`(自分自身)** →
+  `default via 192.168.4.1 dev enp179s0f0 metric 20102` ができている(GDED の「Profile 1」と同じ形。metric が大きいので実害は今は無い)。
+  IP は 4.1 のまま使う → daq.toml の `router_ip` を **192.168.4.1** に変更。ゲートウェイ除去と MTU 9000 は sudo(ユーザー依頼)。
+- zCoBo: `ping 192.168.4.81` 0.16 ms、DF 1472 OK。4.2 / 4.3(GDED / VM)は無応答。GDED の `enp1s0f0/1` は carrier 0、VM `Ubuntu16.04LTS_ELINP` は起動したまま
+  (TPC_Share への書き込みは 16:18 の `CoBo_2026-10-07T10:04:32.170_0001.graw` で止まっている)→ VM の ECC が zCoBo に届く経路は無い。
+- スタック起動(daq_up.sh)→ ecc_bridge に直接 `describe(zCobo)` → **`Connected to 1 CoBo board(s) and 0 MuTanT module(s)`**(0.07 s)→ `reset` で Idle。
+  ECC ログの `isActive cannot be resolved` は describe-zCobo の既知の警告。
+- **設定の取り違えを発見**: GDED から持ってきた `configure-physics.xcfg`(md5 1d7b8854)は
+  `reference/config/configure-physics-zCobo1k-extTrig_120fC_25MHz_232ns_trigDelay1748.xcfg` と同一 = **HIgS 2026 の ELITPC 用**。
+  VM の GET が使っているのは workspace.xcfg の `/home/getuser/Desktop/TPCConfigFiles/configure-physics-extTrig_240fC_25MHz_70ns.xcfg`(VM 内)。
+  GDED ホストの `~/Documents/TPCConfigFiles/` にある同名ファイルは md5 51fd8666 = 2018 年の FW 同梱版と同一(VM 内の版が改変されているかは未確認)。
+  → 誤って HIgS 設定で configure しないよう、`prepare/configure-physics.xcfg` を `*-physics-higs2026.xcfg` に改名、daq.toml の
+  `config_id` を `zCobo / elinp / elinp`(**ファイルはまだ無い** = run/start は prepare で止まる)にしてスタック再起動。雛形 `config/daq_example.toml` もプレースホルダに。
+
 ## 残り(ユーザー立ち会い / 移行日)
 
 1. ~~chrony~~ ✅ 済(上記)。
-2. §2 netplan: `enp179s0f0` = `192.168.4.2/24`、MTU 9000、ゲートウェイ無し(sudo)。**zCoBo の線を GDED から付け替える日に**。
-3. **GDED の VM の GET を止めてから** ELITPC で describe(getHwServer に ECC が 2 つ繋がる事故を避ける)。
-4. ECC 設定: VM の現用 xcfg(physics)を `~/ELITPC/GetSoftware_config` に同期(GDED のコピーが VM の現用と同じか確認)。
+2. ~~線の付け替え~~ ✅(ユーザー、4.1/24)。残り = NIC のゲートウェイ除去 + MTU 9000(sudo)。
+3. ~~describe~~ ✅(VM 側はリンク断で zCoBo に届かない状態で実施)。VM の GET は止めておく(線を戻したときの二重接続防止)。
+4. ECC 設定: **VM 内の `configure-physics-extTrig_240fC_25MHz_70ns.xcfg` を TPC_Share 経由で取得** → `prepare-elinp` / `configure-elinp` に。pulser 用も VM 版(TPC_Share の configure-pulser.xcfg、md5 86a8ab10)と GDED 版(e1043496)が違う。
 5. §10 疎通: DF ping 8972 → パルサー run → `/srv/tpcdaq/run0001/` の graw + ROOT → UI → stop/reset の walk-back。
 6. 不感時間の比較: 移行後の線源 run で 106 の VM 律速(≈ 0.4 Hz 上限)が消えるか。
 7. 後回し: slowctl(§9)、systemd ユニット、ufw。

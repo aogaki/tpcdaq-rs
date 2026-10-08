@@ -30,7 +30,9 @@ rest_listen = "0.0.0.0:8080"
 passphrase = "<run 制御のパスフレーズ>"
 ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 router_ip = "<zCoBo から見たこの機体の IP(直結 NIC)>"   # listen が 0.0.0.0 なので明示する(SPEC §8.2)
-config_id = { describe = "zCobo", prepare = "physics", configure = "physics" }
+# 実験で使う physics 設定の id。**GDED の設定リポジトリにある physics は HIgS 2026 用(120 fC / 232 ns / trigDelay 1748)で mini とは別物**(107)。
+# VM の GET が実際に読んでいる xcfg を写して prepare-<id> / configure-<id> にしてから書く。
+config_id = { describe = "zCobo", prepare = "<physics 設定 id>", configure = "<physics 設定 id>" }
 ui_dir = "/opt/tpcdaq/ui"          # ui/dist/ui/browser のコピー
 ecc_config_dir = "<ECC の設定リポジトリ>"   # getEccServer --config-repo-url と同じ(078 の生成 xcfg の出力先)
 params_dir = "/srv/tpcdaq/params"
