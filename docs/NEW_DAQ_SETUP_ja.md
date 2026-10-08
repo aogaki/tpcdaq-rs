@@ -1,4 +1,6 @@
-# 新 DAQ 機セットアップ手順(Ubuntu 24.04 LTS)— v0.2(2026-09-23: Rust ブリッジ・slowctl・params を反映)
+# 新 DAQ 機セットアップ手順(Ubuntu 24.04 LTS)— v0.3(2026-10-08: データ置き場 = システム NVMe の別パーティション、既存データディスクには触らない)
+
+<!-- v0.2(2026-09-23): Rust ブリッジ・slowctl・params を反映 -->
 
 **位置づけ**: TODO/080 A-1。順序は TODO/076 §6 の裁定どおり —
 **OS → ネットワーク → ツールチェーン → ROOT → 実 ECC(ホストでネイティブ、Ice 3.7)→ tpcdaq-rs → UI →
@@ -12,18 +14,34 @@ ECC ブリッジ(Rust 076、当面は C++ 併存)→ 疎通チェック → 常�
 | もの | 例 | 備考 |
 |---|---|---|
 | 機体 | デスクトップ + オンボード/PCIe NIC ×2(LAN 用 + zCoBo 直結用) | USB Ethernet は使わない(073 §E の教訓) |
-| ディスク | データ用に別ボリューム(mini 28 MB/s 持続、run 1 本 ≈ 数 GB) | `noatime`、空き監視 |
+| ディスク | OS 用の NVMe を分割し、**データ用パーティション**(ext4、`noatime`)を `/srv/tpcdaq` に。既存のデータディスク(ZFS プール等)が載っている機体でも**それには触らない**(§1) | 空き監視。容量の目安は下表 |
 | 資産(リポ外) | 実 mini ジオメトリ `.dat`、ECC 設定一式(describe/prepare/configure xcfg)、GET 20190315_patched(ソース + 16.04 ビルド済み) | reference/ 相当。USB か scp で持ち込む |
 | ケーブル | zCoBo 直結 RJ45(1000BASE-T)、USB-RS232(Bronkhorst 7.03.366 + 9.09.122)、USB-B(HMP2020)、Arduino USB | 079 |
 
+**容量の目安**(1 フレーム = 1 AsAd 全読み出し 557 kB):
+
+| 条件 | 1 日あたり | 1 TB で |
+|---|---|---|
+| 2026-09〜10 の α 線源 run(0.03〜0.4 Hz) | 1.5〜19 GB | 数十日〜1 年以上 |
+| 設計上限(mini 100 Hz、28 MB/s 持続) | 2.4 TB | 約 9 時間 |
+
+高レート運転(ビーム)の前に、データ置き場を別ボリュームへ移す(§11)。
+
 ## 1. OS とアカウント
+
+- **インストール先は NVMe だけ**。インストーラの「ディスク全体を使う」の対象を必ず確認し、既存のデータディスク(ZFS のメンバー等)は選ばない。
+  不安ならインストール中だけデータディスクのケーブルを抜く。**新しい OS は既存の ZFS プールを自動では取り込まない** —— 何もしなければ中身は一切変わらない。
+  後で使うときは `sudo zpool import <pool>`(ホスト ID が変わるので `-f` を求められることがある)。**`zpool upgrade` はしない**(旧 OS に戻せなくなる)。
+- NVMe のパーティション例: EFI 512 MB + ルート 200 GB(ext4)+ 残り全部をデータ用(ext4)。データが溢れても OS が止まらないように分ける。
+  データ用は `/srv/tpcdaq` にマウント(`/etc/fstab` に `UUID=<...> /srv/tpcdaq ext4 defaults,noatime 0 2`)、所有者 `daq`。
+  **`/data` は使わない** —— 既存 ZFS プールの mountpoint が `/data` のことが多く、後で import したときに衝突する。
 
 - Ubuntu 24.04 LTS Server(GUI 不要。ブラウザは別 PC から)。ユーザー `daq`(sudo 可)。
 - `sudo apt update && sudo apt install -y build-essential git cmake pkg-config curl python3 python3-pip python3-yaml openssh-server chrony`
 - 時刻: `chrony` を実験 LAN の NTP か公開 NTP に。**ログブックの ts は RFC3339 オフセット付き**なので TZ を決めて固定
   (`timedatectl set-timezone Europe/Bucharest` 等)。
 - `daq` を `dialout` に(シリアル用): `sudo usermod -aG dialout daq`(再ログイン)。
-- ✅ `timedatectl` が同期済み / `groups` に dialout。
+- ✅ `timedatectl` が同期済み / `groups` に dialout / `findmnt /srv/tpcdaq` が `noatime` / `lsblk -f` で既存データディスクのパーティションと FS 種別がインストール前と同じ。
 
 ## 2. ネットワーク
 
@@ -91,7 +109,7 @@ cd ui && npm ci && npm run build && cd -       # → ui/dist/ui/browser(controll
 ```toml
 [system]
 experiment = "mini_eTPC"
-output_root = "/data/tpcdaq"                     # データボリューム
+output_root = "/srv/tpcdaq"                      # データ用パーティション(§1。/data は既存 ZFS と衝突し得るので使わない)
 geometry = "/opt/tpcdaq/assets/new_geometry_mini_eTPC.dat"   # リポ外
 [[cobo]]
 id = 0
@@ -113,7 +131,7 @@ ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
 config_id = "pulser"                             # 実験に合わせる(078 のプリセットが来るまで手動)
 ui_dir = "/opt/tpcdaq/ui"                        # ui/dist/ui/browser のコピー
 ecc_config_dir = "<ECC の config repo>"          # v1.33: テンプレート xcfg の置き場 = 生成 xcfg の出力先(getEccServer --config-repo-url と同じ)
-params_dir = "/data/tpcdaq/params"               # v1.33: パラメータ JSON(current.json / <id>.json)
+params_dir = "/srv/tpcdaq/params"                # v1.33: パラメータ JSON(current.json / <id>.json)
 # [slowctl] は現地 Phase 0(node scan、by-id の実名)の後に config/slowctl_example.toml を写して足す(§9)
 ```
 - ✅ `cargo test` green、`root_sink --help`、`ls ui/dist/ui/browser/index.html`。
@@ -172,5 +190,7 @@ root_sink は両方 graceful。まずは `daq_up.sh` / `daq_down.sh`(GDED の `b
 
 ## 11. 未確定・追記予定
 
-- 5-B の 3.7.10 コンパイル可否、ROOT の具体版、systemd ユニットの実体。slowctl / params は実装済み(上記 §6 / §9 / §10-9・10)— 実機で初めて通す。
+- 5-B の 3.7.10 コンパイル可否、ROOT の具体版、systemd ユニットの実体。
+- 高レート運転用のデータ置き場(既存 ZFS プールを掃除して import し専用データセット `compression=lz4 atime=off recordsize=1M` + `reservation`、
+  または専用ディスク)。ZFS は使用率 90 % 超で書き込み性能が落ちるので 80 % 以下で使う(TODO/archive/102)。slowctl / params は実装済み(上記 §6 / §9 / §10-9・10)— 実機で初めて通す。
 - 実施ログは TODO/080 A-1 の結果節へ(日付・版・所要時間・つまずき)。

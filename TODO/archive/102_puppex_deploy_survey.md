@@ -89,3 +89,9 @@ Luna2 `~/puppex_backup_2026-10-06/`(700、各ファイル 600)に:
 - `elog_252Cf_Fission_Phase_2.tgz`(2.0 GB): 4,913 ファイル / 2,110,950,899 バイトが両側一致、**ファイルごとの SHA-256 の束のハッシュも一致**。
 - `elog.conf.puppex`(42 行、全 4 節)と `README.txt`。
 - 未退避: InfluxDB の 2026-09-18 10:18〜09-22 10:32(ユーザーは移動済みとの認識。必要なら Luna2 README の Refresh 手順)。puppex の Mongo / elog にこの後書き込みがあればダンプは古くなる。
+
+## 9. データ置き場の裁定(2026-10-08 ユーザー「ZFS のボリュームはとりあえず何もしないでおくことは可能か」→「そうしてください」)
+- **ZFS プールには当面触らない**(import も掃除も tpcdaq 側の作業としてはしない)。OS は NVMe だけに新規インストール。新しい OS はプールを自動 import しないので中身は不変。
+- tpcdaq のデータは **NVMe の別パーティション(ext4、noatime)を `/srv/tpcdaq`** に。`/data` はプールの mountpoint と衝突するので使わない。今の α 線源 run(0.03〜0.4 Hz × 557 kB)なら 1 日 1.5〜19 GB で十分、高レート運転の前に置き場を見直す。
+- 手順書を **v0.3** に改訂(`docs/NEW_DAQ_SETUP_ja.md` §0 ディスク / §1 インストール先と分割・✅ / §6 output_root・params_dir / §11)。SPEC §3.1 とコード内テストの `/data/tpcdaq` は例示値なので据え置き。
+- インストール前のディスク構成の控え(比較用、識別子を含むのでリポ外): `reference/_infra/puppex_disk_baseline_2026-10-08.txt`。この時点でプール `data` は 49.1 TB 中 37.0 TB 使用(10-06 の 47.4 TB から減少 = ユーザーが整理済みとみられる)。
