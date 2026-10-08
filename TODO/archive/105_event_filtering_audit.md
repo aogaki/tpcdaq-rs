@@ -38,3 +38,18 @@
   | firmwareDate | 0x440001D8 | FW のビルド日 |
   extTriggerCnt − eventCounter = busy 中に来て捨てられたトリガ = 不感時間の直接測定。
 - 注意: 未定義アドレスへの AXI 読み出しは Zynq をハングさせ得る(= 取得中の run が止まる)。アドレスは zCoBo 自身の記述ファイル由来だが、run 中に読むかはユーザー判断。**書き込みは一切しない**。
+
+## 追記 2(2026-10-08、ユーザー「リスクは承知で」→ zCoBo の FPGA レジスタを読み取りのみで読んだ。書き込みなし、zCoBo・取得とも正常継続)
+`busybox devmem <addr> 32`(GDED 経由)。base の確認に firmwareDate を先に読んだ。
+| レジスタ | アドレス | 値 | 解釈 |
+|---|---|---|---|
+| firmwareDate | 0x440001D8 | 0x20180129 | 2018-01-29(アドレスは正しい) |
+| hardwareVersion | 0x440001D4 | 1 | Reduced CoBo(zCoBo) |
+| **triggerMask** | 0x4400008C | **0x00000001** | **external のみ有効**(multiplicity / timing / manual / slowControl / 2p / _out すべて 0) |
+| triggerDelay | 0x44000068 | 0x140 = 320 | 3.2 µs |
+| triggerPeriod_10ns | 0x44000084 | 0x05F5E100 | 1 s(既定値。timing モードが無効なので不使用) |
+| eventCounter / extTriggerCnt / fifoHighWaterMark / timeStamp | 0x90 / 0x1CC / 0x1D0 / 0x94・0x98 | **すべて 0** | 4 分あけて再読も 0。その間 .graw は 14 フレーム(7,802,368 B)増加 = **このファームでは未実装**(zCoBo の Trigger_Unit は CoBo とは別実装) |
+
+- zCoBo ファームの README(`reference/ZC706_20181031_ELINP/docs/README.txt` §5): **「現行ファームは MULTIPLICITY でのトリガも 2 陽子モードも扱えない」** → multiplicity による選別は zCoBo では原理的に無い。
+- トリガ受付数はレジスタでは測れない。代わりにハードで測れる: FMC-to-AsAd アダプタの SMA **OUT1 = trig_pulse_nodelay**(時刻と事象番号をラッチした瞬間 = 受け付けたトリガ 1 回につき 1 発)、OUT2 = triggerDelay 遅れの実停止。
+  **IN1(ゲートジェネレータからの入力)と OUT1 をスケーラーかオシロで数えれば、CoBo の受付率と不感時間が直接分かる**。
