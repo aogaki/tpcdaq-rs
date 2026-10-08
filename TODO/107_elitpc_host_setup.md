@@ -124,6 +124,17 @@ VM のネットワーク無しに読めた(Guest Additions 7.1.6、RunLevel 2)�
 - ELITPC に配置: `prepare-elinp` / `configure-elinp` = delay_test、`prepare-pulser-vm` / `configure-pulser-vm` = VM のパルサー。原本は `~/ELITPC/vm_configs_2026-10-08/`。
   daq.toml の `config_id` は既に `zCobo / elinp / elinp`。
 
+## 初の実機 run(2026-10-08 18:22〜、ユーザー許可「1, 2 ともに」)
+
+- **run 1 = パルサー**(config `zCobo / pulser-vm / pulser-vm`、`asad-pulser-start -1000 1000`、30 s): run/start **7.47 s** → Running、
+  run/stop `eos_closed:true / forced_eos:true / reason normal`。出力 `/srv/tpcdaq/run0001/`: `CoBo0_AsAd0_2026-10-08T18:22:45.532_0000.graw`(8,363,520 B)、
+  `run0001.root` 19.0 MB、`run0001_raw.root` 5.7 MB。graw を全数デコード: **30 frames(frameType 2、278,784 B、items 139,264)、eventIdx 0–29 連番、
+  CoBo タイムスタンプ間隔 30 本とも 1.000 s** = 取りこぼしゼロ。
+- **run 2 = α 線源**(config `zCobo / elinp / elinp` = VM の delay_test.xcfg)18:23:51 開始: DataLinkSet `192.168.4.1:46005 TCP`、
+  zCoBo が 7 s 後に接続(`CoBo connected peer=192.168.4.81`)、最初のフレームは開始 38 s 後(557,312 B = 全読み出し)。
+  **ユーザーの退席に合わせて走らせたまま**、制御トークンは release(UI から acquire して止められる)。比較(不感時間・レート vs VM)は run 2 を止めてから。
+- 切替のたびに daq.toml の `config_id` を書き換えてスタックを再起動している(078 の params / REST で切り替える運用は未整備)。
+
 ## 残り(ユーザー立ち会い / 移行日)
 
 1. ~~chrony~~ ✅ 済(上記)。
