@@ -1,12 +1,15 @@
-# 新 DAQ 機セットアップ手順(Ubuntu 26.04 LTS)— v0.4(2026-10-08: OS を 26.04 に。ECC のネイティブ起動を最初に確認、ダメなら 16.04 コンテナ)
+# 新 DAQ 機セットアップ手順(Ubuntu 26.04 LTS)— v0.5(2026-10-08: 実機 ELITPC で §1・§3〜§8 を実施した結果を反映 — TODO/107)
+
+<!-- v0.4(2026-10-08): OS を 26.04 に。ECC のネイティブ起動を最初に確認、ダメなら 16.04 コンテナ -->
 
 <!-- v0.3(2026-10-08): データ置き場 = システム NVMe の別パーティション、既存データディスクには触らない -->
 
 <!-- v0.2(2026-09-23): Rust ブリッジ・slowctl・params を反映 -->
 
-**26.04 の注意(v0.4)**: 実 ECC(§5)は 16.04 ビルドのバイナリを古いライブラリ同梱で動かす方式で、24.04(GDED)では実証済みだが
-**26.04 では未実証**。OS とネットワーク(§1–§2)が済んだら、**§3 より先に §5 A を試して** ECC が `IDLE / NO_ERR` まで上がるかを確かめる。
-上がらなければ §5 C(16.04 コンテナ)に切り替える。ほかの依存(Rust、ROOT 6.40.04 の 26.04 用公式バイナリ、ZFS、X550、NVIDIA)は 26.04 で問題ない見込み。
+**26.04 の実績(v0.5、TODO/107)**: 実 ECC(§5 A)は **26.04.1 でもそのまま動いた**(`sm-status` = `IDLE / NO_ERR`)→ 16.04 コンテナ(§5 C)は不要。
+ROOT 6.40.04(26.04 用公式バイナリ)・root_sink(gcc 15.2、警告ゼロ)・tpcdaq-rs(Rust 1.99、848 passed)も通った。
+つまずいたのは 4 点 —— **NTS が研究所 FW で遮断**(§1)、**デスクトップ版に gcc / git / curl / cmake が無い**(§1 の apt)、
+**root_sink の libzmq / Boost / TPCReco が手順から抜けていた**(§4)、**ファイル記述子のソフト上限 1024**(§6)。
 
 **位置づけ**: TODO/080 A-1。順序は TODO/076 §6 の裁定どおり —
 **OS → ネットワーク → ツールチェーン → ROOT → 実 ECC(ホストでネイティブ、Ice 3.7)→ tpcdaq-rs → UI →
@@ -41,13 +44,32 @@ ECC ブリッジ(Rust 076、当面は C++ 併存)→ 疎通チェック → 常�
 - NVMe のパーティション例: EFI 512 MB + ルート 200 GB(ext4)+ 残り全部をデータ用(ext4)。データが溢れても OS が止まらないように分ける。
   データ用は `/srv/tpcdaq` にマウント(`/etc/fstab` に `UUID=<...> /srv/tpcdaq ext4 defaults,noatime 0 2`)、所有者 `daq`。
   **`/data` は使わない** —— 既存 ZFS プールの mountpoint が `/data` のことが多く、後で import したときに衝突する。
+  - **分けずに入れてしまった場合(ELITPC の実例)**: `/srv/tpcdaq` をルート上のディレクトリにしてよい。データは `daq` が書くので、
+    ext4 の予約 5 %(953 GB の NVMe で約 47 GB、root 専用)が残り、満杯になっても OS 側は止まらない。後で別ボリュームに移すときは
+    同じパスをマウントポイントにする。
 
-- Ubuntu 26.04 LTS Server(GUI 不要。ブラウザは別 PC から)。ユーザー `daq`(sudo 可)。
-- `sudo apt update && sudo apt install -y build-essential git cmake pkg-config curl python3 python3-pip python3-yaml openssh-server chrony`
-- 時刻: `chrony` を実験 LAN の NTP か公開 NTP に。**ログブックの ts は RFC3339 オフセット付き**なので TZ を決めて固定
-  (`timedatectl set-timezone Europe/Bucharest` 等)。
+- Ubuntu 26.04 LTS(Server でもデスクトップでもよい。ELITPC はデスクトップ版)。ユーザー `daq`(sudo 可)。
+- **デスクトップ版には gcc / git / curl / cmake が入っていない**(wget・python3 はある)。§3〜§4 の分もここでまとめて入れる:
+  ```sh
+  sudo apt update
+  sudo apt install -y build-essential git cmake curl python3-zmq python3-yaml libzmq3-dev libboost-dev \
+    libtbb12 libgsl28 libgslcblas0 libblas3 libglu1-mesa libgl2ps1.4 libftgl2 libopengl0 libgfortran5 libcfitsio10t64
+  sudo install -d -o daq -g daq /opt/ROOT /opt/tpcdaq /srv/tpcdaq
+  ```
+  (`libzmq3-dev` と `libboost-dev` は root_sink、`libtbb12` 以降は ROOT 公式バイナリの実行時依存 — §4)
+- 時刻: 26.04 の chrony 既定は Ubuntu の **NTS 付き** pool(`/etc/chrony/sources.d/ubuntu-ntp-pools.sources`)。
+  **ELI-NP の FW は NTS-KE(TCP 4460)を遮断**していて永久に未同期になる(素の NTP = UDP 123 は通る)。
+  素の NTP を**足すだけでは同期しない** —— chrony の既定 `authselectmode mix` は NTS 源に `require` を付けるので、
+  NTS 源が 1 つも使えない間は素の源が届いていても選ばれない(`chronyc sources` で Reach 377 なのに `^-` のまま。ELITPC で実際に踏んだ)。
+  NTS の源ファイルを無効化して素の NTP に置き換える:
+  ```sh
+  echo 'pool ntp.ubuntu.com iburst' | sudo tee /etc/chrony/sources.d/plain-ntp.sources
+  sudo mv /etc/chrony/sources.d/ubuntu-ntp-pools.sources /etc/chrony/sources.d/ubuntu-ntp-pools.sources.disabled
+  sudo chronyc reload sources
+  ```
+  **ログブックの ts は RFC3339 オフセット付き**なので TZ を決めて固定(`timedatectl set-timezone Europe/Bucharest` 等)。
 - `daq` を `dialout` に(シリアル用): `sudo usermod -aG dialout daq`(再ログイン)。
-- ✅ `timedatectl` が同期済み / `groups` に dialout / `findmnt /srv/tpcdaq` が `noatime` / `lsblk -f` で既存データディスクのパーティションと FS 種別がインストール前と同じ。
+- ✅ `chronyc tracking` の Leap status が Normal / `groups` に dialout / `/srv/tpcdaq` が daq 所有 / `lsblk -f` で既存データディスクのパーティションと FS 種別がインストール前と同じ。
 
 ## 2. ネットワーク
 
@@ -63,8 +85,9 @@ ECC ブリッジ(Rust 076、当面は C++ 併存)→ 疎通チェック → 常�
 
 ## 3. ツールチェーン
 
-- Rust: `curl https://sh.rustup.rs -sSf | sh` → stable(手元 1.97 系)。`zmq` クレートは vendored(`zeromq-src`)なので
-  libzmq の apt は不要(GDED で実証、ビルド 1 分)。
+- Rust: `curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal -c rustfmt,clippy` → stable(ELITPC は 1.99、Mac は 1.97)。
+  `zmq` クレートは vendored(`zeromq-src`)なので Rust 側に libzmq の apt は不要(ELITPC で release ビルド 30 s)。
+  リンカに `cc` が要る = build-essential を先に(§1)。
 - Node.js 22 LTS(UI ビルド用。Angular 22 系): `nvm` が OS の版に依らず確実。**Mac でビルドして `ui/dist` を持ち込むのが最短**(機体に Node は不要になる)。
 - `python3-zmq`(ベンチ/疎通スクリプト用): `pip install pyzmq` か apt `python3-zmq`。
 - ✅ `cargo --version` /(機体でビルドする場合のみ)`node --version`(≥ 22)。
@@ -74,13 +97,24 @@ ECC ブリッジ(Rust 076、当面は C++ 併存)→ 疎通チェック → 常�
 - 公式バイナリ `root_v6.40.04.Linux-ubuntu26.04-x86_64-gcc15.2.tar.gz`(root.cern の release-64004。Mac と同じ 6.40.04)を `/opt/ROOT` に展開。`/etc/profile.d/root.sh` に
   `source /opt/ROOT/bin/thisroot.sh`。ソースビルドは不要(TPCReco の旧 ROOT 互換は**出力ファイル側**で担保 — 014 の ZLIB-1)。
 - 確認: `root -b -q` が起動、`root-config --cflags --libs`。
-- tpcdaq-rs 側: `cd tools/root_sink && make -j && make test && make test-root`(test-root は recorder 170 / pevent 99 /
-  raw 88 が green のはず)。gcc 15 で新しい警告・エラーが出たら直して本書に追記する。
+- **実行時依存**: 公式バイナリは `libtbb.so.12`(ほぼ全ライブラリ)ほか数学・グラフィクス系の共有ライブラリを要求する。
+  §1 の apt 行(`libtbb12` 〜 `libcfitsio10t64`)で足りる。残る未解決 `libR` / `libRInside` / `libunuran` / `libXrd*` は
+  26.04 に無いか不要(R・UNU.RAN・XRootD 連携は使わない)。確認: `for f in /opt/ROOT/lib/*.so; do ldd $f | grep "not found"; done`。
+- tpcdaq-rs 側(root_sink)は **libzmq(C API)・Boost ヘッダ・TPCReco の一部**を使う:
+  - apt `libzmq3-dev libboost-dev`(§1)。
+  - TPCReco の `DataFormats/` と `Utilities/`(reference/TPCReco/TPCReco-HIGS2026_online の 2 ディレクトリ、0.8 MB、リポ外)を
+    `/opt/tpcdaq/assets/TPCReco-HIGS2026_online/` に置き、`make TPCDAQ_TPCRECO_DIR=/opt/tpcdaq/assets/TPCReco-HIGS2026_online -j`。
+  - `make test`(gcc のみ)と `make test-root`。ELITPC(gcc 15.2)の実績 = **警告・エラーゼロ**、tpc_wire 68 / rs_core 71 / eb_core 175 /
+    geo 426 / monitor_hist 202 / monitor_pub 92、recorder 170 / pevent 99 / raw 88(conformance と実 PEventTPC はデータ無しで SKIP)。
 - ✅ `tools/root_sink/root_sink --help`。
 
 ## 5. 実 ECC(getEccServer 20190315)をホストにネイティブ導入
 
-3 通り。**A が最短(GDED の 24.04 で実証済み、26.04 は未実証 — 冒頭の注意)**、B は恒久版、C は A が 26.04 で動かないときの逃げ道。
+3 通り。**A が最短(GDED の 24.04 と ELITPC の 26.04.1 で実証済み)**、B は恒久版、C は A が動かないときの逃げ道(26.04 では不要だった)。
+
+**ELITPC での A の実際(2026-10-08)**: GDED の作業ツリーをそのまま流し込んだ(Mac 経由、約 90 MB):
+`ssh GDED 'tar czf - -C /home/daq --exclude="*.graw" --exclude="vivado.*" ELITPC/GetSoftware_bin/20190315 get_docker/stage get_docker/vm_ice ELITPC/GetSoftware_config' | ssh <新機> 'tar xzf - -C /home/daq'`。
+`ldd` の not found は 0、`getEccServer ... -a 127.0.0.1:46002` で Idle。getEccServer は **SIGINT を無視する**ので止めるときは SIGTERM。
 
 **A. 16.04 ビルド済みバイナリ + 不足ライブラリの非 root 展開**(メモリ geteccserver-native-gded の手順そのまま)
 1. `20190315_patched.tgz`(ソース + `build/.libs`)を `~/ELITPC/GetSoftware_bin/20190315/` に展開。
@@ -111,11 +145,21 @@ ECC ブリッジ(Rust 076、当面は C++ 併存)→ 疎通チェック → 常�
 
 ```sh
 git clone https://github.com/aogaki/tpcdaq-rs && cd tpcdaq-rs
-cargo build --release && cargo test           # 812 件 green(2026-09-23 時点)
-cd tools/root_sink && make -j && cd -
+ulimit -n 65536                                # ← 必須(下記)
+cargo build --release && cargo test           # ELITPC 2026-10-08: 58 スイート 848 passed / 0 failed / 1 ignored
+cd tools/root_sink && make TPCDAQ_TPCRECO_DIR=/opt/tpcdaq/assets/TPCReco-HIGS2026_online -j && cd -   # §4
 cd ui && npm ci && npm run build && cd -       # → ui/dist/ui/browser(controller が配信)
 ```
-設定 TOML(GDED の `bench.conf` が雛形。SPEC §3):
+- **手元が origin より先行しているとき**(未 push)は git bundle で渡す: Mac で `git bundle create x.bundle main` → scp →
+  新機で `git clone -b main x.bundle tpcdaq-rs`(`-b main` が無いと HEAD が無くて空チェックアウトになる)。更新は `git pull --ff-only x.bundle main`。
+- **ファイル記述子**: Ubuntu の既定はソフト 1024 / ハード 524288(Mac のシェルは 100 万)。`controller_integration` は 22 本並列で
+  1024 を超え、libzmq が `Too many open files (epoll.cpp:65)` で abort する。テストも本番も `ulimit -n 65536`(daq_up.sh は自分で上げる)。
+- 実データ回帰(任意): `TPCDAQ_REAL_GRAW` / `TPCDAQ_REAL_GEOMETRY_MINI` / `TPCDAQ_ROOT_SINK_BIN` を付けて `cargo test --release`。
+  ELITPC ではオラクル(events 108 / items 15,040,512 / malformed 0)一致、mini raw-tree e2e も 108 events 完結を確認。
+- UI は **Mac でビルドした `ui/dist/ui/browser` を `/opt/tpcdaq/ui` にコピー**すれば新機に Node は要らない。
+- ジオメトリ `.dat` は `/opt/tpcdaq/assets/` に(リポ外)。
+
+設定 TOML(雛形 = **`config/daq_example.toml`**。SPEC §3。下は v0.4 までの例):
 ```toml
 [system]
 experiment = "mini_eTPC"
@@ -166,10 +210,16 @@ params_dir = "/srv/tpcdaq/params"                # v1.33: パラメータ JSON(c
 
 順序は `reference/_spike/demo/start_demo.sh` と同じ(下流から): **root_sink → monitor → graw_writer → decoder →
 receiver → getEccServer → ecc_bridge → controller → slowctl**(slowctl は最後でよい: controller 不在中の IDENT/ALARM は再送キューで届く — 079 Phase 2)。停止は逆順、Rust bin は **SIGINT**(SIGTERM ハンドラ無し — 028 付録 A)、
-root_sink は両方 graceful。まずは `daq_up.sh` / `daq_down.sh`(GDED の `bench_up.sh` を整えたもの)で運用し、
-安定したら systemd ユーザーユニット(`After=` で順序、`KillSignal=SIGINT`)へ。**listen-before-start**(receiver が
-46005 を listen してから ECC start)は controller が担保するので、手順として気にするのは「receiver が上がっていること」だけ。
-- ✅ `curl -s http://localhost:8080/api/status` が全コンポーネント alive。
+root_sink は両方 graceful、getEccServer は **SIGTERM**。安定したら systemd ユーザーユニット(`After=` で順序、`KillSignal=SIGINT`)へ。
+**listen-before-start**(receiver が 46005 を listen してから ECC start)は controller が担保するので、手順として気にするのは「receiver が上がっていること」だけ。
+
+**起動・停止スクリプト(v0.5)**: `tools/deploy/daq_up.sh` / `daq_down.sh`(slowctl はまだ含めない)。ホスト固有のパスは
+`/opt/tpcdaq/daq.env`(雛形 `tools/deploy/daq.env.example`)、DAQ 設定は `/opt/tpcdaq/daq.toml`(雛形 `config/daq_example.toml`、
+パスフレーズを書くので chmod 600)。daq_up.sh は TOML から output_root / geometry / build_timeout_ms / raw_tree を拾って root_sink に渡し、
+`ulimit -n 65536`、ECC の古いライブラリは getEccServer にだけ渡す、各プロセスを setsid で切り離す(ssh から叩いて返ってくる)。
+ログと pid は `$TPCDAQ_LOGS`(既定 `/srv/tpcdaq/logs`、前回分は `.log.prev`)。**起動しただけでは ECC は zCoBo に繋がない**(describe は run/start)。
+- ✅ `curl -s http://localhost:8080/api/status` が全コンポーネント reachable、`ecc` が `Idle / NO_ERR`。別 PC から `http://<新機>:8080/` で UI。
+  `daq_down.sh` 後に `stopped — no leftover processes` とポート全閉(ELITPC で確認済み)。
 
 ## 9. シリアル機器(079)
 
@@ -200,7 +250,7 @@ root_sink は両方 graceful。まずは `daq_up.sh` / `daq_down.sh`(GDED の `b
 
 ## 11. 未確定・追記予定
 
-- 5-B の 3.7.10 コンパイル可否、ROOT の具体版、systemd ユニットの実体。
+- 5-B の 3.7.10 コンパイル可否(26.04 では A が動いたので急がない)、systemd ユニットの実体、slowctl を daq_up.sh に含めるか。
 - 高レート運転用のデータ置き場(既存 ZFS プールを掃除して import し専用データセット `compression=lz4 atime=off recordsize=1M` + `reservation`、
   または専用ディスク)。ZFS は使用率 90 % 超で書き込み性能が落ちるので 80 % 以下で使う(TODO/archive/102)。slowctl / params は実装済み(上記 §6 / §9 / §10-9・10)— 実機で初めて通す。
 - 実施ログは TODO/080 A-1 の結果節へ(日付・版・所要時間・つまずき)。

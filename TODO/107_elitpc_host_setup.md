@@ -53,26 +53,50 @@ v0.4 の指示どおり **§1–§2 の確認 → §5 A(ECC ネイティブ)を�
 - rustup(`--profile minimal -c rustfmt,clippy`)→ **rustc / cargo 1.99.0**(Mac は 1.97.1)。C リンカ(`cc`)は build-essential 待ち。
 - 26.04 デスクトップ版には **gcc / git / curl / cmake が入っていない**(wget と python3 3.14.4 はある)。
 
-## ユーザーに依頼する sudo 作業(1 回にまとめる)
+## sudo 作業(ユーザー実施、2026-10-08)
 
-```sh
-sudo apt update
-sudo apt install -y build-essential git cmake curl python3-zmq \
-  libtbb12 libgsl28 libgslcblas0 libblas3 libglu1-mesa libgl2ps1.4 libftgl2 libopengl0 libgfortran5 libcfitsio10t64
-echo 'pool ntp.ubuntu.com iburst' | sudo tee /etc/chrony/sources.d/plain-ntp.sources
-sudo chronyc reload sources
-sudo usermod -aG dialout daq
-sudo install -d -o daq -g daq /opt/ROOT /opt/tpcdaq /srv/tpcdaq
-echo 'source /opt/ROOT/bin/thisroot.sh' | sudo tee /etc/profile.d/root.sh
-```
+1 回目(15:12): `build-essential git cmake curl python3-zmq` + ROOT 実行時依存 10 個 + 素の NTP 追加 + dialout + `/opt/ROOT /opt/tpcdaq /srv/tpcdaq`(daq 所有)+
+`/etc/profile.d/root.sh`。2 回目(15:17): **`libzmq3-dev libboost-dev`**(root_sink 用。v0.4 の手順から抜けていた)。
 
-## 未決(ユーザー判断)
+## 結果(2026-10-08、ELITPC = Ubuntu 26.04.1 / gcc 15.2.0 / Rust 1.99.0 / ROOT 6.40.04)
 
-- データ置き場: NVMe がルート 1 枚なので、`/srv/tpcdaq` をルート上のディレクトリにする案(ext4 の予約 5 % ≈ 47 GB は root 専用 =
-  daq の書き込みで満杯になっても OS 側の余地は残る。α 線源 run の 1.5〜19 GB/日なら 874 GB で 46 日以上)を推奨。
-  パーティションを分け直すならライブ USB から縮小が要る。
+| 節 | 内容 | 結果 |
+|---|---|---|
+| §4 ROOT | 公式バイナリを `/opt/ROOT` へ。`root -b -q -e 'TH1D ... FillRandom'` | ✅ 起動・cling OK。未解決 ldd は不要な libR / libRInside / libunuran / libXrd* のみ |
+| §6 リポ | 手元が origin より **194 コミット先行**(未 push)→ push せず **git bundle** で `~/tpcdaq-rs` に(`git clone -b main`) | HEAD `546f31a` |
+| §6 cargo | `cargo build --release` | ✅ 30 s |
+| §6 cargo | `cargo test`(ソフト上限 1024 のまま) | ❌ `controller_integration` が `Too many open files (zeromq-src epoll.cpp:65)` → SIGABRT(それまでの 19 スイート 652 件は green) |
+| §6 cargo | `ulimit -n 65536; cargo test --no-fail-fast` | ✅ **58 スイート 848 passed / 0 failed / 1 ignored** |
+| §6 実データ | `TPCDAQ_REAL_GRAW`(パルサー 30,108,684 B)+ `TPCDAQ_REAL_GEOMETRY_MINI` + `TPCDAQ_ROOT_SINK_BIN` で `cargo test --release` 全数 | ✅ 848 / 0 / 1。個別 `--nocapture` で **events 108 / items 15,040,512 / malformed 0**(decoder)、graw 書き出しバイト一致・seq_gaps 0、mini raw-tree e2e = 108 events complete / incomplete 0 / late 0、`run0001.root` 108 entries |
+| §6 SKIP | `TPCDAQ_FAKE_ECC_BIN` 未設定(p3_e2e の E2E-C/D/G/H、p3_error_paths F0–F2、soak smoke)、`TPCDAQ_REAL_GEOMETRY_ELITPC` 未設定 | fake_ecc は Ice 3.8 の C++ テストダブルで本番には不要(Mac で検証済みの範囲) |
+| §4 root_sink | `make TPCDAQ_TPCRECO_DIR=/opt/tpcdaq/assets/TPCReco-HIGS2026_online -j` | ✅ **gcc 15 で警告・エラーゼロ** |
+| §4 root_sink | `make test` | ✅ tpc_wire 68 / rs_core 71 / eb_core 175 / geo 426 / monitor_hist 202 / monitor_pub 92(conformance はゴールデン無しで SKIP) |
+| §4 root_sink | `make test-root` | ✅ recorder 170 / pevent 99 / raw_tree 88(実 PEventTPC 無しの SKIP 1) |
+| §8 起動 | `tools/deploy/daq_up.sh`(新規、`546f31a`)で 8 プロセス | ✅ `api/status`: graw-writer / decoder / receiver0 reachable・Idle、**ecc = Idle / NO_ERR**(Rust ecc_bridge → 実 getEccServer)。Mac(同 LAN)から UI `http://<ELITPC>:8080/` HTTP 200・WS 9000 到達 |
+| §8 停止 | `tools/deploy/daq_down.sh` | ✅ 8 本とも graceful(SIGKILL 無し)、`stopped — no leftover processes`、全ポート閉 → 再度 up して**起動したまま** |
 
-## 次
+配置(リポ外): `/opt/tpcdaq/daq.env`・`/opt/tpcdaq/daq.toml`(chmod 600、パスフレーズは `secrets.token_urlsafe(12)` で生成して TOML にのみ記載)、
+`/opt/tpcdaq/assets/`(実ジオメトリ `.dat`、パルサー `.graw`、TPCReco 部分集合)、`/opt/tpcdaq/ui`(Mac ビルドの dist、09-23 版 = ui/src 最終変更と同じ)、
+データ・ログ `/srv/tpcdaq`(`logs/`、`params/`)。daq.toml: `listen = 0.0.0.0:46005` + **`router_ip = 192.168.4.2`**(NIC 設定前でも上がるように)、
+`config_id = zCobo / physics / physics`、`ecc_config_dir = ~/ELITPC/GetSoftware_config`(GDED のコピー)。
 
-sudo 作業後: ROOT を `/opt/ROOT` へ移して `root -b -q` / tpcdaq-rs を git clone → `cargo build --release && cargo test` →
-`tools/root_sink` を `make -j && make test && make test-root`(gcc 15)→ UI は Mac でビルドした dist を持ち込み → §2 netplan(zCoBo 直結、ユーザー立ち会い)。
+## データ置き場
+
+NVMe がルート ext4 1 枚なので **`/srv/tpcdaq` = ルート上のディレクトリ**で進めた(推奨案をユーザーに提示、異論なし)。
+daq が書くので ext4 の予約 5 %(≈ 47 GB)が OS 側に残る。α 線源 run(1.5〜19 GB/日)なら 874 GB で 46 日以上。高レート運転の前に別ボリュームへ(手順書 §11)。
+
+## 時刻同期の続き — NTS 源を足すだけでは同期しない
+
+素の NTP 源(ntp.ubuntu.com × 4)は Reach 377 で届いているのに全部 `^-`(不採用)、`Leap status: Not synchronised` のまま。
+chrony 4.8 の既定 `authselectmode mix` は NTS(認証付き)源に `require` を付ける = **NTS 源が 1 つも選べない限り同期しない**。
+→ NTS の源ファイル `ubuntu-ntp-pools.sources` を `.disabled` に改名して `chronyc reload sources` が要る(sudo、ユーザー依頼中)。手順書 v0.5 §1 に反映。
+
+## 残り(ユーザー立ち会い / 移行日)
+
+1. chrony: 上記の改名 → `chronyc tracking` の Leap status が Normal。
+2. §2 netplan: `enp179s0f0` = `192.168.4.2/24`、MTU 9000、ゲートウェイ無し(sudo)。**zCoBo の線を GDED から付け替える日に**。
+3. **GDED の VM の GET を止めてから** ELITPC で describe(getHwServer に ECC が 2 つ繋がる事故を避ける)。
+4. ECC 設定: VM の現用 xcfg(physics)を `~/ELITPC/GetSoftware_config` に同期(GDED のコピーが VM の現用と同じか確認)。
+5. §10 疎通: DF ping 8972 → パルサー run → `/srv/tpcdaq/run0001/` の graw + ROOT → UI → stop/reset の walk-back。
+6. 不感時間の比較: 移行後の線源 run で 106 の VM 律速(≈ 0.4 Hz 上限)が消えるか。
+7. 後回し: slowctl(§9)、systemd ユニット、ufw。
