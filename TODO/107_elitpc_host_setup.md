@@ -133,6 +133,12 @@ VM のネットワーク無しに読めた(Guest Additions 7.1.6、RunLevel 2)�
 - **run 2 = α 線源**(config `zCobo / elinp / elinp` = VM の delay_test.xcfg)18:23:51 開始: DataLinkSet `192.168.4.1:46005 TCP`、
   zCoBo が 7 s 後に接続(`CoBo connected peer=192.168.4.81`)、最初のフレームは開始 38 s 後(557,312 B = 全読み出し)。
   **ユーザーの退席に合わせて走らせたまま**、制御トークンは release(UI から acquire して止められる)。比較(不感時間・レート vs VM)は run 2 を止めてから。
+- **CPU(run 2 開始 557 s 時点、26 events)**: 8 プロセスの累積 CPU 計 9.8 s(root_sink 7.05 = ROOT 初期化と圧縮、monitor 1.43、他は各 < 0.4)= 1 コアの 1.8 %。
+  アイドル分込みの上限でも **≈ 0.38 コア秒 / event**(VM は 106 で ≈ 5 コア秒 / event)。RSS は root_sink 565 MB、他は各 6〜17 MB。
+  ユーザー観察「htop で全く CPU 食わない、元のは描画の負荷?」→ 最有力: VM の `GetController.conf` が `[data] monitoring=true / showAsciiHeader=true`
+  (GPU 無し VM で 272 ch × 512 の波形描画 + ヘッダ表示、データルータも GetController 内蔵 = `external=false`)。VM 側で monitoring を切った比較はしていない。
+- **イベント間隔(同 26 events)**: eventIdx 0–25 連番、平均 0.049 Hz、最小間隔 **0.888 s**(1 s 未満が 25 中 1。VM では約 1.0 s の固定不感時間 — 104)。
+  Poisson なら 1 s 未満は 4.8 % ≈ 1.2 本の期待 = 不感時間なしと矛盾しないが統計不足 → 一晩分(数千 events)で判定。
 - 切替のたびに daq.toml の `config_id` を書き換えてスタックを再起動している(078 の params / REST で切り替える運用は未整備)。
 
 ## 残り(ユーザー立ち会い / 移行日)
