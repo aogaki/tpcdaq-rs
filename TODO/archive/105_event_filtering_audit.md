@@ -24,3 +24,17 @@
 ## ユーザー確認事項
 1. ゲートジェネレータの出力幅・モード(再トリガ可否)と、veto / inhibit 入力に何か(CoBo の busy 等)が繋がっているか。LED が CFD 出力かゲート出力か。
 2. VM の物理設定で `triggerMode` / `secondaryTriggerMode` / `readoutDepth` / `enableZeroSuppression` と、LEMO I/O の `function`(busy_output の割り当て)。
+
+## 追記(2026-10-08、ユーザー「FPGA にアクセスできますか」)
+- 経路: Mac → GDED(daq、鍵)→ zCoBo(root、GDED の `~/tpcdaq-rs/zcobo.py`)。2026-10-08 確認: Linux 4.9.0-xilinx(ARMv7、Zynq PS)、稼働 9 日、getHwServer 稼働中(VM の GET でデータ取得中)。
+  FPGA は `/dev/mem` と UIO 3 個(gpio 0x41210000 / axidatagenerator 0x46000000 / udmabufconfig 0x54000000)、`busybox devmem` あり。**レジスタには未アクセス**(run 中のため)。
+- レジスタ表 = `reference/ZC706_20181031_ELINP/configs_1asad/hardwareDescription_zCobo.xcfg`、`ctrl` の base 0x44000000。問題に直結する読み取り専用レジスタ:
+  | レジスタ | アドレス | 意味(xcfg の説明) |
+  |---|---|---|
+  | extTriggerCnt | 0x440001CC | CoBo が受けた外部トリガの総数(pipeCtrl/reset でリセット) |
+  | eventCounter | 0x44000090 | 循環バッファに書いた事象数 |
+  | fifoHighWaterMark | 0x440001D0 | FPGA 内 FIFO の最高水位 [B](下流の詰まりの指標) |
+  | triggerDelay / triggerPeriod_10ns | 0x44000068 / 0x44000084 | 実際に設定されている値(VM の設定ファイルを見ずに確認できる) |
+  | firmwareDate | 0x440001D8 | FW のビルド日 |
+  extTriggerCnt − eventCounter = busy 中に来て捨てられたトリガ = 不感時間の直接測定。
+- 注意: 未定義アドレスへの AXI 読み出しは Zynq をハングさせ得る(= 取得中の run が止まる)。アドレスは zCoBo 自身の記述ファイル由来だが、run 中に読むかはユーザー判断。**書き込みは一切しない**。
