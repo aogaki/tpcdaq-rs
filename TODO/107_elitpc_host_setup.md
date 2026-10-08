@@ -89,11 +89,13 @@ daq が書くので ext4 の予約 5 %(≈ 47 GB)が OS 側に残る。α 線源
 
 素の NTP 源(ntp.ubuntu.com × 4)は Reach 377 で届いているのに全部 `^-`(不採用)、`Leap status: Not synchronised` のまま。
 chrony 4.8 の既定 `authselectmode mix` は NTS(認証付き)源に `require` を付ける = **NTS 源が 1 つも選べない限り同期しない**。
-→ NTS の源ファイル `ubuntu-ntp-pools.sources` を `.disabled` に改名して `chronyc reload sources` が要る(sudo、ユーザー依頼中)。手順書 v0.5 §1 に反映。
+→ NTS の源ファイル `ubuntu-ntp-pools.sources` を `.disabled` に改名して `chronyc reload sources` が要る(sudo)。手順書 v0.5 §1 に反映。
+**ユーザー実施(2026-10-08 15:3x)→ ✅ 同期**: 4 源とも Reach 377、`^*` = 185.125.190.58(prod-ntp-5.ntp4.ps5.canonical.com)、Stratum 3、
+Last offset −7.3 ms、`Leap status: Normal`、`timedatectl` = `System clock synchronized: yes`。
 
 ## 残り(ユーザー立ち会い / 移行日)
 
-1. chrony: 上記の改名 → `chronyc tracking` の Leap status が Normal。
+1. ~~chrony~~ ✅ 済(上記)。
 2. §2 netplan: `enp179s0f0` = `192.168.4.2/24`、MTU 9000、ゲートウェイ無し(sudo)。**zCoBo の線を GDED から付け替える日に**。
 3. **GDED の VM の GET を止めてから** ELITPC で describe(getHwServer に ECC が 2 つ繋がる事故を避ける)。
 4. ECC 設定: VM の現用 xcfg(physics)を `~/ELITPC/GetSoftware_config` に同期(GDED のコピーが VM の現用と同じか確認)。
