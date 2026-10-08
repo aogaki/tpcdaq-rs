@@ -53,3 +53,20 @@
 - zCoBo ファームの README(`reference/ZC706_20181031_ELINP/docs/README.txt` §5): **「現行ファームは MULTIPLICITY でのトリガも 2 陽子モードも扱えない」** → multiplicity による選別は zCoBo では原理的に無い。
 - トリガ受付数はレジスタでは測れない。代わりにハードで測れる: FMC-to-AsAd アダプタの SMA **OUT1 = trig_pulse_nodelay**(時刻と事象番号をラッチした瞬間 = 受け付けたトリガ 1 回につき 1 発)、OUT2 = triggerDelay 遅れの実停止。
   **IN1(ゲートジェネレータからの入力)と OUT1 をスケーラーかオシロで数えれば、CoBo の受付率と不感時間が直接分かる**。
+
+## 追記 3(2026-10-08、ユーザー「GET 以外にも FPGA のシステム上に問題になりそうなものがないか」)— zCoBo の Linux を読み取りのみで点検(取得は継続)
+| 項目 | 結果 | 判定 |
+|---|---|---|
+| CPU / 負荷 | 100 % アイドル、load 0.00。プロセスは init / syslogd / klogd / dropbear / getHwServer のみ | ○ |
+| メモリ | 1,030 MB 中 727 MB 空き、swap 無し。getHwServer の RSS 144 MB(**VmHWM = VmRSS** = 今が最大値。増え続けているかは 1 日後に再確認) | ○(要再確認) |
+| ファイルシステム | ルートは RAM ディスク、/var/log → /tmp(tmpfs、使用 24 kB)。ログで RAM が埋まる心配無し | ○ |
+| カーネルログ | 起動時のメッセージのみ。エラーは USB OTG の probe 失敗だけ(無関係) | ○ |
+| データ用 NIC(eth1、AXI Ethernet) | 1 Gbps 全二重、flow control off。TCP: OutSegs 535 万、**再送 0**、エラー・リセット 0。VM への接続の送信キュー 0 | ○ |
+| DMA バッファ | udmabuf 128 MB × 2(フレーム 557 kB なら約 240 個分)。zCoBo 側で詰まっている兆候無し | ○ |
+| getHwServer | スレッド 7。データ用とみられる 1 本が `poll_schedule_timeout`(9 日で sys 11.5 s)、他は futex / epoll 待ち。UIO の割り込みは /proc/interrupts に出ていない(ポーリング動作) | ○(下記) |
+| 温度(XADC) | 41 °C | ○ |
+| ファーム | SD カード(読み取り専用でマウント → 解除)の BOOT.bin / devicetree.dtb / uImage / uramdisk の md5 が `reference/ZC706_20181031_ELINP/SD_image` と**完全一致**(2018-10-31 版)。firmwareDate レジスタの 2018-01-29 はビットストリームに焼かれた値 | ○ |
+| 時計 | 1970-01-10(RTC / NTP 無し)。ログの時刻は無意味。事象の時刻は FPGA のカウンタなので**データには無影響** | △(実害なし) |
+| その他 | 別の対話セッションで `top` が動いていた(点検の約 2 分前に開始、こちらの操作ではない → 触らず)。SD カードに macOS のメタデータ(2025-03-31)が残っている(無害) | — |
+- 不感時間との関係: zCoBo 側は CPU・NIC・DMA バッファとも余裕で、送信キューも空 = **書き出しの詰まりは zCoBo 側では起きていない**。約 1 s の不感時間は、トリガ受付後の FPGA と getHwServer の間の受け渡し(ポーリング周期や再アーム待ち)か、VM 側の受信のどちらか。zCoBo の getHwServer は CoBo 版の移植でソースが手元に無いので、内部は確認できない。
+  切り分けは、run の無い時に AsAd パルサーを 2 Hz / 5 Hz で入れて記録の頭打ちを見る、か OUT1 と IN1 を数える(追記 2)。
