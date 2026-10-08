@@ -114,7 +114,9 @@ Last offset −7.3 ms、`Leap status: Normal`、`timedatectl` = `System clock sy
 ## 残り(ユーザー立ち会い / 移行日)
 
 1. ~~chrony~~ ✅ 済(上記)。
-2. ~~線の付け替え~~ ✅(ユーザー、4.1/24)。残り = NIC のゲートウェイ除去 + MTU 9000(sudo)。
+2. ~~線の付け替え~~ ✅(ユーザー、4.1/24)。~~NIC のゲートウェイ除去 + MTU 9000~~ ✅(ユーザー実施:
+   `nmcli con mod netplan-enp179s0f0 ipv4.gateway "" ipv4.never-default yes 802-3-ethernet.mtu 9000` → `con up`)。
+   確認: 4.x の default route 消滅、mtu 9000 / 1000 Mb/s、**DF ping 1472 / 8972 とも 3/3**(rtt 0.24 / 0.47 ms)= §2 ✅。スタックは再起動不要(ecc Idle / NO_ERR のまま)。
 3. ~~describe~~ ✅(VM 側はリンク断で zCoBo に届かない状態で実施)。VM の GET は止めておく(線を戻したときの二重接続防止)。
 4. ECC 設定: **VM 内の `configure-physics-extTrig_240fC_25MHz_70ns.xcfg` を TPC_Share 経由で取得** → `prepare-elinp` / `configure-elinp` に。pulser 用も VM 版(TPC_Share の configure-pulser.xcfg、md5 86a8ab10)と GDED 版(e1043496)が違う。
 5. §10 疎通: DF ping 8972 → パルサー run → `/srv/tpcdaq/run0001/` の graw + ROOT → UI → stop/reset の walk-back。
