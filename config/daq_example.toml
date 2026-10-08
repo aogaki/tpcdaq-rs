@@ -1,0 +1,36 @@
+# daq_example.toml — 本番 DAQ 機の設定雛形(SPEC §3、NEW_DAQ_SETUP §6、tools/deploy/daq_up.sh が読む)。
+# 写して /opt/tpcdaq/daq.toml に置き、<...> を埋める。パスフレーズを書くので chmod 600。
+# daq_up.sh は [system] の output_root / geometry と [root_sink] の build_timeout_ms / raw_tree も読む。
+
+[system]
+experiment = "mini_eTPC"
+output_root = "/srv/tpcdaq"
+geometry = "/opt/tpcdaq/assets/<mini の実ジオメトリ>.dat"   # リポ外(実 .dat はリポに入れない)
+
+[[cobo]]
+id = 0
+listen = "0.0.0.0:46005"           # zCoBo 直結 NIC の IP に絞ってもよい(NIC 設定前でも上がるよう既定は全 IF)
+data_sender_id = "CoBo[0]"
+
+[decoder]
+workers = 1
+
+[root_sink]
+snapshot_hz = 1.0
+event_publish_hz = 20.0
+build_timeout_ms = 1000
+raw_tree = true                    # run{N}_raw.root(macros 直結、075)
+
+[monitor]
+ws_listen = "0.0.0.0:9000"
+# slow_sub = "tcp://127.0.0.1:47006"   # slowctl を動かすときに有効化(v1.31)
+
+[controller]
+rest_listen = "0.0.0.0:8080"
+passphrase = "<run 制御のパスフレーズ>"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
+router_ip = "<zCoBo から見たこの機体の IP(直結 NIC)>"   # listen が 0.0.0.0 なので明示する(SPEC §8.2)
+config_id = { describe = "zCobo", prepare = "physics", configure = "physics" }
+ui_dir = "/opt/tpcdaq/ui"          # ui/dist/ui/browser のコピー
+ecc_config_dir = "<ECC の設定リポジトリ>"   # getEccServer --config-repo-url と同じ(078 の生成 xcfg の出力先)
+params_dir = "/srv/tpcdaq/params"
