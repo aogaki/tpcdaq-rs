@@ -109,3 +109,4 @@ Luna2 `~/puppex_backup_2026-10-06/`(700、各ファイル 600)に:
 - 稼働中 DB の扱い: Mongo は 10-06 の論理ダンプ(Luna2、§8)が正。Grafana は Luna2 の書き出し JSON。InfluxDB の 09-18〜09-22 分(§7 で未コピーとした分)は **daq.tgz の中に入っている**(作成が 09-23 のため)。ただし稼働中に tar したので DB ファイルとしての一貫性は保証されない。
 - daq.tgz は ZFS の /data 上にあり、入れ直しでは消えない(§9: プールには触らない)。
 - 未確認: アーカイブ全体の破損検査(一覧作成を途中で止めた。必要なら `gzip -t /data/daq.tgz`、10〜20 分)。/home/daq/delila-rs/docker/data/db に Mongo の WiredTiger 本体があり、稼働中に書き込まれている(§6 の「Mongo は名前付きボリューム」は configdb 側の可能性)。
+- ユーザー回答(2026-10-08): delila-rs などは利用者側ですでにバックアップ済み → /home/daq の退避は追加作業不要。
