@@ -100,3 +100,12 @@ Luna2 `~/puppex_backup_2026-10-06/`(700、各ファイル 600)に:
 - **Ubuntu 26.04 LTS** に決定。手順書を **v0.4** に改訂: ROOT は `root_v6.40.04.Linux-ubuntu26.04-x86_64-gcc15.2.tar.gz`(公式、Mac と同版)/ UI は Mac ビルド持ち込みが最短 /
   **実 ECC のネイティブ起動(§5 A、24.04 の GDED で実証済み)は 26.04 で未実証 → §1–§2 の直後に最初に確認**、ダメなら §5 C(16.04 コンテナ、`--network host`)。
 - ECC の資産(GET の `build/.libs`、xenial の Boost 1.58 / libssl 1.0.0 等、VM 採取の Ice 3.7.2)は GDED の動作実績のある一式を写す(puppex の ~/ELITPC は入れ直しで消えるが不要)。
+
+## 11. `/data/daq.tgz` は /home/daq のスナップショットか(2026-10-08、ユーザー依頼。全数照合は不要との指示)
+- `/data/daq.tgz`(124 GB、2026-09-23 12:37 作成)の最上位は `daq/`(所有者 daq、権限 `drwxr-x---`、日付 09-22 13:54)= **/home を起点に /home/daq を tar したもの**。
+- 今の /home/daq(daq ユーザーで一覧、456 GB、385,719 ファイル)のうち、アーカイブ作成時刻(09-23 12:27 を境に)以降に更新されたのは **1,288 ファイル・0.40 GB だけ**:
+  warp ターミナルのサーバ(229 MB)、各種キャッシュ、firefox snap、そして **delila-rs/docker(33 MB = 稼働中の InfluxDB / Grafana / Mongo のデータ)**。
+  → **daq.tgz は実質的に /home/daq の 09-23 時点のスナップショット**。差分はキャッシュと稼働中 DB だけ。
+- 稼働中 DB の扱い: Mongo は 10-06 の論理ダンプ(Luna2、§8)が正。Grafana は Luna2 の書き出し JSON。InfluxDB の 09-18〜09-22 分(§7 で未コピーとした分)は **daq.tgz の中に入っている**(作成が 09-23 のため)。ただし稼働中に tar したので DB ファイルとしての一貫性は保証されない。
+- daq.tgz は ZFS の /data 上にあり、入れ直しでは消えない(§9: プールには触らない)。
+- 未確認: アーカイブ全体の破損検査(一覧作成を途中で止めた。必要なら `gzip -t /data/daq.tgz`、10〜20 分)。/home/daq/delila-rs/docker/data/db に Mongo の WiredTiger 本体があり、稼働中に書き込まれている(§6 の「Mongo は名前付きボリューム」は configdb 側の可能性)。
