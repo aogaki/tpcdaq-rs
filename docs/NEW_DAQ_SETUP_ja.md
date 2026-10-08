@@ -1,6 +1,12 @@
-# 新 DAQ 機セットアップ手順(Ubuntu 24.04 LTS)— v0.3(2026-10-08: データ置き場 = システム NVMe の別パーティション、既存データディスクには触らない)
+# 新 DAQ 機セットアップ手順(Ubuntu 26.04 LTS)— v0.4(2026-10-08: OS を 26.04 に。ECC のネイティブ起動を最初に確認、ダメなら 16.04 コンテナ)
+
+<!-- v0.3(2026-10-08): データ置き場 = システム NVMe の別パーティション、既存データディスクには触らない -->
 
 <!-- v0.2(2026-09-23): Rust ブリッジ・slowctl・params を反映 -->
+
+**26.04 の注意(v0.4)**: 実 ECC(§5)は 16.04 ビルドのバイナリを古いライブラリ同梱で動かす方式で、24.04(GDED)では実証済みだが
+**26.04 では未実証**。OS とネットワーク(§1–§2)が済んだら、**§3 より先に §5 A を試して** ECC が `IDLE / NO_ERR` まで上がるかを確かめる。
+上がらなければ §5 C(16.04 コンテナ)に切り替える。ほかの依存(Rust、ROOT 6.40.04 の 26.04 用公式バイナリ、ZFS、X550、NVIDIA)は 26.04 で問題ない見込み。
 
 **位置づけ**: TODO/080 A-1。順序は TODO/076 §6 の裁定どおり —
 **OS → ネットワーク → ツールチェーン → ROOT → 実 ECC(ホストでネイティブ、Ice 3.7)→ tpcdaq-rs → UI →
@@ -36,7 +42,7 @@ ECC ブリッジ(Rust 076、当面は C++ 併存)→ 疎通チェック → 常�
   データ用は `/srv/tpcdaq` にマウント(`/etc/fstab` に `UUID=<...> /srv/tpcdaq ext4 defaults,noatime 0 2`)、所有者 `daq`。
   **`/data` は使わない** —— 既存 ZFS プールの mountpoint が `/data` のことが多く、後で import したときに衝突する。
 
-- Ubuntu 24.04 LTS Server(GUI 不要。ブラウザは別 PC から)。ユーザー `daq`(sudo 可)。
+- Ubuntu 26.04 LTS Server(GUI 不要。ブラウザは別 PC から)。ユーザー `daq`(sudo 可)。
 - `sudo apt update && sudo apt install -y build-essential git cmake pkg-config curl python3 python3-pip python3-yaml openssh-server chrony`
 - 時刻: `chrony` を実験 LAN の NTP か公開 NTP に。**ログブックの ts は RFC3339 オフセット付き**なので TZ を決めて固定
   (`timedatectl set-timezone Europe/Bucharest` 等)。
@@ -59,22 +65,22 @@ ECC ブリッジ(Rust 076、当面は C++ 併存)→ 疎通チェック → 常�
 
 - Rust: `curl https://sh.rustup.rs -sSf | sh` → stable(手元 1.97 系)。`zmq` クレートは vendored(`zeromq-src`)なので
   libzmq の apt は不要(GDED で実証、ビルド 1 分)。
-- Node.js 22 LTS(UI ビルド用。Angular 22 系): NodeSource か `nvm`。ビルドは Mac でやって `ui/dist` を持ち込んでもよい。
+- Node.js 22 LTS(UI ビルド用。Angular 22 系): `nvm` が OS の版に依らず確実。**Mac でビルドして `ui/dist` を持ち込むのが最短**(機体に Node は不要になる)。
 - `python3-zmq`(ベンチ/疎通スクリプト用): `pip install pyzmq` か apt `python3-zmq`。
-- ✅ `cargo --version` / `node --version`(≥ 22)。
+- ✅ `cargo --version` /(機体でビルドする場合のみ)`node --version`(≥ 22)。
 
 ## 4. ROOT(root-sink 用)
 
-- 公式バイナリ(Ubuntu 24.04 / gcc13 用 tarball、6.36 以降)を `/opt/ROOT` に展開。`/etc/profile.d/root.sh` に
+- 公式バイナリ `root_v6.40.04.Linux-ubuntu26.04-x86_64-gcc15.2.tar.gz`(root.cern の release-64004。Mac と同じ 6.40.04)を `/opt/ROOT` に展開。`/etc/profile.d/root.sh` に
   `source /opt/ROOT/bin/thisroot.sh`。ソースビルドは不要(TPCReco の旧 ROOT 互換は**出力ファイル側**で担保 — 014 の ZLIB-1)。
 - 確認: `root -b -q` が起動、`root-config --cflags --libs`。
 - tpcdaq-rs 側: `cd tools/root_sink && make -j && make test && make test-root`(test-root は recorder 170 / pevent 99 /
-  raw 88 が green のはず)。
+  raw 88 が green のはず)。gcc 15 で新しい警告・エラーが出たら直して本書に追記する。
 - ✅ `tools/root_sink/root_sink --help`。
 
 ## 5. 実 ECC(getEccServer 20190315)をホストにネイティブ導入
 
-2 通り。**A が最短(GDED で実証済み)**、B は恒久版。
+3 通り。**A が最短(GDED の 24.04 で実証済み、26.04 は未実証 — 冒頭の注意)**、B は恒久版、C は A が 26.04 で動かないときの逃げ道。
 
 **A. 16.04 ビルド済みバイナリ + 不足ライブラリの非 root 展開**(メモリ geteccserver-native-gded の手順そのまま)
 1. `20190315_patched.tgz`(ソース + `build/.libs`)を `~/ELITPC/GetSoftware_bin/20190315/` に展開。
@@ -91,7 +97,11 @@ ECC ブリッジ(Rust 076、当面は C++ 併存)→ 疎通チェック → 常�
 - macOS で要ったパッチは 2 行(`Factory.hpp` include / `PeriodicTask.cpp` io_context)+ configure の Ice パス再標的。
   **3.7.10 の `SyscallException` 改名が GET ソースに当たるかは未確認** — 当たったら `IceUtil::` → `Ice::` の機械置換で済むはず。
   結果を本書に追記すること。
-- ✅ どちらでも: `0.0.0.0:46002` LISTEN、`sm-status` = `IDLE / NO_ERR`、`config-list` が持ち込んだ xcfg のトリプレットを返す。
+**C. 16.04 コンテナで getEccServer だけを動かす**(A が 26.04 で動かないとき)
+- Docker の `ubuntu:16.04` イメージに A の手順 1–3 の資産(GET の `build/.libs`、Ice 3.7.2)を入れ、`--network host` で起動する。
+  Boost 1.58 / libssl 1.0.0 は 16.04 の apt でそのまま入る(dpkg-deb -x 不要)。設定リポジトリはボリュームでマウント。
+- ECC は ZMQ / Ice の TCP でしか外と話さない(ecc_bridge は 127.0.0.1:46002 に繋ぐだけ)ので、コンテナ化しても tpcdaq 側は無変更。
+- ✅ どれでも: `0.0.0.0:46002` LISTEN、`sm-status` = `IDLE / NO_ERR`、`config-list` が持ち込んだ xcfg のトリプレットを返す。
 
 **設定リポジトリ**: `describe-<id>.xcfg / prepare-<id>.xcfg / configure-<id>.xcfg` の命名は厳格(ECC は
 `prepare-<id>` が無いと prepare で失敗 — GDED では configure の写しを置いた)。id の組は controller の

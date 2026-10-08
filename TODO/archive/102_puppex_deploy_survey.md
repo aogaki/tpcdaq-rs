@@ -95,3 +95,8 @@ Luna2 `~/puppex_backup_2026-10-06/`(700、各ファイル 600)に:
 - tpcdaq のデータは **NVMe の別パーティション(ext4、noatime)を `/srv/tpcdaq`** に。`/data` はプールの mountpoint と衝突するので使わない。今の α 線源 run(0.03〜0.4 Hz × 557 kB)なら 1 日 1.5〜19 GB で十分、高レート運転の前に置き場を見直す。
 - 手順書を **v0.3** に改訂(`docs/NEW_DAQ_SETUP_ja.md` §0 ディスク / §1 インストール先と分割・✅ / §6 output_root・params_dir / §11)。SPEC §3.1 とコード内テストの `/data/tpcdaq` は例示値なので据え置き。
 - インストール前のディスク構成の控え(比較用、識別子を含むのでリポ外): `reference/_infra/puppex_disk_baseline_2026-10-08.txt`。この時点でプール `data` は 49.1 TB 中 37.0 TB 使用(10-06 の 47.4 TB から減少 = ユーザーが整理済みとみられる)。
+
+## 10. OS の版(2026-10-08 ユーザー「26.04 は無理そうか。個人的には最新を使いたい」→「26.04 にします」)
+- **Ubuntu 26.04 LTS** に決定。手順書を **v0.4** に改訂: ROOT は `root_v6.40.04.Linux-ubuntu26.04-x86_64-gcc15.2.tar.gz`(公式、Mac と同版)/ UI は Mac ビルド持ち込みが最短 /
+  **実 ECC のネイティブ起動(§5 A、24.04 の GDED で実証済み)は 26.04 で未実証 → §1–§2 の直後に最初に確認**、ダメなら §5 C(16.04 コンテナ、`--network host`)。
+- ECC の資産(GET の `build/.libs`、xenial の Boost 1.58 / libssl 1.0.0 等、VM 採取の Ice 3.7.2)は GDED の動作実績のある一式を写す(puppex の ~/ELITPC は入れ直しで消えるが不要)。
