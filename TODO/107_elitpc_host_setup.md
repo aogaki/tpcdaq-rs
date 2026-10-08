@@ -118,7 +118,7 @@ Last offset −7.3 ms、`Leap status: Normal`、`timedatectl` = `System clock sy
    `nmcli con mod netplan-enp179s0f0 ipv4.gateway "" ipv4.never-default yes 802-3-ethernet.mtu 9000` → `con up`)。
    確認: 4.x の default route 消滅、mtu 9000 / 1000 Mb/s、**DF ping 1472 / 8972 とも 3/3**(rtt 0.24 / 0.47 ms)= §2 ✅。スタックは再起動不要(ecc Idle / NO_ERR のまま)。
 3. ~~describe~~ ✅(VM 側はリンク断で zCoBo に届かない状態で実施)。VM の GET は止めておく(線を戻したときの二重接続防止)。
-4. ECC 設定: **VM 内の `configure-physics-extTrig_240fC_25MHz_70ns.xcfg` を TPC_Share 経由で取得** → `prepare-elinp` / `configure-elinp` に。pulser 用も VM 版(TPC_Share の configure-pulser.xcfg、md5 86a8ab10)と GDED 版(e1043496)が違う。
+4. (**2026-10-09 ユーザー現地作業待ち** — GDED のブリッジ NIC がリンク断で VM `getuser@192.168.4.3` に ssh できない)ECC 設定: **VM 内の `configure-physics-extTrig_240fC_25MHz_70ns.xcfg` を TPC_Share 経由で取得** → `prepare-elinp` / `configure-elinp` に。pulser 用も VM 版(TPC_Share の configure-pulser.xcfg、md5 86a8ab10)と GDED 版(e1043496)が違う。
 5. §10 疎通: DF ping 8972 → パルサー run → `/srv/tpcdaq/run0001/` の graw + ROOT → UI → stop/reset の walk-back。
 6. 不感時間の比較: 移行後の線源 run で 106 の VM 律速(≈ 0.4 Hz 上限)が消えるか。
 7. 後回し: slowctl(§9)、systemd ユニット、ufw。
