@@ -111,6 +111,19 @@ Last offset −7.3 ms、`Leap status: Normal`、`timedatectl` = `System clock sy
   → 誤って HIgS 設定で configure しないよう、`prepare/configure-physics.xcfg` を `*-physics-higs2026.xcfg` に改名、daq.toml の
   `config_id` を `zCobo / elinp / elinp`(**ファイルはまだ無い** = run/start は prepare で止まる)にしてスタック再起動。雛形 `config/daq_example.toml` もプレースホルダに。
 
+## VM の現用設定の取得(2026-10-08 夜、VBoxManage guestcontrol)
+
+ユーザーが getuser のパスワードを GDED の `~/.vm_getuser_pw`(600)に置き、`VBoxManage guestcontrol Ubuntu16.04LTS_ELINP ... --passwordfile` で
+VM のネットワーク無しに読めた(Guest Additions 7.1.6、RunLevel 2)。`copyfrom --recursive --target-directory` は**ディレクトリの中身を直下に**置く。
+`run --exe X -- args` の args は argv[1] から。
+
+- VM の `/home/getuser/Desktop/TPCConfigFiles/`(17 ファイル)→ GDED `~/vm_TPCConfigFiles_2026-10-08/`。
+- 現用 = **`delay_test.xcfg`**(ユーザー確認)= **CKW 100 MHz / peaking 232 ns / 120 fC / external / triggerDelay 3.2 µs**(詳細と 101 への影響は 101 追記 2)。
+- VM のパルサー設定 `GetSoftware_config/configure-pulser.xcfg` = md5 86a8ab10(TPC_Share の写しと同一、GDED 版 e1043496 とは別)= onSlowControl / 100 MHz / peaking 1014 ns / 120 fC。
+  describe-zCobo・hardwareDescription_zCobo は ELITPC 版と同一。
+- ELITPC に配置: `prepare-elinp` / `configure-elinp` = delay_test、`prepare-pulser-vm` / `configure-pulser-vm` = VM のパルサー。原本は `~/ELITPC/vm_configs_2026-10-08/`。
+  daq.toml の `config_id` は既に `zCobo / elinp / elinp`。
+
 ## 残り(ユーザー立ち会い / 移行日)
 
 1. ~~chrony~~ ✅ 済(上記)。
@@ -118,7 +131,7 @@ Last offset −7.3 ms、`Leap status: Normal`、`timedatectl` = `System clock sy
    `nmcli con mod netplan-enp179s0f0 ipv4.gateway "" ipv4.never-default yes 802-3-ethernet.mtu 9000` → `con up`)。
    確認: 4.x の default route 消滅、mtu 9000 / 1000 Mb/s、**DF ping 1472 / 8972 とも 3/3**(rtt 0.24 / 0.47 ms)= §2 ✅。スタックは再起動不要(ecc Idle / NO_ERR のまま)。
 3. ~~describe~~ ✅(VM 側はリンク断で zCoBo に届かない状態で実施)。VM の GET は止めておく(線を戻したときの二重接続防止)。
-4. (**2026-10-09 ユーザー現地作業待ち** — GDED のブリッジ NIC がリンク断で VM `getuser@192.168.4.3` に ssh できない)ECC 設定: **VM 内の `configure-physics-extTrig_240fC_25MHz_70ns.xcfg` を TPC_Share 経由で取得** → `prepare-elinp` / `configure-elinp` に。pulser 用も VM 版(TPC_Share の configure-pulser.xcfg、md5 86a8ab10)と GDED 版(e1043496)が違う。
+4. ~~ECC 設定~~ ✅(guestcontrol で取得、上記)。旧記述: **VM 内の `configure-physics-extTrig_240fC_25MHz_70ns.xcfg` を TPC_Share 経由で取得** → `prepare-elinp` / `configure-elinp` に。pulser 用も VM 版(TPC_Share の configure-pulser.xcfg、md5 86a8ab10)と GDED 版(e1043496)が違う。
 5. §10 疎通: DF ping 8972 → パルサー run → `/srv/tpcdaq/run0001/` の graw + ROOT → UI → stop/reset の walk-back。
 6. 不感時間の比較: 移行後の線源 run で 106 の VM 律速(≈ 0.4 Hz 上限)が消えるか。
 7. 後回し: slowctl(§9)、systemd ユニット、ufw。

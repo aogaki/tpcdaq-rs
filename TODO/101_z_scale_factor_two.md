@@ -1,6 +1,6 @@
 # 101 — dip 角が 2 倍に膨らんでいる(z スケール ×2): ドリフト電圧 1200 V の仮定か、サンプリング 25 MHz の仮定か
 
-**Status: READY**(2026-10-05 起票 Fable。100 の分解能分解の副産物。**ユーザー確認待ち: カソードと GEM1 上面の電位(= ドリフト領域の実電界)**。1200 V / 25 MHz は確認済み)
+**Status: READY**(2026-10-05 起票 Fable。100 の分解能分解の副産物。**2026-10-08: 実際のサンプリングは 100 MHz と判明(追記 2)→ 主因はこれ。次 = samplingMHz 引数化と再生成**)
 
 ## 0. 事実(91 mbar run、²¹⁶Po ピークの飛跡 3,053 本、`reference/_spike/stop_0929/{egenWidth,zscale,tiltTest}.C`)
 - 生成時 E の幅: 全飛跡 σ 0.077 MeV / |θ|,|φ| < 5° だけ σ 0.041 / 経路の角度補正なし(L = d)σ 0.051 / **x だけ(r = x_end + 53)σ 0.046** = ストラグリングのみの期待値 0.047。
@@ -27,3 +27,20 @@
 - θ/φ の広がりの比 4〜5 → **データの示す v_drift ≈ 0.1 cm/µs**(想定 0.48 の 1/5)。移動度則は HIGS(130 mbar / 70 V/cm)で拡散の熱限界一致(066)により支持されるので、**ドリフト領域の実電界が 10〜15 V/cm 程度**(1200 V がカソード対地で GEM1 上面が数百 V?)か、ガス組成を疑う。**→ ユーザーにカソードと GEM1 上面の電位を確認依頼**。
 - パルス形状(`pulseShape.C`): 立ち上がり 10–90 % 49 cell、FWHM 70 cell、閾値超 174 cell(25 MHz なら 2.0 / 2.8 / 7 µs)。AGET の最長整形(1 µs)より長い = 検出器信号自体の広がり or 整形設定の確認要(091 のパルサー 100 MHz は立ち上がり 0.6 µs / FWHM 1.65 µs)。
 - 経路補正を外す(L = d)と 4 枚目は σ 0.051(FWHM 1.8 %)。z を使わない量は全て有効。
+
+## 追記 2(2026-10-08 夜、Opus — **サンプリングは 100 MHz だった**)
+- 107 の移行作業で VM の GetController 設定を `VBoxManage guestcontrol` で読んだ(ユーザーがパスワードをファイルで用意)。
+  `~/.config/actar-get/GetController.conf` の `lastWorkspace` = `/home/getuser/GetSoftware_config/workspace.xcfg`(2026-08-05)、
+  データを TPC_Share に書くテスト `testPedestals` の Conditions = **`/home/getuser/Desktop/TPCConfigFiles/delay_test.xcfg`**(2026-09-03、md5 0845d6c4)。
+  **ユーザー確認(同日): 「delay_test.xcfg が今データ取得用に使ってる設定」**。
+- 中身: **`writingClockFrequency` = 100.0 MHz**(読み出し 25 MHz)、`peackingTime` = **232 ns**、`Gain` = 120 fC、`triggerMode` = external、
+  `triggerDelay` = 320 × 10 ns = 3.2 µs(窓 512 cell = 5.12 µs)、WCK triggerDelay 16、ZS 無効、`isAllChannelRead` false / GlobalThreshold 1。
+  雛形は同ディレクトリの `configure-physics-zCobo-extTrig_120fC_100MHz_70ns_trigDelay360.xcfg`(差は triggerDelay 360→320、WCK triggerDelay 0→16、peaking 70→232 の 3 行)。
+  `.bu`(09-01)は triggerDelay 450 / peaking 70。
+- **これで 101 の不整合がほぼ全部解ける**(1 cell = 10 ns。25 MHz 仮定の 40 ns は 4 倍):
+  - パルス形状: FWHM 70 cell = **0.70 µs**、立ち上がり 49 cell = 0.49 µs → 整形 232 ns + 拡散で自然(25 MHz 仮定の 2.8 µs は AGET の最長整形より長いという矛盾が消える)。
+  - θ/φ の広がりの比 4〜5 から出した v_drift ≈ 0.1 cm/µs は ×4 で **≈ 0.4 cm/µs**(移動度則の 0.48 と 2 割差)→ 「ドリフト領域の実電界が 10〜15 V/cm」の仮説は不要。
+  - `tiltTest.C` の k = 0.5(dz 2 倍)は 4 倍と合わない → 再生成後に見直す(深さ窓や x_end の選び方の系統か)。
+- 「1200 V / 25 MHz は確認済み」(10-05 の回答)は 25 MHz について**誤り**。カソード / GEM1 の電位確認は優先度を下げる。
+- 発注(§2)は `samplingMHz` の引数化を先に: analyzeUVW の時間 → z 変換を 100 MHz に、全 run 再生成 → `zscale.C` / `tiltTest.C` で k ≈ 1 を確認。
+  サンプリングを実機で裏取りするなら zCoBo の CKW 分周レジスタの読み取り(読むだけ)。
