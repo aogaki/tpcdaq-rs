@@ -225,6 +225,15 @@ ELITPC 上で `run0002_raw.root`(root_sink `--raw-tree`)を **graw2root を飛�
 - 容量: 1 event ≈ graw 557 kB + run.root ≈ 610 kB + raw ≈ 145 kB ≈ 1.3 MB → **4.5 Hz で ≈ 5.9 MB/s ≈ 510 GB/日**。空き 860 GB = **約 40 時間**。
   週末(〜72 h)を回すなら出力を絞る必要あり(run.root を止める `--no-root` で ≈ 0.7 MB/event ≈ 270 GB/日、graw だけなら ≈ 220 GB/日)。
 
+- run 13 の中身確認(開始 3 分、graw2root → analyzeUVW(91 mbar)→ makeTracks → sourceTracks → stoppedAlphas(−386, 91)):
+  924 events / ok 916 / 線源方向 672(73 %、run 2 は 71 %)。停止線 ²¹²Bi −24.4 / ²²⁰Rn −3.5 / ²¹⁶Po +41.4 mm(run 2: −25.5 / −5.0 / +42.5)= **同じ α が 130 倍の量**。
+  graw2root はファイル名末尾 `_0000.graw` を前提(仮名のシンボリックリンクだと `stoi` で落ちる)。
+- **容量 → ユーザー裁定(10-09): ZFS を使う(本番機として ZFS に保存する予定だった。これまで不要だっただけ)**。オフィスに戻ってから実施。
+  事前確認: カーネル 7.0.0-38 に `ubuntu/dkms/zfs/zfs.ko.zst` 同梱、`zfsutils-linux` 2.4.1 候補あり、sda/sdb/sdc は `zfs_member data` のまま。
+  SPEC §3 の例も `output_root = "/data/tpcdaq"`。手順案: `apt install zfsutils-linux` → `zpool import`(一覧)→ `zpool import -f data`(ホスト ID 変更のため。**upgrade しない**)→
+  `zfs create -o compression=lz4 -o atime=off -o recordsize=1M -o mountpoint=/data/tpcdaq data/tpcdaq` + chown daq →
+  run 13 停止 → `tpcdaq_state.json`(next_run)・`logbook.jsonl`・`params/` を新 output_root へ写す → daq.toml の output_root 変更 → 再起動 → run 14。
+
 ## 別件メモ(後で)
 - UI の Parameters(078)の既定値が `writingClockFrequency_MHz: 25.0`(HIgS の configure-physics 由来)。mini の現用は 100 MHz(101 追記 2)
   → Parameters から保存すると 25 MHz の xcfg ができる。mini で使う前に既定値をテンプレート(elinp)から取るよう直す。
