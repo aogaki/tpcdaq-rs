@@ -73,3 +73,17 @@
   そのとき受信と graw が無傷かは未試験。
 - root_sink 本体: ROOT 初期化後に SIGINT ハンドラを入れ直す。
 - run/stop が root-sink の close を待てるようにする(controller は root-sink を直接観測できない、SPEC §1.3)→ Fable キュー。
+
+## 追記: ZFS は効いているか(2026-10-09 12:00–12:06、ユーザー質問「ZFS アレイの遅さも関係?」)
+- 素の書き込み速度(乱数 4 GiB を tmpfs から `dd bs=4M conv=fdatasync`): **ZFS 328 / 226 MB/s**、**NVMe(ext4)809 MB/s**。
+  182 Hz 時に要るのは graw ≈ 100 MB/s + ROOT ≈ 40 MB/s ≈ 140 MB/s → ZFS で足りるが余裕は 2 倍程度。
+- A/B(periodic 5 ms = 126 Hz、workers 4、30 s、α run 26 を 12:02:56 停止 → run 27 = ZFS、`/srv/tpcdaq/speedtest` の run 1 = NVMe → α run 28 を 12:05:43 再開):
+
+  | 出力先 | イベント | 停止後の書き切り | 1 イベントあたり(run + 書き切り)| I/O 待ち(PSI io some avg10) |
+  |---|---|---|---|---|
+  | ZFS | 4,257 | 32 s | 14.6 ms(≈ 69 events/s) | 0.9–10 % |
+  | NVMe | 3,997 | 25 s | 13.8 ms(≈ 73 events/s) | 0.3–0.9 % |
+
+  両方ともロスなし(NVMe: graw 3,997 連番 = raw 3,997 = w0–w3 計 3,997)。**root_sink の 4 本の recorder スレッドは両方で 99.9 % に張り付き**
+  (`top -H`)= **律速は CPU(PEventTPC の詰め替え + 圧縮)**。ZFS の寄与は ≈ 5–6 %。もっと速くするなら workers を増やす(ELITPC は 20 スレッド)。
+- 試験用の `/srv/tpcdaq/speedtest`(4.6 GB)は確認後に削除。
