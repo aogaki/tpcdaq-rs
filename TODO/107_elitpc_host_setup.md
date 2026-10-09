@@ -243,6 +243,8 @@ ELITPC 上で `run0002_raw.root`(root_sink `--raw-tree`)を **graw2root を飛�
 - 切り替え: run 13 を 10:20:42 に停止(5 Hz × 29 min = **8,595 events、graw 5 本 + PEventTPC 5 分割 + raw**、1 GiB ロールオーバー正常)→ daq_down →
   `tpcdaq_state.json`(`{"next_run":14}`)と `logbook.jsonl` を `/data/tpcdaq/` へ(NVMe 側は `*.migrated-2026-10-09` に改名して残す)→ daq.toml `output_root = "/data/tpcdaq"`
   (`params_dir` とログは NVMe の `/srv/tpcdaq` のまま)→ daq_up → **run 14 開始 10:21:07**(α 線源、elinp、91 mbar)。28 s で 131 frames(4.75 Hz)、overflow 0、ZFS 圧縮 1.23x。
+- 既存の 1 data error: `sudo zpool status -v data` → `data:<0x3919b>`(パスに解決できないオブジェクト)。`find /data -xdev -inum 233883` を daq(9 s、読めない 1 ディレクトリ以外)と
+  ユーザーの sudo の両方で実行 → **該当なし**、スナップショットも無し → **掃除で削除済みのファイル**(現存データには影響なし)。表示は次の scrub 完了で消える(前回 1 d 6.6 h、実験の合間に)。
 - 冗長性なしへのユーザー回答(10-09): **実験が終わるたびにデータを別の場所へ移している**(運用でカバー済み)。
 - run 1–13 は NVMe の `/srv/tpcdaq/run00NN` に残っている(run 13 だけで 11 GB)。移すかはユーザー判断。
 - 副産物: root_sink の `events_complete=8888` が書き出し 8,595(= graw 8,595、連番・欠番なし)より多い → **108** に起票(データ損失なし)。
