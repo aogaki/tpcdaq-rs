@@ -234,6 +234,18 @@ ELITPC 上で `run0002_raw.root`(root_sink `--raw-tree`)を **graw2root を飛�
   `zfs create -o compression=lz4 -o atime=off -o recordsize=1M -o mountpoint=/data/tpcdaq data/tpcdaq` + chown daq →
   run 13 停止 → `tpcdaq_state.json`(next_run)・`logbook.jsonl`・`params/` を新 output_root へ写す → daq.toml の output_root 変更 → 再起動 → run 14。
 
+## ZFS への切り替え(2026-10-09 10:19〜、オフィス帰還後)
+
+- ユーザー sudo: `apt install zfsutils-linux`(2.4.1)→ `zpool import -f data` → `zfs create -o compression=lz4 -o atime=off -o recordsize=1M -o mountpoint=/data/tpcdaq data/tpcdaq` → chown daq。
+- 確認: `data` ONLINE、49.1 T / alloc 24.9 T / free 24.2 T(50 %)、frag 16 %、`compatibility off`、upgrade の促し無し(**upgrade していない**)。
+  **構成は sda1 / sdb1 / sdc1 のストライプ(冗長性なし)** = ディスク 1 本の故障でプール全体を失う。**過去の scrub(2026-09-14)で 1 data error**(修復不能、
+  ファイル名は `sudo zpool status -v data` でないと見えない — ユーザーに依頼)。`sharenfs off`。
+- 切り替え: run 13 を 10:20:42 に停止(5 Hz × 29 min = **8,595 events、graw 5 本 + PEventTPC 5 分割 + raw**、1 GiB ロールオーバー正常)→ daq_down →
+  `tpcdaq_state.json`(`{"next_run":14}`)と `logbook.jsonl` を `/data/tpcdaq/` へ(NVMe 側は `*.migrated-2026-10-09` に改名して残す)→ daq.toml `output_root = "/data/tpcdaq"`
+  (`params_dir` とログは NVMe の `/srv/tpcdaq` のまま)→ daq_up → **run 14 開始 10:21:07**(α 線源、elinp、91 mbar)。28 s で 131 frames(4.75 Hz)、overflow 0、ZFS 圧縮 1.23x。
+- run 1–13 は NVMe の `/srv/tpcdaq/run00NN` に残っている(run 13 だけで 11 GB)。移すかはユーザー判断。
+- 副産物: root_sink の `events_complete=8888` が書き出し 8,595(= graw 8,595、連番・欠番なし)より多い → **108** に起票(データ損失なし)。
+
 ## 別件メモ(後で)
 - UI の Parameters(078)の既定値が `writingClockFrequency_MHz: 25.0`(HIgS の configure-physics 由来)。mini の現用は 100 MHz(101 追記 2)
   → Parameters から保存すると 25 MHz の xcfg ができる。mini で使う前に既定値をテンプレート(elinp)から取るよう直す。
