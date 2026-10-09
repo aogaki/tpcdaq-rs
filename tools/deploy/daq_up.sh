@@ -69,6 +69,11 @@ for f in "$ROOT_SINK" "$BIN/monitor" "$BIN/graw_writer" "$BIN/decoder" "$BIN/rec
     [ -x "$f" ] || fail "missing binary: $f"
 done
 [ -d "$ECC_CONFIG_DIR" ] || fail "missing ECC config repo $ECC_CONFIG_DIR"
+# root_sink の PEventTPC 並列書き出し本数(daq.env の ROOT_SINK_RECORDER_WORKERS、既定 1 — TODO/109)。
+# > 1 で --recorder-workers N(064: mini 100 events/s)。その場合ファイル名は run{N}_w{k}.root になる。
+# raw ツリーは常に 1 本(run{N}_raw.root)。
+RECORDER_WORKERS=${ROOT_SINK_RECORDER_WORKERS:-1}
+[[ "$RECORDER_WORKERS" =~ ^[1-9][0-9]*$ ]] || fail "ROOT_SINK_RECORDER_WORKERS='$RECORDER_WORKERS' is not a positive integer"
 mkdir -p "$LOGS"
 
 # 統合テストは 1024 で "Too many open files" になった(107)。ZMQ ソケット数に余裕を持たせる。
@@ -76,13 +81,14 @@ ulimit -n 65536 || fail "ulimit -n 65536 (hard limit $(ulimit -Hn))"
 # shellcheck disable=SC1090
 source "$ROOT_SETUP" || fail "cannot source $ROOT_SETUP"
 
-echo "config: $CONF  output_root: $OUTPUT_ROOT  logs: $LOGS"
+echo "config: $CONF  output_root: $OUTPUT_ROOT  logs: $LOGS  root_sink workers: $RECORDER_WORKERS"
 echo "== starting the stack =="
 
 # 1. root-sink(下流から。monitor PUB を先に上げる — SUB は slow-joiner)
 start root_sink "$ROOT_SINK" --bind "tcp://*:47003" --pub "tcp://*:47004" \
     --geometry "$GEOMETRY" --output-root "$OUTPUT_ROOT" --expect "${ROOT_SINK_EXPECT:-0:0}" \
     ${BUILD_TIMEOUT_MS:+--build-timeout-ms "$BUILD_TIMEOUT_MS"} \
+    $( [ "$RECORDER_WORKERS" -gt 1 ] && echo --recorder-workers "$RECORDER_WORKERS" ) \
     $( [ "$RAW_TREE" = "true" ] && echo --raw-tree )
 wait_for_line "$LOGS/root_sink.log" "monitor PUB bind" 20 || fail "root_sink did not bind"
 
