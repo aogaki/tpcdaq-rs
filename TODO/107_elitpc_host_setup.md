@@ -249,6 +249,16 @@ ELITPC 上で `run0002_raw.root`(root_sink `--raw-tree`)を **graw2root を飛�
 - run 1–13 は NVMe の `/srv/tpcdaq/run00NN` に残っている(run 13 だけで 11 GB)。移すかはユーザー判断。
 - 副産物: root_sink の `events_complete=8888` が書き出し 8,595(= graw 8,595、連番・欠番なし)より多い → **108** に起票(データ損失なし)。
 
+## ELOG(2026-10-09、ユーザー選択「2 = TPC 用に新しく」)
+
+- ELITPC には ELOG なし(26.04 の apt にも無い)。旧 puppex の ELOG は port 8082・SSL 0・パスワード無し・属性 Author/Type/Category/Subject(Luna2 の `elog.conf.puppex`)。
+- PSI 公式 `elog-latest.tar.gz` = **3.1.5** を ELITPC で `make USE_SSL=0 -j`(gcc 15 で上流コード由来の警告のみ、libssl 不要)。`make install` は `/etc` に init スクリプトを書くので使わず、
+  `~/build/elog-stage/elog/{bin,scripts,resources,themes,logbooks,elogd.cfg}` に組んで試験起動(8082 で HTTP 302 → logbook へ)してから、ユーザー sudo で `/opt/elog` へコピー +
+  systemd ユニット `elogd.service`(`User=daq`、`Type=simple`、`Restart=on-failure`、`elogd -c /opt/elog/elogd.cfg -s /opt/elog -d /opt/elog/logbooks -p 8082`)を enable --now。
+- 確認: `enabled / active`、`0.0.0.0:8082` LISTEN、ノート PC から `http://192.168.144.220:8082/` → 302 → `/mini+eTPC/`(`<title>ELOG mini eTPC</title>`)。
+  logbook = **「mini eTPC」**(旧 ELOG と同じ属性・選択肢)、データは NVMe の `/opt/elog/logbooks`(実験ごとに移す ZFS ではない)。
+- imagemagick はサービス起動の後に入ったため `ImageMagick NOT detected`(添付画像の縮小だけ無効)→ `sudo systemctl restart elogd` で有効になる。
+
 ## 別件メモ(後で)
 - UI の Parameters(078)の既定値が `writingClockFrequency_MHz: 25.0`(HIgS の configure-physics 由来)。mini の現用は 100 MHz(101 追記 2)
   → Parameters から保存すると 25 MHz の xcfg ができる。mini で使う前に既定値をテンプレート(elinp)から取るよう直す。
