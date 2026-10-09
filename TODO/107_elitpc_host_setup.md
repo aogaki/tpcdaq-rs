@@ -267,6 +267,9 @@ run 14(α、10:21–11:21)を停止 → `elinp` のトリガを `periodically` �
   使ってから次の周期を数える(上限 ≈ 340 Hz)。graw は全 run で全数・連番。
 - **run 18(77 Hz)の ROOT が未確定** → 109 に起票(root_sink が追いつかず、daq_down の 10 s SIGKILL で close 前に終了)。graw は無傷。
 
+- 109 実装 + 最大レート試験(11:35–11:57): 上限 ≈ **182 Hz(1 GbE で頭打ち)**、全レートでロスなし、root_sink は workers 4 で ≈ 65–70 events/s 持続。
+  α run 19 は 11:35:56 停止(3,068 件で確定)→ 試験 run 20–25 → **α run 26 を 11:57:24 再開**(workers 1)。詳細 = archive/109。
+
 ## 別件メモ(後で)
 - UI の Parameters(078)の既定値が `writingClockFrequency_MHz: 25.0`(HIgS の configure-physics 由来)。mini の現用は 100 MHz(101 追記 2)
   → Parameters から保存すると 25 MHz の xcfg ができる。mini で使う前に既定値をテンプレート(elinp)から取るよう直す。
