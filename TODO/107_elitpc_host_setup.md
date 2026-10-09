@@ -199,6 +199,21 @@ ELITPC 上で `run0002_raw.root`(root_sink `--raw-tree`)を **graw2root を飛�
 `channel_map.csv` は gitignore の内部資産 → `~/ana_107/` にだけ置いた(600)。解析は `/srv/tpcdaq` を汚さないよう `~/ana_107/` にシンボリックリンクで。
 注意: analyzeUVW の時間 → z は 25 MHz 前提(101 追記 2: 実機は 100 MHz)と圧力既定 100 mbar のまま。
 
+## 現地試験: IN1 にパルス発生器(2026-10-09 08:58〜、ユーザー現地 + ノート PC 同行)
+
+- run 7(E、tp10、α 線源)は 08:58:16 に停止: 111 events / 3,306 s(0.0333 Hz)、**1 s 未満の間隔 0 本**(Poisson 期待 3.6、p ≈ 3 %)、最小 1.567 s
+  → triggerPeriod 10 ms でも不感時間は消えない方向。
+- ユーザーがゲートジェネレータの代わりにパルス発生器を IN1 へ: **5 Hz、当初 0–4 V → 指摘して 0–3.2 V に下げた**(README は +3.3 V TTL、xcfg コメントは 2.5 V LVCMOS。
+  FPGA 直結なら 4 V は絶対最大定格超えの恐れ — アダプタのバッファ有無は資料で未確認)。パルス幅は発生器の固定値(変えられない)。
+- `~/ext_watch.sh`(5 s ごとの受理レート表示付き)で **run 8 = X1: `elinp`(triggerPeriod 1000 ms のまま)、30 s** →
+  **154 events / 30.60 s、eventIdx 0–153 連番、間隔 153 本すべて 0.200 s** = 5 Hz を全数受理。
+- **結論: zCoBo の外部トリガ経路にも tpcdaq-rs にも ~1 s の不感時間は無い**。triggerPeriod も無関係(X2 = tp10 は不要になった)。
+  → ~1 s の不感時間は**トリガ信号の上流**(CFD → ゲートジェネレータ、またはその出力の形 = 幅が ~1 s 近い等)にある。
+
+## 別件メモ(後で)
+- UI の Parameters(078)の既定値が `writingClockFrequency_MHz: 25.0`(HIgS の configure-physics 由来)。mini の現用は 100 MHz(101 追記 2)
+  → Parameters から保存すると 25 MHz の xcfg ができる。mini で使う前に既定値をテンプレート(elinp)から取るよう直す。
+
 ## 残り(ユーザー立ち会い / 移行日)
 
 1. ~~chrony~~ ✅ 済(上記)。
