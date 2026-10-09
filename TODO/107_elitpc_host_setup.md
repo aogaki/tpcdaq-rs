@@ -210,6 +210,12 @@ ELITPC 上で `run0002_raw.root`(root_sink `--raw-tree`)を **graw2root を飛�
 - **結論: zCoBo の外部トリガ経路にも tpcdaq-rs にも ~1 s の不感時間は無い**。triggerPeriod も無関係(X2 = tp10 は不要になった)。
   → ~1 s の不感時間は**トリガ信号の上流**(CFD → ゲートジェネレータ、またはその出力の形 = 幅が ~1 s 近い等)にある。
 
+- 途中で ELITPC の LAN が不通(古い LAN ケーブル)→ ユーザーが GDED のケーブルと交換して復旧(GDED 側が要注意)。
+- **run 9**(目隠し): パルス発生器 5 Hz TTL → CAEN TTL→NIM → CAEN NIM→TTL → IN1 = **30 s で 0 発**(zCoBo 接続・ECC Running は正常)。
+- **run 10**: パルス発生器を NIM(5 Hz)にして CAEN NIM→TTL 1 段 → IN1 = **30 s で 0 発**(同上)。
+  本番(ゲートジェネレータ NIM → 同じ NIM→TTL → IN1)では α のトリガが来ているので、変換器の出力が常に使えないわけではない
+  → パルス発生器の NIM 振幅(50 Ω 前提の表示か)・幅、変換器出力の電圧と極性をオシロで確認待ち。
+
 ## 別件メモ(後で)
 - UI の Parameters(078)の既定値が `writingClockFrequency_MHz: 25.0`(HIgS の configure-physics 由来)。mini の現用は 100 MHz(101 追記 2)
   → Parameters から保存すると 25 MHz の xcfg ができる。mini で使う前に既定値をテンプレート(elinp)から取るよう直す。
