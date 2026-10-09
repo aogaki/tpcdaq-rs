@@ -260,6 +260,13 @@ ELITPC 上で `run0002_raw.root`(root_sink `--raw-tree`)を **graw2root を飛�
 - imagemagick はサービス起動の後に入ったため `ImageMagick NOT detected`(添付画像の縮小だけ無効)→ `sudo systemctl restart elogd` で有効になる。
   → ユーザーが restart(10:36:18)→ journal `ImageMagick detected`、active、ノート PC から HTTP 302 ✅。
 
+## periodic トリガ試験(2026-10-09 11:21–11:25、ユーザー質問「periodically だと?」)
+
+run 14(α、10:21–11:21)を停止 → `elinp` のトリガを `periodically` にした `elinp-per{1000,200,50,10}` を `~/ext_watch.sh` で 30 s ずつ(run 15–18)→ run 19 で α 再開(11:25:22)。
+- 受理: 1.00 / 4.93 / 18.89 / **77.33 Hz**。イベント間隔は**「周期 + 2.931 ms」で完全に一定**(ばらつき 0)= zCoBo は 1 イベントの読み出しに 2.93 ms
+  使ってから次の周期を数える(上限 ≈ 340 Hz)。graw は全 run で全数・連番。
+- **run 18(77 Hz)の ROOT が未確定** → 109 に起票(root_sink が追いつかず、daq_down の 10 s SIGKILL で close 前に終了)。graw は無傷。
+
 ## 別件メモ(後で)
 - UI の Parameters(078)の既定値が `writingClockFrequency_MHz: 25.0`(HIgS の configure-physics 由来)。mini の現用は 100 MHz(101 追記 2)
   → Parameters から保存すると 25 MHz の xcfg ができる。mini で使う前に既定値をテンプレート(elinp)から取るよう直す。
