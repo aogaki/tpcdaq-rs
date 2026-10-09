@@ -141,6 +141,27 @@ VM のネットワーク無しに読めた(Guest Additions 7.1.6、RunLevel 2)�
   Poisson なら 1 s 未満は 4.8 % ≈ 1.2 本の期待 = 不感時間なしと矛盾しないが統計不足 → 一晩分(数千 events)で判定。
 - 切替のたびに daq.toml の `config_id` を書き換えてスタックを再起動している(078 の params / REST で切り替える運用は未整備)。
 
+## 一晩の α 線源 run 2(2026-10-08 18:23 → 10-09 07:51、48,459 s)
+
+- 健全性: receiver 1,695 frames / 944,643,840 B、`overflow_frames 0 / framer_resets 0 / messages_abandoned 0`、全ログに WARN/ERROR 無し、ECC Running / NO_ERR。
+  CPU 累計 root_sink 664 s・monitor 122 s・decoder 32 s・receiver 29 s・graw_writer 14 s・controller 9 s・ecc_bridge 4 s(計 ≈ 874 s = 1 コアの 1.8 %、≈ 0.5 コア秒 / event アイドル込み)。
+  RSS は root_sink 670 MB(開始時 565)、他は不変。ディスク使用 28 → 30 GB。
+- **イベント間隔**(`gaps.py`、graw ヘッダの CoBo タイムスタンプ、Poisson 期待 = 不感時間なし):
+
+  | | events | rate | 0–0.5 s | 0.5–1.0 s | 1.0–1.5 s | 1.5–2.0 s | 2.0–3.0 s | 最小間隔 |
+  |---|---|---|---|---|---|---|---|---|
+  | **ELITPC run 2**(tpcdaq-rs) | 1,695 | 0.0350 Hz | **0** / 29.4 | **3** / 28.9 | 35 / 28.4 | 40 / 27.9 | 58 / 54.3 | 0.888 s |
+  | VM 10-07 run(GET、`_0000`+`_0001`) | 3,463 | 0.0329 Hz | 4 / 56.5 | 8 / 55.6 | 78 / 54.7 | 59 / 53.8 | 130 / 105.0 | 0.048 s |
+
+  → **約 1 s の不感時間は ELITPC でも同じに残る = VM が原因ではない**(106 の結論を訂正)。eventIdx は両方とも連番 = zCoBo が受け付けなかったトリガは番号も付かない。
+  1.0–2.0 s の過剰は不感時間中に来たトリガが失われる + ²²⁰Rn → ²¹⁶Po(半減期 0.145 s)の相関対が落ちる分の名残。レートは 0.035 vs 0.033 Hz で、この低レートでは 1 s の不感時間による損失は数 % しかない。
+- **最有力の被疑者 = `triggerPeriod_10ns`(CoBo レジスタ 0x84)**: GET の `CoBoNode::configure` は**トリガモードに関係なく**
+  `setTriggerPeriod()` を呼び、`triggerPeriod`(ms)× 100,000 を書く(`reference/20190315_patched/GetBench/src/get/rc/CoBoNode.cpp:538, 3192–3203`)。
+  delay_test / VM のパルサー / 2018 FW 同梱の external 用 configure-pedestals まで**全部 1000 ms**。xcfg のコメントは「periodic モード用」だが、
+  ZC706 移植 FW が external でも最小間隔として使っている疑い。他に ~1 s の項目は無い(triggerDeadTime 等は 2p 専用、TriggerVetoOption none)。
+- 確かめ方(ユーザーの了承待ち): run 2 を止め、`triggerPeriod` だけ 10 ms に変えた設定でパルサーを 200 ms 周期(5 Hz)で打つ → 1 Hz に頭打ちなら別原因、
+  5 Hz 通れば確定。その後 α 線源で同じ変更を入れて間隔分布の 0–1 s が Poisson 期待に戻るかを見る。
+
 ## 残り(ユーザー立ち会い / 移行日)
 
 1. ~~chrony~~ ✅ 済(上記)。
