@@ -87,3 +87,11 @@
   両方ともロスなし(NVMe: graw 3,997 連番 = raw 3,997 = w0–w3 計 3,997)。**root_sink の 4 本の recorder スレッドは両方で 99.9 % に張り付き**
   (`top -H`)= **律速は CPU(PEventTPC の詰め替え + 圧縮)**。ZFS の寄与は ≈ 5–6 %。もっと速くするなら workers を増やす(ELITPC は 20 スレッド)。
 - 試験用の `/srv/tpcdaq/speedtest`(4.6 GB)は確認後に削除。
+
+## 追記: ZFS の圧縮は効いているか(2026-10-09、ユーザー質問)
+- `data/tpcdaq`: `compression=lz4`(local)、`compressratio 1.23x`(logical 63.1 G → used 51.3 G)。プール全体(`data`、既定 on)は 1.48x。
+- ファイル別(run 22、ZFS の on-disk / 見かけ): **graw 1.00**(lz4 では縮まない — ZFS は 12.5 % 未満なら非圧縮で置く)、**`_raw.root` 1.00**
+  (ROOT 内で ZLIB-1 済み: tree tot 1,104 MB → zip 436 MB = 2.53x)、**PEventTPC `_w0.root` 1.75**(ROOT 内で tot 4,330 MB → zip 530 MB = 8.17x、
+  それでも lz4 がさらに 1.75 倍縮める)。run 14(workers 1)の PEventTPC も ROOT 内 7.61x。
+- 含意: PEventTPC は**圧縮前 ≈ 4.4 MB/event**(991 events で 4.3 GB)= root_sink が CPU 律速になる主因。ZLIB-1 の出力に lz4 がまだ効く = ROOT 側の
+  圧縮を強くすればファイルは縮むが CPU を食う(既に律速)。今は「ROOT は速い ZLIB-1、残りは ZFS の lz4」で分担できている。
