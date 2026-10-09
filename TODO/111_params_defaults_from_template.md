@@ -30,6 +30,11 @@
   合成フィクスチャ(`tests/fixtures/params/`)で例外ありのケース。
 - 078 の CompoundConfig オラクル(`tools/ccfg_resolve`)で、抽出した値が ECC の解決結果と全インスタンス一致。
 
+## 2.1 手元の実テンプレート(2026-10-09 配置、gitignore)
+`reference/_vm_configs_2026-10-08/` = VM の `TPCConfigFiles/` 17 本 + `delay_test.xcfg`(md5 0845d6c4)+ VM / GDED のパルサー
+(`share_configure-pulser.xcfg` = 86a8ab10、`gded_configure-pulser.xcfg` = e1043496)。HIgS の physics は `reference/config/`。
+ELITPC 上の同じもの = `~/ELITPC/vm_configs_2026-10-08/` と `~/ELITPC/GetSoftware_config/configure-elinp.xcfg`。
+
 ## 3. 見積もり(2026-10-09 にユーザーへ提示)
 
 | 作業 | 担当 | 目安 |

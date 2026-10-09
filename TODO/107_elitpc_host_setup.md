@@ -270,6 +270,11 @@ run 14(α、10:21–11:21)を停止 → `elinp` のトリガを `periodically` �
 - 109 実装 + 最大レート試験(11:35–11:57): 上限 ≈ **182 Hz(1 GbE で頭打ち)**、全レートでロスなし、root_sink は workers 4 で ≈ 65–70 events/s 持続。
   α run 19 は 11:35:56 停止(3,068 件で確定)→ 試験 run 20–25 → **α run 26 を 11:57:24 再開**(workers 1)。詳細 = archive/109。
 
+## 運用マニュアル(2026-10-09)
+- ユーザーの claude.ai に Claude Doc「ELITPC DAQ 運用マニュアル(mini eTPC)」を作成(日本語タブ + English タブ、構成図つき)。ユーザーが追記・修正 →
+  レビュー 7 点を反映 → 英訳。English タブの PDF(A4、9 ページ)を doc に添付し、控えを `reference/_manual/ELITPC_DAQ_Manual_en_2026-10-09.pdf`(gitignore)に。
+  実 IP・パス入りなのでリポには入れない。
+
 ## 別件メモ(後で)
 - UI の Parameters(078)の既定値が `writingClockFrequency_MHz: 25.0`(HIgS の configure-physics 由来)。mini の現用は 100 MHz(101 追記 2)
   → Parameters から保存すると 25 MHz の xcfg ができる。mini で使う前に既定値をテンプレート(elinp)から取るよう直す。
