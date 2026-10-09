@@ -5,7 +5,9 @@
 #
 # run 中なら先に UI / REST で run/stop すること(ここは止めるだけで EOS は流さない)。
 # 上流から畳む。Rust bin の graceful stop は SIGINT のみ(SIGTERM ハンドラ無し — 028 付録 A)、
-# root_sink は SIGINT/SIGTERM 両方 graceful、getEccServer は SIGINT を無視するので SIGTERM(107 実測)。
+# getEccServer は SIGINT を無視するので SIGTERM(107 実測)。**root_sink も SIGTERM**: スクリプトから `&` で
+# 起動したプロセスは SIGINT = SIG_IGN を引き継ぎ、root_sink は run で ROOT が初期化された後に SIGINT が
+# SIG_IGN に戻っている(/proc/<pid>/status の SigIgn で確認、2026-10-09 — TODO/109)。SIGTERM は捕まえる。
 #
 # **root_sink だけは書き切るまで待ち、SIGKILL しない**(保存系 — TODO/109)。高レートの run の直後は
 # 内部に未書き出しのイベントが溜まっていて、run/stop が返った後も数十秒〜数分書き続ける。
@@ -29,7 +31,7 @@ for name in $ORDER; do
     pid=$(cat "$pidfile")
     if kill -0 "$pid" 2>/dev/null; then
         sig=INT
-        [ "$name" = "ecc_server" ] && sig=TERM
+        [ "$name" = "ecc_server" ] || [ "$name" = "root_sink" ] && sig=TERM
         kill -"$sig" "$pid" 2>/dev/null
         if [ "$name" = "root_sink" ]; then
             # 書き切るまで待つ。10 s ごとに経過を出す。
