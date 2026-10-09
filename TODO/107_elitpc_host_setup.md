@@ -258,6 +258,7 @@ ELITPC 上で `run0002_raw.root`(root_sink `--raw-tree`)を **graw2root を飛�
 - 確認: `enabled / active`、`0.0.0.0:8082` LISTEN、ノート PC から `http://192.168.144.220:8082/` → 302 → `/mini+eTPC/`(`<title>ELOG mini eTPC</title>`)。
   logbook = **「mini eTPC」**(旧 ELOG と同じ属性・選択肢)、データは NVMe の `/opt/elog/logbooks`(実験ごとに移す ZFS ではない)。
 - imagemagick はサービス起動の後に入ったため `ImageMagick NOT detected`(添付画像の縮小だけ無効)→ `sudo systemctl restart elogd` で有効になる。
+  → ユーザーが restart(10:36:18)→ journal `ImageMagick detected`、active、ノート PC から HTTP 302 ✅。
 
 ## 別件メモ(後で)
 - UI の Parameters(078)の既定値が `writingClockFrequency_MHz: 25.0`(HIgS の configure-physics 由来)。mini の現用は 100 MHz(101 追記 2)
