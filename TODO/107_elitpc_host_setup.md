@@ -162,6 +162,27 @@ VM のネットワーク無しに読めた(Guest Additions 7.1.6、RunLevel 2)�
 - 確かめ方(ユーザーの了承待ち): run 2 を止め、`triggerPeriod` だけ 10 ms に変えた設定でパルサーを 200 ms 周期(5 Hz)で打つ → 1 Hz に頭打ちなら別原因、
   5 Hz 通れば確定。その後 α 線源で同じ変更を入れて間隔分布の 0–1 s が Poisson 期待に戻るかを見る。
 
+## 不感時間の切り分け試験(2026-10-09 朝、ユーザー指示「試してから」)
+
+run 2 を 07:53 に停止(`run0002.root` 1,697 entries complete / incomplete 0 で確定。1 GB の close に数秒)。`~/pulser_test.sh <config_id> <周期 ms> <秒> "<comment>"`
+(daq.toml の config_id 書き換え → daq_down/up → acquire → run/start → `asad-pulser-start -1000 <周期>` → sleep → `asad-pulser-stop` → run/stop → release)で
+パルサーを **200 ms 周期(5 Hz)× 30 s**。graw ヘッダで受理数と間隔を数えた:
+
+| run | 設定(pulser-vm からの差分) | frame | 受理 | 間隔 |
+|---|---|---|---|---|
+| 3 (A) | なし(triggerPeriod 1000 ms) | type 2 / 278,784 B | 150 / 150 | 全部 0.20 s |
+| 4 (B) | triggerPeriod 10 ms | type 2 / 278,784 B | 150 / 150 | 全部 0.20 s |
+| 5 (C1) | isAllChannelRead false + GlobalThreshold 1(= 線源設定の読み出し) | **type 1 / 557,312 B** | 150 / 150 | 全部 0.20 s |
+| 6 (C2) | subscribe + checkAsAd true | type 2 / 278,784 B | 150 / 150 | 全部 0.20 s |
+
+→ **パルサートリガ(onSlowControl)では ~1 s の不感時間は出ない**。triggerPeriod も効かない。zCoBo は 557 kB フレームを 5 Hz(2.8 MB/s)で落とさず送れる。
+frameType 1 / 2 の差は isAllChannelRead(部分読み出し = アドレス付き 4 B/item)で決まる(線源設定は閾値 1 で全 ch ヒットのため 272 × 512 が 4 B 形式で来る)。
+**残る差はトリガ経路(external = IN1)だけ** → triggerPeriod 仮説は external モードについては未検証のまま。
+
+- **run 7 (E)** 2026-10-09 ~08:05 開始: α 線源、external、`elinp-tp10`(delay_test の triggerPeriod だけ 1000 → 10 ms)。
+  数時間で 0–1 s の間隔が Poisson 期待(≈ 3.4 %)に戻るかを見る。戻らなければ被疑者は FW の external 経路か上流(ゲートジェネレータ等)。
+  決定打が早く欲しければ、現地で IN1 にパルス発生器(例 5 Hz)を入れて elinp / elinp-tp10 を 30 s ずつ。
+
 ## 残り(ユーザー立ち会い / 移行日)
 
 1. ~~chrony~~ ✅ 済(上記)。
