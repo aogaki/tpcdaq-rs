@@ -183,6 +183,13 @@ frameType 1 / 2 の差は isAllChannelRead(部分読み出し = アドレス付�
   数時間で 0–1 s の間隔が Poisson 期待(≈ 3.4 %)に戻るかを見る。戻らなければ被疑者は FW の external 経路か上流(ゲートジェネレータ等)。
   決定打が早く欲しければ、現地で IN1 にパルス発生器(例 5 Hz)を入れて elinp / elinp-tp10 を 30 s ずつ。
 
+## macros で解析できるか(ユーザー質問、2026-10-09)
+
+ELITPC 上で `run0002_raw.root`(root_sink `--raw-tree`)を **graw2root を飛ばして** analyzeUVW.C → makeTracks.C に直結:
+1,697 events → `run0002_uvw.root` → `run0002_tracks.root` **ok 1,690 / 1,697**(analyzeUVW 2.9 s、makeTracks 0.9 s、ROOT 6.40.04 / gcc 15)。
+`channel_map.csv` は gitignore の内部資産 → `~/ana_107/` にだけ置いた(600)。解析は `/srv/tpcdaq` を汚さないよう `~/ana_107/` にシンボリックリンクで。
+注意: analyzeUVW の時間 → z は 25 MHz 前提(101 追記 2: 実機は 100 MHz)と圧力既定 100 mbar のまま。
+
 ## 残り(ユーザー立ち会い / 移行日)
 
 1. ~~chrony~~ ✅ 済(上記)。
