@@ -95,3 +95,17 @@
   それでも lz4 がさらに 1.75 倍縮める)。run 14(workers 1)の PEventTPC も ROOT 内 7.61x。
 - 含意: PEventTPC は**圧縮前 ≈ 4.4 MB/event**(991 events で 4.3 GB)= root_sink が CPU 律速になる主因。ZLIB-1 の出力に lz4 がまだ効く = ROOT 側の
   圧縮を強くすればファイルは縮むが CPU を食う(既に律速)。今は「ROOT は速い ZLIB-1、残りは ZFS の lz4」で分担できている。
+
+## 追記: 並列 8 本(2026-10-09 12:12–12:16、ユーザー指示「並列のスレッド数は 8 にしてテスト」)
+
+`~/w8_seq.sh`(periodic、`ROOT_SINK_RECORDER_WORKERS=8`、30 s ずつ、run 29–32)→ α run 33 を workers 1 で再開(12:16:19)。
+
+| run | 周期 | workers 4 の書き切り(run 22–25) | **workers 8 の書き切り** | events | 処理量(events / (30 s + 書き切り)) | root_sink CPU |
+|---|---|---|---|---|---|---|
+| 30 | 5 ms(126 Hz) | 27 s | **6 s** | 4,181 | ≈ 116 /s | ≈ 510 % |
+| 31 | 3 ms(169 Hz) | 51 s | **13 s** | 5,332 | ≈ 124 /s | ≈ 530 % |
+| 32 | 1 ms(182 Hz) | 60 s | **16 s** | 5,607 | ≈ 122 /s | ≈ 590 % |
+
+- 3 本ともロスなし(graw 連番、`events_complete` = graw、late 0、overflow 0)。**root_sink の持続処理量は workers 8 で ≈ 120 events/s**(4 本の ≈ 1.8 倍)。
+- run 29(10 ms)は無効: 直前に α run 28 を run/stop せずにスタックを落とした(Opus の試験スクリプトのミス)ため、先頭に run 28 の古いフレームが混ざり
+  root-sink が late 2,057 で大半を捨てた → **110** に起票。graw は無傷。
