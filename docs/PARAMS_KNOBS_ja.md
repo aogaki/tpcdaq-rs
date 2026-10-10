@@ -49,7 +49,7 @@ Node[CoBo].Instance[0].AsAd[1].Aget[2].channel[5].LSBThresholdValue
 - 照合したノブ: **11**(§2 の表 10 個 + §2.1 裁定 2 の `TriggerInhibition`)
 - 初回(2026-09-22 午前)で位置が一致 → そのまま実装: **7**(§3)
 - 表と食い違ったので一旦保留 → **同日のレビュー裁定で位置を確定して実装: 4**(§4)
-- **2026-09-22 時点で 11 ノブすべて実装済み**(JSON の葉は 13 個 —
+- **2026-09-22 時点で 11 ノブすべて実装済み**(当時。2026-10-10 に `fpnRead` が加わり現在は 12 ノブ・葉 15 — §7)(JSON の葉は 13 個 —
   `zeroSuppression` が 2、`pulser` が 3 に分かれるため)
 
 ## 3. 初回の照合で位置が一致したノブ(7)
@@ -170,7 +170,7 @@ Node[CoBo].Instance[0].AsAd[1].Aget[2].channel[5].LSBThresholdValue
 
 `describe-elitpc.xcfg` はルートが `Setup id="Hardware"`(configure/prepare は `Setup id="Conditions"`)で、
 中身は `HardwareConfigId`(= `zCobo`)と `Endpoint`(IP の `addressField id="0..3"` と `port`)だけ。
-上記 11 ノブはどれも現れない。078 の管理対象外(§2「含めない」+ FW とペアで不変)。
+管理ノブ(§7)はどれも現れない。078 の管理対象外(§2「含めない」+ FW とペアで不変)。
 
 ## 6. 実装中に判明した CompoundConfig の解決規則(078 §2 の例と食い違う)
 

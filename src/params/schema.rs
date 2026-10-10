@@ -4,11 +4,18 @@
 //! AsAd / AGET / ch だけ違う値は `exceptions` に入る。これは xcfg 自身の継承規則
 //! (`id="*"` が既定、個別 id が上書き)を JSON に写したもの。
 //!
-//! # ノブ集合(7 個)
+//! # ノブ集合(12 ノブ・JSON の葉 15)
 //!
-//! `docs/PARAMS_KNOBS_ja.md` の照合結果に従い、**テンプレート xcfg と位置・型・範囲が
-//! 一致したノブだけ**を実装している。078 §2 の表のうち `peakingTime_ns` / `readout` /
-//! `zeroSuppression` / `pulser` は表と実物が食い違うため**未実装**(Fable の裁定待ち)。
+//! `docs/PARAMS_KNOBS_ja.md` §7 の表が正。**テンプレート xcfg と位置・型・範囲が
+//! 一致したノブだけ**を実装している(078 §2 の表と食い違う項目は同文書の照合結果で確定):
+//!
+//! - CoBo: `triggerDelay` / `writingClockFrequency_MHz` / `triggerMode` /
+//!   `zeroSuppression.enabled` / `pulser.{enabled,voltage_mV,period_ms}`
+//! - AGET: `globalThreshold` / `peakingTime_ns` / `readout`(`isAllChannelRead` のみ)/
+//!   `fpnRead`(`isFPNRead`、2026-10-10 TODO/111 §5.4 で追加)
+//! - channel: `lsbThreshold` / `gain` / `triggerInhibition` / `zeroSuppression.threshold`
+//!
+//! 葉が 15 なのは `zeroSuppression` が 2 葉、`pulser` が 3 葉に分かれるため(12 ノブ中 10 は単純な 1 葉)。
 //!
 //! 型と範囲は xcfg の `range` 属性をそのまま写す。`range` が無いもの
 //! (`Module.triggerDelay`)は型と非負だけを見る(GET 側 `CoBoNode::setTriggerDelay` も
