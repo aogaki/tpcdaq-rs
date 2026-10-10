@@ -175,3 +175,12 @@ partial = false/false)では表せず `unsupported` → mini でパラメータ�
   バッジ + Save 無効 + 理由表示。`DEFAULT_KNOBS` は消えた(= 25 MHz 直書きの穴は塞がった)。
 - 裁定の記録: §5.4(readout / fpnRead)、レーン A の迷った点 1〜6 は §5.4 末尾のとおり。`schema.rs` 冒頭の「ノブ集合(7 個)」の古い doc コメントは次の機械作業で直す(Sonnet)。
 - 未了: §1-5 実機確認(ELITPC、VPN 待ち)、§1-6 マニュアル更新、SPEC §3.3 / §11 への転記(ノブ 12 個・`fpnRead`・`/api/params/{templates,defaults}`)。
+
+### 実機確認(§1-5、ELITPC、2026-10-10 12:55、Fable)
+- main `5f7417f` を bundle で ELITPC へ、`cargo build --release`(16 s)、UI dist を `/opt/tpcdaq/ui` に入れ替え(旧は `ui.old`)。α run 33(88,711 s)を停止 → daq_down / up。
+- `GET /api/params/templates` → 20 本(`configure-*.xcfg`。生成物 `*__<hash8>` と prepare-* は出ない)。
+- `GET /api/params/defaults?template=configure-elinp.xcfg` → knobs = 320 / 100.0 MHz / external / **readout partial + fpnRead true** / 232 ns / 120 fC / thr 1 / LSB 15 / ZS off 600 / pulser off、unset・unsupported・exceptions 空。
+- 無変更で `PUT /api/params` → id **`elinp__4bd7bfd1`**、`configure-elinp__4bd7bfd1.xcfg` と `prepare-…` が生成され、**どちらも `configure-elinp.xcfg` とバイト一致**(md5 0845d6c4 = VM の delay_test.xcfg)。
+- `run/start` → run 34: ECC ログ `Prepare: using configuration 'elinp__4bd7bfd1'` / `Reading configuration file …configure-elinp__4bd7bfd1.xcfg` / `Configure: loading … 'elinp__4bd7bfd1'`、
+  logbook `run_start.config_id = elinp__4bd7bfd1` + `params {id, sha256, exceptions 0}`。40 s で 202 frames(≈ 5 Hz)、overflow 0。**run 34 は α 本番として続行**(中身は elinp と同一)。
+- これで UI の Parameters 画面は mini で使える(次のステップ = 25 MHz への切替は UI から: writingClockFrequency 25、triggerDelay を窓に合わせて決め直す — 101)。
