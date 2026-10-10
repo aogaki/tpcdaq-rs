@@ -47,7 +47,7 @@ export const PEAKING_TIME_NS: readonly number[] = [
   70, 117, 232, 280, 334, 383, 502, 541, 568, 632, 721, 760, 831, 870, 976, 1014,
 ];
 
-/** 11 ノブ(PARAMS_KNOBS_ja.md §7)。葉は 14(`zeroSuppression` 2 + `pulser` 3 + 単純 9)。 */
+/** 12 ノブ(PARAMS_KNOBS_ja.md §7)。葉は 15(`zeroSuppression` 2 + `pulser` 3 + 単純 10)。 */
 export const KNOB_GROUPS: readonly KnobGroup[] = [
   {
     name: 'triggerDelay',
@@ -133,9 +133,22 @@ export const KNOB_GROUPS: readonly KnobGroup[] = [
         kind: 'enum',
         scopeDepth: 2,
         choices: ['full', 'partial'],
-        // full/partial は AGET の 2 要素(isAllChannelRead + isFPNRead)に展開される
-        // (078 レーン A 結果節 §4-2。`enableWriteHittedregister` / `channel.Reading` は非管理)。
-        xcfgElements: ['isAllChannelRead', 'isFPNRead'],
+        // full/partial は isAllChannelRead だけ(111 §5.4 で isFPNRead を fpnRead に分けた。
+        // `enableWriteHittedregister` / `channel.Reading` は非管理)。
+        xcfgElements: ['isAllChannelRead'],
+      },
+    ],
+  },
+  {
+    name: 'fpnRead',
+    label: 'Read FPN channels',
+    fields: [
+      {
+        key: 'fpnRead',
+        label: 'Read FPN channels',
+        kind: 'bool',
+        scopeDepth: 2,
+        xcfgElements: ['isFPNRead'],
       },
     ],
   },
@@ -238,7 +251,7 @@ export const KNOB_GROUPS: readonly KnobGroup[] = [
   },
 ];
 
-/** 14 の葉(表示・往復用のフラット版)。 */
+/** 15 の葉(表示・往復用のフラット版)。 */
 export const KNOB_FIELDS: readonly KnobField[] = KNOB_GROUPS.flatMap((group) => group.fields);
 
 /** 全 [`KnobField.xcfgElements`] を集めたもの(Preview xcfg のハイライト判定に使う)。 */

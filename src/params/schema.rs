@@ -48,7 +48,7 @@ pub enum KnobKind {
 #[derive(Debug, Clone, Copy)]
 pub struct KnobSpec {
     /// JSON のキー。入れ子は `.` 区切り(`"pulser.enabled"` = `{"pulser":{"enabled":…}}`)。
-    /// **合成ノブ(`readout`)では同じ名前のエントリが複数ある**。
+    /// 合成ノブ(Derived)は同じ名前のエントリを複数持てる(2026-10-10 以降の KNOBS では全ノブ 1 エントリ)。
     pub name: &'static str,
     /// xcfg 上でその値が住む階層。
     pub scope: Scope,
@@ -133,19 +133,21 @@ pub const KNOBS: &[KnobSpec] = &[
         suffix: &["Global", "Reg1", "peackingTime"],
         kind: KnobKind::IntEnum(PEAKING_TIME_NS),
     },
-    // `readout` = 合成ノブ。full / partial が**同じ JSON キー**から 2 要素に展開される。
-    // 値は実テンプレート 2 本の差分から: full = configure-physics、partial = configure-pulser。
+    // `readout` = 全 ch を読むか(full → true、partial → false)。モード名の対応表を持つので Derived。
+    // 2026-10-10(TODO/111 §5.4)に isFPNRead を `fpnRead` へ分けた: mini の現用テンプレートは
+    // isAllChannelRead=false + isFPNRead=true で、2 要素を 1 モードに束ねると表せなかったため。
     KnobSpec {
         name: "readout",
         scope: Scope::Aget,
         suffix: &["Global", "Reg1", "isAllChannelRead"],
         kind: KnobKind::Derived(&[("full", "true"), ("partial", "false")]),
     },
+    // `fpnRead` = FPN 4 ch を常に読むか(TODO/111 §5.4)。
     KnobSpec {
-        name: "readout",
+        name: "fpnRead",
         scope: Scope::Aget,
         suffix: &["Global", "Reg1", "isFPNRead"],
-        kind: KnobKind::Derived(&[("full", "true"), ("partial", "false")]),
+        kind: KnobKind::Bool,
     },
     // `zeroSuppression` は JSON では 1 つのオブジェクトだが、xcfg では**スコープが違う 2 要素**。
     // 例外は threshold にだけ意味がある(enabled は CoBo スコープなので `at` は必ず細かすぎ → 拒否)。
@@ -670,7 +672,7 @@ mod tests {
 
             for other in KNOBS.iter().skip(i + 1) {
                 if other.name == spec.name {
-                    // 名前が重複してよいのは合成ノブ(`readout`)だけ。
+                    // 名前が重複してよいのは合成ノブ(Derived)だけ。
                     assert!(
                         matches!(spec.kind, KnobKind::Derived(_))
                             && matches!(other.kind, KnobKind::Derived(_)),

@@ -24,9 +24,9 @@ function loadFixtureKnobs(): Record<string, unknown> {
 }
 
 describe('KNOB_FIELDS ↔ params_roundtrip.json(過不足なし)', () => {
-  it('11 グループ・14 葉(9 単純 + zeroSuppression 2 + pulser 3)', () => {
-    expect(KNOB_GROUPS).toHaveLength(11);
-    expect(KNOB_FIELDS).toHaveLength(14);
+  it('12 グループ・15 葉(10 単純 + zeroSuppression 2 + pulser 3)', () => {
+    expect(KNOB_GROUPS).toHaveLength(12);
+    expect(KNOB_FIELDS).toHaveLength(15);
   });
 
   it('KNOB_FIELDS のキー集合 = フィクスチャの knobs を平らにしたキー集合(過不足なし)', () => {
@@ -105,9 +105,22 @@ describe('個別ノブの型・範囲(docs/PARAMS_KNOBS_ja.md §7 の写し)', (
     });
   });
 
-  it('zeroSuppression.enabled / pulser.enabled は bool', () => {
+  it('zeroSuppression.enabled / pulser.enabled / fpnRead は bool', () => {
     expect(knobField('zeroSuppression.enabled')?.kind).toBe('bool');
     expect(knobField('pulser.enabled')?.kind).toBe('bool');
+    expect(knobField('fpnRead')?.kind).toBe('bool');
+  });
+
+  it('readout は isAllChannelRead だけ、fpnRead は isFPNRead(111 §5.4 で分けた)', () => {
+    expect(knobField('readout')?.xcfgElements).toEqual(['isAllChannelRead']);
+    expect(knobField('fpnRead')).toMatchObject({
+      label: 'Read FPN channels',
+      scopeDepth: 2,
+      xcfgElements: ['isFPNRead'],
+    });
+    // フォームの並びは readout の直後。
+    const keys = KNOB_FIELDS.map((field) => field.key);
+    expect(keys.indexOf('fpnRead')).toBe(keys.indexOf('readout') + 1);
   });
 
   it('未知のキーは undefined', () => {

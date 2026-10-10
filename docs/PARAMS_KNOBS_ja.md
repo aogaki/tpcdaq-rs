@@ -118,6 +118,10 @@ Node[CoBo].Instance[0].AsAd[1].Aget[2].channel[5].LSBThresholdValue
   readout ノブに含めたいなら、pedestals テンプレートの `false` をどう扱うか(= テンプレート毎に
   full の意味が違う)を決める必要がある。
 - 067 の注意(partial にすると frameType が 1 に変わる)は UI 側(レーン C)の表示事項として残る。
+- **2026-10-10 改訂(TODO/111 §5.4)**: mini の現用テンプレート(`delay_test.xcfg` = `configure-elinp.xcfg`)は
+  `isAllChannelRead=false` + `isFPNRead=true` で、2 要素を 1 モードに束ねた `readout` では表せなかった。
+  `readout` は `isAllChannelRead` だけ(full → true、partial → false)、`isFPNRead` は新ノブ **`fpnRead`**(AGET、bool)に分けた。
+  4 通りの組がすべて表せる。上の表の「管理」列はこの 2 ノブで管理する、と読み替える。
 
 ### 4-3. `zeroSuppression` — enabled と threshold のスコープが違う → **内部で 2 ノブ**
 
@@ -218,7 +222,7 @@ JSON の意味(「AsAd1 全体」)は変わらず、`Params::effective_value` �
 **実機の解決器と合わない**ので、SPEC §3 にはこの節の方式(展開)を写す。
 生成物が大きくなるのは許容(JSON の意味は不変)。
 
-## 7. 実装済みノブ一覧(JSON キー → xcfg。2026-09-22 時点)
+## 7. 実装済みノブ一覧(JSON キー → xcfg。2026-10-10 時点 — 12 ノブ・葉 15)
 
 `src/params/schema.rs` の `KNOBS` が唯一の定義。スコープ深さ = CoBo 0 / AsAd 1 / AGET 2 / channel 3。
 `exceptions[].at` はこの深さ**以下**(= 同じか粗い)だけ許され、粗い場合は実在 id の直積に展開される(§6)。
@@ -234,7 +238,8 @@ JSON の意味(「AsAd1 全体」)は変わらず、`Params::effective_value` �
 | `pulser.period_ms` | CoBo | `Generator.period_ms` | int ≥ 0 |
 | `globalThreshold` | AGET | `Global.Reg1.GlobalThresholdValue` | int [0, 7] |
 | `peakingTime_ns` | AGET | `Global.Reg1.peackingTime` | `PEAKING_TIME_NS` の 16 値 |
-| `readout` | AGET | `Global.Reg1.isAllChannelRead` + `Global.Reg1.isFPNRead` | {full, partial} |
+| `readout` | AGET | `Global.Reg1.isAllChannelRead` | {full (true), partial (false)} |
+| `fpnRead` | AGET | `Global.Reg1.isFPNRead` | bool |
 | `lsbThreshold` | channel | `LSBThresholdValue` | int [0, 15] |
 | `gain` | channel | `Gain` | {10pC, 120fC, 1pC, 240fC} |
 | `triggerInhibition` | channel | `TriggerInhibition` | {inhibit_channel, inhibit_trigger, none} |
@@ -250,9 +255,13 @@ Monitoring / InspectionLines / LEMO / Alarms、`Node[Mutant]` 配下すべて。
 
 `src/params/extract.rs` の `extract(name, xml)`(純関数)= `GET /api/params/defaults?template=<name>` の中身。UI の初期値をテンプレート自身から読む(直書き既定値で mini の 100 MHz が 25 MHz に化ける穴を塞ぐ)。
 - `knobs`: `Instance[*]` から `*` の連鎖で読めて、`KnobKind` の型・範囲(`Params` の検証と同じ検査)に収まった葉だけ。
-- `unset`: `*` の連鎖に要素が無い葉(`.` 区切り)。**既定値で埋めない**。合成ノブは構成要素が 1 つでも無ければ unset。
-- `unsupported` `{knob, found, why}`: 型・範囲外 / 合成ノブ(`readout`)の構成要素が同じモードに写らない / 明示 id ノードの値が例外で表せない。`found` は xcfg のテキストそのまま(合成は `isAllChannelRead=true,isFPNRead=false`)。
+- `unset`: `*` の連鎖に要素が無い葉(`.` 区切り)。**既定値で埋めない**。
+- `unsupported` `{knob, found, why}`: 型・範囲外(`readout` は対応表 true/false 以外)/ 明示 id ノードの値が例外で表せない。`found` は xcfg のテキストそのまま。why は schema の検査と同じ文言(パース不能・対応表外は英語の短文)。
 - `exceptions`: `Instance[*]` の下で**明示 id が先頭から連続する**ノードの値。`at` = その明示 id の接頭辞(`AsAd[1].Aget[*].channel[*].Gain` → `{asad:1}`)。
-- 表せない明示ノード → `unsupported`: `*` の下の明示 id(`AsAd[*].Aget[1]…`、why `explicit id below a wildcard`)、CoBo の明示インスタンス(`Instance[0]…`、why `explicit CoBo instance`)、合成ノブの構成要素が同じノードに揃わない。
+- 表せない明示ノード → `unsupported`: `*` の下の明示 id(`AsAd[*].Aget[1]…`、why `explicit id below a wildcard`)、CoBo の明示インスタンス(`Instance[0]…`、why `explicit CoBo instance`)。
 - render の除去規則(§3-1)は表せない明示ノードを消すので、「抽出 → 保存」の後にもう一度抽出すると `unsupported` は空になる(knobs / exceptions は不変 = 冪等)。
+- **注記(粗い at)**: `AsAd[1].Aget[*].channel[*]` のような粗い明示ノードは §6 の探索規則によりテンプレート上では**効いていない**が、
+  抽出は §5.0 どおり `{asad:1}` の例外として返し、保存すると render が実在 id に展開して**効くようになる**。現行の実テンプレートにこの形は無い。
+- **注記(例外の列挙順)**: render は例外を列挙順に書くので、同じノブで粗い例外を細かい例外より後に並べると粗い方が上書きする
+  (`effective_value` は most specific wins)。抽出が返す例外はノブごとに `at` が重ならないので、この経路では起きない。
 - 受け入れ: `tests/params_extract.rs`(合成フィクスチャ + env `TPCDAQ_PARAMS_REAL_TEMPLATES` の実テンプレート往復)、`tests/params_ccfg_oracle.rs`(抽出値の有効値 = ECC の解決値)。
