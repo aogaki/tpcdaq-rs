@@ -6,9 +6,16 @@
  *    `ParamsApiError` を **サーバの `error` 文言のまま** 投げる。
  * ② `PUT /api/params` — body が `{token, params}`、400/401/409/503 それぞれの文言を保つ。
  * ③ `GET /api/params/render` — `template` の有無で URL が変わる、書かない(GET のみ)。
- * ④ 応答が届かない(fetch が reject)場合も status 0 + URL つきの文言で投げる(silent 禁止)。
+ * ④ `GET /api/params/templates` / `GET /api/params/defaults`(TODO/111 §5.0)— 閲覧系、エラー文言はそのまま。
+ * ⑤ 応答が届かない(fetch が reject)場合も status 0 + URL つきの文言で投げる(silent 禁止)。
  */
-import { type ParamsInfo, type ParamsJson, ParamsApiError, ParamsClient } from './params-api';
+import {
+  type ParamsDefaults,
+  type ParamsInfo,
+  type ParamsJson,
+  ParamsApiError,
+  ParamsClient,
+} from './params-api';
 
 const PARAMS_JSON: ParamsJson = {
   schema: 'tpcdaq-params/1',
@@ -243,4 +250,75 @@ describe('ParamsClient.renderParams — GET /api/params/render(dry run)', () => 
       message: 'GET /api/params/render → HTTP 404 Not Found',
     });
   });
+});
+
+describe('ParamsClient.getTemplates — GET /api/params/templates(111 §5.0)', () => {
+  it('200: templates の配列だけを返す', async () => {
+    const { fetchFn, calls } = fakeFetch([
+      {
+        status: 200,
+        payload: { templates: ['configure-elinp.xcfg', 'configure-pulser-vm.xcfg'] },
+      },
+    ]);
+    const client = new ParamsClient(() => '/api', fetchFn);
+
+    const result = await client.getTemplates();
+
+    expect(result).toEqual(['configure-elinp.xcfg', 'configure-pulser-vm.xcfg']);
+    expect(calls[0].url).toBe('/api/params/templates');
+    expect(calls[0].init?.method).toBe('GET');
+  });
+
+  it('503(ecc_config_dir 未設定)はサーバの文言のまま投げる', async () => {
+    const { fetchFn } = fakeFetch([
+      { status: 503, payload: { error: 'ecc_config_dir is not configured' } },
+    ]);
+    const client = new ParamsClient(() => '/api', fetchFn);
+
+    await expect(client.getTemplates()).rejects.toMatchObject({
+      status: 503,
+      message: 'ecc_config_dir is not configured',
+    });
+  });
+
+  it('200 でも契約の形でなければ黙って空にせず投げる', async () => {
+    const { fetchFn } = fakeFetch([{ status: 200, payload: { templates: 'oops' } }]);
+    const client = new ParamsClient(() => '/api', fetchFn);
+
+    await expect(client.getTemplates()).rejects.toBeInstanceOf(ParamsApiError);
+  });
+});
+
+describe('ParamsClient.getDefaults — GET /api/params/defaults(111 §5.0)', () => {
+  const DEFAULTS: ParamsDefaults = {
+    template: 'configure-elinp.xcfg',
+    knobs: { triggerDelay: 320, writingClockFrequency_MHz: 100.0 },
+    exceptions: [{ at: { asad: 1, aget: 2, ch: 5 }, knob: 'lsbThreshold', value: 3 }],
+    unset: ['pulser.period_ms'],
+    unsupported: [{ knob: 'triggerMode', found: 'onMultiplicity', why: 'not in {external, …}' }],
+  };
+
+  it('200: そのまま返す。template はクエリに URL エンコードで乗る', async () => {
+    const { fetchFn, calls } = fakeFetch([{ status: 200, payload: DEFAULTS }]);
+    const client = new ParamsClient(() => '/api', fetchFn);
+
+    const result = await client.getDefaults('configure elinp.xcfg');
+
+    expect(result).toEqual(DEFAULTS);
+    expect(calls[0].url).toBe('/api/params/defaults?template=configure%20elinp.xcfg');
+    expect(calls[0].init?.method).toBe('GET');
+  });
+
+  for (const [status, error] of [
+    [400, 'template は .xcfg で終わる必要がある'],
+    [404, 'template が無い: configure-x.xcfg'],
+    [503, 'ecc_config_dir is not configured'],
+  ] as const) {
+    it(`${status} はサーバの文言のまま投げる`, async () => {
+      const { fetchFn } = fakeFetch([{ status, payload: { error } }]);
+      const client = new ParamsClient(() => '/api', fetchFn);
+
+      await expect(client.getDefaults('x.xcfg')).rejects.toMatchObject({ status, message: error });
+    });
+  }
 });

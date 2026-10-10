@@ -7,32 +7,110 @@
     <p class="banner error"><code>GET /api/params</code> failed: {{ error }}</p>
   }
 
-  @if (!loading() && loadError() === null && info() === null && !draftReady()) {
-    <section class="card">
-      <h2>No parameters yet</h2>
-      <p class="sub">
-        No <code>current.json</code> is configured on the controller yet. Enter the template xcfg
-        file name (from the <code>ecc_config_dir</code>, e.g.
-        <code>configure-physics-zCobo1k-extTrig_120fC_25MHz_232ns_trigDelay1748.xcfg</code>) and
-        load the defaults — knobs start at the current HIGS2026 working point (SPEC §3.3), and
-        nothing is saved until you press <em>Save</em>.
-      </p>
-      <label class="field">
-        template
+  <!-- Template picker (shared by the "No parameters yet" card and the loaded screen). -->
+  <ng-template #picker>
+    <label class="field">
+      source xcfg
+      @if (templates(); as list) {
+        <select class="template-picker" (change)="setNewTemplateInput($event)">
+          <option value="" [selected]="newTemplateInput() === ''">— choose a template —</option>
+          @for (name of list; track name) {
+            <option [value]="name" [selected]="name === newTemplateInput()">{{ name }}</option>
+          }
+        </select>
+      } @else {
         <input
           type="text"
+          class="template-picker"
           [value]="newTemplateInput()"
           (input)="setNewTemplateInput($event)"
           autocomplete="off"
         />
-      </label>
-      <button type="button" [disabled]="newTemplateInput().trim() === ''" (click)="loadDefaults()">
-        Load defaults from template
+      }
+    </label>
+    @if (templates(); as list) {
+      @if (list.length === 0) {
+        <p class="sub">No <code>configure-*.xcfg</code> found in <code>ecc_config_dir</code>.</p>
+      }
+    }
+    @if (templatesError(); as error) {
+      <p class="banner error">
+        Template list unavailable — type the file name instead:
+        <span class="err">{{ error }}</span>
+      </p>
+    }
+    <div class="row">
+      <button
+        type="button"
+        [disabled]="newTemplateInput().trim() === '' || defaultsBusy()"
+        (click)="loadFromTemplate()"
+      >
+        Load from template
       </button>
+      @if (defaultsBusy()) {
+        <span class="sub">reading…</span>
+      }
+    </div>
+    @if (confirmReload()) {
+      <p class="banner info">
+        Unsaved edits in the form will be discarded and replaced by the values in
+        <span class="mono">{{ newTemplateInput() }}</span
+        >.
+      </p>
+      <div class="row">
+        <button type="button" (click)="confirmReloadNow()">Discard edits and reload</button>
+        <button type="button" (click)="cancelReload()">Cancel</button>
+      </div>
+    }
+    @if (defaultsError(); as error) {
+      <p class="banner error">
+        <code>GET /api/params/defaults</code> failed: <span class="err">{{ error }}</span>
+      </p>
+    }
+  </ng-template>
+
+  @if (!loading() && loadError() === null && info() === null && !draftReady()) {
+    <section class="card">
+      <h2>No parameters yet</h2>
+      <p class="sub">
+        No <code>current.json</code> is configured on the controller yet. Choose the template xcfg
+        (from the <code>ecc_config_dir</code>) and load it — the knobs start at the values
+        <em>written in that template</em> (nothing is assumed), and nothing is saved until you press
+        <em>Save</em>.
+      </p>
+      <ng-container [ngTemplateOutlet]="picker" />
     </section>
   }
 
   @if (draftReady()) {
+    <section class="card">
+      <header>
+        <h2>Load from template</h2>
+      </header>
+      <p class="sub">Replaces the form below with the values written in the chosen template.</p>
+      <ng-container [ngTemplateOutlet]="picker" />
+    </section>
+
+    @if (unsupported().length > 0) {
+      <section class="card">
+        <header>
+          <h2>Unsupported in template</h2>
+          <span class="badge">{{ unsupported().length }}</span>
+        </header>
+        <p class="sub">
+          These values cannot be represented by a knob — the fields stay empty and Save is disabled
+          until you fill them in or load another template.
+        </p>
+        <ul class="unsupported-list">
+          @for (item of unsupported(); track item.knob) {
+            <li>
+              <span class="mono">{{ item.knob }}: {{ item.found }} — {{ item.why }}</span>
+            </li>
+          }
+        </ul>
+      </section>
+    }
+
     <!-- (1) identity: template name + the saved id/exceptions badge. -->
     <section class="card">
       <header>
@@ -82,6 +160,9 @@
                     }
                     @case ('enum') {
                       <select (change)="onScalarChange(field, $event)">
+                        @if (isBlank(field.key)) {
+                          <option value="" selected>—</option>
+                        }
                         @for (choice of field.choices; track choice) {
                           <option [value]="choice" [selected]="isEnumSelected(field, choice)">
                             {{ choice }}
@@ -101,6 +182,9 @@
                   }
                   @if (field.unit) {
                     <span class="unit">{{ field.unit }}</span>
+                  }
+                  @if (blankBadge(field.key); as badge) {
+                    <span class="badge-unset">{{ badge }}</span>
                   }
                 </label>
               }

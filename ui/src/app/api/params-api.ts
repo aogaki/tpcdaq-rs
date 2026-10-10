@@ -6,6 +6,8 @@
  *   409(Running 中)/ 503(`ecc_config_dir` 未設定)は **サーバの `error` 文言をそのまま**
  *   `ParamsApiError` として投げる(041 D-1 の「明瞭なエラー」を殺さない)。
  * - `GET /api/params/render?template=<name>` — dry run(閲覧系)。**書かない**。
+ * - `GET /api/params/templates` / `GET /api/params/defaults?template=<name>` — テンプレート
+ *   xcfg の一覧と、そこから抽出した初期値(閲覧系、TODO/111 §5.0 の契約が正)。
  *
  * `controller-api.ts` / `run-control-api.ts` と同じ流儀: `fetch` を直に使い、`FetchLike` で
  * 差し替える(`provideHttpClient` を増やさない = KISS)。
@@ -61,6 +63,28 @@ export interface ParamsRenderResult {
   readonly id: string;
   readonly exceptions: number;
   readonly configure_xcfg: string;
+}
+
+/** `defaults` の `unsupported` 1 件。`found` は xcfg のテキストそのまま。 */
+export interface ParamsUnsupported {
+  readonly knob: string;
+  readonly found: string;
+  readonly why: string;
+}
+
+/**
+ * `GET /api/params/defaults` の応答(TODO/111 §5.0)。
+ *
+ * - `knobs` = テンプレートから読めて型・範囲に収まった葉だけ(`tpcdaq-params/1` の `knobs` と同形)。
+ * - `unset` = テンプレートに要素が無い葉(`.` 区切り)。黙って既定値を入れない。
+ * - `unsupported` = 要素はあるが型・範囲外 / 合成ノブが写らないもの。
+ */
+export interface ParamsDefaults {
+  readonly template: string;
+  readonly knobs: Record<string, unknown>;
+  readonly exceptions: readonly ExceptionRow[];
+  readonly unset: readonly string[];
+  readonly unsupported: readonly ParamsUnsupported[];
 }
 
 /** HTTP エラーをそのまま持ち回る(サーバの `error` 文言を加工しない)。 */
@@ -128,6 +152,29 @@ export class ParamsClient {
     const url = apiUrl(this.apiBase(), path);
     const response = await this.send(url, 'GET');
     return this.parseOrThrow<ParamsRenderResult>(url, 'GET', response);
+  }
+
+  /** `GET /api/params/templates` — `ecc_config_dir` 直下の `configure-*.xcfg` のファイル名(辞書順)。 */
+  async getTemplates(): Promise<string[]> {
+    const url = apiUrl(this.apiBase(), 'params/templates');
+    const response = await this.send(url, 'GET');
+    const payload = await this.parseOrThrow<{ templates?: unknown }>(url, 'GET', response);
+    const list = payload?.templates;
+    if (!Array.isArray(list) || !list.every((name) => typeof name === 'string')) {
+      // 200 なのに契約の形でない(古いサーバ等)。空配列にして黙らせない。
+      throw new ParamsApiError(
+        response.status,
+        `GET ${url} returned an unexpected body (expected {"templates": [string…]})`,
+      );
+    }
+    return list as string[];
+  }
+
+  /** `GET /api/params/defaults?template=<name>` — テンプレート xcfg から抽出した初期値。**書かない**。 */
+  async getDefaults(template: string): Promise<ParamsDefaults> {
+    const url = apiUrl(this.apiBase(), `params/defaults?template=${encodeURIComponent(template)}`);
+    const response = await this.send(url, 'GET');
+    return this.parseOrThrow<ParamsDefaults>(url, 'GET', response);
   }
 
   private async send(
