@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.35(2026-09-23 — 実装の正本)**
+- **status**: **v1.36(2026-10-10 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -151,7 +151,7 @@
   topology frame は来ない(decoder カウンタ 0)= 確定**、§13-5 実 ECC(20190315)をホストで
   ネイティブ起動し e2e 成立、§13-7 `extra_connections=0` 実測(mini)。初回 configure 7 s
   (261 s コールドスタートは再現せず)。データは frameType 2 rev 5(compact)278,784 B/frame。
-  / **v1.30(2026-09-17)Wave 1 反映(TODO/080)**: §5.4 に **AsAd 電子回路座標パネル**(TODO/077 — monitor タブの Event Display の下、(cobo,asad) 毎 nAget×nCh × nBuckets の 2D、0x03 由来)を追加、§10.3 の 0x03 購読条件を「波形ビュー**または monitor タブ**」に改訂。§6.7 に **raw ツリー契約の共有**(ガス圧シミュレーション gas-pressure-test の Stage 4 が同一契約で `_raw.root` を書き macros を共有 — 契約変更は両リポ同時、合成 raw は §5.5 QA 再構成のフィクスチャ供給元、080 D-8)を明記。 / **v1.31(2026-09-22)slowctl 骨格の契約(TODO/079 Phase 2、監視のみ)**: §2.3 に slowctl → monitor の PUB ペイロード(kind=`slow`)、§3.1 に `[slowctl]` / `[[slowctl.device]]` / `[monitor] slow_sub` の例、§3.2 に slowctl status PUB `47006` と source_id 200 = slowctl(旧 psu)、§9.2 の `psu` レコードを **`slow`** に一般化(IDENT / VALUE / ALARM / RECOVER / ERROR、値は機器の単位文字列つき)し run_start / run_stop に `slow`(直近値、nullable)を追加、§10.3 の status JSON に `slow` を同梱。作動 API は引き続き無し(§11)。 / **v1.32(2026-09-22)パラメータ JSON の契約(TODO/078 レーン A)**: §3.3 を新設 — JSON が正・xcfg は生成物、11 ノブとスコープ、例外は「一様値 + 例外リスト」、**CompoundConfig の継承は粗い例外を発注どおりには解決しない(Search.hpp の backtrack、オラクル実測)ので粗い例外は実在 id の直積へ展開**、生成物名 `<stem>__<sha256 8>`、受け入れは CompoundConfig オラクル(tools/ccfg_resolve、env-gated)。 / **v1.33(2026-09-23)パラメータ REST と run/start 結線(TODO/078 レーン B)**: §8.1 に `GET/PUT /api/params`・`GET /api/params/render`・`/api/status.params`、§3.1 `[controller]` に `ecc_config_dir` / `params_dir`、§9.2 `run_start.params`(nullable)と `audit run/start.params_id`、§3.3 に id の正規化規則(serde_json 辞書順の JSON テキストの sha256)と REST の状態規則(Running 中の PUT は 409、ecc_config_dir 未設定は 503)。 / **v1.34(2026-09-23)UI 2 ビュー(TODO/078 レーン C・079 Phase 4)**: §11 に **Parameters ビュー**(ノブ 11 のフォーム + Exceptions (N) + Preview xcfg + Save、status バーに `params <id> · exceptions N`)と **Slow control ビュー**(旧 Power を置換: 最新値の表 + ECharts トレンド(UI 内 30 min リングバッファ)+ counters、status バーに alarm 数)を追加。作動 UI は無し(安全境界)。 / **v1.35(2026-09-23)ecc-bridge を Rust に(TODO/076 Phase 3)**: §1.1 の ecc-bridge 行を Rust(`src/ecc/`、`src/bin/ecc_bridge.rs`、Ice プロトコル 1.0 / encoding 1.1 を自前実装、Ice ライブラリ非依存)に、§8.2 を「ecc-bridge(Rust)」に改題し C++ 実装の記述を履歴化。JSON REQ/REP 契約は不変(C++ の 457 CHECK を Rust テストに移植、fake ECC の e2e 52 本、実 ECC + 実 zCoBo で walk-back 一致 — 076 結果節)。C++ に残るのは fake_ecc(テストダブル)と e2e クライアントのみ。
+  / **v1.30(2026-09-17)Wave 1 反映(TODO/080)**: §5.4 に **AsAd 電子回路座標パネル**(TODO/077 — monitor タブの Event Display の下、(cobo,asad) 毎 nAget×nCh × nBuckets の 2D、0x03 由来)を追加、§10.3 の 0x03 購読条件を「波形ビュー**または monitor タブ**」に改訂。§6.7 に **raw ツリー契約の共有**(ガス圧シミュレーション gas-pressure-test の Stage 4 が同一契約で `_raw.root` を書き macros を共有 — 契約変更は両リポ同時、合成 raw は §5.5 QA 再構成のフィクスチャ供給元、080 D-8)を明記。 / **v1.31(2026-09-22)slowctl 骨格の契約(TODO/079 Phase 2、監視のみ)**: §2.3 に slowctl → monitor の PUB ペイロード(kind=`slow`)、§3.1 に `[slowctl]` / `[[slowctl.device]]` / `[monitor] slow_sub` の例、§3.2 に slowctl status PUB `47006` と source_id 200 = slowctl(旧 psu)、§9.2 の `psu` レコードを **`slow`** に一般化(IDENT / VALUE / ALARM / RECOVER / ERROR、値は機器の単位文字列つき)し run_start / run_stop に `slow`(直近値、nullable)を追加、§10.3 の status JSON に `slow` を同梱。作動 API は引き続き無し(§11)。 / **v1.32(2026-09-22)パラメータ JSON の契約(TODO/078 レーン A)**: §3.3 を新設 — JSON が正・xcfg は生成物、11 ノブとスコープ、例外は「一様値 + 例外リスト」、**CompoundConfig の継承は粗い例外を発注どおりには解決しない(Search.hpp の backtrack、オラクル実測)ので粗い例外は実在 id の直積へ展開**、生成物名 `<stem>__<sha256 8>`、受け入れは CompoundConfig オラクル(tools/ccfg_resolve、env-gated)。 / **v1.33(2026-09-23)パラメータ REST と run/start 結線(TODO/078 レーン B)**: §8.1 に `GET/PUT /api/params`・`GET /api/params/render`・`/api/status.params`、§3.1 `[controller]` に `ecc_config_dir` / `params_dir`、§9.2 `run_start.params`(nullable)と `audit run/start.params_id`、§3.3 に id の正規化規則(serde_json 辞書順の JSON テキストの sha256)と REST の状態規則(Running 中の PUT は 409、ecc_config_dir 未設定は 503)。 / **v1.34(2026-09-23)UI 2 ビュー(TODO/078 レーン C・079 Phase 4)**: §11 に **Parameters ビュー**(ノブ 11 のフォーム + Exceptions (N) + Preview xcfg + Save、status バーに `params <id> · exceptions N`)と **Slow control ビュー**(旧 Power を置換: 最新値の表 + ECharts トレンド(UI 内 30 min リングバッファ)+ counters、status バーに alarm 数)を追加。作動 UI は無し(安全境界)。 / **v1.35(2026-09-23)ecc-bridge を Rust に(TODO/076 Phase 3)**: §1.1 の ecc-bridge 行を Rust(`src/ecc/`、`src/bin/ecc_bridge.rs`、Ice プロトコル 1.0 / encoding 1.1 を自前実装、Ice ライブラリ非依存)に、§8.2 を「ecc-bridge(Rust)」に改題し C++ 実装の記述を履歴化。JSON REQ/REP 契約は不変(C++ の 457 CHECK を Rust テストに移植、fake ECC の e2e 52 本、実 ECC + 実 zCoBo で walk-back 一致 — 076 結果節)。C++ に残るのは fake_ecc(テストダブル)と e2e クライアントのみ。 / **v1.36(2026-10-10)パラメータの初期値をテンプレートから抽出(TODO/111)**: §3.3 に **抽出(render の逆)** — `src/params/extract.rs`、テンプレートの `*` 連鎖から一様値、明示 id ノードから例外、要素が無い葉は `unset`、型・範囲外や合成ノブが写らないものは `unsupported` として**明示**(黙って既定値を入れない)。ノブを **12(葉 15)**に: `readout` は `isAllChannelRead` だけ(full/partial)、**`fpnRead`(bool、`isFPNRead`)を分離** — mini の現用 xcfg は `isAllChannelRead=false` + `isFPNRead=true` で、2 要素を 1 モードに束ねると表せなかった。§8.1 に `GET /api/params/templates`・`GET /api/params/defaults?template=`。§11 の Parameters ビューは UI の既定値直書き(`DEFAULT_KNOBS`、HIgS の 25 MHz)を廃止し、テンプレート一覧から選んで抽出値で埋める(unset / unsupported は空欄 + バッジ + Save 無効)。受け入れ: 実テンプレート 3 本(mini delay_test / VM pulser / HIgS physics)で抽出 → render がバイト一致、オラクル 4,423 インスタンス一致、ELITPC 実機で抽出 → 無変更保存 → 生成 xcfg がテンプレートとバイト一致 → その id で run(111 結果節)。
   / **v1.29(2026-09-15)安全境界を明文化(§11、ユーザー裁定 — TODO/079 の発端)**: web 操作面(controller REST / UI)は DAQ の run 制御と監視のみ。**物理的作動(HV・ガス圧 setpoint・バルブ)は web に経路を作らず、ローカル限定**。§1.1 の psu 行を「監視のみ」に改め、名称を slowctl(HV / ガス / 環境の汎用スローコントロール)へ。根拠 = token + passphrase は事故防止であって認証ではない(§3.1)、TLS/認証は自前実装しない。
   / **v1.28(2026-09-14)§6.7 を実装前に精度上げ(TODO/075 着手、Fable)**: adc ブロック数は
   「観測」ではなく**期待フラグメント集合(§6.3 `--expect`)から起動時に確定**(ブランチは最初の
@@ -588,9 +588,9 @@ receiver プロセスは `tpcdaq-receiver --config x.toml --cobo-id K` で CoBo 
 
 - **xcfg を直接編集しない。** 実験側の正典 xcfg を**テンプレート**として無改変で取り込み、`tpcdaq-params/1` の JSON(`template` + `knobs` + `exceptions`)から
   `configure-<stem>__<sha256 先頭 8>.xcfg` と同内容の `prepare-…` を生成する(同じ JSON → 同じファイル)。describe は不変。
-- **ノブ = 11(JSON の葉 13)**、定義は `src/params/schema.rs` の `KNOBS` が唯一(表と根拠 = `docs/PARAMS_KNOBS_ja.md` §7)。
+- **ノブ = 12(JSON の葉 15、v1.36)**、定義は `src/params/schema.rs` の `KNOBS` が唯一(表と根拠 = `docs/PARAMS_KNOBS_ja.md` §7)。
   CoBo: `triggerDelay`(10 ns 単位)/ `writingClockFrequency_MHz` / `triggerMode` / `zeroSuppression.enabled` / `pulser.{enabled, voltage_mV, period_ms}`(`Generator.amplitudeStart` と同値、mV)。
-  AGET: `globalThreshold` / `peakingTime_ns`(AGET 仕様 16 値 = xcfg `range`)/ `readout`(`isAllChannelRead` + `isFPNRead`、full/partial。`enableWriteHittedregister` と `channel.Reading` はテンプレート由来)。
+  AGET: `globalThreshold` / `peakingTime_ns`(AGET 仕様 16 値 = xcfg `range`)/ `readout`(`isAllChannelRead` のみ、full/partial)/ **`fpnRead`(`isFPNRead`、bool — v1.36 で `readout` から分離。mini の現用は partial + fpnRead true)**(`enableWriteHittedregister` と `channel.Reading` はテンプレート由来)。
   channel: `lsbThreshold` / `gain` / `triggerInhibition` / `zeroSuppression.threshold`。**全ノブ必須**(省略不可)。管理外の要素はテンプレートを 1 バイトも変えない(往復はバイト一致)。
 - **例外リスト**: `at` は (asad, aget, ch) の接頭辞、ノブのスコープと同じか粗いものだけ。**CompoundConfig の継承解決(`CCfg/View/Search.hpp`)は
   `<AsAd id="1"><Aget id="*">` のような粗い明示ノードを一様値より優先しない**(段を戻って `*` の連鎖を選び直す backtrack。オラクル実測、078 結果節)。
@@ -603,6 +603,10 @@ receiver プロセスは `tpcdaq-receiver --config x.toml --cobo-id K` で CoBo 
 - **REST(v1.33、§8.1)**: `GET /api/params`(無ければ 404)/ `PUT /api/params {token, params}`(検証 400、**Running 中は 409**、`ecc_config_dir` 未設定は **503**、成功で render + 保存 + `audit params/put`)/
   `GET /api/params/render?template=…`(dry run、書かない)。**run/start は current.json があれば prepare / configure の config_id に `<id>` を使う**(describe は TOML のまま)。
   current.json があるのに render できないときは run を始めない(TOML へ黙って後退しない)。UI(Parameters ビュー、Exceptions (N) バッジ、status バーの `params <id> · exceptions N`)はレーン C(§11 に着手時追記)。
+- **抽出(v1.36、TODO/111)**: `extract(template)` は render の逆。`*` の連鎖にある値 → `knobs`(`KnobKind` の型・範囲に収まるものだけ)、明示 id ノードの値 → `exceptions`(`at` は明示 id の接頭辞)、
+  `*` 連鎖に要素が無い葉 → `unset`、要素はあるが型・範囲外 / 合成ノブが 1 モードに写らない / CoBo の明示インスタンス / `*` の下の明示 id → `unsupported {knob, found, why}`。
+  **黙って既定値を入れない**(unset / unsupported は UI が空欄 + 理由表示 + Save 無効)。受け入れ = 実テンプレートで 抽出 → render がバイト一致 + 再抽出の冪等性 + オラクル。
+  REST `GET /api/params/templates` → `{templates: [configure-*.xcfg の名前]}`(生成物 `*__<hash8>` と他相は除く)、`GET /api/params/defaults?template=<name>` → 上記の JSON(400 = 名前がパス外 / 不正、404 = 無い、503 = `ecc_config_dir` 未設定)。
 
 ## 4. ジオメトリ仕様
 
@@ -1074,6 +1078,8 @@ README で明示。root-sink のビルドは tools/ 内で完結し、Rust 側�
   - **パラメータ(v1.33、§3.3、TODO/078)**: `GET /api/params` → `{id, sha256, exceptions, params, files: {configure, prepare}}`(無ければ 404)/
     `PUT /api/params {token, params}` → 同形(検証失敗 400 + `ParamsError` 文言、Running 中 409、`ecc_config_dir` 未設定 503)/
     `GET /api/params/render?template=<name>` → `{id, exceptions, configure_xcfg}`(dry run、書かない)。`GET /api/status` に `params: {id, exceptions} | null`(失敗は null + `notes`)。
+    **v1.36(TODO/111)**: `GET /api/params/templates` → `{templates: [string]}`(`ecc_config_dir` 直下の `configure-*.xcfg`、辞書順)/ `GET /api/params/defaults?template=<name>` →
+    `{template, knobs, exceptions, unset, unsupported}`(テンプレートからの抽出、書かない。400 / 404 / 503 は §3.3)。
   - 状態変更系はすべて token 必須 + 監査ログ(audit レコード)。閲覧系は認証なし(二層アクセス制御)。
     **例外(v1.10 明文化)**: `POST /api/logbook/comment` は **token 不要** — DAQ 状態を変えない
     記録系であり、R11(シフト全員が書けるログブック)を操作権 1 名モデルより優先する。
@@ -1233,9 +1239,12 @@ Angular + Angular Material(delila-rs operator UI と同一スタック)。ビュ
 - P3 起票時の確認項目: ①1 Hz redraw でのズーム状態保持(painter `updateObject` + redraw)、
   ②JSROOT ダークモードの Grafana 風ページへの馴染み、③ライセンス最終確認(MIT のはず)。
 
-- **Parameters ビュー(v1.34、TODO/078 レーン C)**: §3.3 の JSON を編集する唯一の画面。ノブ 11(葉 13)のフォーム(型・範囲は UI の表 = `src/params/schema.rs` の写し、
+- **Parameters ビュー(v1.34、TODO/078 レーン C。v1.36 で初期値をテンプレート抽出に — TODO/111)**: §3.3 の JSON を編集する唯一の画面。ノブ 12(葉 15)のフォーム(型・範囲は UI の表 = `src/params/schema.rs` の写し、
   過不足は spec で検知、最終検証はサーバの 400)、折りたたみ「Exceptions (N)」(件数は常に見える)、「Preview xcfg」(`GET /api/params/render` の本文、管理ノブの行をハイライト。
   テンプレートとの diff は出さない)、「Save」(`PUT /api/params`、操作権 token 必須、Running 中は無効)。status バーに `params <id> · exceptions N`(15 s poll、無ければ `—`)。
+  **初期値(v1.36)**: UI に既定値を焼き込まない。「Load from template」で `GET /api/params/templates` の一覧から選び(読めなければ名前の手入力に落として理由を出す)、
+  `GET /api/params/defaults` の抽出値でフォームと Exceptions 表を埋める。`unset` / `unsupported` / 手で空にした葉は空欄 + バッジ(`unset in template` 等)+ 警告一覧、
+  値の無い葉がある間は Save 無効(理由を表示)。下書きに変更があるまま読み直すときは画面内で確認(捨てる / Cancel)。
 - **Slow control ビュー(v1.34、TODO/079 Phase 4、旧 Power を置換)**: WS `status.slow`(§10.3)の最新値の表(device / node / param / value unit / age / alarm)、
   ECharts トレンド(UI 内リングバッファ 1 Hz × 30 min、最大 4 系列)、`counters` 表。`slow` 無しは「No slow-control data」(モック値なし)。status バーに alarm 数。
   **作動 UI は置かない**(下の安全境界)。
