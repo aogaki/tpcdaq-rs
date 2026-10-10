@@ -187,6 +187,26 @@ button:disabled {
   font-size: 0.7rem;
 }
 
+/* テンプレートに無い / 写らない葉(空欄)。赤で「埋めるまで保存できない」ことを見せる。 */
+.knob-field .badge-unset {
+  align-self: flex-start;
+  padding: 0 0.4rem;
+  border: 1px solid var(--tpc-error);
+  border-radius: 999px;
+  color: var(--tpc-error);
+  font-size: 0.7rem;
+}
+
+.unsupported-list {
+  margin: 0;
+  padding-left: 1.2rem;
+  color: var(--tpc-error);
+}
+
+.template-picker {
+  max-width: 34rem;
+}
+
 /* ---- exceptions ---- */
 
 .exceptions {

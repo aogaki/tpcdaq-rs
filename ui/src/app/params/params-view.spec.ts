@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { RunControlApiService, RunControlClient } from '../api/run-control-api';
 import { ParamsApiService, ParamsClient } from '../api/params-api';
 import { WsClientService } from '../ws/ws-client';
-import { DEFAULT_KNOBS, ParamsView } from './params-view';
+import { ParamsView } from './params-view';
 
 // リポ直下の合成フィクスチャ(`knob-spec.spec.ts` と同じファイル)。
 const FIXTURE_PATH = '../tests/fixtures/params/params_roundtrip.json';
@@ -50,6 +50,29 @@ const SAVED_INFO = {
   },
 };
 
+/** elinp 相当のテンプレートから抽出した応答(111 §5.0 の例。mini = 100 MHz / triggerDelay 320)。 */
+const ELINP_DEFAULTS = {
+  template: 'configure-elinp.xcfg',
+  knobs: {
+    triggerDelay: 320,
+    writingClockFrequency_MHz: 100.0,
+    triggerMode: 'external',
+    globalThreshold: 1,
+    lsbThreshold: 15,
+    gain: '120fC',
+    triggerInhibition: 'none',
+    peakingTime_ns: 232,
+    readout: 'partial',
+    zeroSuppression: { enabled: false, threshold: 600 },
+    pulser: { enabled: false, voltage_mV: -1000.0, period_ms: 1000 },
+  } as Record<string, unknown>,
+  exceptions: [] as unknown[],
+  unset: [] as string[],
+  unsupported: [] as { knob: string; found: string; why: string }[],
+};
+
+const TEMPLATES = ['configure-elinp.xcfg', 'configure-pulser-vm.xcfg'];
+
 interface Call {
   url: string;
   init: RequestInit | undefined;
@@ -74,6 +97,8 @@ describe('ParamsView', () => {
   let fixture: ComponentFixture<ParamsView>;
   let getReplies: { status: number; payload: unknown }[];
   let putReplies: { status: number; payload: unknown }[];
+  let defaultsReplies: { status: number; payload: unknown }[];
+  let templatesReply: { status: number; payload: unknown };
   let wsState: ReturnType<typeof signal<{ state: string } | null>>;
 
   function text(): string {
@@ -98,6 +123,18 @@ describe('ParamsView', () => {
     return found as HTMLInputElement;
   }
 
+  /** テンプレート選択の `<select>`(一覧が読めたとき)。 */
+  function picker(): HTMLSelectElement {
+    return fixture.nativeElement.querySelector('select.template-picker') as HTMLSelectElement;
+  }
+
+  function choose(name: string): void {
+    const select = picker();
+    select.value = name;
+    select.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+  }
+
   /**
    * `fixture.whenStable()` だけでは足りない: `getParams`/`putParams`/`renderParams` は
    * `fetch → response.json()` と 2 段以上 await が連なるので(zoneless なので raw な
@@ -113,16 +150,40 @@ describe('ParamsView', () => {
   }
 
   /** GET が先に走るので、順番は [GET, ...PUT/render のうち呼んだ分]。 */
-  function setup(get: { status: number; payload: unknown }[]): {
+  function setup(
+    get: { status: number; payload: unknown }[],
+    templates: { status: number; payload: unknown } = {
+      status: 200,
+      payload: { templates: TEMPLATES },
+    },
+  ): {
     calls: Call[];
     control: RunControlClient;
   } {
     getReplies = get;
     putReplies = [];
+    defaultsReplies = [];
+    templatesReply = templates;
     const callSeq: Call[] = [];
+    const respond = (reply: { status: number; payload: unknown }): Promise<Response> =>
+      Promise.resolve({
+        ok: reply.status >= 200 && reply.status < 300,
+        status: reply.status,
+        statusText: '',
+        json: () => Promise.resolve(reply.payload),
+      } as unknown as Response);
     const fetchFn = (url: string, init?: RequestInit): Promise<Response> => {
       callSeq.push({ url, init });
       const method = init?.method ?? 'GET';
+      if (url === '/api/params/templates') return respond(templatesReply);
+      if (url.startsWith('/api/params/defaults')) {
+        return respond(
+          defaultsReplies.shift() ?? {
+            status: 500,
+            payload: { error: 'no defaults reply queued' },
+          },
+        );
+      }
       if (method === 'PUT') {
         const reply = putReplies.shift() ?? {
           status: 500,
@@ -167,28 +228,225 @@ describe('ParamsView', () => {
 
   afterEach(() => fixture?.destroy());
 
-  it('404: "No parameters yet" を出し、テンプレート名を入れると既定値のフォームができる', async () => {
-    setup([{ status: 404, payload: { error: 'no params configured' } }]);
+  it('404: "No parameters yet" とテンプレート一覧を出し、選んで読むとテンプレートの値でフォームが埋まる', async () => {
+    const { calls } = setup([{ status: 404, payload: { error: 'no params configured' } }]);
     await settle();
 
     expect(text()).toContain('No parameters yet');
-    expect(button('Load defaults from template').disabled).toBe(true);
+    expect(calls.some((c) => c.url === '/api/params/templates')).toBe(true);
+    const options = [...picker().querySelectorAll('option')].map((o) => o.value);
+    expect(options).toEqual(['', ...TEMPLATES]);
+    expect(button('Load from template').disabled).toBe(true);
 
-    const templateInput = fixture.nativeElement.querySelector('.card input') as HTMLInputElement;
-    templateInput.value = 'configure-mini-fixture.xcfg';
-    templateInput.dispatchEvent(new Event('input'));
-    fixture.detectChanges();
-
-    expect(button('Load defaults from template').disabled).toBe(false);
-    button('Load defaults from template').click();
+    defaultsReplies = [{ status: 200, payload: ELINP_DEFAULTS }];
+    choose('configure-elinp.xcfg');
+    expect(button('Load from template').disabled).toBe(false);
+    button('Load from template').click();
     await settle();
 
+    const defaultsCall = calls.find((c) => c.url.startsWith('/api/params/defaults'));
+    expect(defaultsCall?.url).toBe('/api/params/defaults?template=configure-elinp.xcfg');
     expect(text()).not.toContain('No parameters yet');
     expect(text()).toContain('Knobs');
-    // 既定値(= params_roundtrip.json)が反映されている。
-    expect(input('Trigger delay').value).toBe('1748');
-    expect(input('Global threshold').value).toBe('1');
+    // 旧 DEFAULT_KNOBS(25 MHz / 1748)ではなく、テンプレート由来の 100 MHz / 320。
+    expect(input('Trigger delay').value).toBe('320');
+    expect(input('Writing clock frequency').value).toBe('100');
+    expect(input('Readout').value).toBe('partial');
+    expect(input('template').value).toBe('configure-elinp.xcfg');
     expect(text()).toContain('not saved yet');
+    expect(text()).not.toContain('unset in template');
+  });
+
+  it('defaults の knobs が params_roundtrip.json の knobs なら、フィクスチャの値でフォームが埋まる', async () => {
+    const raw = JSON.parse(readFileSync(FIXTURE_PATH, 'utf-8')) as {
+      knobs: Record<string, unknown>;
+    };
+    setup([{ status: 404, payload: { error: 'no params configured' } }]);
+    await settle();
+    defaultsReplies = [{ status: 200, payload: { ...ELINP_DEFAULTS, knobs: raw.knobs } }];
+    choose('configure-elinp.xcfg');
+    button('Load from template').click();
+    await settle();
+
+    expect(input('Trigger delay').value).toBe('1748');
+    expect(input('Writing clock frequency').value).toBe('25');
+    expect(input('Trigger mode').value).toBe('external');
+    expect(input('Peaking time').value).toBe('232');
+    expect(input('Readout').value).toBe('full');
+    expect(input('Pulser voltage').value).toBe('-1000');
+    expect(input('Pulser period').value).toBe('1000');
+    expect(text()).not.toContain('unset in template');
+    expect(button('Save').disabled).toBe(false);
+  });
+
+  it('テンプレート一覧が読めない(503)ときはテキスト入力に落とし、理由を画面に出す', async () => {
+    const { calls } = setup([{ status: 404, payload: { error: 'no params configured' } }], {
+      status: 503,
+      payload: { error: 'ecc_config_dir is not configured' },
+    });
+    await settle();
+
+    expect(picker()).toBeNull();
+    expect(text()).toContain('ecc_config_dir is not configured');
+    const typed = fixture.nativeElement.querySelector('input.template-picker') as HTMLInputElement;
+    typed.value = 'configure-elinp.xcfg';
+    typed.dispatchEvent(new Event('input'));
+    fixture.detectChanges();
+
+    defaultsReplies = [{ status: 200, payload: ELINP_DEFAULTS }];
+    button('Load from template').click();
+    await settle();
+
+    expect(calls.some((c) => c.url === '/api/params/defaults?template=configure-elinp.xcfg')).toBe(
+      true,
+    );
+    expect(input('Trigger delay').value).toBe('320');
+  });
+
+  it('defaults の失敗(404)はサーバの文言をそのまま出し、フォームは作らない', async () => {
+    setup([{ status: 404, payload: { error: 'no params configured' } }]);
+    await settle();
+    defaultsReplies = [
+      { status: 404, payload: { error: 'template が無い: configure-elinp.xcfg' } },
+    ];
+    choose('configure-elinp.xcfg');
+    button('Load from template').click();
+    await settle();
+
+    expect(text()).toContain('template が無い: configure-elinp.xcfg');
+    expect(text()).toContain('No parameters yet');
+    expect(text()).not.toContain('Knobs');
+  });
+
+  it('defaults の exceptions が Exceptions 表に入る', async () => {
+    setup([{ status: 404, payload: { error: 'no params configured' } }]);
+    await settle();
+    defaultsReplies = [
+      {
+        status: 200,
+        payload: {
+          ...ELINP_DEFAULTS,
+          exceptions: [{ at: { asad: 1, aget: 2, ch: 5 }, knob: 'lsbThreshold', value: 3 }],
+        },
+      },
+    ];
+    choose('configure-elinp.xcfg');
+    button('Load from template').click();
+    await settle();
+
+    expect(text()).toContain('Exceptions 1');
+    const cells = [...fixture.nativeElement.querySelectorAll('table.exceptions tbody input')].map(
+      (e) => (e as HTMLInputElement).value,
+    );
+    // asad / aget / ch / value / note(knob は select)。
+    expect(cells.slice(0, 3)).toEqual(['1', '2', '5']);
+    expect(cells[3]).toBe('3');
+  });
+
+  it('unset の葉は空欄 + 赤バッジ。埋まるまで Save 無効で、理由に葉の名前が出る', async () => {
+    setup([{ status: 404, payload: { error: 'no params configured' } }]);
+    await settle();
+    const knobs = structuredClone(ELINP_DEFAULTS.knobs) as { pulser: Record<string, unknown> };
+    delete knobs.pulser['period_ms'];
+    defaultsReplies = [
+      { status: 200, payload: { ...ELINP_DEFAULTS, knobs, unset: ['pulser.period_ms'] } },
+    ];
+    choose('configure-elinp.xcfg');
+    button('Load from template').click();
+    await settle();
+
+    expect(input('Pulser period').value).toBe('');
+    const badges = fixture.nativeElement.querySelectorAll('.badge-unset');
+    expect(badges).toHaveLength(1);
+    expect((badges[0] as HTMLElement).textContent).toContain('unset in template');
+    expect(button('Save').disabled).toBe(true);
+    expect(text()).toContain('pulser.period_ms');
+
+    // 手で値を入れれば解消(token はある・Idle)。
+    const period = input('Pulser period');
+    period.value = '500';
+    period.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelectorAll('.badge-unset')).toHaveLength(0);
+    expect(button('Save').disabled).toBe(false);
+  });
+
+  it('unsupported は警告一覧("knob: found — why")に出し、該当欄は空欄、Save 無効', async () => {
+    setup([{ status: 404, payload: { error: 'no params configured' } }]);
+    await settle();
+    const knobs = { ...ELINP_DEFAULTS.knobs };
+    delete knobs['triggerMode'];
+    defaultsReplies = [
+      {
+        status: 200,
+        payload: {
+          ...ELINP_DEFAULTS,
+          knobs,
+          unsupported: [
+            { knob: 'triggerMode', found: 'onMultiplicity', why: 'not in {external, …}' },
+          ],
+        },
+      },
+    ];
+    choose('configure-elinp.xcfg');
+    button('Load from template').click();
+    await settle();
+
+    const warnings = fixture.nativeElement.querySelector('.unsupported-list') as HTMLElement;
+    expect(warnings.textContent).toContain('triggerMode: onMultiplicity — not in {external, …}');
+    // 空欄(onMultiplicity をそのまま入れない)。
+    expect(input('Trigger mode').value).toBe('');
+    expect(button('Save').disabled).toBe(true);
+    expect(text()).toContain('triggerMode');
+  });
+
+  it('読み込み済み画面にも Load from template がある。下書きが無変更なら確認なしで読み直す', async () => {
+    const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+    await settle();
+    expect(input('Trigger delay').value).toBe('1748');
+
+    defaultsReplies = [{ status: 200, payload: ELINP_DEFAULTS }];
+    choose('configure-elinp.xcfg');
+    button('Load from template').click();
+    await settle();
+
+    expect(calls.some((c) => c.url === '/api/params/defaults?template=configure-elinp.xcfg')).toBe(
+      true,
+    );
+    expect(text()).not.toContain('will be discarded');
+    expect(input('Trigger delay').value).toBe('320');
+    // 保存済み id は残る(読み直しは下書きだけ。サーバは触らない)。
+    expect(text()).toContain('mini-fixture__797d5dc2');
+  });
+
+  it('下書きに変更があるときは確認文言を出し、Cancel で下書きを守り、確認で読み直す', async () => {
+    const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+    await settle();
+    const delay = input('Trigger delay');
+    delay.value = '999';
+    delay.dispatchEvent(new Event('change'));
+    fixture.detectChanges();
+
+    defaultsReplies = [{ status: 200, payload: ELINP_DEFAULTS }];
+    choose('configure-elinp.xcfg');
+    button('Load from template').click();
+    await settle();
+
+    expect(text()).toContain('will be discarded');
+    expect(calls.some((c) => c.url.startsWith('/api/params/defaults'))).toBe(false);
+
+    button('Cancel').click();
+    await settle();
+    expect(text()).not.toContain('will be discarded');
+    expect(input('Trigger delay').value).toBe('999');
+
+    button('Load from template').click();
+    await settle();
+    button('Discard edits and reload').click();
+    await settle();
+
+    expect(input('Trigger delay').value).toBe('320');
+    expect(text()).not.toContain('will be discarded');
   });
 
   it('200: サーバの params でフォームが埋まり、id・exceptions バッジが出る', async () => {
@@ -314,21 +572,12 @@ describe('ParamsView', () => {
   it('Preview は info が無い(まだ保存していない)間は無効', async () => {
     setup([{ status: 404, payload: { error: 'no params configured' } }]);
     await settle();
-    const templateInput = fixture.nativeElement.querySelector('.card input') as HTMLInputElement;
-    templateInput.value = 'configure-mini-fixture.xcfg';
-    templateInput.dispatchEvent(new Event('input'));
-    fixture.detectChanges();
-    button('Load defaults from template').click();
+    defaultsReplies = [{ status: 200, payload: ELINP_DEFAULTS }];
+    choose('configure-elinp.xcfg');
+    button('Load from template').click();
     await settle();
 
     expect(button('Preview xcfg').disabled).toBe(true);
     expect(text()).toContain('Save once first');
-  });
-});
-
-describe('DEFAULT_KNOBS ↔ tests/fixtures/params/params_roundtrip.json', () => {
-  it('「既定値で作る」の値は往復フィクスチャの knobs と一致する(ずれの検知)', () => {
-    const raw = JSON.parse(readFileSync(FIXTURE_PATH, 'utf-8')) as { knobs: unknown };
-    expect(DEFAULT_KNOBS).toEqual(raw.knobs);
   });
 });

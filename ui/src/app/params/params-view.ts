@@ -8,9 +8,11 @@
  * # 責務の分担
  *
  * - 読み込みは `ParamsApiService`(閲覧系、認証なし)。`GET /api/params` が 404 なら
- *   まだ何も保存されていない ——「テンプレート名を入れて既定値で作る」導線を出す
- *   (`renderParams()` は current.json が要るので使えない。既定値は
- *   `tests/fixtures/params/params_roundtrip.json` の値そのもの)。
+ *   まだ何も保存されていない ——「テンプレートを選んで読む」導線を出す。ノブの初期値は
+ *   **テンプレート xcfg から抽出したもの**(`GET /api/params/defaults`、TODO/111 §5.0)で、
+ *   UI に既定値は焼き込まない(mini = 100 MHz / ELITPC = 25 MHz が混ざる事故を防ぐ)。
+ * - テンプレートに無い葉(`unset`)・型や範囲に収まらない葉(`unsupported`)は**空欄**にして
+ *   理由を出し、埋まるまで Save を無効にする(黙って既定値を入れない)。
  * - 保存は `RunControlApiService` の token(操作権 1 名モデル)。**失敗はサーバの文言を
  *   そのまま**出す(041 D-1 / silent 失敗を作らない)。
  * - Running 中の判定は **monitor WS の `status.state`**(078 §11 の指定どおり。controller の
@@ -18,11 +20,14 @@
  * - スコープ(CoBo/AsAd/AGET/channel)は画面に出さない(078 §0)。`knob-spec.ts` の
  *   `scopeDepth` は Preview のハイライトにだけ使う。
  */
+import { NgTemplateOutlet } from '@angular/common';
 import { Component, computed, inject, signal } from '@angular/core';
 
 import {
+  type ExceptionRow,
   type ParamsInfo,
   type ParamsJson,
+  type ParamsUnsupported,
   ParamsApiError,
   ParamsApiService,
 } from '../api/params-api';
@@ -49,26 +54,6 @@ export interface ExceptionDraftRow {
   readonly note: string;
 }
 
-/**
- * テンプレート未設定時の既定値(= `tests/fixtures/params/params_roundtrip.json` の `knobs`、
- * 078 §11「knobs は表の既定値(configure-physics 25 MHz の現行値)で空フォームを作る」)。
- * `knob-spec.spec.ts` 経由ではなくここで直接固定しているので、フィクスチャが動いたら
- * `params-view.spec.ts` がずれを検知する。
- */
-export const DEFAULT_KNOBS: Record<string, unknown> = {
-  triggerDelay: 1748,
-  writingClockFrequency_MHz: 25.0,
-  triggerMode: 'external',
-  globalThreshold: 1,
-  lsbThreshold: 15,
-  gain: '120fC',
-  triggerInhibition: 'none',
-  peakingTime_ns: 232,
-  readout: 'full',
-  zeroSuppression: { enabled: false, threshold: 600 },
-  pulser: { enabled: false, voltage_mV: -1000.0, period_ms: 1000 },
-};
-
 function defaultValueText(field: KnobField): string {
   if (field.kind === 'bool') return 'false';
   if (field.choices && field.choices.length > 0) return String(field.choices[0]);
@@ -80,8 +65,20 @@ function emptyExceptionRow(): ExceptionDraftRow {
   return { asad: '', aget: '', ch: '', knob: first.key, value: defaultValueText(first), note: '' };
 }
 
+function exceptionRows(exceptions: readonly ExceptionRow[]): ExceptionDraftRow[] {
+  return exceptions.map((exception) => ({
+    asad: exception.at.asad?.toString() ?? '',
+    aget: exception.at.aget?.toString() ?? '',
+    ch: exception.at.ch?.toString() ?? '',
+    knob: exception.knob,
+    value: String(exception.value),
+    note: exception.note ?? '',
+  }));
+}
+
 @Component({
   selector: 'app-params-view',
+  imports: [NgTemplateOutlet],
   templateUrl: './params-view.html',
   styleUrl: './params-view.scss',
 })
@@ -100,14 +97,44 @@ export class ParamsView {
   /** フォームを描画してよいか(読み込み済み、または「既定値で作る」を押した)。 */
   readonly draftReady = signal(false);
 
-  /** 「No parameters yet」のテンプレート名入力。 */
+  /** 「Load from template」で読むテンプレート名(select / 手入力のどちらでもここに入る)。 */
   readonly newTemplateInput = signal('');
+  /** `GET /api/params/templates` の一覧。`null` = 読めていない(理由は `templatesError`)。 */
+  readonly templates = signal<string[] | null>(null);
+  readonly templatesError = signal<string | null>(null);
+  readonly defaultsBusy = signal(false);
+  readonly defaultsError = signal<string | null>(null);
+  /** 下書きに変更があるまま読み直そうとした —— 確認待ち(捨ててよいか)。 */
+  readonly confirmReload = signal(false);
+
+  /** 直近に読んだテンプレートの `unset`(テンプレートに要素が無い葉、`.` 区切り)。 */
+  readonly unsetLeaves = signal<readonly string[]>([]);
+  /** 直近に読んだテンプレートの `unsupported`(要素はあるが型・範囲外 / 写らない)。 */
+  readonly unsupported = signal<readonly ParamsUnsupported[]>([]);
+  /** 「下書きに変更があるか」の基準(読み込み / 保存直後のスナップショット)。 */
+  private readonly baseline = signal('');
 
   /** 編集中の下書き。 */
   readonly templateName = signal('');
   readonly knobValues = signal<Map<string, unknown>>(new Map());
   readonly exceptionsDraft = signal<ExceptionDraftRow[]>([]);
   readonly noteText = signal('');
+
+  /** 下書きの全体を比較用の文字列にしたもの(Map は順序に依らないよう key で並べる)。 */
+  private readonly snapshot = computed(() =>
+    JSON.stringify([
+      this.templateName(),
+      [...this.knobValues()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+      this.exceptionsDraft(),
+      this.noteText(),
+    ]),
+  );
+  readonly draftDirty = computed(() => this.snapshot() !== this.baseline());
+
+  /** 値が入っていない葉(テンプレートに無い / 型外 / 手で空にした)。Save の前に埋める必要がある。 */
+  readonly blankKeys = computed(() =>
+    KNOB_FIELDS.map((field) => field.key).filter((key) => !this.knobValues().has(key)),
+  );
 
   readonly hasToken = computed(() => this.control.token() !== null);
 
@@ -127,6 +154,10 @@ export class ParamsView {
   readonly saveDisabledReason = computed<string | null>(() => {
     if (!this.draftReady()) return 'Load parameters first';
     if (this.templateName().trim() === '') return 'Template name is required';
+    const blank = this.blankKeys();
+    if (blank.length > 0) {
+      return `Knobs without a value: ${blank.join(', ')} — fill them in or load another template`;
+    }
     if (!this.hasToken()) return 'Acquire control in Run control first';
     if (this.runningNow()) return 'A run is active — cannot change parameters while Running';
     if (this.saveBusy()) return 'Saving…';
@@ -144,6 +175,20 @@ export class ParamsView {
 
   constructor() {
     void this.load();
+    void this.loadTemplates();
+  }
+
+  private async loadTemplates(): Promise<void> {
+    try {
+      this.templates.set(await this.api.getTemplates());
+      this.templatesError.set(null);
+    } catch (error) {
+      // 一覧が読めなくても名前の手入力で続けられる。ただし理由は画面に出す。
+      this.templates.set(null);
+      this.templatesError.set(
+        error instanceof ParamsApiError ? error.message : describeError(error),
+      );
+    }
   }
 
   private async load(): Promise<void> {
@@ -164,35 +209,83 @@ export class ParamsView {
   }
 
   private loadDraftFrom(params: ParamsJson): void {
-    this.templateName.set(params.template);
-    this.knobValues.set(flattenKnobs(params.knobs));
-    this.exceptionsDraft.set(
-      params.exceptions.map((exception) => ({
-        asad: exception.at.asad?.toString() ?? '',
-        aget: exception.at.aget?.toString() ?? '',
-        ch: exception.at.ch?.toString() ?? '',
-        knob: exception.knob,
-        value: String(exception.value),
-        note: exception.note ?? '',
-      })),
+    this.setDraft(
+      params.template,
+      flattenKnobs(params.knobs),
+      exceptionRows(params.exceptions),
+      params.note ?? '',
     );
-    this.noteText.set(params.note ?? '');
+    this.unsetLeaves.set([]);
+    this.unsupported.set([]);
   }
 
+  /** 下書きを丸ごと差し替え、「変更なし」の基準を取り直す。 */
+  private setDraft(
+    template: string,
+    knobs: Map<string, unknown>,
+    exceptions: ExceptionDraftRow[],
+    note: string,
+  ): void {
+    this.templateName.set(template);
+    this.knobValues.set(knobs);
+    this.exceptionsDraft.set(exceptions);
+    this.noteText.set(note);
+    this.baseline.set(this.snapshot());
+  }
+
+  /** `<select>` / 手入力欄の共通ハンドラ。 */
   setNewTemplateInput(event: Event): void {
-    this.newTemplateInput.set((event.target as HTMLInputElement).value);
+    this.newTemplateInput.set((event.target as HTMLInputElement | HTMLSelectElement).value);
+    this.confirmReload.set(false);
   }
 
-  /** 「Load defaults from template」— knobs は既定値(§0 のとおり、テンプレートは読まない)。 */
-  loadDefaults(): void {
+  /**
+   * 「Load from template」。下書きに変更があれば、捨ててよいか確認してから(`confirmReload`)。
+   * 読み込み前(`draftReady` が偽)や無変更なら、そのまま読む。
+   */
+  loadFromTemplate(): void {
+    if (this.newTemplateInput().trim() === '' || this.defaultsBusy()) return;
+    if (this.draftReady() && this.draftDirty() && !this.confirmReload()) {
+      this.confirmReload.set(true);
+      return;
+    }
+    void this.fetchDefaults();
+  }
+
+  cancelReload(): void {
+    this.confirmReload.set(false);
+  }
+
+  confirmReloadNow(): void {
+    void this.fetchDefaults();
+  }
+
+  private async fetchDefaults(): Promise<void> {
     const name = this.newTemplateInput().trim();
-    if (name === '') return;
-    this.templateName.set(name);
-    this.knobValues.set(flattenKnobs(DEFAULT_KNOBS));
-    this.exceptionsDraft.set([]);
-    this.noteText.set('');
-    this.saveResult.set(null);
-    this.draftReady.set(true);
+    this.defaultsBusy.set(true);
+    this.defaultsError.set(null);
+    try {
+      const defaults = await this.api.getDefaults(name);
+      const knobs = flattenKnobs(defaults.knobs);
+      // 契約上 unsupported の葉は knobs に居ないはずだが、居ても空欄にする
+      // (入れると render が 400 になる値をフォームに残さない)。
+      for (const item of defaults.unsupported) knobs.delete(item.knob);
+      this.setDraft(defaults.template, knobs, exceptionRows(defaults.exceptions), '');
+      this.unsetLeaves.set(defaults.unset);
+      this.unsupported.set(defaults.unsupported);
+      this.saveResult.set(null);
+      this.saveError.set(null);
+      this.confirmReload.set(false);
+      this.draftReady.set(true);
+    } catch (error) {
+      // 失敗したら下書きには触らない。サーバの文言をそのまま出す。
+      this.defaultsError.set(
+        error instanceof ParamsApiError ? error.message : describeError(error),
+      );
+      this.confirmReload.set(false);
+    } finally {
+      this.defaultsBusy.set(false);
+    }
   }
 
   setTemplateName(event: Event): void {
@@ -229,6 +322,27 @@ export class ParamsView {
     });
   }
 
+  private clearKnob(key: string): void {
+    this.knobValues.update((map) => {
+      const next = new Map(map);
+      next.delete(key);
+      return next;
+    });
+  }
+
+  /** 空欄の葉に付けるバッジの文言(値があれば `null`)。 */
+  blankBadge(key: string): string | null {
+    if (this.knobValues().has(key)) return null;
+    if (this.unsetLeaves().includes(key)) return 'unset in template';
+    if (this.unsupported().some((item) => item.knob === key)) return 'unsupported in template';
+    return 'empty';
+  }
+
+  /** 空欄(`blankBadge` あり)の enum は、先頭の選択肢が選ばれているように見せない。 */
+  isBlank(key: string): boolean {
+    return !this.knobValues().has(key);
+  }
+
   private coerceScalar(field: KnobField, raw: string): unknown {
     if (field.kind === 'int') return Number.parseInt(raw, 10);
     if (field.kind === 'real') return Number(raw);
@@ -244,6 +358,10 @@ export class ParamsView {
 
   onScalarChange(field: KnobField, event: Event): void {
     const raw = (event.target as HTMLInputElement | HTMLSelectElement).value;
+    if (raw.trim() === '') {
+      this.clearKnob(field.key); // 空欄は「未設定」のまま(NaN を作らない)。
+      return;
+    }
     this.setKnob(field.key, this.coerceScalar(field, raw));
   }
 
