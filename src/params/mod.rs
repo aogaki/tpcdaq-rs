@@ -5,15 +5,18 @@
 //!
 //! - [`schema`]: JSON スキーマ `tpcdaq-params/1` と検証(ノブ表 = [`schema::KNOBS`])。
 //! - [`render`]: テンプレート xcfg への適用(除去規則 → 一様値 → 例外)。
+//! - [`extract`]: その逆 — テンプレート xcfg からノブの値を読む(TODO/111、UI の初期値)。
 //! - [`paths`]: xcfg 上の位置の内部表現(CompoundConfig の `Path` 構文)。
 //!
 //! 実装したノブと、078 §2 の表と実 xcfg が食い違って**未実装**のノブは
 //! `docs/PARAMS_KNOBS_ja.md` を参照。
 
+pub mod extract;
 pub mod paths;
 pub mod render;
 pub mod schema;
 
+pub use extract::{extract, Extracted, Unsupported};
 pub use paths::{knob_path, Scope};
 pub use render::{render, Rendered};
 pub use schema::{

@@ -245,3 +245,14 @@ JSON の意味(「AsAd1 全体」)は変わらず、`Params::effective_value` �
 `channel.isSelectedforTestMode`、`Generator.defaultVoltage`、`Module.coboId` / `nbEvent` /
 `readoutDepth` / `frameType`、`AsAd.Control.isActive`、`AsAd.Generator.*`、PLL / CircularBuffer /
 Monitoring / InspectionLines / LEMO / Alarms、`Node[Mutant]` 配下すべて。
+
+## 8. 抽出(render の逆、TODO/111)
+
+`src/params/extract.rs` の `extract(name, xml)`(純関数)= `GET /api/params/defaults?template=<name>` の中身。UI の初期値をテンプレート自身から読む(直書き既定値で mini の 100 MHz が 25 MHz に化ける穴を塞ぐ)。
+- `knobs`: `Instance[*]` から `*` の連鎖で読めて、`KnobKind` の型・範囲(`Params` の検証と同じ検査)に収まった葉だけ。
+- `unset`: `*` の連鎖に要素が無い葉(`.` 区切り)。**既定値で埋めない**。合成ノブは構成要素が 1 つでも無ければ unset。
+- `unsupported` `{knob, found, why}`: 型・範囲外 / 合成ノブ(`readout`)の構成要素が同じモードに写らない / 明示 id ノードの値が例外で表せない。`found` は xcfg のテキストそのまま(合成は `isAllChannelRead=true,isFPNRead=false`)。
+- `exceptions`: `Instance[*]` の下で**明示 id が先頭から連続する**ノードの値。`at` = その明示 id の接頭辞(`AsAd[1].Aget[*].channel[*].Gain` → `{asad:1}`)。
+- 表せない明示ノード → `unsupported`: `*` の下の明示 id(`AsAd[*].Aget[1]…`、why `explicit id below a wildcard`)、CoBo の明示インスタンス(`Instance[0]…`、why `explicit CoBo instance`)、合成ノブの構成要素が同じノードに揃わない。
+- render の除去規則(§3-1)は表せない明示ノードを消すので、「抽出 → 保存」の後にもう一度抽出すると `unsupported` は空になる(knobs / exceptions は不変 = 冪等)。
+- 受け入れ: `tests/params_extract.rs`(合成フィクスチャ + env `TPCDAQ_PARAMS_REAL_TEMPLATES` の実テンプレート往復)、`tests/params_ccfg_oracle.rs`(抽出値の有効値 = ECC の解決値)。

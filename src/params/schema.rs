@@ -581,7 +581,7 @@ fn bad_type(spec: &KnobSpec, value: &Value, expected: &'static str) -> ParamsErr
     }
 }
 
-fn check_value(spec: &KnobSpec, value: &Value) -> Result<(), ParamsError> {
+pub(super) fn check_value(spec: &KnobSpec, value: &Value) -> Result<(), ParamsError> {
     match spec.kind {
         KnobKind::Int { min, max } => {
             let v = value
