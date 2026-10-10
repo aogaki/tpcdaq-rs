@@ -1,6 +1,6 @@
 # 111 — Parameters UI の初期値をテンプレート xcfg から読む(mini で 25 MHz に化ける穴を塞ぐ)
 
-**Status: READY**(2026-10-09 起票 Opus。**着手はユーザー指示待ち** — ユーザー「着手はせずにチケットだけ」)
+**Status: IN PROGRESS**(2026-10-09 起票 Opus。2026-10-10 ユーザー「パラメーター画面をお願いします」→ Fable が発注書を精度上げ(§5)し、レーン A(Opus)/ B(Sonnet)を並列発注)
 
 ## 0. 問題(1 分で)
 
@@ -56,3 +56,81 @@ ELITPC 上の同じもの = `~/ELITPC/vm_configs_2026-10-08/` と `~/ELITPC/GetS
   triggerInhibition / zeroSuppression / pulser)。xcfg の残り(delay_test で値を持つ要素 ≈ 284、インスタンス展開で 4,423)は**テンプレートから無変更で引き継ぐ**。
 - 特定の AsAd / AGET / ch だけ変える値は「Exceptions (N)」(折りたたみ、件数バッジ + ログブックで常に見える)— 078 §0。
 - 構成・識別子系(AsAd `isActive`、readoutDepth 等)はノブにせず、テンプレートの選択が運ぶ(078 §2)。
+
+## 5. 発注書(Fable、2026-10-10)— 2 レーン並列、契約は §5.0
+
+### 5.0 契約(両レーン共通。ここが正 — 実装中に変えない)
+
+`GET /api/params/templates`(閲覧系、認証なし)→ 200:
+```json
+{"templates": ["configure-elinp.xcfg", "configure-pulser-vm.xcfg", "..."]}
+```
+`ecc_config_dir` 直下の `configure-*.xcfg` の**ファイル名**を辞書順(prepare-* / describe-* / 生成物 `*__<hash8>.xcfg` は除く)。
+503 = `ecc_config_dir` 未設定(既存 `ECC_CONFIG_DIR_NOT_CONFIGURED` と同文言)。
+
+`GET /api/params/defaults?template=<name>`(閲覧系、認証なし)→ 200:
+```json
+{
+  "template": "configure-elinp.xcfg",
+  "knobs": { "triggerDelay": 320, "writingClockFrequency_MHz": 100.0, "triggerMode": "external",
+             "globalThreshold": 1, "lsbThreshold": 15, "gain": "120fC", "triggerInhibition": "none",
+             "peakingTime_ns": 232, "readout": "partial",
+             "zeroSuppression": {"enabled": false, "threshold": 600},
+             "pulser": {"enabled": false, "voltage_mV": -1000.0, "period_ms": 1000} },
+  "exceptions": [ {"at": {"asad": 1, "aget": 2, "ch": 5}, "knob": "lsbThreshold", "value": 3} ],
+  "unset": [],
+  "unsupported": []
+}
+```
+- `knobs` = **テンプレートの `*` 連鎖から読めて、かつ `KnobKind` の型・範囲に収まった葉だけ**(JSON の形は `tpcdaq-params/1` の `knobs` と同じ入れ子)。
+- `unset` = `*` 連鎖に要素が無い葉の名前(`.` 区切り、例 `"pulser.period_ms"`)。**黙って既定値を入れない**(CLAUDE.md)。
+- `unsupported` = 要素はあるが型・範囲外、または合成ノブ(`readout`)の構成要素が同じモードに写らないもの:
+  `[{"knob": "triggerMode", "found": "onMultiplicity", "why": "not in {external, …}"}]`。`found` は xcfg のテキストそのまま(複数要素なら `isAllChannelRead=true,isFPNRead=false` の形)。
+- `exceptions` = 明示 id ノードにあるノブ値。`at` は**明示 id の接頭辞だけ**(`AsAd[1].Aget[*].channel[*].Gain` → `{"asad":1}`、
+  `AsAd[1].Aget[2].channel[5].LSBThresholdValue` → `{asad:1,aget:2,ch:5}`)。`*` の下に明示 id が来る形(`AsAd[*].Aget[1]…`)は CompoundConfig の
+  探索規則上の意味が render と一致しないので **`unsupported`** に入れる(`why: "explicit id below a wildcard"`)。`note` は付けない。
+- エラー: 400 = `template` 欠落 / 空 / パス区切り(`/`, `\`)や `..` を含む / `.xcfg` で終わらない / `ecc_config_dir` の外に解決される / xcfg として読めない(`ParamsError` の文言)。
+  404 = ファイルが無い。503 = `ecc_config_dir` 未設定。本文は既存と同じ `{"error": "..."}`。
+
+### 5.1 レーン A(Rust: 抽出 + REST)— implementer、**model: opus**
+
+1. `src/params/extract.rs`(新規)+ `mod.rs` の公開。`pub fn extract(template_name: &str, template_xml: &str) -> Result<Extracted, ParamsError>`、
+   `Extracted { template: String, knobs: BTreeMap<String, Value>(入れ子に組み立てた JSON `Value` でもよい), exceptions: Vec<Exception>, unset: Vec<String>, unsupported: Vec<Unsupported> }`
+   + `impl Extracted { pub fn to_json(&self) -> Value }`(§5.0 の形)。**純関数**(ファイル IO なし)。`render.rs` の私有パーサ(`parse` / `Node` / `Element` / `find_cobo_node` /
+   `TemplateIds`)を `pub(super)` に開いて再利用する — パーサを二重に持たない。値のテキスト → JSON は `KnobKind` ごとに(`Int`/`IntEnum` → 整数、`Real`/`RealEnum` → f64、
+   `StrEnum` → 文字列、`Bool` → bool、`Derived` → 全エントリのテキストが同じモードに写るときだけそのモード)。既存 `value_to_xcfg_text` の逆であること(往復テストで担保)。
+2. REST(`src/controller.rs`): §5.0 の 2 エンドポイント。既存 `get_params_render` と同じ `spawn_blocking` + `Reply` の流儀。パスの検査は **canonicalize してから `starts_with(ecc_config_dir)`**。
+3. テスト(TDD — red を先に):
+   - `tests/params_extract.rs`(新規): (a) `template_mini.xcfg` → `knobs` が `params_roundtrip.json` の `knobs` と**完全一致**、`exceptions`/`unset`/`unsupported` 空。
+     (b) `template_stale_overrides.xcfg` → 明示ノードの値が `exceptions` に出る(件数と `at` を assert)。(c) **冪等性**: `extract` → `Params` に組んで `render` → もう一度 `extract` した結果が
+     (a)(b) それぞれで最初の抽出と一致。(d) `Derived` 不整合(`isAllChannelRead=true` + `isFPNRead=false` の合成フィクスチャ、文字列置換で作る)→ `unsupported` に `readout`。
+     (e) `Generator.period_ms` を削ったフィクスチャ → `unset` に `pulser.period_ms`、他は正常。(f) `triggerMode=onMultiplicity` → `unsupported`。
+   - **実テンプレート往復**(任意回帰、リポには入れない): 環境変数 `TPCDAQ_PARAMS_REAL_TEMPLATES`(`:` 区切りの xcfg パス)があれば各ファイルで `extract` → `render` が
+     **バイト一致**、無ければ `SKIP …` を出して緑(`tests/params_ccfg_oracle.rs` と同じ流儀)。手元の実物 = `reference/_vm_configs_2026-10-08/delay_test.xcfg`、
+     `reference/_vm_configs_2026-10-08/share_configure-pulser.xcfg`、`reference/config/configure-physics-zCobo1k-extTrig_120fC_25MHz_232ns_trigDelay1748.xcfg`
+     (**発注の受け入れ時にこの 3 本で実行して結果節に貼る**)。
+   - `tests/controller_integration.rs` に REST 2 本: templates の一覧(prepare-*/生成物を除く)、defaults の 200(フィクスチャ template_mini を `ecc_config_dir` に置く)/ 400(`../x.xcfg`、`a/b.xcfg`、`.xcfg` なし)/ 404 / 503。既存 `params_harness` を使う。
+   - `tests/params_ccfg_oracle.rs`: bin があるとき、`extract` した `knobs`+`exceptions` の `effective_value` が ccfg_resolve の解決値と一致する検査を 1 本足す(既存のヘルパで足りる)。
+4. `docs/PARAMS_KNOBS_ja.md` に §8「抽出(render の逆)」を 10 行で(規則 = §5.0 の箇条書き)。
+5. ゲート: `cargo fmt && cargo clippy --tests -- -D warnings && cargo test`(全部 green、結果の件数を結果節に)。`.unwrap()` 禁止(テストは `#![allow(clippy::unwrap_used)]`)。
+   **やらないこと**: ノブ表 `KNOBS` の変更、`triggerPeriod` の追加、UI。設計分岐に当たったら実装せず報告。
+
+### 5.2 レーン B(UI: Parameters ビュー)— implementer、**model: sonnet**
+
+1. `ui/src/app/api/params-api.ts`: `getTemplates(): Promise<string[]>`、`getDefaults(template: string): Promise<ParamsDefaults>`(§5.0 の型を `ParamsDefaults` として定義。
+   `unsupported` の要素型 `{knob, found, why}`)。エラーは既存 `ParamsApiError` の流儀(サーバの `error` 文言を加工しない)。
+2. `ui/src/app/params/params-view.ts` / `.html`:
+   - **`DEFAULT_KNOBS` を削除**。`params-view.spec.ts` の `DEFAULT_KNOBS ↔ params_roundtrip.json` の describe は、「`getDefaults` の応答(フィクスチャ JSON の knobs をモックで返す)でフォームが埋まる」テストに置き換える。
+   - テンプレートの選択: `getTemplates()` の一覧を `<select>` に(読めなければテキスト入力にフォールバックし、理由を表示)。「No parameters yet」の画面と、読み込み済み画面の両方に
+     **Load from template** ボタンを置く(読み込み済み側は「下書きを捨てて読み直す」ので、下書きに変更があれば確認文言を出してから)。
+   - 読み込んだら `knobs` でフォームを埋め、`exceptions` を Exceptions 表に、`unset` の葉は**空欄 + 赤い「unset in template」バッジ**、`unsupported` は**フォームの上に警告一覧**
+     (`knob: found — why`)として出す。`unset` または `unsupported` が残っている間は Save を無効にし、`saveDisabledReason` に理由を出す(silent 禁止)。
+   - `unsupported` のノブは該当フィールドを空欄にする(テンプレートの値をそのまま入れない — 入れると render で 400 になる)。
+3. テスト(`params-view.spec.ts` / `params-api.spec.ts`): templates 一覧の表示、defaults でフォームが埋まる、`unset` で Save が無効 + バッジ、`unsupported` で警告 + Save 無効、
+   読み込み済み画面からの読み直し。既存テスト(現在 UI 全体で 272 以上)を落とさない。
+4. ゲート: `cd ui && npm test -- --watch=false`(件数を結果節に)+ `npm run build`。`ui/dist` はコミットしない。**やらないこと**: ノブの追加、Rust 側、SPEC。
+
+### 5.3 共通
+- worktree 隔離、着手前に `git merge --ff-only main`。発注書の絶対パス = `/Users/aogaki/Workspace/tpcdaq-rs/TODO/111_params_defaults_from_template.md`(§5.0 + 自レーン節)。
+- コミットは各レーンのブランチに。完了報告 = 変更ファイル一覧 + テスト実行コマンドと件数 + 設計上迷った点。Fable が完了時に一括レビューしてマージ。
+- §5.1 の実テンプレート 3 本・ELITPC 実機確認(§1-5)・SPEC §3.3/§11 の反映・マニュアル更新(§1-6)は Fable(主対話)。`triggerPeriod` は見送り(ユーザーの当面の目的 = 25 MHz への切替には不要)。
