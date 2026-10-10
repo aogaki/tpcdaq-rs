@@ -161,3 +161,17 @@ partial = false/false)では表せず `unsupported` → mini でパラメータ�
 レーン A 報告の「迷った点」への裁定: 1(CoBo 明示インスタンスの値 → unsupported)採用。2(`why` は schema の文言)採用。3・4 採用。
 5(粗い `at` の例外は render で明示 id に展開され、テンプレート上では効いていなかった値が効くようになる)— 実テンプレートに無い形なので今回は §5.0 のまま、
 `docs/PARAMS_KNOBS_ja.md` §8 に 1 行注記。6(例外の列挙順)— 今回の経路では起きないので据え置き、§8 に注記。
+
+## 結果(2026-10-10、Fable 一括レビュー + 受け入れ再実行。実機確認は下に追記)
+
+- マージ: レーン A `4d4dd53` → `18e505b`、レーン B `adac11c` → `c57cfb6`、§5.4(readout 分割 + fpnRead)`218f5e1` → **`1165cf8`**。
+- **実テンプレート往復(Fable が main `1165cf8` で再実行)**: `TPCDAQ_PARAMS_REAL_TEMPLATES=<delay_test : share_configure-pulser : HIgS physics> cargo test --test params_extract`
+  → 14 passed、**3 本とも byte-identical**、unset / unsupported / exceptions すべて空。抽出値: mini = 320 / 100.0 MHz / external / **readout partial + fpnRead true** / 232 ns / 120 fC、
+  VM パルサー = 750 / onSlowControl / 1014 ns / pulser enabled、HIgS = 1748 / 25.0 MHz / readout full。
+- **CompoundConfig オラクル**(`tools/ccfg_resolve` を reference/20190315_patched/CompoundConfig でビルド): 4 passed(mini フィクスチャ 238 インスタンス × JSON 値・抽出値、実テンプレート 4,423 インスタンス)。
+- ゲート(main `1165cf8`、Mac): `cargo fmt --check` / `cargo clippy --tests -- -D warnings` 警告 0 / **cargo test 867 passed / 0 failed / 1 ignored**(着手前 848。+13 extract +4 REST +2 render 他)。
+  UI: **298 passed / 5 skipped / 0 failed**(着手前 283)、`npm run build` 成功。
+- レーン B のレビュー(Fable): 契約どおり。空欄は NaN を作らず「未設定」、enum は空欄のときだけ `—`、下書きに変更があれば画面内 2 ボタンで確認、unset / unsupported / 手で空にした欄は
+  バッジ + Save 無効 + 理由表示。`DEFAULT_KNOBS` は消えた(= 25 MHz 直書きの穴は塞がった)。
+- 裁定の記録: §5.4(readout / fpnRead)、レーン A の迷った点 1〜6 は §5.4 末尾のとおり。`schema.rs` 冒頭の「ノブ集合(7 個)」の古い doc コメントは次の機械作業で直す(Sonnet)。
+- 未了: §1-5 実機確認(ELITPC、VPN 待ち)、§1-6 マニュアル更新、SPEC §3.3 / §11 への転記(ノブ 12 個・`fpnRead`・`/api/params/{templates,defaults}`)。
