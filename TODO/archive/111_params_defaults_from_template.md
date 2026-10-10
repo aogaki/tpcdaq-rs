@@ -1,6 +1,6 @@
 # 111 — Parameters UI の初期値をテンプレート xcfg から読む(mini で 25 MHz に化ける穴を塞ぐ)
 
-**Status: IN PROGRESS**(2026-10-09 起票 Opus。2026-10-10 ユーザー「パラメーター画面をお願いします」→ Fable が発注書を精度上げ(§5)し、レーン A(Opus)/ B(Sonnet)を並列発注)
+**Status: COMPLETED**(2026-10-09 起票 Opus。2026-10-10 ユーザー「パラメーター画面をお願いします」→ Fable が発注書を精度上げ(§5)し、レーン A(Opus)/ B(Sonnet)を並列発注 → §5.4 追加 → 実機確認 → SPEC v1.36 → 同日完了)
 
 ## 0. 問題(1 分で)
 
@@ -184,3 +184,11 @@ partial = false/false)では表せず `unsupported` → mini でパラメータ�
 - `run/start` → run 34: ECC ログ `Prepare: using configuration 'elinp__4bd7bfd1'` / `Reading configuration file …configure-elinp__4bd7bfd1.xcfg` / `Configure: loading … 'elinp__4bd7bfd1'`、
   logbook `run_start.config_id = elinp__4bd7bfd1` + `params {id, sha256, exceptions 0}`。40 s で 202 frames(≈ 5 Hz)、overflow 0。**run 34 は α 本番として続行**(中身は elinp と同一)。
 - これで UI の Parameters 画面は mini で使える(次のステップ = 25 MHz への切替は UI から: writingClockFrequency 25、triggerDelay を窓に合わせて決め直す — 101)。
+
+### 締め(2026-10-10、Fable)
+- SPEC **v1.36**(`d9bbf41`): §3.3 抽出・ノブ 12・`fpnRead`、§8.1 `GET /api/params/{templates,defaults}`、§11 Parameters ビューの初期値。
+- `schema.rs` / `mod.rs` / `PARAMS_KNOBS_ja.md` の古い件数表記を Sonnet が修正(`792caa8` → merge `79a8e9c`、`cargo test --lib params` 15 passed)。
+- 運用マニュアル(Claude Doc): 日英とも「Parameters 画面は使わない」2 か所を使い方(Load from template → 変えたい項目だけ → Save、unset / unsupported は空欄 + Save 無効)に置き換え、
+  「やってはいけない」は ECC step operations だけに。English PDF を作り直した(9 ページ、控え `reference/_manual/ELITPC_DAQ_Manual_en_2026-10-10.pdf`)。
+- 見送り(別チケット候補): `triggerPeriod` ノブ(periodic 試験用、§1-4)。
+- 実機の状態: ELITPC は main `79a8e9c` 相当のビルド(`5f7417f` + doc のみ差分)、`/opt/tpcdaq/ui` は新 UI、`current.json` = `elinp__4bd7bfd1`、α run 34 が同 id で取得中。
