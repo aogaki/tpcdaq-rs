@@ -134,3 +134,30 @@ ELITPC 上の同じもの = `~/ELITPC/vm_configs_2026-10-08/` と `~/ELITPC/GetS
 - worktree 隔離、着手前に `git merge --ff-only main`。発注書の絶対パス = `/Users/aogaki/Workspace/tpcdaq-rs/TODO/111_params_defaults_from_template.md`(§5.0 + 自レーン節)。
 - コミットは各レーンのブランチに。完了報告 = 変更ファイル一覧 + テスト実行コマンドと件数 + 設計上迷った点。Fable が完了時に一括レビューしてマージ。
 - §5.1 の実テンプレート 3 本・ELITPC 実機確認(§1-5)・SPEC §3.3/§11 の反映・マニュアル更新(§1-6)は Fable(主対話)。`triggerPeriod` は見送り(ユーザーの当面の目的 = 25 MHz への切替には不要)。
+
+## 5.4 追加発注(Fable、2026-10-10 — レーン A の報告を受けた裁定)— implementer、**model: opus**
+
+**事実**: mini の現用 `delay_test.xcfg`(= `configure-elinp.xcfg`)は `isAllChannelRead=false` + `isFPNRead=true`。合成ノブ `readout`(full = true/true、
+partial = false/false)では表せず `unsupported` → mini でパラメータを保存できない。HIgS / VM パルサーは true/true なので表せていた。
+
+**裁定: `readout` を分ける。** `readout` = `isAllChannelRead` だけの合成ノブ(full → true、partial → false)、新ノブ **`fpnRead`** = `Global.Reg1.isFPNRead`(AGET スコープ、bool)。
+物理の意味(全 ch 読むか / FPN 4 ch を常に読むか)がそれぞれ 1 ノブに対応し、4 通りすべてが表せる。3 つ目のモード名(`partial+fpn` 等)は意味が伝わらないので採らない。
+スキーマ id `tpcdaq-params/1` は据え置き(本番の current.json はまだ無い。フィクスチャだけが影響)。
+
+やること(main `c57cfb6` 以降から):
+1. `src/params/schema.rs`: `KNOBS` の `readout` エントリを `isAllChannelRead` の 1 本に、`fpnRead`(`Scope::Aget`、`["Global","Reg1","isFPNRead"]`、`KnobKind::Bool`)を追加。
+   `knob_scope_depth` 等はそのまま動くはず。ノブは 12 個(葉 15)になる。
+2. フィクスチャ `tests/fixtures/params/params_roundtrip.json` に `"fpnRead": true`。`tests/params_render.rs` の `KNOBS_BODY` と件数 assert、`tests/params_extract.rs`、
+   `tests/params_ccfg_oracle.rs`、`tests/controller_integration.rs` の該当を更新。(d) の「合成ノブの構成要素が不整合」テストは、合成ノブが 1 要素になるので
+   削除せず**「`fpnRead` が bool でないテキスト → unsupported」**に書き換える。
+3. UI: `ui/src/app/params/knob-spec.ts` に `fpnRead`(bool、scopeDepth 2、label "Read FPN channels"、xcfgElements `["isFPNRead"]`)を `readout` の直後に追加。
+   `readout` の `xcfgElements` から `isFPNRead` を外す。`knob-spec.spec.ts`(フィクスチャとの突き合わせ)と `params-view.spec.ts` が通るように(件数の assert があれば更新)。
+   `cd ui && npm test -- --watch=false` + `npm run build`。
+4. `docs/PARAMS_KNOBS_ja.md` §7 の表と §8 を更新(`readout` の行を 2 行に)。
+5. **受け入れ**: `TPCDAQ_PARAMS_REAL_TEMPLATES=<3 本>` で `cargo test --test params_extract` が **3 本ともバイト一致**(delay_test が通ること)。
+   オラクル `TPCDAQ_CCFG_RESOLVE_BIN=/Users/aogaki/Workspace/tpcdaq-rs/tools/ccfg_resolve/build/ccfg_resolve TPCDAQ_XCFG_TEMPLATE=<physics> cargo test --test params_ccfg_oracle` が緑。
+   ゲート `cargo fmt && cargo clippy --tests -- -D warnings && cargo test`。
+
+レーン A 報告の「迷った点」への裁定: 1(CoBo 明示インスタンスの値 → unsupported)採用。2(`why` は schema の文言)採用。3・4 採用。
+5(粗い `at` の例外は render で明示 id に展開され、テンプレート上では効いていなかった値が効くようになる)— 実テンプレートに無い形なので今回は §5.0 のまま、
+`docs/PARAMS_KNOBS_ja.md` §8 に 1 行注記。6(例外の列挙順)— 今回の経路では起きないので据え置き、§8 に注記。
