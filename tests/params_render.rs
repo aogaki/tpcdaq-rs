@@ -35,9 +35,9 @@ fn params_json(knobs_and_exceptions: &str) -> String {
     )
 }
 
-/// 全ノブ(11 個 = 葉 13 個)をテンプレートの現行値にしたうえで、一部だけ差し替えるための素。
+/// 全ノブ(12 個 = 葉 15 個)をテンプレートの現行値にしたうえで、一部だけ差し替えるための素。
 /// `KNOBS_BODY` は `{}` を含まないので `format!` で包んで使う(`replace("}")` の誤爆を避ける)。
-const KNOBS_BODY: &str = r#""triggerDelay":1748,"writingClockFrequency_MHz":25.0,"triggerMode":"external","globalThreshold":1,"lsbThreshold":15,"gain":"120fC","triggerInhibition":"none","peakingTime_ns":232,"readout":"full","zeroSuppression":{"enabled":false,"threshold":600},"pulser":{"enabled":false,"voltage_mV":-1000.0,"period_ms":1000}"#;
+const KNOBS_BODY: &str = r#""triggerDelay":1748,"writingClockFrequency_MHz":25.0,"triggerMode":"external","globalThreshold":1,"lsbThreshold":15,"gain":"120fC","triggerInhibition":"none","peakingTime_ns":232,"readout":"full","fpnRead":true,"zeroSuppression":{"enabled":false,"threshold":600},"pulser":{"enabled":false,"voltage_mV":-1000.0,"period_ms":1000}"#;
 
 /// `"knobs":{…}` の形。
 fn knobs_template_values() -> String {
@@ -490,7 +490,7 @@ fn an_exception_value_is_range_checked_like_the_uniform_value() {
 /// 期待値の出典:
 /// ```text
 /// $ shasum -a 256 tests/fixtures/params/params_roundtrip.json
-/// 4228b96fd7539f7e4bdbe6d2a8a1477edbee90ca9a857d7ba6a57b491c8bf083
+/// 1f04446c4dd2c8f27f02eb08208378537d2f48d9b27598956684f428af4327ba
 /// ```
 #[test]
 fn the_config_id_is_the_template_stem_plus_the_json_hash() {
@@ -499,14 +499,14 @@ fn the_config_id_is_the_template_stem_plus_the_json_hash() {
 
     let rendered = render(&params, &template).unwrap();
 
-    assert_eq!(rendered.config_id, "mini-fixture__4228b96f");
+    assert_eq!(rendered.config_id, "mini-fixture__1f04446c");
     assert_eq!(
         rendered.configure_file_name,
-        "configure-mini-fixture__4228b96f.xcfg"
+        "configure-mini-fixture__1f04446c.xcfg"
     );
     assert_eq!(
         rendered.prepare_file_name,
-        "prepare-mini-fixture__4228b96f.xcfg"
+        "prepare-mini-fixture__1f04446c.xcfg"
     );
 }
 
@@ -584,10 +584,10 @@ fn the_peaking_time_table_matches_the_template_range_attribute() {
     ));
 }
 
-/// `readout` は**合成ノブ**: 1 つの JSON 値が AGET の 2 要素に展開される。
-/// 値の出典は実テンプレート 2 本の差分(full = configure-physics、partial = configure-pulser)。
+/// `readout` は `isAllChannelRead` だけ(full → true、partial → false)。`isFPNRead` は別ノブ
+/// `fpnRead`(TODO/111 §5.4 — mini の現用 = false/true を表すため 2026-10-10 に分けた)。
 #[test]
-fn readout_partial_flips_both_aget_elements() {
+fn readout_and_fpn_read_each_flip_only_their_own_aget_element() {
     let template = template_mini();
 
     let full = Params::from_json_str(&params_json(&format!(
@@ -610,23 +610,41 @@ fn readout_partial_flips_both_aget_elements() {
     assert!(rendered_partial
         .xml
         .contains("<isAllChannelRead>false</isAllChannelRead>"));
-    assert!(rendered_partial
-        .xml
-        .contains("<isFPNRead>false</isFPNRead>"));
-    // full との差はこの 2 要素だけ(非管理ノブは無傷)。
+    // full との差は isAllChannelRead だけ(isFPNRead も非管理ノブも無傷)。
     assert_eq!(
         rendered_partial.xml,
-        rendered_full
-            .xml
-            .replace(
-                "<isAllChannelRead>true</isAllChannelRead>",
-                "<isAllChannelRead>false</isAllChannelRead>"
-            )
-            .replace(
-                "<isFPNRead>true</isFPNRead>",
-                "<isFPNRead>false</isFPNRead>"
-            )
+        rendered_full.xml.replace(
+            "<isAllChannelRead>true</isAllChannelRead>",
+            "<isAllChannelRead>false</isAllChannelRead>"
+        )
     );
+
+    // mini の現用の組(isAllChannelRead=false + isFPNRead=true)は partial + fpnRead=true。
+    let no_fpn = Params::from_json_str(&params_json(&format!(
+        r#"{}, "exceptions":[]"#,
+        knobs_with("\"fpnRead\":true", "\"fpnRead\":false")
+    )))
+    .unwrap();
+    let rendered_no_fpn = render(&no_fpn, &template).unwrap();
+    assert_eq!(
+        rendered_no_fpn.xml,
+        rendered_full.xml.replace(
+            "<isFPNRead>true</isFPNRead>",
+            "<isFPNRead>false</isFPNRead>"
+        )
+    );
+}
+
+#[test]
+fn fpn_read_must_be_a_bool() {
+    let json = params_json(&format!(
+        r#"{}, "exceptions":[]"#,
+        knobs_with("\"fpnRead\":true", "\"fpnRead\":\"yes\"")
+    ));
+    assert!(matches!(
+        Params::from_json_str(&json).unwrap_err(),
+        ParamsError::BadType { .. }
+    ));
 }
 
 #[test]

@@ -30,7 +30,8 @@ use super::schema::{
 pub const WHY_BELOW_WILDCARD: &str = "explicit id below a wildcard";
 /// `Instance[0]` など CoBo の明示インスタンスにある値。`at` は CoBo を区別できない。
 pub const WHY_EXPLICIT_INSTANCE: &str = "explicit CoBo instance";
-/// 合成ノブ(`readout`)の構成要素が同じノードに揃っていない。
+/// 複数要素の合成ノブで、構成要素が同じノードに揃っていない(2026-10-10 以降の KNOBS には無いが、
+/// Derived の複数エントリはスキーマ上まだ許されるので残す)。
 pub const WHY_PARTIAL_COMPOSITE: &str = "not all parts of the composite knob at the same node";
 
 /// 抽出結果(111 §5.0 の JSON は [`Extracted::to_json`])。
@@ -46,7 +47,7 @@ pub struct Extracted {
 }
 
 /// 読めたが表せなかった値 1 件。`found` は xcfg のテキストそのまま
-/// (合成ノブは `isAllChannelRead=true,isFPNRead=false` の形)。
+/// (構成要素が複数の合成ノブは `a=true,b=false` の形)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Unsupported {
     pub knob: String,
@@ -376,11 +377,12 @@ fn derived_mode(entries: &[(&KnobSpec, &str)]) -> Result<Value, String> {
         .ok_or_else(|| "no parts of the composite knob".to_string())
 }
 
-/// `found` の文字列。合成ノブは `要素名=テキスト` を `,` でつなぐ。
+/// `found` の文字列。構成要素が複数のノブは `要素名=テキスト` を `,` でつなぐ(1 つならテキストそのまま)。
 fn found_text(entries: &[(&KnobSpec, &str)]) -> String {
+    // KNOBS に同じ名前のエントリが複数ある(= 構成要素が複数の)ノブだけ要素名を付ける。
     let composite = entries
-        .iter()
-        .any(|(spec, _)| matches!(spec.kind, KnobKind::Derived(_)));
+        .first()
+        .is_some_and(|(spec, _)| knob_specs(spec.name).count() > 1);
     entries
         .iter()
         .map(|(spec, text)| {

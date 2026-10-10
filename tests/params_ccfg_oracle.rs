@@ -116,6 +116,7 @@ fn the_rendered_xcfg_resolves_to_the_json_values_for_every_instance() {
             "triggerInhibition": "none",
             "peakingTime_ns": 502,
             "readout": "partial",
+            "fpnRead": false,
             "zeroSuppression": {"enabled": true, "threshold": 700},
             "pulser": {"enabled": true, "voltage_mV": -300.0, "period_ms": 200}
         },
@@ -125,7 +126,8 @@ fn the_rendered_xcfg_resolves_to_the_json_values_for_every_instance() {
             {"at": {"asad": 0, "aget": 1, "ch": 4}, "knob": "triggerInhibition", "value": "inhibit_channel"},
             {"at": {"asad": 1, "aget": 1}, "knob": "globalThreshold", "value": 6},
             {"at": {"asad": 0, "aget": 1}, "knob": "peakingTime_ns", "value": 117},
-            {"at": {"asad": 0}, "knob": "readout", "value": "full", "note": "合成ノブ × 粗い例外"},
+            {"at": {"asad": 0}, "knob": "readout", "value": "full", "note": "粗い例外"},
+            {"at": {"asad": 1, "aget": 0}, "knob": "fpnRead", "value": true, "note": "mini の現用の組(partial + FPN)"},
             {"at": {"asad": 1, "aget": 0, "ch": 2}, "knob": "zeroSuppression.threshold", "value": 42}
         ]
     }"#;
@@ -134,7 +136,7 @@ fn the_rendered_xcfg_resolves_to_the_json_values_for_every_instance() {
     let path = write_temp("mini_rendered.xcfg", &rendered.xml);
 
     let checked = check_all_instances(&bin, &path, &params, &rendered.xml, &["0", "1"]);
-    // KNOBS のエントリは CoBo 7 / AGET 4 / channel 4(合成ノブ readout は 2 エントリ)。
+    // KNOBS のエントリは CoBo 7 / AGET 4(globalThreshold, peakingTime, readout, fpnRead)/ channel 4。
     // 2 CoBo instance × (7 + 4×(2 AsAd × 2 AGET) + 4×(2 × 2 × 6 ch)) = 2 × (7 + 16 + 96) = 238
     assert_eq!(checked, 238, "照合したインスタンス数");
     eprintln!("params_ccfg_oracle: mini fixture で {checked} インスタンスを照合");
@@ -236,7 +238,7 @@ fn the_stale_explicit_override_wins_in_the_template_and_is_gone_after_rendering(
     let json = r#"{"schema":"tpcdaq-params/1","template":"configure-mini-fixture.xcfg",
         "knobs":{"triggerDelay":1748,"writingClockFrequency_MHz":25.0,"triggerMode":"external",
         "globalThreshold":1,"lsbThreshold":15,"gain":"120fC","triggerInhibition":"none",
-        "peakingTime_ns":232,"readout":"full",
+        "peakingTime_ns":232,"readout":"full","fpnRead":true,
         "zeroSuppression":{"enabled":false,"threshold":600},
         "pulser":{"enabled":false,"voltage_mV":-1000.0,"period_ms":1000}},
         "exceptions":[]}"#;
@@ -278,6 +280,7 @@ fn the_real_template_resolves_to_the_json_values_for_every_instance() {
             "triggerInhibition": "none",
             "peakingTime_ns": 232,
             "readout": "full",
+            "fpnRead": true,
             "zeroSuppression": {"enabled": false, "threshold": 600},
             "pulser": {"enabled": false, "voltage_mV": -1000.0, "period_ms": 1000}
         },
@@ -325,6 +328,7 @@ fn the_real_template_round_trips_byte_for_byte() {
             "triggerInhibition": "none",
             "peakingTime_ns": 232,
             "readout": "full",
+            "fpnRead": true,
             "zeroSuppression": {"enabled": false, "threshold": 600},
             "pulser": {"enabled": false, "voltage_mV": -1000.0, "period_ms": 1000}
         },

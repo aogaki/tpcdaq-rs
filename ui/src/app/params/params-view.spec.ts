@@ -32,6 +32,7 @@ const SAVED_PARAMS = {
     triggerInhibition: 'none',
     peakingTime_ns: 232,
     readout: 'full',
+    fpnRead: true,
     zeroSuppression: { enabled: false, threshold: 600 },
     pulser: { enabled: false, voltage_mV: -1000.0, period_ms: 1000 },
   },
@@ -63,6 +64,7 @@ const ELINP_DEFAULTS = {
     triggerInhibition: 'none',
     peakingTime_ns: 232,
     readout: 'partial',
+    fpnRead: true, // mini の現用 = isAllChannelRead=false + isFPNRead=true(111 §5.4)
     zeroSuppression: { enabled: false, threshold: 600 },
     pulser: { enabled: false, voltage_mV: -1000.0, period_ms: 1000 },
   } as Record<string, unknown>,

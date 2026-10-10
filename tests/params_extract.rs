@@ -120,7 +120,7 @@ fn explicit_nodes_become_exceptions_and_unrepresentable_ones_are_unsupported() {
         ("globalThreshold", "6", below),               // 仕込み 2
         ("lsbThreshold", "0", below),                  // 仕込み 3
         ("peakingTime_ns", "70", below),               // 仕込み 5
-        ("readout", "isAllChannelRead=false", below),  // 仕込み 6
+        ("readout", "false", below),                   // 仕込み 6
         ("zeroSuppression.enabled", "true", instance), // 仕込み 8
         ("zeroSuppression.threshold", "11", below),    // 仕込み 7
         ("pulser.enabled", "true", instance),          // 仕込み 8
@@ -142,12 +142,13 @@ fn a_coarse_explicit_node_gives_an_exception_at_the_explicit_prefix() {
 
     let json = extract("t.xcfg", &xml).unwrap().to_json();
 
-    // KNOBS の順。readout(合成ノブ)は 2 要素が同じノードで同じモード(partial = false/false)なら 1 件。
+    // KNOBS の順。readout(isAllChannelRead → full/partial)と fpnRead(isFPNRead)は別ノブ。
     assert_eq!(
         json["exceptions"],
         json!([
             {"at": {"asad": 1}, "knob": "gain", "value": "240fC"},
             {"at": {"asad": 1, "aget": 1}, "knob": "readout", "value": "partial"},
+            {"at": {"asad": 1, "aget": 1}, "knob": "fpnRead", "value": false},
         ])
     );
     assert_eq!(json["unsupported"], json!([]));
@@ -188,26 +189,44 @@ fn extracting_the_rendered_stale_template_keeps_the_exceptions_and_drops_the_uns
 // (d)(e)(f) 表せない / 無い値は黙って埋めない
 // ---------------------------------------------------------------------
 
-/// `readout` の 2 要素が同じモードに写らない(true + false)→ `unsupported`、`knobs` に無い。
+/// bool ノブ `fpnRead` に true/false 以外のテキスト → `unsupported`、`knobs` に無い
+/// (111 §5.4: 旧「合成ノブの構成要素が不整合」の置き換え — readout は 1 要素になった)。
 #[test]
-fn a_composite_knob_whose_parts_disagree_is_unsupported() {
+fn a_bool_knob_with_a_non_bool_text_is_unsupported() {
     let xml = replaced(
         &fixture("template_mini.xcfg"),
         "<isFPNRead>true</isFPNRead>",
-        "<isFPNRead>false</isFPNRead>",
+        "<isFPNRead>yes</isFPNRead>",
+    );
+
+    let json = extract("t.xcfg", &xml).unwrap().to_json();
+
+    assert_eq!(json["knobs"].get("fpnRead"), None);
+    assert_eq!(json["knobs"]["readout"], json!("full"));
+    let unsupported = json["unsupported"].as_array().unwrap();
+    assert_eq!(unsupported.len(), 1, "{unsupported:?}");
+    assert_eq!(unsupported[0]["knob"], json!("fpnRead"));
+    assert_eq!(unsupported[0]["found"], json!("yes"));
+    assert_eq!(json["unset"], json!([]));
+}
+
+/// `readout` の対応表に無いテキスト → `unsupported`(テキストそのまま)。
+#[test]
+fn a_readout_text_outside_the_mode_table_is_unsupported() {
+    let xml = replaced(
+        &fixture("template_mini.xcfg"),
+        "<isAllChannelRead>true</isAllChannelRead>",
+        "<isAllChannelRead>sometimes</isAllChannelRead>",
     );
 
     let json = extract("t.xcfg", &xml).unwrap().to_json();
 
     assert_eq!(json["knobs"].get("readout"), None);
-    let unsupported = json["unsupported"].as_array().unwrap();
-    assert_eq!(unsupported.len(), 1, "{unsupported:?}");
-    assert_eq!(unsupported[0]["knob"], json!("readout"));
     assert_eq!(
-        unsupported[0]["found"],
-        json!("isAllChannelRead=true,isFPNRead=false")
+        json["unsupported"],
+        json!([{"knob": "readout", "found": "sometimes",
+                "why": "parts do not map to one of {full, partial}"}])
     );
-    assert_eq!(json["unset"], json!([]));
 }
 
 /// `Generator.period_ms` が無い → `unset` に `pulser.period_ms`、ほかの pulser の葉は読める。

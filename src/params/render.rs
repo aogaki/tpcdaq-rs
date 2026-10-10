@@ -81,7 +81,7 @@ pub fn render(params: &Params, template_xml: &str) -> Result<Rendered, ParamsErr
                     knob: exception.knob.clone(),
                 });
             }
-            // 合成ノブ(`readout`)は 1 つの例外が複数の要素に効く。
+            // 構成要素が複数の合成ノブ(Derived)は 1 つの例外が複数の要素に効く。
             for spec in knob_specs(&exception.knob) {
                 let text = value_to_xcfg_text(spec, &exception.value)?;
                 for target in ids.expand(&exception.at, spec, &exception.knob)? {
