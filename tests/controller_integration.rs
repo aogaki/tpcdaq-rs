@@ -1862,3 +1862,143 @@ async fn status_reports_the_current_params_id_and_exceptions_or_null() {
     let _ = std::fs::remove_dir_all(&ecc_config_dir);
     harness.shutdown();
 }
+
+// ---------------------------------------------------------------------
+// テンプレートからの初期値(TODO/111 §5.0)
+// ---------------------------------------------------------------------
+
+/// `GET /api/params/templates` = `ecc_config_dir` 直下の `configure-*.xcfg` を辞書順。
+/// prepare-* / describe-* / 生成物 `*__<hash8>.xcfg` / 他の拡張子 / ディレクトリは出さない。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn params_templates_lists_the_configure_templates_but_not_generated_or_other_phases() {
+    let (harness, ecc_config_dir) = params_harness("params-templates").await;
+    for name in [
+        "configure-elinp.xcfg",
+        "prepare-elinp.xcfg",
+        "describe-elinp.xcfg",
+        "configure-elinp__0123abcd.xcfg",
+        "configure-notes.txt",
+        // `__` があっても 8 桁 16 進でなければ生成物ではない(テンプレート名の一部)。
+        "configure-a__b.xcfg",
+    ] {
+        std::fs::write(ecc_config_dir.join(name), "<Setup/>").unwrap();
+    }
+    std::fs::create_dir_all(ecc_config_dir.join("configure-dir.xcfg")).unwrap();
+
+    let (status, body) = get(harness.rest, "/api/params/templates");
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        json!({"templates": [
+            "configure-a__b.xcfg",
+            "configure-elinp.xcfg",
+            "configure-mini-fixture.xcfg",
+        ]})
+    );
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+/// `GET /api/params/defaults?template=` の 200 = 抽出結果(§5.0 の形)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn params_defaults_returns_the_knobs_extracted_from_the_template() {
+    let (harness, ecc_config_dir) = params_harness("params-defaults").await;
+
+    let (status, body) = get(
+        harness.rest,
+        "/api/params/defaults?template=configure-mini-fixture.xcfg",
+    );
+
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        json!({
+            "template": "configure-mini-fixture.xcfg",
+            "knobs": roundtrip_params_json()["knobs"],
+            "exceptions": [],
+            "unset": [],
+            "unsupported": [],
+        })
+    );
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+/// 400(名前の形 / ディレクトリの外 / XML として読めない)・404(無い)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn params_defaults_rejects_bad_names_with_400_and_missing_files_with_404() {
+    let (harness, ecc_config_dir) = params_harness("params-defaults-errors").await;
+    std::fs::write(
+        ecc_config_dir.join("configure-broken.xcfg"),
+        "<Setup><Node id=\"CoBo\"></Setup>",
+    )
+    .unwrap();
+
+    for query in [
+        "",
+        "?template=",
+        "?template=../x.xcfg",
+        "?template=..",
+        "?template=a/b.xcfg",
+        "?template=a%5Cb.xcfg",
+        "?template=configure-mini-fixture",
+        "?template=configure-broken.xcfg",
+    ] {
+        let (status, body) = get(harness.rest, &format!("/api/params/defaults{query}"));
+        assert_eq!(status, 400, "{query}: {body}");
+        assert!(body["error"].is_string(), "{query}: {body}");
+    }
+
+    let (status, body) = get(
+        harness.rest,
+        "/api/params/defaults?template=configure-nope.xcfg",
+    );
+    assert_eq!(status, 404, "{body}");
+    assert!(body["error"].is_string(), "{body}");
+
+    // シンボリックリンクで外へ出るもの = canonicalize 後に ecc_config_dir の外 → 400。
+    #[cfg(unix)]
+    {
+        let outside = temp_root("params-defaults-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::copy(
+            template_src(&ecc_config_dir),
+            outside.join("configure-outside.xcfg"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("configure-outside.xcfg"),
+            ecc_config_dir.join("configure-link.xcfg"),
+        )
+        .unwrap();
+        let (status, body) = get(
+            harness.rest,
+            "/api/params/defaults?template=configure-link.xcfg",
+        );
+        assert_eq!(status, 400, "{body}");
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+/// `ecc_config_dir` 未設定 → templates / defaults とも 503(既存と同文言)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn params_templates_and_defaults_return_503_without_ecc_config_dir() {
+    let harness = harness("params-defaults-no-eccdir", &[0], true, None).await;
+
+    for path in [
+        "/api/params/templates",
+        "/api/params/defaults?template=configure-mini-fixture.xcfg",
+    ] {
+        let (status, body) = get(harness.rest, path);
+        assert_eq!(status, 503, "{path}: {body}");
+        assert_eq!(body["error"], json!("ecc_config_dir is not configured"));
+    }
+
+    harness.shutdown();
+}

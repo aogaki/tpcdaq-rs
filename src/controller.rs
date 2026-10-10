@@ -2764,6 +2764,155 @@ async fn get_params_render(
     }
 }
 
+/// 生成物 `<stem>__<hash8>.xcfg`(078 §3-3)か。`__` の後ろが 16 進 8 桁のときだけ。
+fn is_generated_xcfg(name: &str) -> bool {
+    let stem = name.strip_suffix(".xcfg").unwrap_or(name);
+    match stem.rsplit_once("__") {
+        Some((_, hash)) => hash.len() == 8 && hash.chars().all(|c| c.is_ascii_hexdigit()),
+        None => false,
+    }
+}
+
+/// `GET /api/params/templates`(閲覧系 = 認証なし、TODO/111 §5.0)。
+/// `ecc_config_dir` 直下の `configure-*.xcfg`(生成物を除く)のファイル名を辞書順。
+async fn get_params_templates(State(controller): State<Arc<Controller>>) -> Reply {
+    let reply = tokio::task::spawn_blocking(move || {
+        let Some(ecc_config_dir) = controller.params.ecc_config_dir.clone() else {
+            return err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ECC_CONFIG_DIR_NOT_CONFIGURED,
+            );
+        };
+        let entries = match std::fs::read_dir(&ecc_config_dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("cannot read {}: {e}", ecc_config_dir.display()),
+                )
+            }
+        };
+        let mut templates: Vec<String> = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    return err_json(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("cannot read {}: {e}", ecc_config_dir.display()),
+                    )
+                }
+            };
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("configure-")
+                && name.ends_with(".xcfg")
+                && !is_generated_xcfg(&name)
+                && entry.path().is_file()
+            {
+                templates.push(name);
+            }
+        }
+        templates.sort();
+        ok_json(json!({"templates": templates}))
+    })
+    .await;
+    match reply {
+        Ok(reply) => reply,
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("params/templates task: {e}"),
+        ),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ParamsDefaultsQuery {
+    template: Option<String>,
+}
+
+/// `GET /api/params/defaults?template=<name>`(閲覧系 = 認証なし、TODO/111 §5.0)。
+/// テンプレート xcfg からノブの値を抽出して返す(UI の「Load defaults from template」)。
+/// 400 = 名前が不正 / `ecc_config_dir` の外 / xcfg として読めない、404 = 無い、503 = 未設定。
+async fn get_params_defaults(
+    State(controller): State<Arc<Controller>>,
+    Query(query): Query<ParamsDefaultsQuery>,
+) -> Reply {
+    let reply = tokio::task::spawn_blocking(move || {
+        let Some(ecc_config_dir) = controller.params.ecc_config_dir.clone() else {
+            return err_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                ECC_CONFIG_DIR_NOT_CONFIGURED,
+            );
+        };
+        let name = query.template.unwrap_or_default();
+        if name.is_empty() {
+            return err_json(StatusCode::BAD_REQUEST, "template is required");
+        }
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                format!("template {name:?} must be a file name in ecc_config_dir"),
+            );
+        }
+        if !name.ends_with(".xcfg") {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                format!("template {name:?} is not an .xcfg file"),
+            );
+        }
+        let path = ecc_config_dir.join(&name);
+        if !path.exists() {
+            return err_json(
+                StatusCode::NOT_FOUND,
+                format!("template {name} not found in {}", ecc_config_dir.display()),
+            );
+        }
+        // シンボリックリンク等でディレクトリの外へ出るものは拒否する(canonicalize してから比べる)。
+        let inside = match (path.canonicalize(), ecc_config_dir.canonicalize()) {
+            (Ok(file), Ok(dir)) => file.starts_with(dir),
+            (Err(e), _) | (_, Err(e)) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("cannot resolve {}: {e}", path.display()),
+                )
+            }
+        };
+        if !inside {
+            return err_json(
+                StatusCode::BAD_REQUEST,
+                format!("template {name} resolves outside ecc_config_dir"),
+            );
+        }
+        let xml = match std::fs::read_to_string(&path) {
+            Ok(xml) => xml,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    format!("template {name} is not UTF-8 text: {e}"),
+                )
+            }
+            Err(e) => {
+                return err_json(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("cannot read {}: {e}", path.display()),
+                )
+            }
+        };
+        match crate::params::extract(&name, &xml) {
+            Ok(extracted) => ok_json(extracted.to_json()),
+            Err(e) => err_json(StatusCode::BAD_REQUEST, e.to_string()),
+        }
+    })
+    .await;
+    match reply {
+        Ok(reply) => reply,
+        Err(e) => err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("params/defaults task: {e}"),
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------
 // ログ投稿 PULL(SPEC §2.3 LogPost / §3.2)
 // ---------------------------------------------------------------------
@@ -2873,6 +3022,8 @@ pub fn router(controller: Arc<Controller>) -> Router {
         .route("/api/ecc/{action}", post(post_ecc))
         .route("/api/params", get(get_params).put(put_params))
         .route("/api/params/render", get(get_params_render))
+        .route("/api/params/templates", get(get_params_templates))
+        .route("/api/params/defaults", get(get_params_defaults))
         .route("/api/logbook", get(get_logbook))
         .route("/api/logbook/comment", post(post_comment));
     if let Some(dir) = ui_dir {

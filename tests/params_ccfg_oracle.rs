@@ -21,7 +21,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 use tpcdaq::params::schema::{knob_spec, value_to_xcfg_text};
-use tpcdaq::params::{knob_path, render, Params, Scope, KNOBS};
+use tpcdaq::params::{extract, knob_path, render, Params, Scope, KNOBS, SCHEMA_ID};
 
 fn oracle_bin() -> Option<String> {
     match std::env::var("TPCDAQ_CCFG_RESOLVE_BIN") {
@@ -138,6 +138,26 @@ fn the_rendered_xcfg_resolves_to_the_json_values_for_every_instance() {
     // 2 CoBo instance × (7 + 4×(2 AsAd × 2 AGET) + 4×(2 × 2 × 6 ch)) = 2 × (7 + 16 + 96) = 238
     assert_eq!(checked, 238, "照合したインスタンス数");
     eprintln!("params_ccfg_oracle: mini fixture で {checked} インスタンスを照合");
+
+    // TODO/111: 生成物から**抽出**した knobs + exceptions の有効値も ECC の解決と全数一致する
+    // (粗い例外は render が明示 id に展開済みなので、抽出側は ch 単位の例外として読む)。
+    let extracted = extract(&params.template, &rendered.xml).unwrap();
+    let json = extracted.to_json();
+    assert_eq!(json["unset"], serde_json::json!([]));
+    assert_eq!(json["unsupported"], serde_json::json!([]));
+    let extracted_params = Params::from_json_str(
+        &serde_json::json!({
+            "schema": SCHEMA_ID,
+            "template": json["template"],
+            "knobs": json["knobs"],
+            "exceptions": json["exceptions"],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let checked = check_all_instances(&bin, &path, &extracted_params, &rendered.xml, &["0", "1"]);
+    assert_eq!(checked, 238, "抽出した値で照合したインスタンス数");
+    eprintln!("params_ccfg_oracle: 抽出した値で {checked} インスタンスを照合");
 }
 
 /// 除去規則(§3-1)の負性テストを**オラクルで**確かめる。

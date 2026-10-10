@@ -123,22 +123,22 @@ fn template_stem(template: &str) -> String {
 // ---------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
-enum Node {
+pub(super) enum Node {
     Element(Element),
     /// テキスト・コメント・宣言など、**そのまま出すもの**(生スライス)。
     Raw(String),
 }
 
 #[derive(Debug, Clone)]
-struct Element {
-    name: String,
-    id: Option<String>,
+pub(super) struct Element {
+    pub(super) name: String,
+    pub(super) id: Option<String>,
     /// `<Module>` や `<channel id="0" />` の生スライス。
     open_raw: String,
     /// `</Module>`(空要素は空文字)。
     close_raw: String,
     empty: bool,
-    children: Vec<Node>,
+    pub(super) children: Vec<Node>,
 }
 
 impl Element {
@@ -154,7 +154,7 @@ impl Element {
     }
 
     /// 指定名(と id)の子のインデックス。
-    fn find_child(&self, name: &str, id: Option<&str>) -> Option<usize> {
+    pub(super) fn find_child(&self, name: &str, id: Option<&str>) -> Option<usize> {
         self.children.iter().position(|child| match child {
             Node::Element(element) => {
                 element.name == name && (id.is_none() || element.id.as_deref() == id)
@@ -163,7 +163,7 @@ impl Element {
         })
     }
 
-    fn child_indices(&self, name: &str) -> Vec<usize> {
+    pub(super) fn child_indices(&self, name: &str) -> Vec<usize> {
         self.children
             .iter()
             .enumerate()
@@ -260,7 +260,7 @@ fn new_element(name: &str, id: Option<&str>) -> Element {
 // パース / 書き出し
 // ---------------------------------------------------------------------
 
-fn parse(xml: &str) -> Result<Element, ParamsError> {
+pub(super) fn parse(xml: &str) -> Result<Element, ParamsError> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().expand_empty_elements = false;
 
@@ -359,7 +359,7 @@ fn write_children(element: &Element, out: &mut String) {
 // ---------------------------------------------------------------------
 
 /// `Setup` の下の `Node id="CoBo"` を取る。
-fn find_cobo_node(doc: &mut Element) -> Result<&mut Element, ParamsError> {
+pub(super) fn find_cobo_node(doc: &mut Element) -> Result<&mut Element, ParamsError> {
     let setup =
         doc.child_indices("Setup")
             .first()
