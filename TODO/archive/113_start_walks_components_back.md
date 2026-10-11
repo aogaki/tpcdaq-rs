@@ -33,4 +33,4 @@
   ゲート(main `c9b17cd`、Fable 再実行): clippy 警告 0、**cargo test 879 passed / 0 failed / 1 ignored**。
 - SPEC **v1.38**: §1.3 と §3.3。
 - 残課題: 歩き戻しの Stop の後の EOS 伝播を待たない(異常経路のみ。必要なら Fable キュー)。`late_fragments == 0` の初回ログ判定(108 の別件)も未。
-- ELITPC 反映: 下記。
+- ELITPC 反映(13:55): main `990259b` を bundle → release build → run 56 停止 → daq_down / up → α run 57(25 MHz / trigDelay 1500 = ユーザーの current.json)。audit `run/start.component_walk_back = []`(全員 Idle)、ECC `status->Idle`。
