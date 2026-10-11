@@ -317,9 +317,22 @@
       @if (saveDisabledReason(); as reason) {
         <p class="banner info">{{ reason }}</p>
       }
+      @if (applyDisabledReason(); as reason) {
+        @if (reason !== saveDisabledReason()) {
+          <p class="banner info">Apply &amp; restart: {{ reason }}</p>
+        }
+      }
       <div class="row">
         <button type="button" [disabled]="saveDisabled()" (click)="save()">
           {{ saveBusy() ? 'saving…' : 'Save' }}
+        </button>
+        <button
+          type="button"
+          [disabled]="applyDisabled()"
+          title="Stop the run if one is active, save these parameters, then start a new run"
+          (click)="applyAndRestart()"
+        >
+          Apply &amp; restart
         </button>
         <button type="button" [disabled]="previewDisabled()" (click)="preview()">
           {{ previewBusy() ? 'rendering…' : 'Preview xcfg' }}
@@ -327,6 +340,22 @@
       </div>
       @if (previewDisabledReason(); as reason) {
         <p class="sub">{{ reason }}</p>
+      }
+
+      @if (applySteps().length > 0) {
+        <ol class="apply-steps">
+          @for (line of applySteps(); track $index) {
+            <li>{{ line }}</li>
+          }
+        </ol>
+      }
+      @if (applyError(); as error) {
+        <p class="banner error">
+          <span class="err">{{ error }}</span>
+        </p>
+      }
+      @if (applyResult(); as result) {
+        <p class="banner ok">{{ result }}</p>
       }
 
       @if (saveError(); as error) {

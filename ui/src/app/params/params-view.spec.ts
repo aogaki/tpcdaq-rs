@@ -9,6 +9,7 @@ import { type ComponentFixture, TestBed } from '@angular/core/testing';
 import { signal } from '@angular/core';
 import { readFileSync } from 'node:fs';
 
+import { ControllerApiService } from '../api/controller-api';
 import { RunControlApiService, RunControlClient } from '../api/run-control-api';
 import { ParamsApiService, ParamsClient } from '../api/params-api';
 import { WsClientService } from '../ws/ws-client';
@@ -101,6 +102,11 @@ describe('ParamsView', () => {
   let putReplies: { status: number; payload: unknown }[];
   let defaultsReplies: { status: number; payload: unknown }[];
   let templatesReply: { status: number; payload: unknown };
+  /** `POST /api/run/{stop,start}` への応答キュー。`gate` があればそれが解けるまで応答を保留する。 */
+  let postReplies: { status: number; payload: unknown; gate?: Promise<void> }[];
+  /** `GET /api/status` への応答キュー(尽きたら最後の 1 通を繰り返す)。 */
+  let statusReplies: unknown[];
+  let statusCalls: number;
   let wsState: ReturnType<typeof signal<{ state: string } | null>>;
 
   function text(): string {
@@ -165,6 +171,9 @@ describe('ParamsView', () => {
     getReplies = get;
     putReplies = [];
     defaultsReplies = [];
+    postReplies = [];
+    statusReplies = [{ phase: 'Idle' }];
+    statusCalls = 0;
     templatesReply = templates;
     const callSeq: Call[] = [];
     const respond = (reply: { status: number; payload: unknown }): Promise<Response> =>
@@ -185,6 +194,13 @@ describe('ParamsView', () => {
             payload: { error: 'no defaults reply queued' },
           },
         );
+      }
+      if (method === 'POST') {
+        const reply = postReplies.shift() ?? {
+          status: 500,
+          payload: { error: 'no POST reply queued' },
+        };
+        return (reply.gate ?? Promise.resolve()).then(() => respond(reply));
       }
       if (method === 'PUT') {
         const reply = putReplies.shift() ?? {
@@ -220,10 +236,23 @@ describe('ParamsView', () => {
         { provide: ParamsApiService, useValue: api as unknown as ParamsApiService },
         { provide: RunControlApiService, useValue: control as unknown as RunControlApiService },
         { provide: WsClientService, useValue: { status: wsState } as unknown as WsClientService },
+        {
+          provide: ControllerApiService,
+          useValue: {
+            getStatus: () => {
+              statusCalls += 1;
+              const reply = statusReplies.length > 1 ? statusReplies.shift() : statusReplies[0];
+              return Promise.resolve(reply);
+            },
+          } as unknown as ControllerApiService,
+        },
       ],
     });
 
     fixture = TestBed.createComponent(ParamsView);
+    // Idle 待ちは 200 ms 間隔・30 s 上限が本番値。試験は待たずに、上限は 3 回に縮める。
+    fixture.componentInstance.sleep = () => Promise.resolve();
+    fixture.componentInstance.idleMaxPolls = 3;
     fixture.detectChanges();
     return { calls: callSeq, control };
   }
@@ -581,5 +610,252 @@ describe('ParamsView', () => {
 
     expect(button('Preview xcfg').disabled).toBe(true);
     expect(text()).toContain('Save once first');
+  });
+
+  describe('Apply & restart (TODO/112 §3)', () => {
+    const STOP_OK = { status: 200, payload: { ok: true, run: 7 } };
+    const START_OK = { status: 200, payload: { run: 8, phase: 'Running' } };
+
+    function posts(calls: Call[]): string[] {
+      return calls.filter((c) => c.init?.method === 'POST').map((c) => c.url);
+    }
+
+    /** 状態を変える呼び出し(POST / PUT)の順序だけを抜き出す。 */
+    function sequence(calls: Call[]): string[] {
+      return calls
+        .filter((c) => c.init?.method === 'POST' || c.init?.method === 'PUT')
+        .map((c) => `${c.init?.method} ${c.url}`);
+    }
+
+    it('Running: Stop → Idle 待ち → PUT → Start の順に 3 段。comment は note 欄、Run N+1 を表示', async () => {
+      const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      wsState.set({ state: 'running', run: 7 } as { state: string });
+      postReplies = [STOP_OK, START_OK];
+      putReplies = [{ status: 200, payload: SAVED_INFO }];
+      statusReplies = [{ phase: 'Stopping' }, { phase: 'Idle' }];
+      fixture.detectChanges();
+
+      expect(button('Apply & restart').disabled).toBe(false);
+      button('Apply & restart').click();
+      await settle();
+
+      expect(sequence(calls)).toEqual([
+        'POST /api/run/stop',
+        'PUT /api/params',
+        'POST /api/run/start',
+      ]);
+      expect(statusCalls).toBe(2); // Stopping → Idle の 2 回目で抜ける。
+      const stopBody = JSON.parse(String(calls.find((c) => c.url === '/api/run/stop')?.init?.body));
+      expect(stopBody).toEqual({ token: TOKEN });
+      const startBody = JSON.parse(
+        String(calls.find((c) => c.url === '/api/run/start')?.init?.body),
+      );
+      // SAVED_PARAMS.note が Parameters の note 欄に入っている。
+      expect(startBody).toEqual({ token: TOKEN, comment: 'template_mini.xcfg の現行値そのまま' });
+      expect(text()).toContain('1/3 Stopping run 7');
+      expect(text()).toContain('2/3 Saving parameters');
+      expect(text()).toContain('3/3 Starting run');
+      expect(text()).toContain('Run 8 started with mini-fixture__797d5dc2');
+      expect(button('Apply & restart').disabled).toBe(false);
+    });
+
+    it('note 欄が空なら comment は "apply: <params id>"', async () => {
+      const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      fixture.componentInstance.noteText.set('');
+      postReplies = [START_OK];
+      putReplies = [{ status: 200, payload: SAVED_INFO }];
+
+      button('Apply & restart').click();
+      await settle();
+
+      const startBody = JSON.parse(
+        String(calls.find((c) => c.url === '/api/run/start')?.init?.body),
+      );
+      expect(startBody).toEqual({ token: TOKEN, comment: 'apply: mini-fixture__797d5dc2' });
+    });
+
+    it('Idle: stop を飛ばして PUT → Start の 2 段(status も見ない)', async () => {
+      const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      postReplies = [START_OK];
+      putReplies = [{ status: 200, payload: SAVED_INFO }];
+
+      button('Apply & restart').click();
+      await settle();
+
+      expect(sequence(calls)).toEqual(['PUT /api/params', 'POST /api/run/start']);
+      expect(statusCalls).toBe(0);
+      expect(text()).not.toContain('Stopping run');
+      expect(text()).toContain('1/2 Saving parameters');
+      expect(text()).toContain('2/2 Starting run');
+      expect(text()).toContain('Run 8 started with mini-fixture__797d5dc2');
+    });
+
+    it('stop 失敗(HTTP 409)はサーバの文言を出し、以降の段を実行しない', async () => {
+      const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      wsState.set({ state: 'running' });
+      postReplies = [{ status: 409, payload: { error: 'run は Stopping 中' } }];
+
+      button('Apply & restart').click();
+      await settle();
+
+      expect(sequence(calls)).toEqual(['POST /api/run/stop']);
+      expect(statusCalls).toBe(0);
+      expect(text()).toContain('run は Stopping 中');
+      expect(text()).not.toContain('started with');
+    });
+
+    it('stop が 200 でも ok:false(異常終了)なら失敗として止める', async () => {
+      const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      wsState.set({ state: 'running' });
+      postReplies = [{ status: 200, payload: { ok: false, reason: 'forced EOS', notes: ['n1'] } }];
+
+      button('Apply & restart').click();
+      await settle();
+
+      expect(sequence(calls)).toEqual(['POST /api/run/stop']);
+      expect(text()).toContain('Stop failed');
+      expect(text()).toContain('n1');
+    });
+
+    it('Idle に 30 s 届かない: "Stop did not reach Idle in 30 s" を出し、PUT / start しない', async () => {
+      const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      wsState.set({ state: 'running' });
+      postReplies = [STOP_OK];
+      statusReplies = [{ phase: 'Stopping' }];
+
+      button('Apply & restart').click();
+      await settle();
+
+      expect(statusCalls).toBe(3); // idleMaxPolls = 3
+      expect(sequence(calls)).toEqual(['POST /api/run/stop']);
+      expect(text()).toContain('Stop did not reach Idle in 30 s');
+      expect(button('Apply & restart').disabled).toBe(false);
+    });
+
+    it('Idle 待ち中の status 取得失敗は再試行する(2 回失敗 → 3 回目で Idle → 続行)', async () => {
+      const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      wsState.set({ state: 'running' });
+      postReplies = [STOP_OK, START_OK];
+      putReplies = [{ status: 200, payload: SAVED_INFO }];
+      const outcomes: (() => Promise<unknown>)[] = [
+        () => Promise.reject(new Error('GET /api/status → HTTP 500')),
+        () => Promise.resolve('not an object'), // 想定外の形
+        () => Promise.resolve({ phase: 'Idle' }),
+      ];
+      let polls = 0;
+      TestBed.inject(ControllerApiService).getStatus = () => outcomes[polls++]();
+
+      button('Apply & restart').click();
+      await settle();
+
+      expect(polls).toBe(3);
+      expect(sequence(calls)).toEqual([
+        'POST /api/run/stop',
+        'PUT /api/params',
+        'POST /api/run/start',
+      ]);
+      expect(text()).toContain('Run 8 started with');
+    });
+
+    it('status がずっと取れない: 上限で "Stop did not reach Idle in 30 s (last status error: …)" で止まる', async () => {
+      const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      wsState.set({ state: 'running' });
+      postReplies = [STOP_OK];
+      let polls = 0;
+      TestBed.inject(ControllerApiService).getStatus = () => {
+        polls += 1;
+        return Promise.reject(new Error('GET /api/status → HTTP 500'));
+      };
+
+      button('Apply & restart').click();
+      await settle();
+
+      expect(polls).toBe(3); // idleMaxPolls = 3
+      expect(sequence(calls)).toEqual(['POST /api/run/stop']);
+      expect(text()).toContain(
+        'Stop did not reach Idle in 30 s (last status error: GET /api/status → HTTP 500)',
+      );
+    });
+
+    it('PUT 400 では start せず、run は止まったままと明示する', async () => {
+      const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      wsState.set({ state: 'running' });
+      postReplies = [STOP_OK];
+      putReplies = [{ status: 400, payload: { error: 'ノブ gain の値 7pC は許された値ではない' } }];
+
+      button('Apply & restart').click();
+      await settle();
+
+      expect(sequence(calls)).toEqual(['POST /api/run/stop', 'PUT /api/params']);
+      expect(posts(calls)).not.toContain('/api/run/start');
+      expect(text()).toContain('ノブ gain の値 7pC は許された値ではない');
+      expect(text()).toContain('The run is stopped and was not restarted');
+    });
+
+    it('start 401 は文言そのままに "run は止まったまま" を明示する(パラメータは保存済み)', async () => {
+      setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      wsState.set({ state: 'running' });
+      postReplies = [
+        STOP_OK,
+        { status: 401, payload: { error: 'token が違う(別の operator が取得)' } },
+      ];
+      putReplies = [{ status: 200, payload: SAVED_INFO }];
+
+      button('Apply & restart').click();
+      await settle();
+
+      expect(text()).toContain('token が違う(別の operator が取得)');
+      expect(text()).toContain('The run is still stopped');
+      expect(text()).toContain('mini-fixture__797d5dc2'); // 保存はできている
+      expect(text()).not.toContain('started with');
+    });
+
+    it('進行中は全ボタン無効(Save / Apply / Preview)。終われば戻る', async () => {
+      setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      wsState.set({ state: 'running' });
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      postReplies = [{ ...STOP_OK, gate }, START_OK];
+      putReplies = [{ status: 200, payload: SAVED_INFO }];
+
+      button('Apply & restart').click();
+      await settle();
+
+      expect(button('Apply & restart').disabled).toBe(true);
+      expect(button('Save').disabled).toBe(true);
+      expect(button('Preview xcfg').disabled).toBe(true);
+      expect(text()).toContain('1/3 Stopping run');
+
+      wsState.set({ state: 'idle' });
+      release();
+      await settle();
+      expect(button('Apply & restart').disabled).toBe(false);
+      expect(text()).toContain('Run 8 started with');
+    });
+
+    it('token が無ければ Apply & restart は無効(理由を表示)。Save と違い Running でも有効', async () => {
+      const { control } = setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      wsState.set({ state: 'running' });
+      fixture.detectChanges();
+      expect(button('Apply & restart').disabled).toBe(false);
+      expect(button('Save').disabled).toBe(true);
+
+      control.setToken(null);
+      fixture.detectChanges();
+      expect(button('Apply & restart').disabled).toBe(true);
+      expect(text()).toContain('Acquire control in Run control first');
+    });
   });
 });
