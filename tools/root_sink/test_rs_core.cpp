@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <set>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -247,6 +248,40 @@ static void test_reset_clears_the_baselines() {
   CHECK(sc.check(100, 1) == SeqAction::Ok);
 }
 
+// ---------------------------------------------------------------------------
+// 4. run close 行 — TODO/108: 件数は**その run の分**(プロセス通算ではない)
+// ---------------------------------------------------------------------------
+
+static void test_run_closed_line_reports_per_run_counts() {
+  // 通算カウンタ(Counts)は run を跨いで増え続ける。close 行は run 開始時点との差。
+  // 非対称データ(出典 = 手計算): run 12 = 139 件 / batch 100 / incomplete 3 / late 2、
+  // 続く run 13 = 8595 件 / batch 8534 / incomplete 7 / late 5。
+  // 108 の実例と同じ形で、run 13 終了時の通算は 139 + 8595 = 8734(旧 close 行はこれを出していた)。
+  RunCounts total;  // 通算(プロセス開始から)
+  RunCounts at_open;  // run 開始時点の通算(スナップショット)
+
+  // run 12
+  at_open = total;
+  total.batches += 100;
+  total.events_complete += 139;
+  total.events_incomplete += 3;
+  total.late_fragments += 2;
+  CHECK(format_run_closed(12, total, at_open) ==
+        "root_sink: run 12 closed (batches=100 events_complete=139 "
+        "events_incomplete=3 late_fragments=2)\n");
+
+  // run 13: 通算は 239 / 8734 / 10 / 7 だが、行は run 13 分だけ
+  at_open = total;
+  total.batches += 8534;
+  total.events_complete += 8595;
+  total.events_incomplete += 7;
+  total.late_fragments += 5;
+  CHECK_EQ(total.events_complete, 139 + 8595);
+  CHECK(format_run_closed(13, total, at_open) ==
+        "root_sink: run 13 closed (batches=8534 events_complete=8595 "
+        "events_incomplete=7 late_fragments=5)\n");
+}
+
 int main() {
   test_channel_is_fifo();
   test_pop_blocks_until_a_push_arrives();
@@ -268,5 +303,7 @@ int main() {
   test_regression_and_duplicate_are_detected();
   test_sources_are_tracked_independently();
   test_reset_clears_the_baselines();
+
+  test_run_closed_line_reports_per_run_counts();
   return tpccheck::report("test_rs_core");
 }

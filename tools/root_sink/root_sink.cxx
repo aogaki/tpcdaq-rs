@@ -162,6 +162,8 @@ struct Counts {
   uint64_t recorder_queue = 0;       // 集計 → Recorder の在庫(瞬間値、011)
   // CoBo 毎のフラグメント数(status の材料 — SPEC §5.3。Fragment.cobo は u8)。
   uint64_t frames_per_cobo[rsmon::kMaxCobo] = {};
+  // run 開始時点の通算(close 行を run 単位にするため。TODO/108)。JSON には出さない。
+  rootsink::RunCounts run_at_open;
 };
 
 // --------------------------------------------------------------------------
@@ -771,6 +773,8 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
           g_mon.hist->reset();
         }
         std::memset(c.frames_per_cobo, 0, sizeof(c.frames_per_cobo));
+        // close 行は run 単位の件数(TODO/108)—— 開始時点の通算を覚えておく。
+        c.run_at_open = {c.batches, c.events_complete, c.events_incomplete, c.late_fragments};
         std::fprintf(stderr, "root_sink: run %u opened (source_id=%u)\n", h.run_number,
                      h.source_id);
       }
@@ -865,11 +869,10 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
           item.run_number = run.run_number();
           raw->push(std::move(item));
         }
-        std::fprintf(stderr,
-                     "root_sink: run %u closed (batches=%" PRIu64 " events_complete=%" PRIu64
-                     " events_incomplete=%" PRIu64 " late_fragments=%" PRIu64 ")\n",
-                     env.run_number, c.batches, c.events_complete, c.events_incomplete,
-                     c.late_fragments);
+        const std::string line = rootsink::format_run_closed(
+            env.run_number,
+            {c.batches, c.events_complete, c.events_incomplete, c.late_fragments}, c.run_at_open);
+        std::fputs(line.c_str(), stderr);
       } else if (ea == EosAction::Ignored) {
         std::fprintf(stderr,
                      "root_sink: ignored EndOfStream source_id=%u run=%u "
