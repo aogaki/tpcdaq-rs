@@ -71,4 +71,4 @@
 
   試験後、`elinp` 無変更(note だけ違う → id `elinp__6e39bcc8`、`configure-elinp.xcfg` とバイト一致)で α run 51 を再開、取得中。ユーザーも run 38–40 で手動の stop → 保存 → start を回していた(実運用の先行例)。
 - 副産物: **108 の原因が判明** — root_sink の `run N closed (events_complete=…)` はプロセス通算(49 / 98 / 137 / 173 …)。108 に記録。
-- UI の目視(ブラウザで Apply & restart を押す)は未実施 — ユーザーに依頼。
+- UI の目視: ユーザーがブラウザで確認(2026-10-11)「UI はいいと思います」。
