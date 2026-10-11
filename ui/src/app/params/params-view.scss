@@ -132,6 +132,12 @@ button:disabled {
   gap: 0.5rem;
 }
 
+.apply-steps {
+  margin: 0;
+  padding-left: 1.4rem;
+  font: var(--mat-sys-body-small);
+}
+
 /* ---- knobs ---- */
 
 .knob-groups {

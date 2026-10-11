@@ -31,7 +31,14 @@ import {
   ParamsApiError,
   ParamsApiService,
 } from '../api/params-api';
-import { RunControlApiService } from '../api/run-control-api';
+import { ControllerApiService } from '../api/controller-api';
+import { parseControllerStatus } from '../api/controller-status';
+import {
+  type ActionResult,
+  EMPTY_INPUT,
+  RunControlApiService,
+  actionByEndpoint,
+} from '../api/run-control-api';
 import { describeError } from '../logbook/logbook-feed';
 import { WsClientService } from '../ws/ws-client';
 import {
@@ -52,6 +59,18 @@ export interface ExceptionDraftRow {
   readonly knob: string;
   readonly value: string;
   readonly note: string;
+}
+
+/** Apply & restart: stop の後に controller が Idle になるのを待つ間隔と上限(TODO/112 §3)。 */
+const IDLE_POLL_MS = 200;
+const IDLE_TIMEOUT_S = 30;
+
+/** 失敗した `ActionResult` → 画面の 1 文。サーバの文言(error / reason / notes)をそのまま使う。 */
+function failureText(result: ActionResult): string {
+  const body = result.body;
+  const reason = body !== null && typeof body['reason'] === 'string' ? body['reason'] : null;
+  const head = result.error ?? reason ?? `HTTP ${result.status}`;
+  return result.notes.length > 0 ? `${head} (${result.notes.join('; ')})` : head;
 }
 
 function defaultValueText(field: KnobField): string {
@@ -86,6 +105,12 @@ export class ParamsView {
   private readonly api = inject(ParamsApiService);
   private readonly control = inject(RunControlApiService);
   private readonly ws = inject(WsClientService);
+  private readonly controller = inject(ControllerApiService);
+
+  /** Idle 待ちの待機と回数上限(試験が差し替える。本番値 = 200 ms × 150 回 = 30 s)。 */
+  idlePollMs = IDLE_POLL_MS;
+  idleMaxPolls = (IDLE_TIMEOUT_S * 1000) / IDLE_POLL_MS;
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   readonly groups = KNOB_GROUPS;
   readonly fields = KNOB_FIELDS;
@@ -150,8 +175,15 @@ export class ParamsView {
   readonly previewText = signal<string | null>(null);
   readonly previewLines = computed(() => (this.previewText() ?? '').split('\n'));
 
-  /** Save が押せない理由(押せるときは `null`)。理由は必ず画面に出す(silent 禁止)。 */
-  readonly saveDisabledReason = computed<string | null>(() => {
+  /** Apply & restart の進行中(Stop → Save → Start のどこかを実行している間)。 */
+  readonly applyBusy = signal(false);
+  /** 実行済み / 実行中の段(`1/3 Stopping run 7…` の列)。 */
+  readonly applySteps = signal<readonly string[]>([]);
+  readonly applyError = signal<string | null>(null);
+  readonly applyResult = signal<string | null>(null);
+
+  /** Save / Apply & restart に共通の「下書きがまだ送れない理由」。 */
+  private readonly draftIssue = computed<string | null>(() => {
     if (!this.draftReady()) return 'Load parameters first';
     if (this.templateName().trim() === '') return 'Template name is required';
     const blank = this.blankKeys();
@@ -159,15 +191,34 @@ export class ParamsView {
       return `Knobs without a value: ${blank.join(', ')} — fill them in or load another template`;
     }
     if (!this.hasToken()) return 'Acquire control in Run control first';
+    return null;
+  });
+
+  /** Save が押せない理由(押せるときは `null`)。理由は必ず画面に出す(silent 禁止)。 */
+  readonly saveDisabledReason = computed<string | null>(() => {
+    const issue = this.draftIssue();
+    if (issue !== null) return issue;
     if (this.runningNow()) return 'A run is active — cannot change parameters while Running';
+    if (this.applyBusy()) return 'Apply & restart is in progress…';
     if (this.saveBusy()) return 'Saving…';
     return null;
   });
   readonly saveDisabled = computed(() => this.saveDisabledReason() !== null);
 
+  /** Apply & restart が押せない理由。Running 中でも押せる(それが目的)。 */
+  readonly applyDisabledReason = computed<string | null>(() => {
+    const issue = this.draftIssue();
+    if (issue !== null) return issue;
+    if (this.applyBusy()) return 'Apply & restart is in progress…';
+    if (this.saveBusy()) return 'Saving…';
+    return null;
+  });
+  readonly applyDisabled = computed(() => this.applyDisabledReason() !== null);
+
   /** Preview は current.json が無いと render できない(dry run はサーバ保存分を読む)。 */
   readonly previewDisabledReason = computed<string | null>(() => {
     if (this.info() === null) return 'Save once first (Preview renders the saved current.json)';
+    if (this.applyBusy()) return 'Apply & restart is in progress…';
     if (this.previewBusy()) return 'Rendering…';
     return null;
   });
@@ -465,18 +516,118 @@ export class ParamsView {
     this.saveBusy.set(true);
     this.saveError.set(null);
     try {
-      const result = await this.api.putParams(token, this.buildParamsJson());
-      this.info.set(result);
-      this.saveResult.set(result);
-      this.loadDraftFrom(result.params);
-      // 保存内容が変わったので古い preview を残さない(黙って古い xcfg を見せない)。
-      this.previewText.set(null);
-      this.previewError.set(null);
+      this.adoptSaved(await this.api.putParams(token, this.buildParamsJson()));
     } catch (error) {
       this.saveError.set(error instanceof ParamsApiError ? error.message : describeError(error));
     } finally {
       this.saveBusy.set(false);
     }
+  }
+
+  /** 保存できた内容を画面の状態にする(Save / Apply & restart 共通)。 */
+  private adoptSaved(result: ParamsInfo): void {
+    this.info.set(result);
+    this.saveResult.set(result);
+    this.loadDraftFrom(result.params);
+    // 保存内容が変わったので古い preview を残さない(黙って古い xcfg を見せない)。
+    this.previewText.set(null);
+    this.previewError.set(null);
+  }
+
+  /**
+   * Apply & restart(TODO/112 §3): Running なら Stop → Idle 待ち → PUT → Start、
+   * Idle なら PUT → Start。新しい状態機械は持たず、既存 REST を順に呼ぶだけ。
+   * どの段で失敗しても**サーバの文言をそのまま**出し、以降の段は実行しない。
+   */
+  async applyAndRestart(): Promise<void> {
+    if (this.applyDisabled()) return;
+    this.applyBusy.set(true);
+    this.applySteps.set([]);
+    this.applyError.set(null);
+    this.applyResult.set(null);
+    this.saveError.set(null);
+    this.saveResult.set(null);
+    try {
+      await this.runApply();
+    } finally {
+      this.applyBusy.set(false);
+    }
+  }
+
+  private async runApply(): Promise<void> {
+    const token = this.control.token();
+    if (token === null) return; // applyDisabledReason が防いでいるはずだが、型のために残す。
+    const wasRunning = this.runningNow();
+    const total = wasRunning ? 3 : 2;
+    const step = (label: string): void =>
+      this.applySteps.update((steps) => [...steps, `${steps.length + 1}/${total} ${label}`]);
+    const stoppedNote = wasRunning
+      ? 'The run is stopped and was not restarted.'
+      : 'No run was started.';
+
+    if (wasRunning) {
+      const runNumber = this.ws.status()?.run;
+      step(runNumber === undefined ? 'Stopping run…' : `Stopping run ${runNumber}…`);
+      const stop = await this.control.execute(actionByEndpoint('/api/run/stop'), EMPTY_INPUT);
+      if (!stop.ok) {
+        this.applyError.set(
+          `Stop failed: ${failureText(stop)}. Parameters were not saved and no run was started.`,
+        );
+        return;
+      }
+      const idleProblem = await this.waitForIdle();
+      if (idleProblem !== null) {
+        this.applyError.set(`${idleProblem}. Parameters were not saved and no run was started.`);
+        return;
+      }
+    }
+
+    step('Saving parameters…');
+    // comment は Parameters の note 欄(空なら保存後の id から作る)。
+    const note = this.noteText().trim();
+    let saved: ParamsInfo;
+    try {
+      saved = await this.api.putParams(token, this.buildParamsJson());
+    } catch (error) {
+      const why = error instanceof ParamsApiError ? error.message : describeError(error);
+      this.applyError.set(`Saving parameters failed: ${why}. ${stoppedNote}`);
+      return;
+    }
+    this.adoptSaved(saved);
+
+    step('Starting run…');
+    const comment = note === '' ? `apply: ${saved.id}` : note;
+    const start = await this.control.execute(actionByEndpoint('/api/run/start'), {
+      ...EMPTY_INPUT,
+      comment,
+    });
+    if (!start.ok) {
+      this.applyError.set(
+        `Start failed: ${failureText(start)}. Parameters were saved (${saved.id}). The run is still stopped.`,
+      );
+      return;
+    }
+    const run = start.body?.['run'];
+    this.applyResult.set(
+      `${typeof run === 'number' ? `Run ${run}` : 'Run'} started with ${saved.id}`,
+    );
+  }
+
+  /** stop の 200 を信用し切らず、`GET /api/status` が Idle になるまで待つ。問題なら理由、無ければ null。 */
+  private async waitForIdle(): Promise<string | null> {
+    for (let attempt = 0; attempt < this.idleMaxPolls; attempt++) {
+      let raw: unknown;
+      try {
+        raw = await this.controller.getStatus();
+      } catch (error) {
+        return `Could not read the controller status while waiting for Idle: ${describeError(error)}`;
+      }
+      const view = parseControllerStatus(raw);
+      if (view === null) return 'Unexpected /api/status response while waiting for Idle';
+      if (view.phase === 'Idle') return null;
+      if (attempt < this.idleMaxPolls - 1) await this.sleep(this.idlePollMs);
+    }
+    return `Stop did not reach Idle in ${IDLE_TIMEOUT_S} s`;
   }
 
   async preview(): Promise<void> {
