@@ -626,32 +626,45 @@ impl<'a> Sequencer<'a> {
     /// 各コンポーネントを **`Idle` まで歩き戻す**(113、SPEC §1.3 v1.37)。
     ///
     /// `GetStatus` で見て Idle でないものにだけ `Reset` を撃つ。§1.3 の遷移表で `Reset` は
-    /// Configured / Armed / Running / Error のどこからでも Idle へ 1 手で戻すので、ECC の
-    /// ように段数を数える必要は無い。歩いた跡は `trail` に `"<名前>: <状態>-><着地>"` で積む。
+    /// Configured / Armed / Running / Error のどこからでも Idle へ 1 手で戻す。ただし
+    /// **`Running` には先に `Stop`**(EOS を流す)—— v1.6 の「run を閉じる前に Reset しない」
+    /// と同じ理由で、Running のまま Reset すると EOS が流れず root-sink 側で run が開いたまま
+    /// 残る(decoder なら seq ギャップで root-sink が fatal 死)。順序は停止・巻き戻しと同じく
+    /// **上流から**(receiver の EOS が先に下流へ向かう)。
     ///
-    /// `GetStatus` が届かない・`Reset` が断られる/届かないコンポーネントがあれば `Err`
-    /// (どれが、何の状態で残ったかを文言に載せる)—— 状態が判らない / Idle でないまま
-    /// Configure へ進んでも断られるだけなので、ここで止めて理由を明示する。
+    /// 歩いた跡は `trail` に `"<名前>: <状態>[-><Stop の着地>]-><Reset の着地>"` で積む
+    /// (例 `"receiver0: Configured->Idle"`、`"decoder: Running->Configured->Idle"`)。
+    ///
+    /// `GetStatus` が届かない・`Stop` / `Reset` が断られる/届かないコンポーネントがあれば
+    /// `Err`(どれが、何の状態で残ったかを文言に載せる)。`Stop` が通らなければ `Reset` へは
+    /// 進まない —— 状態が判らない / Idle でないまま Configure へ進んでも断られるだけなので、
+    /// ここで止めて理由を明示する。
     fn walk_components_back_to_idle(&mut self, trail: &mut Vec<String>) -> Result<(), String> {
         let params = self.params;
-        for component in params.components.iter() {
+        for component in params.components.iter().rev() {
             let state = self.apply(component, &Command::GetStatus)?.state;
             if state == ComponentState::Idle {
                 continue;
             }
-            let landed = self.apply(component, &Command::Reset).map_err(|detail| {
+            let left = |detail: String| {
                 format!(
                     "{detail} — {} was left {state}; refusing to start a run",
                     component.name
                 )
-            })?;
+            };
+            let mut step = format!("{}: {state}", component.name);
+            if state == ComponentState::Running {
+                let stopped = self.apply(component, &Command::Stop).map_err(left)?;
+                step.push_str(&format!("->{}", stopped.state));
+            }
+            let landed = self.apply(component, &Command::Reset).map_err(left)?;
+            step.push_str(&format!("->{}", landed.state));
             warn!(
                 component = component.name,
-                %state,
-                landed = %landed.state,
-                "component was not Idle at run start — walked back with Reset"
+                walked = step,
+                "component was not Idle at run start — walked back"
             );
-            trail.push(format!("{}: {state}->{}", component.name, landed.state));
+            trail.push(step);
         }
         Ok(())
     }
@@ -4299,18 +4312,19 @@ mod tests {
             &mock.commands()[..4],
             &[
                 Call::new("ecc", "status"),
-                // 上流からではなく `components` の順(= graw-writer, decoder, receiver0, …)。
-                // Idle の graw-writer / receiver1 には Reset を撃たない。
-                Call::new("decoder", "Reset"),
+                // 停止・巻き戻しと同じく上流から(receiver1, receiver0, decoder, graw-writer)。
+                // Idle の receiver1 / graw-writer には Reset を撃たない。Running ではないので
+                // Stop も撃たない。
                 Call::new("receiver0", "Reset"),
+                Call::new("decoder", "Reset"),
                 Call::new("graw-writer", "Configure"),
             ]
         );
         assert_eq!(
             report.component_walk_back,
             vec![
-                "decoder: Error->Idle".to_string(),
                 "receiver0: Configured->Idle".to_string(),
+                "decoder: Error->Idle".to_string(),
             ]
         );
         assert_eq!(
@@ -4318,6 +4332,60 @@ mod tests {
             vec!["Configure", "Arm", "Start"]
         );
         assert_eq!(mock.actions("receiver1"), vec!["Configure", "Arm", "Start"]);
+    }
+
+    /// Running のまま残ったコンポーネントは **Stop(EOS を流す)→ Reset** の順で戻し、
+    /// Configure はその後(v1.6 の「run を閉じる前に Reset しない」と同じ理由)。
+    /// 跡は Stop の着地(§1.3 遷移表: Running --Stop--> Configured)も挟む。
+    #[test]
+    fn a_running_component_is_stopped_before_the_reset_and_configured_after() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .component_in("decoder", ComponentState::Running)
+            .component_in("receiver0", ComponentState::Armed);
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-10-11T10:00:00.000")
+            .unwrap();
+
+        assert_eq!(
+            &mock.commands()[..5],
+            &[
+                Call::new("ecc", "status"),
+                Call::new("receiver0", "Reset"), // Armed → Reset のみ
+                Call::new("decoder", "Stop"),
+                Call::new("decoder", "Reset"),
+                Call::new("graw-writer", "Configure"),
+            ]
+        );
+        assert_eq!(
+            report.component_walk_back,
+            vec![
+                "receiver0: Armed->Idle".to_string(),
+                "decoder: Running->Configured->Idle".to_string(),
+            ]
+        );
+        assert_eq!(
+            mock.actions("decoder"),
+            vec!["Stop", "Reset", "Configure", "Arm", "Start"]
+        );
+    }
+
+    /// Running の相手が Stop を断ったら Reset へは進まず、stage `walk-back` で止まる。
+    #[test]
+    fn a_running_component_that_refuses_the_stop_is_not_reset_and_the_run_does_not_start() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .component_in("decoder", ComponentState::Running)
+            .fail_on("decoder", "Stop");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-10-11T10:00:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "walk-back");
+        assert!(failure.detail.contains("decoder"), "{}", failure.detail);
+        assert!(failure.detail.contains("Running"), "{}", failure.detail);
+        assert_eq!(mock.actions("decoder"), vec!["Stop"]);
+        assert!(!mock.commands().iter().any(|c| c.action == "Configure"));
     }
 
     /// 全員 Idle なら歩き戻しの跡は空(1 本目・正常な連続 run の姿)。
