@@ -615,19 +615,22 @@ export class ParamsView {
 
   /** stop の 200 を信用し切らず、`GET /api/status` が Idle になるまで待つ。問題なら理由、無ければ null。 */
   private async waitForIdle(): Promise<string | null> {
+    // 取得失敗(通信エラー・想定外の形)は「まだ Idle でない」と同じ扱いで再ポーリングする
+    // (run はもう止まっている。一時的な失敗で start を諦めない)。上限で止まるときだけ理由を添える。
+    let lastError: string | null = null;
     for (let attempt = 0; attempt < this.idleMaxPolls; attempt++) {
-      let raw: unknown;
       try {
-        raw = await this.controller.getStatus();
+        const view = parseControllerStatus(await this.controller.getStatus());
+        if (view === null) lastError = 'Unexpected /api/status response';
+        else if (view.phase === 'Idle') return null;
+        else lastError = null;
       } catch (error) {
-        return `Could not read the controller status while waiting for Idle: ${describeError(error)}`;
+        lastError = describeError(error);
       }
-      const view = parseControllerStatus(raw);
-      if (view === null) return 'Unexpected /api/status response while waiting for Idle';
-      if (view.phase === 'Idle') return null;
       if (attempt < this.idleMaxPolls - 1) await this.sleep(this.idlePollMs);
     }
-    return `Stop did not reach Idle in ${IDLE_TIMEOUT_S} s`;
+    const base = `Stop did not reach Idle in ${IDLE_TIMEOUT_S} s`;
+    return lastError === null ? base : `${base} (last status error: ${lastError})`;
   }
 
   async preview(): Promise<void> {

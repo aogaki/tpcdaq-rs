@@ -738,19 +738,51 @@ describe('ParamsView', () => {
       expect(button('Apply & restart').disabled).toBe(false);
     });
 
-    it('status が読めない(HTTP 500)ときも文言を出して止まる', async () => {
+    it('Idle 待ち中の status 取得失敗は再試行する(2 回失敗 → 3 回目で Idle → 続行)', async () => {
       const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
       await settle();
       wsState.set({ state: 'running' });
-      postReplies = [STOP_OK];
-      const api = TestBed.inject(ControllerApiService);
-      api.getStatus = () => Promise.reject(new Error('GET /api/status → HTTP 500'));
+      postReplies = [STOP_OK, START_OK];
+      putReplies = [{ status: 200, payload: SAVED_INFO }];
+      const outcomes: (() => Promise<unknown>)[] = [
+        () => Promise.reject(new Error('GET /api/status → HTTP 500')),
+        () => Promise.resolve('not an object'), // 想定外の形
+        () => Promise.resolve({ phase: 'Idle' }),
+      ];
+      let polls = 0;
+      TestBed.inject(ControllerApiService).getStatus = () => outcomes[polls++]();
 
       button('Apply & restart').click();
       await settle();
 
+      expect(polls).toBe(3);
+      expect(sequence(calls)).toEqual([
+        'POST /api/run/stop',
+        'PUT /api/params',
+        'POST /api/run/start',
+      ]);
+      expect(text()).toContain('Run 8 started with');
+    });
+
+    it('status がずっと取れない: 上限で "Stop did not reach Idle in 30 s (last status error: …)" で止まる', async () => {
+      const { calls } = setup([{ status: 200, payload: SAVED_INFO }]);
+      await settle();
+      wsState.set({ state: 'running' });
+      postReplies = [STOP_OK];
+      let polls = 0;
+      TestBed.inject(ControllerApiService).getStatus = () => {
+        polls += 1;
+        return Promise.reject(new Error('GET /api/status → HTTP 500'));
+      };
+
+      button('Apply & restart').click();
+      await settle();
+
+      expect(polls).toBe(3); // idleMaxPolls = 3
       expect(sequence(calls)).toEqual(['POST /api/run/stop']);
-      expect(text()).toContain('GET /api/status → HTTP 500');
+      expect(text()).toContain(
+        'Stop did not reach Idle in 30 s (last status error: GET /api/status → HTTP 500)',
+      );
     });
 
     it('PUT 400 では start せず、run は止まったままと明示する', async () => {
