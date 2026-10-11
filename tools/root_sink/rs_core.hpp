@@ -35,7 +35,10 @@
 #include <deque>
 #include <map>
 #include <mutex>
+#include <cinttypes>
+#include <cstdio>
 #include <set>
+#include <string>
 #include <utility>
 
 namespace rootsink {
@@ -264,6 +267,33 @@ class SeqCheck {
   std::map<uint32_t, uint64_t> last_;
   bool expect_zero_start_;
 };
+
+// ---------------------------------------------------------------------------
+// run close 行(TODO/108)
+// ---------------------------------------------------------------------------
+//
+// 通算カウンタ(Counts)はプロセス寿命で増え続ける。close 行が出すのは**その run の分**
+// = run 開始時点のスナップショットとの差(通算は最終 JSON 行にだけ残す)。
+
+struct RunCounts {
+  uint64_t batches = 0;
+  uint64_t events_complete = 0;
+  uint64_t events_incomplete = 0;
+  uint64_t late_fragments = 0;
+};
+
+inline std::string format_run_closed(uint32_t run_number, const RunCounts& now,
+                                     const RunCounts& at_open) {
+  char buf[256];
+  std::snprintf(buf, sizeof(buf),
+                "root_sink: run %u closed (batches=%" PRIu64 " events_complete=%" PRIu64
+                " events_incomplete=%" PRIu64 " late_fragments=%" PRIu64 ")\n",
+                run_number, now.batches - at_open.batches,
+                now.events_complete - at_open.events_complete,
+                now.events_incomplete - at_open.events_incomplete,
+                now.late_fragments - at_open.late_fragments);
+  return buf;
+}
 
 }  // namespace rootsink
 
