@@ -28,6 +28,11 @@
 //! `Running/Paused --stop--> Ready --breakup--> Prepared --reset--> Described --reset--> Idle`。
 //! `Idle` に着けなければ **run を始めない**([`Sequencer::walk_ecc_back_to_idle`])。
 //!
+//! コンポーネントも同じく Idle まで歩き戻してから始める(113、SPEC §1.3 v1.37): 停止の
+//! 畳む段の `Reset` が届かないと、そのコンポーネントは `Configured` のまま残り、次の
+//! `Configure` が断られ続ける。`GetStatus` で Idle でないものにだけ `Reset` を撃ち、跡を
+//! audit `run/start.component_walk_back` に残す([`Sequencer::walk_components_back_to_idle`])。
+//!
 //! あわせて、`Arm` は前の run が閉じたソケットの解放待ちで一時的に bind に失敗しうるので
 //! 指数バックオフで粘り(粘った実績は audit へ)、run 開始が失敗したときは
 //! **`run_start` をログブックへ書く前に限り** 採番を巻き戻す。
@@ -419,6 +424,10 @@ pub struct StartReport {
     /// 例: `["status->Ready", "breakup->Prepared", "reset->Described", "reset->Idle"]`。
     /// 1 要素だけなら歩く必要が無かった。**ログブックの audit に残す**(silent にしない)。
     pub ecc_walk_back: Vec<String>,
+    /// コンポーネントの歩き戻し(113)。Idle でなかったものだけ
+    /// `"<名前>: <見えた状態>-><Reset 応答の状態>"` で積む(例 `"receiver0: Configured->Idle"`)。
+    /// 空 = 全員 Idle だった(正常な姿)。**audit に残す**。
+    pub component_walk_back: Vec<String>,
 }
 
 /// `Arm` のリトライ実績(034 = 論点 B「リトライしたら回数と所要を必ず出す」)。
@@ -453,7 +462,7 @@ pub struct RouterLink {
 /// run 開始の失敗報告(監査ログにそのまま載る)。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StartFailure {
-    /// `Configure` / `Arm` / `Start` / `ecc` / `geometry` のどこで落ちたか。
+    /// `walk-back`(113)/ `Configure` / `Arm` / `Start` / `ecc` / `geometry` のどこで落ちたか。
     pub stage: &'static str,
     pub detail: String,
     /// 巻き戻しで送ったコマンドのうち失敗したものの記録(silent にしない)。
@@ -536,6 +545,14 @@ impl<'a> Sequencer<'a> {
             Err(detail) => return Err(self.rollback("ecc", detail, &touched)),
         };
 
+        // 0'. コンポーネントも Idle へ歩き戻す(113)。前の run の停止で Reset が届かなかった
+        //     コンポーネントは Configured 等のまま残り、下の Configure が断られ続ける。
+        //     ここで Reset した相手は Idle に戻っているので `touched` には数えない。
+        let mut component_walk_back = Vec::new();
+        if let Err(detail) = self.walk_components_back_to_idle(&mut component_walk_back) {
+            return Err(self.rollback("walk-back", detail, &touched));
+        }
+
         // 1. Configure(下流から: graw-writer → decoder → receivers)
         //    SPEC §6.4 v1.8: 正式な run 開始 TS は controller が 1 つだけ決めてここで配る。
         let run_config = RunConfig {
@@ -602,7 +619,41 @@ impl<'a> Sequencer<'a> {
             arm_retries,
             ecc_state_after_reset,
             ecc_walk_back,
+            component_walk_back,
         })
+    }
+
+    /// 各コンポーネントを **`Idle` まで歩き戻す**(113、SPEC §1.3 v1.37)。
+    ///
+    /// `GetStatus` で見て Idle でないものにだけ `Reset` を撃つ。§1.3 の遷移表で `Reset` は
+    /// Configured / Armed / Running / Error のどこからでも Idle へ 1 手で戻すので、ECC の
+    /// ように段数を数える必要は無い。歩いた跡は `trail` に `"<名前>: <状態>-><着地>"` で積む。
+    ///
+    /// `GetStatus` が届かない・`Reset` が断られる/届かないコンポーネントがあれば `Err`
+    /// (どれが、何の状態で残ったかを文言に載せる)—— 状態が判らない / Idle でないまま
+    /// Configure へ進んでも断られるだけなので、ここで止めて理由を明示する。
+    fn walk_components_back_to_idle(&mut self, trail: &mut Vec<String>) -> Result<(), String> {
+        let params = self.params;
+        for component in params.components.iter() {
+            let state = self.apply(component, &Command::GetStatus)?.state;
+            if state == ComponentState::Idle {
+                continue;
+            }
+            let landed = self.apply(component, &Command::Reset).map_err(|detail| {
+                format!(
+                    "{detail} — {} was left {state}; refusing to start a run",
+                    component.name
+                )
+            })?;
+            warn!(
+                component = component.name,
+                %state,
+                landed = %landed.state,
+                "component was not Idle at run start — walked back with Reset"
+            );
+            trail.push(format!("{}: {state}->{}", component.name, landed.state));
+        }
+        Ok(())
     }
 
     /// ECC を **`Idle` まで歩き戻す**(036、SPEC §1.3 v1.12 の ⚠ 注記)。
@@ -2131,6 +2182,9 @@ fn start_run_blocking(
                     // (2 本目以降が `["status->Ready","breakup->Prepared","reset->Described",
                     //  "reset->Idle"]` になっていること)。
                     "ecc_walk_back": report.ecc_walk_back,
+                    // 113: Idle でなかったコンポーネントを Reset で歩き戻した跡(空 = 全員 Idle)。
+                    // 空でない = 前の run の停止で Reset が届かなかった、という運用の可視化。
+                    "component_walk_back": report.component_walk_back,
                     // 078 レーン B §10-3: この run が使った params の `<id>`(無ければ null =
                     // TOML の config_id だけで走った)。
                     "params_id": params_id}),
@@ -2629,66 +2683,33 @@ async fn put_params(
         }
     };
 
-    {
-        let run_state = lock(&controller.run);
-        if run_state.phase != Phase::Idle {
-            let why = format!(
-                "controller is {} — not Idle (次 run から効くという半端は作らない)",
-                run_state.phase
-            );
-            drop(run_state);
-            controller.audit("params/put", json!({}), &operator, false, Some(why.clone()));
-            return err_json(StatusCode::CONFLICT, why);
-        }
-    }
-
     let reply = tokio::task::spawn_blocking(move || {
-        let rendered = match controller.render_with_template_dir(&ecc_config_dir, &params) {
-            Ok(rendered) => rendered,
-            Err(e) => {
-                controller.audit("params/put", json!({}), &operator, false, Some(e.clone()));
-                return err_json(StatusCode::BAD_REQUEST, e);
+        // 113 §2-3: **相の確認と書き込みを同じロック区間に**置く。確認の後でロックを手放すと、
+        // その隙に別クライアントの `run/start` が相を Starting にして current.json を読み、
+        // 書きかけ / 直後に差し替わる params で run が始まりうる。ロックを握っている間は
+        // start が相を取れないので、「PUT が先に済む」か「PUT が 409」のどちらかに決まる。
+        // audit はロックを手放してから(logbook のロックと入れ子にしない)。
+        let saved = {
+            let run_state = lock(&controller.run);
+            if run_state.phase != Phase::Idle {
+                Err((
+                    StatusCode::CONFLICT,
+                    format!(
+                        "controller is {} — not Idle (次 run から効くという半端は作らない)",
+                        run_state.phase
+                    ),
+                ))
+            } else {
+                save_params(&controller, &ecc_config_dir, &params, &text)
             }
         };
-
-        // §3-3: 生成物は content-addressed(`<id>` = stem + JSON の sha256 先頭 8 桁)なので、
-        // 既存なら書かない(同じ JSON の再 PUT でタイムスタンプが動かない)。
-        let configure_path = ecc_config_dir.join(&rendered.configure_file_name);
-        let prepare_path = ecc_config_dir.join(&rendered.prepare_file_name);
-        for (path, content) in [
-            (&configure_path, &rendered.xml),
-            (&prepare_path, &rendered.xml),
-        ] {
-            if !path.exists() {
-                if let Err(e) = std::fs::write(path, content) {
-                    let why = format!("cannot write {}: {e}", path.display());
-                    controller.audit("params/put", json!({}), &operator, false, Some(why.clone()));
-                    return err_json(StatusCode::INTERNAL_SERVER_ERROR, why);
-                }
-            }
-        }
-
-        let params_dir = controller.params_dir();
-        if let Err(e) = std::fs::create_dir_all(&params_dir) {
-            let why = format!("cannot create {}: {e}", params_dir.display());
-            controller.audit("params/put", json!({}), &operator, false, Some(why.clone()));
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, why);
-        }
-        // `current.json` は「今の設定」なので常に上書きする(§3-3 の content-addressed 規則は
-        // configure/prepare/`<id>.json` だけの話 —— これは固定名で「最新」を指す)。
-        if let Err(e) = std::fs::write(params_dir.join("current.json"), &text) {
-            let why = format!("cannot write current.json: {e}");
-            controller.audit("params/put", json!({}), &operator, false, Some(why.clone()));
-            return err_json(StatusCode::INTERNAL_SERVER_ERROR, why);
-        }
-        let id_path = params_dir.join(format!("{}.json", rendered.config_id));
-        if !id_path.exists() {
-            if let Err(e) = std::fs::write(&id_path, &text) {
-                let why = format!("cannot write {}: {e}", id_path.display());
+        let rendered = match saved {
+            Ok(rendered) => rendered,
+            Err((code, why)) => {
                 controller.audit("params/put", json!({}), &operator, false, Some(why.clone()));
-                return err_json(StatusCode::INTERNAL_SERVER_ERROR, why);
+                return err_json(code, why);
             }
-        }
+        };
 
         let current = CurrentParams {
             sha256: sha256_hex(&text),
@@ -2714,6 +2735,56 @@ async fn put_params(
             format!("params/put task: {e}"),
         ),
     }
+}
+
+/// [`put_params`] の render + 書き込み(呼び手が `controller.run` のロックを握った状態で呼ぶ)。
+/// 失敗は (HTTP コード, 理由): テンプレート/render の不備は 400、書けないのは 500。
+fn save_params(
+    controller: &Controller,
+    ecc_config_dir: &Path,
+    params: &crate::params::Params,
+    text: &str,
+) -> Result<crate::params::Rendered, (StatusCode, String)> {
+    let rendered = controller
+        .render_with_template_dir(ecc_config_dir, params)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let cannot_write = |path: &Path, e: std::io::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot write {}: {e}", path.display()),
+        )
+    };
+
+    // §3-3: 生成物は content-addressed(`<id>` = stem + JSON の sha256 先頭 8 桁)なので、
+    // 既存なら書かない(同じ JSON の再 PUT でタイムスタンプが動かない)。
+    for file_name in [&rendered.configure_file_name, &rendered.prepare_file_name] {
+        let path = ecc_config_dir.join(file_name);
+        if !path.exists() {
+            std::fs::write(&path, &rendered.xml).map_err(|e| cannot_write(&path, e))?;
+        }
+    }
+
+    let params_dir = controller.params_dir();
+    std::fs::create_dir_all(&params_dir).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("cannot create {}: {e}", params_dir.display()),
+        )
+    })?;
+    // `current.json` は「今の設定」なので常に上書きする(§3-3 の content-addressed 規則は
+    // configure/prepare/`<id>.json` だけの話 —— これは固定名で「最新」を指す)。
+    // 113 §2-3: 一時ファイルに書いて rename で差し替える(同じファイルシステム内の rename は
+    // アトミック)—— 読み手(run/start・GET /api/params・status)が書きかけを見ない。
+    let current_path = params_dir.join("current.json");
+    let tmp_path = params_dir.join("current.json.tmp");
+    std::fs::write(&tmp_path, text).map_err(|e| cannot_write(&tmp_path, e))?;
+    std::fs::rename(&tmp_path, &current_path).map_err(|e| cannot_write(&current_path, e))?;
+
+    let id_path = params_dir.join(format!("{}.json", rendered.config_id));
+    if !id_path.exists() {
+        std::fs::write(&id_path, text).map_err(|e| cannot_write(&id_path, e))?;
+    }
+    Ok(rendered)
 }
 
 #[derive(Debug, Deserialize)]
@@ -3174,6 +3245,9 @@ mod tests {
         receiver_polls: BTreeMap<String, u64>,
         /// この名前のコンポーネントは**不達**(REQ タイムアウト相当の `Err`)。
         unreachable: Vec<String>,
+        /// コンポーネント名 → 今の状態(113)。未登録 = `Idle`。断られなかった状態遷移
+        /// コマンドはその行き先へ動かす(合法性は見ない — それは統合テストの本物の状態機械の役)。
+        states: BTreeMap<String, ComponentState>,
         slept: Duration,
     }
 
@@ -3225,8 +3299,16 @@ mod tests {
                 bytes_steps: BTreeMap::new(),
                 receiver_polls: BTreeMap::new(),
                 unreachable: Vec::new(),
+                states: BTreeMap::new(),
                 slept: Duration::ZERO,
             }
+        }
+
+        /// 113: このコンポーネントが `state` に居るところから始める
+        /// (例: 前の run の停止で Reset が届かず `Configured` のまま残った)。
+        fn component_in(mut self, component: &str, state: ComponentState) -> Self {
+            self.states.insert(component.to_string(), state);
+            self
         }
 
         /// EOS は最初から流れ切っている(正常停止で強制 EOS に落ちない)。
@@ -3438,7 +3520,16 @@ mod tests {
                     }
                 }
             }
-            let state = ComponentState::Running;
+            if !refused {
+                if let Some(target) = command.target_state() {
+                    self.states.insert(name.clone(), target);
+                }
+            }
+            let state = self
+                .states
+                .get(&name)
+                .copied()
+                .unwrap_or(ComponentState::Idle);
             let response = if refused {
                 CommandResponse::error(state, format!("mock refuses {action}"))
             } else {
@@ -4185,6 +4276,100 @@ mod tests {
                 ],
             })
         );
+    }
+
+    // -----------------------------------------------------------------
+    // 113 — コンポーネントの歩き戻し(停止時の Reset 不達からの回復)
+    // -----------------------------------------------------------------
+
+    /// **113 の本体**: 前の run の停止で Reset が届かず `Configured` のまま残った receiver0 を、
+    /// ECC の歩き戻しの後・Configure の前に `Reset` で `Idle` へ戻す。Idle のものには触らない。
+    /// 歩いた跡は `"<名前>: <見えた状態>-><Reset 応答の状態>"` で残る(audit 行き)。
+    #[test]
+    fn a_component_left_configured_is_reset_before_any_configure() {
+        let params = params_with(&[0, 1]);
+        let mut mock = MockTransport::new(&params)
+            .component_in("receiver0", ComponentState::Configured)
+            .component_in("decoder", ComponentState::Error);
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-10-11T10:00:00.000")
+            .unwrap();
+
+        assert_eq!(
+            &mock.commands()[..4],
+            &[
+                Call::new("ecc", "status"),
+                // 上流からではなく `components` の順(= graw-writer, decoder, receiver0, …)。
+                // Idle の graw-writer / receiver1 には Reset を撃たない。
+                Call::new("decoder", "Reset"),
+                Call::new("receiver0", "Reset"),
+                Call::new("graw-writer", "Configure"),
+            ]
+        );
+        assert_eq!(
+            report.component_walk_back,
+            vec![
+                "decoder: Error->Idle".to_string(),
+                "receiver0: Configured->Idle".to_string(),
+            ]
+        );
+        assert_eq!(
+            mock.actions("graw-writer"),
+            vec!["Configure", "Arm", "Start"]
+        );
+        assert_eq!(mock.actions("receiver1"), vec!["Configure", "Arm", "Start"]);
+    }
+
+    /// 全員 Idle なら歩き戻しの跡は空(1 本目・正常な連続 run の姿)。
+    #[test]
+    fn idle_components_leave_an_empty_walk_back_trail() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params);
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-10-11T10:00:00.000")
+            .unwrap();
+        assert!(report.component_walk_back.is_empty());
+        assert!(!mock.commands().iter().any(|c| c.action == "Reset"));
+    }
+
+    /// 歩き戻しの `Reset` が断られたら run を始めない。**どれが・何の状態で**残ったかを
+    /// 文言に載せ、どのコンポーネントにも Configure を出さない。
+    #[test]
+    fn a_component_that_refuses_the_walk_back_reset_stops_the_run_before_any_configure() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .component_in("receiver0", ComponentState::Armed)
+            .fail_on("receiver0", "Reset");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-10-11T10:00:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "walk-back");
+        assert!(failure.detail.contains("receiver0"), "{}", failure.detail);
+        assert!(failure.detail.contains("Armed"), "{}", failure.detail);
+        assert!(
+            !mock.commands().iter().any(|c| c.action == "Configure"),
+            "{:?}",
+            mock.commands()
+        );
+    }
+
+    /// GetStatus が届かないコンポーネントも、状態が判らないまま Configure へ進まない。
+    #[test]
+    fn an_unreachable_component_stops_the_run_at_the_walk_back() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params).unreachable("decoder");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(57, "", "2026-10-11T10:00:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "walk-back");
+        assert!(
+            failure.detail.contains("decoder: GetStatus unreachable"),
+            "{}",
+            failure.detail
+        );
+        assert!(!mock.commands().iter().any(|c| c.action == "Configure"));
     }
 
     /// **巻き戻し**: Configure が receiver0 で失敗 → 実行済み(graw-writer, decoder)だけ畳む。
