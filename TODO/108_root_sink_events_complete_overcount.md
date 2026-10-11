@@ -1,6 +1,6 @@
 # 108 — root_sink の `events_complete` が書き出し件数より多い(高レートで +3.4 %)
 
-**Status: READY**(2026-10-09 起票 Opus。データ損失なし = 表示 / カウンタの不具合。原因調査から)
+**Status: READY**(2026-10-09 起票 Opus。データ損失なし = 表示 / カウンタの不具合。**2026-10-11 原因判明(下記)— 修正は Sonnet 向けの機械作業**)
 
 ## 事実(ELITPC、run 13 = α 線源 ≈ 4.8 Hz、2026-10-09 09:51–10:20、107)
 
@@ -17,3 +17,9 @@
 
 ## 影響
 UI / status / logbook の `events_complete` を信じて「全部書けた」と判断すると数が合わない。データ(graw・ROOT)は無傷。
+
+## 原因(2026-10-11、112 の実機 10 周で判明 — Fable)
+`run N closed (batches=… events_complete=…)` の **`events_complete` はプロセス通算**(run 41 = 49、run 42 = 98、run 43 = 137 = 98 + 39、… run 50 = 408)。`batches` も通算。
+run 13 の 8,888 = 8,595(run 13)+ 293(同じプロセスで先に取った run 12 の 139 + run 8 の 154)。書き出し件数(`finalized … entries`)は per-run で正しい。
+→ 直し方: close 行は**その run の件数**を出す(run 開始時の通算値との差、または per-run カウンタ)。通算は最終 JSON 行にだけ残す。`late_fragments` も同様に per-run にするか確認。
+テスト: `tools/root_sink` の既存テスト(recorder / eb_core)に「2 run 連続で close 行の件数が各 run の件数」を 1 本。
