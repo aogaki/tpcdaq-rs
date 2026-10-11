@@ -84,9 +84,31 @@ struct Recorder {
     commands: Mutex<Vec<String>>,
     /// `Configure` で受け取った設定断片(run 開始 TS の配布を見るため)。
     configs: Mutex<Vec<Value>>,
+    /// 113: コマンド名 → 残り「断る回数」(`u32::MAX` = 常に断る)。停止時の Reset 不達や
+    /// Configure の失敗を作るため。断ったコマンドも `commands` には記録される。
+    refusals: Mutex<Vec<(&'static str, u32)>>,
 }
 
 impl Recorder {
+    /// 113: 次の `times` 回の `command` を断らせる(`u32::MAX` = 常に)。
+    fn refuse(&self, command: &'static str, times: u32) {
+        self.refusals.lock().unwrap().push((command, times));
+    }
+
+    /// 断る番なら残り回数を 1 減らして `true`。
+    fn take_refusal(&self, command: &str) -> bool {
+        let mut refusals = self.refusals.lock().unwrap();
+        for (name, left) in refusals.iter_mut() {
+            if *name == command && *left > 0 {
+                if *left != u32::MAX {
+                    *left -= 1;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     fn push(&self, name: &str) {
         self.commands.lock().unwrap().push(name.to_string());
     }
@@ -140,6 +162,9 @@ impl FakeComponent {
         let Some(target) = command.target_state() else {
             return respond(self, true, "status".to_string());
         };
+        if self.recorder.take_refusal(name) {
+            return respond(self, false, format!("fake refuses {name}"));
+        }
         if !self.state.can_transition_to(target) {
             return respond(
                 self,
@@ -838,25 +863,20 @@ async fn a_stop_without_eos_forces_it_through_the_receivers() {
     harness.shutdown();
 }
 
-/// 開始シーケンスが途中で失敗したら巻き戻す(実 ZMQ 版)。
-/// receiver を先に Configure 済みにしておくと controller の `Configure` が
-/// 不許可遷移で断られる —— そこから先へ進まず、実行済みだけが畳まれる。
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_start_rolls_back_and_leaves_no_half_started_run() {
-    let harness = harness("rollback", &[0], true, None).await;
-
-    // receiver0 を Idle から動かしておく(controller の Configure が断られる状況を作る)。
+/// controller を通さずにコンポーネント(`/api/status` の `components[index]`)へ
+/// `Configure` を直接撃ち、Idle から動かしておく(113 以前の巻き戻し試験の前提作り)。
+fn configure_directly(harness: &Harness, index: usize) {
     let context = zmq::Context::new();
-    let receiver_endpoint = {
+    let endpoint = {
         let (_, body) = get(harness.rest, "/api/status");
-        body["components"][2]["endpoint"]
+        body["components"][index]["endpoint"]
             .as_str()
             .unwrap()
             .to_string()
     };
     let response = tpcdaq::command::request(
         &context,
-        &receiver_endpoint,
+        &endpoint,
         &Command::Configure(tpcdaq::command::RunConfig {
             run_number: 99,
             comment: String::new(),
@@ -865,10 +885,20 @@ async fn a_failed_start_rolls_back_and_leaves_no_half_started_run() {
         Duration::from_secs(5),
     )
     .unwrap();
-    assert!(
-        response.success,
-        "前提: receiver は Configured になっている"
-    );
+    assert!(response.success, "前提: Configured になっている");
+}
+
+/// 開始シーケンスが途中で失敗したら巻き戻す(実 ZMQ 版)。
+/// receiver0 が controller の `Configure` を断る —— そこから先へ進まず、実行済みだけが畳まれる。
+///
+/// 113 以前は「receiver を先に Configure 済みにしておく」で断らせていたが、113 から start は
+/// Idle でないコンポーネントを先に Reset で歩き戻すので、その前提では start が**通る**
+/// (= [`a_component_left_configured_by_a_lost_reset_is_walked_back_at_the_next_start`])。
+/// ここではフェイクに Configure そのものを断らせる。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_start_rolls_back_and_leaves_no_half_started_run() {
+    let harness = harness("rollback", &[0], true, None).await;
+    harness.receivers[0].refuse("Configure", u32::MAX);
 
     let token = harness.acquire("aogaki");
     let (status, body) = post(
@@ -921,6 +951,142 @@ async fn a_failed_start_rolls_back_and_leaves_no_half_started_run() {
     // 巻き戻したこと自体も監査に残す(silent にしない)。
     assert_eq!(audit["params"]["next_run_rewound"], json!(true));
     assert!(!records.iter().any(|r| r["type"] == json!("run_start")));
+
+    harness.shutdown();
+}
+
+/// **113 の本体**(112 レーン A で実測した穴): 停止の畳む段で receiver0 への `Reset` が
+/// 届かないと、`run/stop` は `ok:true` + `notes` で返り receiver0 は `Configured` のまま残る。
+/// 113 以前は次の `run/start` が `Configure refused in state Configured` で 500 になり、
+/// プロセス再起動まで直らなかった。113 からは start が **Idle でないものを Reset してから**
+/// Configure するので通り、歩いた跡が audit `run/start.component_walk_back` に残る。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_component_left_configured_by_a_lost_reset_is_walked_back_at_the_next_start() {
+    let harness = harness("walk-back", &[0], true, None).await;
+    let token = harness.acquire("aogaki");
+
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "first"}),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    // 停止の畳む段の Reset を 1 回だけ落とす(実測ではエフェメラルポート枯渇で不達)。
+    harness.receivers[0].refuse("Reset", 1);
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+    // stop の契約は不変: ok = EOS と保存の完結、Reset の失敗は notes に載る。
+    assert_eq!(body["ok"], json!(true), "{body}");
+    let notes = body["notes"].as_array().unwrap();
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.as_str().unwrap().starts_with("receiver0: Reset refused")),
+        "{body}"
+    );
+    let (_, status_body) = get(harness.rest, "/api/status");
+    assert_eq!(status_body["phase"], json!("Idle"));
+    assert_eq!(
+        status_body["components"][2]["state"],
+        json!("Configured"),
+        "前提: receiver0 は Configured のまま残っている"
+    );
+
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "second"}),
+    );
+    assert_eq!(status, 200, "歩き戻せば 2 本目が通る: {body}");
+    assert_eq!(body["run"], json!(2));
+
+    // receiver0 だけが 2 本目の Configure の前に Reset を受け直す(1 本目の Stop の後の
+    // Reset は断られた分)。Idle に戻っていた graw-writer / decoder には余計な Reset が無い。
+    assert_eq!(
+        harness.receivers[0].commands(),
+        vec![
+            "Configure",
+            "Arm",
+            "Start",
+            "Stop",
+            "Reset",
+            "Reset",
+            "Configure",
+            "Arm",
+            "Start"
+        ]
+    );
+    assert_eq!(
+        harness.decoder.commands(),
+        vec![
+            "Configure",
+            "Arm",
+            "Start",
+            "Stop",
+            "Reset",
+            "Configure",
+            "Arm",
+            "Start"
+        ]
+    );
+
+    let records = harness.logbook();
+    let audit = records
+        .iter()
+        .rev()
+        .find(|r| r["type"] == json!("audit") && r["action"] == json!("run/start"))
+        .unwrap();
+    assert_eq!(audit["ok"], json!(true), "{audit}");
+    assert_eq!(audit["params"]["run"], json!(2));
+    assert_eq!(
+        audit["params"]["component_walk_back"],
+        json!(["receiver0: Configured->Idle"])
+    );
+    // 1 本目(全員 Idle)は空の配列で残る(キーは常にある)。
+    let first = records
+        .iter()
+        .find(|r| r["type"] == json!("audit") && r["action"] == json!("run/start"))
+        .unwrap();
+    assert_eq!(first["params"]["component_walk_back"], json!([]));
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+    harness.shutdown();
+}
+
+/// 歩き戻しの `Reset` まで断られたら run を始めない: 500 の文言に**どれが・何の状態で**
+/// 残ったかが載り、どのコンポーネントにも Configure は出ず、採番は巻き戻る。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_component_that_cannot_be_walked_back_refuses_the_start_and_says_which() {
+    let harness = harness("walk-back-refused", &[0], true, None).await;
+    configure_directly(&harness, 2); // receiver0 → Configured
+    harness.receivers[0].refuse("Reset", u32::MAX);
+
+    let token = harness.acquire("aogaki");
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 500, "{body}");
+    let error = body["error"].as_str().unwrap();
+    assert!(error.contains("receiver0"), "{body}");
+    assert!(error.contains("Configured"), "{body}");
+
+    // controller からの Configure は誰も受けていない(receiver0 の 1 発目は直撃ちの前提作り)。
+    assert!(harness.graw_writer.commands().is_empty());
+    assert!(harness.decoder.commands().is_empty());
+    assert_eq!(harness.receivers[0].commands(), vec!["Configure", "Reset"]);
+
+    let (_, status_body) = get(harness.rest, "/api/status");
+    assert_eq!(status_body["phase"], json!("Idle"));
+    let records = harness.logbook();
+    let audit = records.last().unwrap();
+    assert_eq!(audit["action"], json!("run/start"));
+    assert_eq!(audit["ok"], json!(false));
+    assert_eq!(audit["params"]["stage"], json!("walk-back"));
+    assert_eq!(audit["params"]["next_run_rewound"], json!(true));
 
     harness.shutdown();
 }
@@ -1583,6 +1749,12 @@ async fn params_get_404_then_put_creates_the_xcfg_pair_and_get_returns_the_same_
     let (status, get_body) = get(harness.rest, "/api/params");
     assert_eq!(status, 200, "{get_body}");
     assert_eq!(get_body, put_body, "GET は PUT と同じ形を返す(078 §10)");
+
+    // 113 §2-3: current.json は一時ファイル + rename で差し替える —— 一時ファイルは残らない。
+    assert_eq!(
+        dir_listing(&harness.output_root.join("params")),
+        vec!["current.json".to_string(), format!("{id}.json")]
+    );
 
     let records = harness.logbook();
     let audit = records
