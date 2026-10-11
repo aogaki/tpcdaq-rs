@@ -10,6 +10,9 @@
 
 #![allow(clippy::unwrap_used)]
 
+// 112: 本物のコンポーネント 3 種をプロセス内で起動する部品(`spawn_components_listening`)だけ使う。
+mod common;
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -276,6 +279,17 @@ impl FakeEcc {
             .collect()
     }
 
+    /// その action の要求を**受けた順に全部**(112: 周回ごとの configure / prepare の id を見る)。
+    fn requests_for(&self, action: &str) -> Vec<Value> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.get("action").and_then(Value::as_str) == Some(action))
+            .cloned()
+            .collect()
+    }
+
     fn request(&self, action: &str) -> Option<Value> {
         self.requests
             .lock()
@@ -446,6 +460,42 @@ async fn harness_full(
         });
     }
 
+    let (BoundEndpoints { rest, log_pull }, ecc) = spawn_controller(
+        &shutdown,
+        &output_root,
+        cobos,
+        components,
+        ui_dir,
+        config_ids,
+        ecc_config_dir,
+    )
+    .await;
+
+    Harness {
+        rest,
+        log_pull,
+        output_root,
+        graw_writer,
+        decoder,
+        receivers,
+        router_ports,
+        ecc,
+        shutdown,
+        _data_listeners: data_listeners,
+    }
+}
+
+/// fake ECC + controller(REST)を起動する。コンポーネントはフェイク([`harness_full`])でも
+/// 本物([`real_chain`]、112)でもよい —— controller から見えるのはコマンド REP だけ。
+async fn spawn_controller(
+    shutdown: &broadcast::Sender<()>,
+    output_root: &Path,
+    cobos: Vec<CoboSpec>,
+    components: Vec<ComponentEndpoint>,
+    ui_dir: Option<PathBuf>,
+    config_ids: ConfigIds,
+    ecc_config_dir: Option<PathBuf>,
+) -> (BoundEndpoints, FakeEcc) {
     let ecc = FakeEcc::spawn();
     let params = ControllerParams {
         rest_listen: "127.0.0.1:0".to_string(),
@@ -453,7 +503,7 @@ async fn harness_full(
         log_pull_bind: "tcp://127.0.0.1:*".to_string(),
         ui_dir,
         config_ids,
-        output_root: output_root.clone(),
+        output_root: output_root.to_path_buf(),
         geometry_path: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/geometry_2cobo_fake.dat"),
         cobos,
@@ -482,20 +532,7 @@ async fn harness_full(
             panic!("controller failed: {e}");
         }
     });
-    let BoundEndpoints { rest, log_pull } = bound_rx.await.unwrap();
-
-    Harness {
-        rest,
-        log_pull,
-        output_root,
-        graw_writer,
-        decoder,
-        receivers,
-        router_ports,
-        ecc,
-        shutdown,
-        _data_listeners: data_listeners,
-    }
+    (bound_rx.await.unwrap(), ecc)
 }
 
 impl Harness {
@@ -2001,4 +2038,741 @@ async fn params_templates_and_defaults_return_503_without_ecc_config_dir() {
     }
 
     harness.shutdown();
+}
+
+// ---------------------------------------------------------------------
+// Apply & restart の遷移(TODO/112 §2 レーン A)
+// ---------------------------------------------------------------------
+
+/// triggerDelay だけ変えた params JSON(112: 周ごとに id を変えるための 1 ノブ)。
+fn params_with_trigger_delay(delay: u64) -> Value {
+    let mut params = roundtrip_params_json();
+    params["knobs"]["triggerDelay"] = json!(delay);
+    params
+}
+
+/// ログブックの audit のうち、指定の action だけを `(action, ok)` で受けた順に。
+fn audit_trail(records: &[Value], actions: &[&str]) -> Vec<(String, bool)> {
+    records
+        .iter()
+        .filter(|r| r["type"] == json!("audit"))
+        .filter(|r| actions.iter().any(|a| r["action"] == json!(a)))
+        .map(|r| {
+            (
+                r["action"].as_str().unwrap().to_string(),
+                r["ok"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// 112 §2-1 (a)(b): `run/stop` の 200 を受けた**直後に待ち時間ゼロで** `PUT /api/params`
+/// (triggerDelay を 1 つ変える)→ `run/start` を 5 周。
+///
+/// 各周: stop 200(`forced_eos=false` / `eos_closed=true` — このハーネスは EOS が最初から
+/// 流れ切っている形)→ PUT 200(新しい id)→ start 200(run 番号 +1)→ ECC(fake)が受けた
+/// prepare / configure の `config_id` も logbook `run_start.config_id` も新しい id。
+/// 最後に audit の順序(run/stop → params/put → run/start)と run 台帳・ECC 列・
+/// コンポーネントのコマンド列を全周まとめて照合する。周ごとの所要 ms は stderr に出す
+/// (`--nocapture` で読む)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn back_to_back_stop_put_start_switches_the_params_id_every_round_for_five_rounds() {
+    let (harness, ecc_config_dir) = params_harness("apply-restart").await;
+    let token = harness.acquire("aogaki");
+
+    // 周 0: テンプレート現行値(triggerDelay 1748)で run 1 を始める。
+    let (status, first_put) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": roundtrip_params_json()}),
+    );
+    assert_eq!(status, 200, "{first_put}");
+    let mut ids = vec![first_put["id"].as_str().unwrap().to_string()];
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "apply-restart 0"}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["run"], json!(1));
+
+    // 毎周違う triggerDelay(単調でない非対称な値 = 周の取り違えが id に出る)。
+    let delays: [u64; 5] = [1700, 1832, 1650, 1999, 1777];
+    for (round, delay) in delays.iter().enumerate() {
+        let stopping = round as u64 + 1; // この周で止める run(1..=5)
+
+        let began = Instant::now();
+        let (status, stop) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+        let stop_ms = began.elapsed().as_millis();
+        assert_eq!(status, 200, "round {round}: {stop}");
+        assert_eq!(stop["run"], json!(stopping), "round {round}: {stop}");
+        assert_eq!(stop["ok"], json!(true), "round {round}: {stop}");
+        assert_eq!(stop["forced_eos"], json!(false), "round {round}: {stop}");
+        assert_eq!(stop["eos_closed"], json!(true), "round {round}: {stop}");
+        assert_eq!(stop["notes"], json!([]), "round {round}: {stop}");
+
+        // 待ち時間ゼロ(sleep も status ポーリングも挟まない)。
+        let began = Instant::now();
+        let (status, put_body) = put(
+            harness.rest,
+            "/api/params",
+            json!({"token": token, "params": params_with_trigger_delay(*delay)}),
+        );
+        let put_ms = began.elapsed().as_millis();
+        assert_eq!(status, 200, "round {round}: {put_body}");
+        let id = put_body["id"].as_str().unwrap().to_string();
+        assert!(
+            !ids.contains(&id),
+            "round {round}: triggerDelay {delay} の id {id} が既出 {ids:?}"
+        );
+        ids.push(id.clone());
+
+        let began = Instant::now();
+        let (status, start) = post(
+            harness.rest,
+            "/api/run/start",
+            json!({"token": token, "comment": format!("apply-restart {}", round + 1)}),
+        );
+        let start_ms = began.elapsed().as_millis();
+        assert_eq!(status, 200, "round {round}: {start}");
+        assert_eq!(start["run"], json!(stopping + 1), "round {round}: {start}");
+
+        // ECC(fake)が**最後に**受けた prepare / configure は新しい id(describe は TOML のまま)。
+        let last = |action: &str| harness.ecc.requests_for(action).last().cloned().unwrap();
+        assert_eq!(last("prepare")["config_id"], json!(id), "round {round}");
+        assert_eq!(last("configure")["config_id"], json!(id), "round {round}");
+        assert_eq!(last("describe")["config_id"], json!("integration"));
+
+        let records = harness.logbook();
+        let run_start = records
+            .iter()
+            .rev()
+            .find(|r| r["type"] == json!("run_start"))
+            .unwrap();
+        assert_eq!(run_start["run"], json!(stopping + 1), "round {round}");
+        assert_eq!(run_start["config_id"], json!(id), "round {round}");
+        assert_eq!(run_start["params"]["id"], json!(id), "round {round}");
+
+        eprintln!(
+            "112 back-to-back round {}: stop {stop_ms} ms / put {put_ms} ms / start {start_ms} ms \
+             / total {} ms (run {stopping} -> {}, triggerDelay {delay}, id {id})",
+            round + 1,
+            stop_ms + put_ms + start_ms,
+            stopping + 1,
+        );
+    }
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["run"], json!(6));
+
+    // --- 監査の順序: PUT → start → (stop → PUT → start)×5 → stop、全部 ok ---
+    let records = harness.logbook();
+    let mut expected = vec![
+        ("params/put".to_string(), true),
+        ("run/start".to_string(), true),
+    ];
+    for _ in 0..5 {
+        for action in ["run/stop", "params/put", "run/start"] {
+            expected.push((action.to_string(), true));
+        }
+    }
+    expected.push(("run/stop".to_string(), true));
+    assert_eq!(
+        audit_trail(&records, &["run/stop", "params/put", "run/start"]),
+        expected
+    );
+
+    // --- run 台帳: 番号は 1..=6 で飛ばず、run_start の id は PUT の順そのまま ---
+    let starts: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["type"] == json!("run_start"))
+        .collect();
+    assert_eq!(
+        starts
+            .iter()
+            .map(|r| r["run"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6]
+    );
+    assert_eq!(
+        starts
+            .iter()
+            .map(|r| r["config_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>(),
+        ids
+    );
+    let stops: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["type"] == json!("run_stop"))
+        .collect();
+    assert_eq!(
+        stops
+            .iter()
+            .map(|r| r["run"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4, 5, 6]
+    );
+    for run_stop in &stops {
+        assert_eq!(run_stop["ok"], json!(true), "{run_stop}");
+        assert_eq!(run_stop["forced_eos"], json!(false), "{run_stop}");
+        assert_eq!(run_stop["eos_closed"], json!(true), "{run_stop}");
+    }
+
+    // --- ECC: 1 本目は Off から、2 本目以降は stop の Ready から Idle へ歩き戻す ---
+    let mut expected_ecc: Vec<&str> = vec!["describe", "prepare", "configure", "start"];
+    for _ in 0..5 {
+        expected_ecc.extend([
+            "stop",
+            "breakup",
+            "reset",
+            "reset",
+            "describe",
+            "prepare",
+            "configure",
+            "start",
+        ]);
+    }
+    expected_ecc.push("stop");
+    assert_eq!(harness.ecc.actions(), expected_ecc);
+
+    // --- コンポーネント: 6 周とも Configure → Arm → Start → Stop → Reset を 1 回ずつ ---
+    let one_run = ["Configure", "Arm", "Start", "Stop", "Reset"];
+    let six_runs: Vec<String> = (0..6)
+        .flat_map(|_| one_run.iter().map(|c| c.to_string()))
+        .collect();
+    for (name, recorder) in [
+        ("graw-writer", &harness.graw_writer),
+        ("decoder", &harness.decoder),
+        ("receiver0", &harness.receivers[0]),
+    ] {
+        assert_eq!(recorder.commands(), six_runs, "{name}");
+    }
+
+    // --- 生成物: 6 つの id ぶんの configure/prepare(+ テンプレート)---
+    let listing = dir_listing(&ecc_config_dir);
+    for id in &ids {
+        assert!(
+            listing.contains(&format!("configure-{id}.xcfg")),
+            "{listing:?}"
+        );
+        assert!(
+            listing.contains(&format!("prepare-{id}.xcfg")),
+            "{listing:?}"
+        );
+    }
+    assert_eq!(listing.len(), 1 + 2 * ids.len(), "{listing:?}");
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+/// 112 §2-1 (c): stop の直後に**別の operator が acquire で token を奪った**ら、元の token の
+/// PUT も start も 401 で、本文の `error` がそのまま UI に出せる文言であること。
+/// 奪った側は普通に PUT → start できる(遷移が固まっていない)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_token_taken_between_stop_and_put_makes_put_and_start_401_with_the_reason() {
+    let (harness, ecc_config_dir) = params_harness("apply-restart-401").await;
+    let token = harness.acquire("aogaki");
+    let (status, body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": roundtrip_params_json()}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+    let student = harness.acquire("student");
+
+    let (status, body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": params_with_trigger_delay(1700)}),
+    );
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body, json!({"error": "stale or unknown token"}));
+
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "should not start"}),
+    );
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body, json!({"error": "stale or unknown token"}));
+
+    // 何も動いていない: 相は Idle、操作者は奪った側、run_start は 1 本のまま。
+    let (_, status_body) = get(harness.rest, "/api/status");
+    assert_eq!(status_body["phase"], json!("Idle"));
+    assert_eq!(status_body["operator"], json!("student"));
+    let records = harness.logbook();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| r["type"] == json!("run_start"))
+            .count(),
+        1
+    );
+    // 拒否も監査に残る(silent にしない)。
+    let rejected: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["type"] == json!("audit") && r["operator"] == json!("<unauthorized>"))
+        .collect();
+    assert_eq!(
+        rejected
+            .iter()
+            .map(|r| r["action"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["params/put", "run/start"]
+    );
+    for r in &rejected {
+        assert_eq!(r["error"], json!("stale or unknown token"), "{r}");
+    }
+
+    // 奪った側はそのまま PUT → start できる。
+    let (status, body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": student, "params": params_with_trigger_delay(1700)}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": student, "comment": "taken over"}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["run"], json!(2));
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": student}));
+    assert_eq!(status, 200, "{body}");
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+/// 112 §2-1 (d): stop の 200 を受けた瞬間の `GET /api/status` は必ず `phase: Idle`
+/// (タイミング穴 ① の直接検証)。start → stop → status を 100 回、一度も Idle 以外を見ない。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_status_right_after_a_stop_reply_is_idle_in_a_hundred_cycles() {
+    let harness = harness("stop-then-status", &[0], true, None).await;
+    let token = harness.acquire("aogaki");
+
+    const CYCLES: usize = 100;
+    let mut not_idle = Vec::new();
+    let mut cycle_ms = Vec::new();
+    for cycle in 0..CYCLES {
+        let began = Instant::now();
+        let (status, body) = post(
+            harness.rest,
+            "/api/run/start",
+            json!({"token": token, "comment": ""}),
+        );
+        assert_eq!(status, 200, "cycle {cycle}: {body}");
+        let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+        assert_eq!(status, 200, "cycle {cycle}: {body}");
+        // 畳む段(Stop / Reset)で何か落ちていれば notes に出る。ここで止めないと、
+        // 次周の start が「Configure refused in state Configured」で落ちて原因が見えない。
+        assert_eq!(body["notes"], json!([]), "cycle {cycle}: {body}");
+        let (_, status_body) = get(harness.rest, "/api/status");
+        cycle_ms.push(began.elapsed().as_millis());
+        if status_body["phase"] != json!("Idle") {
+            not_idle.push((cycle, status_body["phase"].clone()));
+        }
+    }
+    assert!(
+        not_idle.is_empty(),
+        "stop の 200 直後に Idle 以外: {not_idle:?}"
+    );
+    cycle_ms.sort_unstable();
+    eprintln!(
+        "112 stop-then-status: {CYCLES} cycles, start+stop+status ms min {} / median {} / max {}",
+        cycle_ms[0],
+        cycle_ms[CYCLES / 2],
+        cycle_ms[CYCLES - 1],
+    );
+
+    harness.shutdown();
+}
+
+// ---------------------------------------------------------------------
+// Apply & restart の実データ版(TODO/112 §2-1 (b): 本物の receiver / decoder / graw-writer)
+// ---------------------------------------------------------------------
+
+/// decoder の下流(root-sink の席)に座る吸い込み。PULL を握って全部読み、
+/// `EndOfStream` の run 番号だけを受けた順に記録する(= root-sink が run を閉じる合図の回数)。
+struct SinkDrain {
+    endpoint: String,
+    eos_runs: Arc<Mutex<Vec<u32>>>,
+    data_batches: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SinkDrain {
+    fn spawn() -> Self {
+        let context = zmq::Context::new();
+        let socket = context.socket(zmq::PULL).unwrap();
+        socket.set_rcvtimeo(100).unwrap();
+        socket.bind("tcp://127.0.0.1:*").unwrap();
+        let endpoint = socket.get_last_endpoint().unwrap().unwrap();
+        let eos_runs = Arc::new(Mutex::new(Vec::new()));
+        let data_batches = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let thread_eos = Arc::clone(&eos_runs);
+        let thread_batches = Arc::clone(&data_batches);
+        let thread_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                let Ok(bytes) = socket.recv_bytes(0) else {
+                    continue; // EAGAIN = 100 ms の目覚まし
+                };
+                let message = tpcdaq::msg::Message::<tpcdaq::msg::Fragments>::from_msgpack(&bytes)
+                    .expect("decoder output is a msgpack Message<Fragments>");
+                match message {
+                    tpcdaq::msg::Message::EndOfStream { run_number, .. } => {
+                        thread_eos.lock().unwrap().push(run_number)
+                    }
+                    tpcdaq::msg::Message::Data(_) => {
+                        thread_batches.fetch_add(1, Ordering::Relaxed);
+                    }
+                    tpcdaq::msg::Message::Heartbeat { .. } => {}
+                }
+            }
+        });
+        Self {
+            endpoint,
+            eos_runs,
+            data_batches,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn eos_runs(&self) -> Vec<u32> {
+        self.eos_runs.lock().unwrap().clone()
+    }
+}
+
+impl Drop for SinkDrain {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// 本物の graw-writer → decoder → receiver + fake ECC + controller。receiver のデータポートは
+/// **固定**(production の `0.0.0.0:46005` と同じく毎 run 同じポートへ bind し直す)。
+struct RealChain {
+    rest: SocketAddr,
+    ecc: FakeEcc,
+    output_root: PathBuf,
+    data_port: u16,
+    sink: SinkDrain,
+    components: Vec<common::Component>,
+    shutdown: broadcast::Sender<()>,
+}
+
+async fn real_chain(tag: &str) -> (RealChain, PathBuf) {
+    let ecc_config_dir = temp_root(&format!("{tag}-ecc-config"));
+    std::fs::create_dir_all(&ecc_config_dir).unwrap();
+    std::fs::copy(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/params/template_mini.xcfg"),
+        ecc_config_dir.join("configure-mini-fixture.xcfg"),
+    )
+    .unwrap();
+
+    let output_root = temp_root(tag);
+    std::fs::create_dir_all(&output_root).unwrap();
+    let sink = SinkDrain::spawn();
+    let data_port = common::free_port();
+    let components = common::spawn_components_listening(
+        &output_root,
+        &sink.endpoint,
+        &format!("127.0.0.1:{data_port}"),
+    )
+    .await;
+    let endpoint = |name: &str| common::endpoint_of(&components, name);
+    let endpoints = vec![
+        ComponentEndpoint {
+            name: "graw-writer".to_string(),
+            endpoint: endpoint("graw-writer"),
+            kind: ComponentKind::GrawWriter,
+        },
+        ComponentEndpoint {
+            name: "decoder".to_string(),
+            endpoint: endpoint("decoder"),
+            kind: ComponentKind::Decoder,
+        },
+        ComponentEndpoint {
+            name: "receiver0".to_string(),
+            endpoint: endpoint("receiver0"),
+            kind: ComponentKind::Receiver { cobo_id: 0 },
+        },
+    ];
+    let cobos = vec![CoboSpec {
+        id: 0,
+        listen: format!("127.0.0.1:{data_port}"),
+        data_sender_id: "CoBo[0]".to_string(),
+    }];
+
+    let (shutdown, _) = broadcast::channel(1);
+    let (BoundEndpoints { rest, .. }, ecc) = spawn_controller(
+        &shutdown,
+        &output_root,
+        cobos,
+        endpoints,
+        None,
+        ConfigIds::same("integration"),
+        Some(ecc_config_dir.clone()),
+    )
+    .await;
+
+    let chain = RealChain {
+        rest,
+        ecc,
+        output_root,
+        data_port,
+        sink,
+        components,
+        shutdown,
+    };
+    (chain, ecc_config_dir)
+}
+
+impl RealChain {
+    fn acquire(&self, operator: &str) -> String {
+        let (status, body) = post(
+            self.rest,
+            "/api/control/acquire",
+            json!({"operator": operator, "passphrase": "change-me"}),
+        );
+        assert_eq!(status, 200, "{body}");
+        body["token"].as_str().unwrap().to_string()
+    }
+
+    fn logbook(&self) -> Vec<Value> {
+        let (status, body) = get(self.rest, "/api/logbook?since_seq=0");
+        assert_eq!(status, 200, "{body}");
+        body["records"].as_array().unwrap().clone()
+    }
+
+    /// `GET /api/status` に載る receiver0 の `frames`(GetStatus 実測)。
+    fn receiver_frames(&self) -> u64 {
+        let (_, body) = get(self.rest, "/api/status");
+        body["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == json!("receiver0"))
+            .and_then(|c| c["metrics"]["frames"].as_u64())
+            .unwrap_or(0)
+    }
+
+    fn shutdown(self) {
+        let _ = self.shutdown.send(());
+        for component in &self.components {
+            let _ = component.shutdown.send(());
+        }
+        let _ = std::fs::remove_dir_all(&self.output_root);
+    }
+}
+
+/// frameType 1(blkSize=1、big-endian)の最小の正しい CoBo フレーム = ヘッダ 88 B + item 2 個
+/// (4 B × 2)= **96 B**。decoder が malformed にしない形(src/decode.rs の `make_cobo_frame` と
+/// 同じ配置)。AsAd は呼び手が交互に振る(graw-writer が AsAd 毎ファイルに分ける)。
+const SYNTH_FRAME_BYTES: usize = 96;
+
+fn synth_frame(event_idx: u32, asad: u8) -> Vec<u8> {
+    let put_be = |b: &mut [u8], at: usize, value: u64, len: usize| {
+        for i in 0..len {
+            b[at + i] = (value >> (8 * (len - 1 - i))) as u8;
+        }
+    };
+    let mut b = vec![0u8; SYNTH_FRAME_BYTES];
+    b[0] = 0x00; // big-endian, blkSize=1
+    put_be(&mut b, 1, SYNTH_FRAME_BYTES as u64, 3); // frameSize
+    put_be(&mut b, 5, 1, 2); // frameType 1
+    put_be(&mut b, 8, 88, 2); // headerSize
+    put_be(&mut b, 10, 4, 2); // itemSize
+    put_be(&mut b, 12, 2, 4); // nItems
+    put_be(&mut b, 22, u64::from(event_idx), 4);
+    b[26] = 0; // CoBo 0
+    b[27] = asad;
+    // item = aget<<30 | chan<<23 | bucket<<14 | adc(非対称な 2 個)
+    let items: [(u32, u32, u32, u32); 2] = [(0, 3, 10, 500), (1, 64, 200, 1234)];
+    for (i, (aget, chan, bucket, adc)) in items.iter().enumerate() {
+        let word = (aget << 30) | (chan << 23) | (bucket << 14) | adc;
+        put_be(&mut b, 88 + i * 4, u64::from(word), 4);
+    }
+    b
+}
+
+/// 112 §2-1 (b) の実データ版: 本物の receiver / decoder / graw-writer で「run 中に数十フレーム →
+/// stop の 200 → 待ち 0 で PUT → start」を 5 周。
+///
+/// 実 CoBo と同じく **データリンクは stop で閉じない**(`daqStop` は TCP を close しない —
+/// SPEC §1.3 v1.12)。前の周の接続は**次の start が返るまで握ったまま**にする(実機で CoBo が
+/// close するのは次 run の breakup)。したがって停止は静止検出 → 強制 EOS の実機経路
+/// (`forced_eos=true` / `eos_closed=true`)を通り、receiver は**毎周同じポート**へ
+/// bind し直す(穴 ③ の listen 解放 → 再 listen)。
+///
+/// 照合: 各 run の `frames` = 送った数 / graw のバイト数 = 送った数 × 96 B / decoder 下流
+/// (root-sink の席)が受けた EOS の run 番号 = 1..=6(run close 件数 = 周回数)/
+/// ECC configure の DataLinkSet は毎周同じポート。周ごとの所要 ms と Arm の粘りを stderr に出す。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn back_to_back_apply_and_restart_with_real_components_relistens_every_round() {
+    let (chain, ecc_config_dir) = real_chain("apply-restart-real").await;
+    let token = chain.acquire("aogaki");
+    let (status, body) = put(
+        chain.rest,
+        "/api/params",
+        json!({"token": token, "params": roundtrip_params_json()}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = post(
+        chain.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "real 0"}),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    // run 1..=6 で送るフレーム数(非対称・「数十」)。バイト数は × 96 B。
+    let frames_per_run: [u64; 6] = [24, 31, 27, 40, 22, 35];
+    let delays: [u64; 5] = [1700, 1832, 1650, 1999, 1777];
+    let mut event_idx = 0u32;
+    let mut previous_link: Option<std::net::TcpStream> = None;
+
+    for (index, &frames) in frames_per_run.iter().enumerate() {
+        let run = index as u64 + 1;
+
+        // --- fake CoBo: この run のデータリンクを張って frames 個送る(close しない)---
+        let mut link = std::net::TcpStream::connect(("127.0.0.1", chain.data_port))
+            .unwrap_or_else(|e| panic!("run {run}: receiver が listen していない: {e}"));
+        // 前の run の接続は次の start が返るまで握っていた(実機の CoBo は breakup で close)。
+        drop(previous_link.take());
+        for i in 0..frames {
+            link.write_all(&synth_frame(event_idx, (i % 2) as u8))
+                .unwrap();
+            event_idx += 1;
+        }
+        wait_until(&format!("run {run}: receiver frames == {frames}"), || {
+            chain.receiver_frames() == frames
+        });
+
+        // --- stop の 200 → 待ち 0 で PUT → start(最後の run は stop だけ)---
+        let began = Instant::now();
+        let (status, stop) = post(chain.rest, "/api/run/stop", json!({"token": token}));
+        let stop_ms = began.elapsed().as_millis();
+        assert_eq!(status, 200, "run {run}: {stop}");
+        assert_eq!(stop["run"], json!(run), "run {run}: {stop}");
+        assert_eq!(stop["ok"], json!(true), "run {run}: {stop}");
+        assert_eq!(stop["eos_closed"], json!(true), "run {run}: {stop}");
+        assert_eq!(stop["notes"], json!([]), "run {run}: {stop}");
+        assert_eq!(
+            stop["forced_eos"],
+            json!(true),
+            "run {run}: リンクを握ったままなので実機経路(静止 → 強制 EOS): {stop}"
+        );
+        previous_link = Some(link);
+
+        let Some(&delay) = delays.get(index) else {
+            eprintln!("112 real chain run {run}: final stop {stop_ms} ms ({frames} frames)");
+            break;
+        };
+        let began = Instant::now();
+        let (status, put_body) = put(
+            chain.rest,
+            "/api/params",
+            json!({"token": token, "params": params_with_trigger_delay(delay)}),
+        );
+        let put_ms = began.elapsed().as_millis();
+        assert_eq!(status, 200, "run {run}: {put_body}");
+        let id = put_body["id"].as_str().unwrap().to_string();
+
+        let began = Instant::now();
+        let (status, start) = post(
+            chain.rest,
+            "/api/run/start",
+            json!({"token": token, "comment": format!("real {}", index + 1)}),
+        );
+        let start_ms = began.elapsed().as_millis();
+        assert_eq!(status, 200, "run {run}: {start}");
+        assert_eq!(start["run"], json!(run + 1), "run {run}: {start}");
+        let configure = chain.ecc.requests_for("configure").last().cloned().unwrap();
+        assert_eq!(configure["config_id"], json!(id), "run {run}");
+        assert_eq!(
+            configure["links"][0]["router_port"],
+            json!(chain.data_port),
+            "run {}: receiver が同じポートで listen し直していない",
+            run + 1
+        );
+
+        let records = chain.logbook();
+        let start_audit = records
+            .iter()
+            .rev()
+            .find(|r| r["action"] == json!("run/start") && r["ok"] == json!(true))
+            .unwrap();
+        eprintln!(
+            "112 real chain run {run} -> {}: {frames} frames / stop {stop_ms} ms / put {put_ms} ms \
+             / start {start_ms} ms / total {} ms / arm_retries {}",
+            run + 1,
+            stop_ms + put_ms + start_ms,
+            start_audit["params"]["arm_retries"],
+        );
+    }
+    drop(previous_link);
+
+    // --- run 台帳: frames と graw のバイト数が送った数と一致(run 間で混ざらない)---
+    let records = chain.logbook();
+    let stops: Vec<&Value> = records
+        .iter()
+        .filter(|r| r["type"] == json!("run_stop"))
+        .collect();
+    assert_eq!(stops.len(), frames_per_run.len());
+    for (run_stop, &frames) in stops.iter().zip(frames_per_run.iter()) {
+        let run = run_stop["run"].as_u64().unwrap();
+        assert_eq!(run_stop["ok"], json!(true), "{run_stop}");
+        assert_eq!(
+            run_stop["counters"]["frames"],
+            json!({"0": frames}),
+            "run {run}"
+        );
+        let files = run_stop["files"].as_array().unwrap();
+        let bytes: u64 = files.iter().map(|f| f["bytes"].as_u64().unwrap()).sum();
+        // 手計算: frames × 96 B(例: run 1 = 24 × 96 = 2304 B)。
+        assert_eq!(
+            bytes,
+            frames * SYNTH_FRAME_BYTES as u64,
+            "run {run}: {files:?}"
+        );
+        assert_eq!(files.len(), 2, "AsAd 0 / 1 の 2 ファイル: {files:?}");
+        for file in files {
+            // graw-writer は `<output_root>/run{run:04}/CoBo0_AsAd{a}_<ts>_0000.graw` の絶対パスを申告する。
+            assert!(
+                file["path"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("/run{run:04}/CoBo0_AsAd")),
+                "run {run}: {file}"
+            );
+        }
+    }
+
+    // --- decoder 下流(root-sink の席)は run 毎に EOS を 1 回ずつ受けた ---
+    wait_until("sink received 6 EOS", || chain.sink.eos_runs().len() == 6);
+    assert_eq!(chain.sink.eos_runs(), vec![1, 2, 3, 4, 5, 6]);
+    assert!(chain.sink.data_batches.load(Ordering::Relaxed) > 0);
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    chain.shutdown();
 }

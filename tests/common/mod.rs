@@ -478,6 +478,16 @@ pub struct Component {
 /// 固定値は書かない)。receiver のデータポートも動的で、Arm で実ポートが決まり
 /// controller が Arm 応答から回収する。
 pub async fn spawn_components(data_root: &Path, sink_data_ep: &str) -> Vec<Component> {
+    spawn_components_listening(data_root, sink_data_ep, "127.0.0.1:0").await
+}
+
+/// [`spawn_components`] の receiver データポート指定版(TODO/112: production と同じく
+/// **毎 run 同じポート**へ bind し直す経路 —— 前 run の listen 解放 / TIME_WAIT を踏む)。
+pub async fn spawn_components_listening(
+    data_root: &Path,
+    sink_data_ep: &str,
+    receiver_listen: &str,
+) -> Vec<Component> {
     let gw_pull = free_endpoint();
     let dec_pull = free_endpoint();
     let mut components = Vec::new();
@@ -525,7 +535,7 @@ pub async fn spawn_components(data_root: &Path, sink_data_ep: &str) -> Vec<Compo
 
     let recv_params = ReceiverParams {
         cobo_id: 0,
-        listen: "127.0.0.1:0".to_string(),
+        listen: receiver_listen.to_string(),
         command_listen: "tcp://127.0.0.1:0".to_string(),
         graw_writer_endpoint: gw_pull,
         decoder_endpoint: dec_pull,
