@@ -2,6 +2,14 @@
 
 **Status: COMPLETED**(2026-10-08 起票・調査 Opus。ユーザー「multiplicity 以外でも何らかの形でイベントのフィルタリングが行われていないか精査して」)
 
+> **訂正(2026-10-12、試験済み — [107](../107_elitpc_host_setup.md) run 8 / 12)**: 表の「CoBo のトリガ受付 … 約 1 s の不感時間のみ」と、末尾の推定(「FPGA と getHwServer の受け渡しか、VM 側の受信」)は誤り。
+> 1 s の不感時間は **zCoBo より上流、CAEN の NIM→TTL 変換器**にあった。
+> - 交換後は zCoBo + tpcdaq-rs が外部 5 Hz を全数受理した。
+> - α は 4.53 Hz、最小間隔 4.9 ms で受理された(読み出しは 1 事象あたり約 2.9 ms、CKR 25 MHz 固定)。
+> - したがって「²²⁰Rn → ²¹⁶Po(0.145 s)の遅延同時計数は原理的に見えない」も、**変換器を交換した今は当てはまらない**。
+>
+> 内容依存の選別が CFD の波高閾値だけであること(全読み出し・ZS なし・欠番なし)は変わらない。
+
 ## 方法
 - .graw の全フレームヘッダを直接読む(`reference/_spike/stop_0929/grawscan.py`、CoboFormats-Rev-5-Compact.xcfg のオフセット)。対象 6 run(09-25 / 09-29 / 09-30 / 10-01 / 10-02 / 10-07)、計 162,948 フレーム。
 - GET ソース(`reference/20190315_patched/GetBench/src/get/rc/CoBo{Node,ConfigParser}.cpp`)で設定値がどのレジスタに効くかを確認。
