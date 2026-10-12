@@ -46,6 +46,14 @@ expect_serial = ""                     # 空でなければ open 時に 113/3 �
 # [lo, hi] 逸脱で ALARM、戻れば RECOVER。**DAQ は止めない**(TODO/079 §3-3)。
 alarms = [{ node = 4, param = "fmeasure", lo = 90.0, hi = 110.0 }]
 
+# HiVolta(DT1415ET)は通信 1 往復ごとに偽トリガを作るので、読み出しを長めの周期にする(TODO/118, 119)。
+# poll_s は機器ごとの任意キー(秒)。省略 = 上の poll_hz から決まる周期。
+# [[slowctl.device]]
+# type = "hivolta"
+# name = "hv"
+# addr = "192.168.144.50:1470"
+# poll_s = 10.0
+
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "change-me"

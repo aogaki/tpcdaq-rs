@@ -21,7 +21,7 @@ use std::time::Duration;
 use tracing::info;
 
 use super::hivolta::{
-    mon_bd, mon_ch, parse_alarm, parse_status, BdPar, ChPar, HvLink, HvLinkError,
+    mon_bd, mon_ch, parse_alarm, parse_status, BdPar, ChPar, HvLink, HvLinkError, ALL_CH,
 };
 use super::{now_ms, Driver, DriverError, Ident, Sample};
 
@@ -119,6 +119,25 @@ fn parse_bdilk(value: &str) -> Result<f64, DriverError> {
     }
 }
 
+impl<T: Read + Write> HiVoltaDriver<T> {
+    /// 全 ch 一括(`CH:8`)で 1 パラメータ読む。値の数が `nch` と違えば Protocol エラー
+    /// (黙って切り詰めない・埋めない)。
+    fn bulk(&mut self, par: ChPar, what: &str) -> Result<Vec<String>, DriverError> {
+        let values = self
+            .link
+            .exchange(&mon_ch(ALL_CH, par))
+            .map_err(driver_error)?;
+        if values.len() != usize::from(self.nch) {
+            return Err(DriverError::Protocol(format!(
+                "{what}: expected {} values, got {}: {values:?}",
+                self.nch,
+                values.len()
+            )));
+        }
+        Ok(values)
+    }
+}
+
 impl<T: Read + Write> Driver for HiVoltaDriver<T> {
     fn ident(&mut self) -> Result<Vec<Ident>, DriverError> {
         let name = single_value(
@@ -137,6 +156,12 @@ impl<T: Read + Write> Driver for HiVoltaDriver<T> {
             .trim()
             .parse()
             .map_err(|_| DriverError::Protocol(format!("BDNCH: not a number: {nch_str:?}")))?;
+        // TODO/119: poll は全 ch 一括(CH:8)で読むので ALL_CH 以外の機種は扱わない(可視化)。
+        if nch != ALL_CH {
+            return Err(DriverError::Protocol(format!(
+                "BDNCH: expected {ALL_CH} channels, got {nch}"
+            )));
+        }
         let frel = single_value(
             self.link
                 .exchange(&mon_bd(BdPar::Frel))
@@ -193,39 +218,20 @@ impl<T: Read + Write> Driver for HiVoltaDriver<T> {
         let ts_ms = now_ms();
         let mut samples = Vec::with_capacity(usize::from(self.nch) * 4 + 2);
 
+        // TODO/119: 通信 1 往復ごとに偽トリガが入る(TODO/118)ので、全 ch 一括(CH:8)で
+        // 4 往復 + ボード 2 往復 = 6 往復/周期にする。
+        let vmon_all = self.bulk(ChPar::Vmon, "VMON")?;
+        let imon_all = self.bulk(ChPar::Imon, "IMON")?;
+        let status_all = self.bulk(ChPar::Status, "STATUS")?;
+        let vset_all = self.bulk(ChPar::Vset, "VSET")?;
+
         for ch in 0..self.nch {
-            let vmon_s = single_value(
-                self.link
-                    .exchange(&mon_ch(ch, ChPar::Vmon))
-                    .map_err(driver_error)?,
-                "VMON",
-            )?;
-            let vmon = parse_f64_value(&vmon_s, "VMON")?;
-
-            let imon_s = single_value(
-                self.link
-                    .exchange(&mon_ch(ch, ChPar::Imon))
-                    .map_err(driver_error)?,
-                "IMON",
-            )?;
-            let imon = parse_f64_value(&imon_s, "IMON")?;
-
-            let status_s = single_value(
-                self.link
-                    .exchange(&mon_ch(ch, ChPar::Status))
-                    .map_err(driver_error)?,
-                "STATUS",
-            )?;
+            let i = usize::from(ch);
+            let vmon = parse_f64_value(&vmon_all[i], "VMON")?;
+            let imon = parse_f64_value(&imon_all[i], "IMON")?;
             let status =
-                parse_status(&status_s).map_err(|e| DriverError::Protocol(e.to_string()))?;
-
-            let vset_s = single_value(
-                self.link
-                    .exchange(&mon_ch(ch, ChPar::Vset))
-                    .map_err(driver_error)?,
-                "VSET",
-            )?;
-            let vset = parse_f64_value(&vset_s, "VSET")?;
+                parse_status(&status_all[i]).map_err(|e| DriverError::Protocol(e.to_string()))?;
+            let vset = parse_f64_value(&vset_all[i], "VSET")?;
 
             // 発注書 §1: 「STATUS ビット → alarm」= ovc|ovv|unv|trip|ovp|ovt|kill|intlk|fail。
             // bronkhorst.rs の「Alarm info ≠ 0 はそのノードの全サンプルに立てる」流儀を踏襲し、
@@ -390,7 +396,7 @@ mod tests {
     #[test]
     fn ident_reads_all_six_board_fields_and_keeps_nch() {
         let mut fake = FakeHv::new();
-        register_ident(&mut fake, 2, "SN12345");
+        register_ident(&mut fake, 8, "SN12345");
         let mut driver = HiVoltaDriver::new("hv", fake, String::new());
 
         let idents = driver.ident().unwrap();
@@ -399,19 +405,19 @@ mod tests {
         assert_eq!(ident.device, "hv");
         assert_eq!(ident.node, None);
         assert_eq!(ident.fields["name"], "DT1415ET");
-        assert_eq!(ident.fields["nch"], "2");
+        assert_eq!(ident.fields["nch"], "8");
         assert_eq!(ident.fields["frel"], "1.5");
         assert_eq!(ident.fields["snum"], "SN12345");
         assert_eq!(ident.fields["ctr"], "REMOTE");
         assert_eq!(ident.fields["ilkm"], "DISABLE");
-        assert_eq!(driver.nch(), 2, "BDNCH を焼き込まずに保持する");
+        assert_eq!(driver.nch(), 8, "BDNCH を焼き込まずに保持する");
     }
 
     /// `expect_serial` が空でなければ `BDSNUM` と照合する(TODO/089 §1)。不一致は `Identity`。
     #[test]
     fn ident_serial_mismatch_is_an_identity_error() {
         let mut fake = FakeHv::new();
-        register_ident(&mut fake, 2, "SN12345");
+        register_ident(&mut fake, 8, "SN12345");
         let mut driver = HiVoltaDriver::new("hv", fake, "OTHER-SERIAL".to_string());
 
         assert!(matches!(
@@ -425,79 +431,147 @@ mod tests {
     #[test]
     fn ident_serial_match_succeeds() {
         let mut fake = FakeHv::new();
-        register_ident(&mut fake, 1, "SN-OK");
+        register_ident(&mut fake, 8, "SN-OK");
         let mut driver = HiVoltaDriver::new("hv", fake, "SN-OK".to_string());
         assert!(driver.ident().is_ok());
     }
 
-    /// nch = 2 の poll: 発注書 §1 が列挙した 4 項目 × 2 ch + ボード 2 項目 = 10 サンプル
-    /// (発注書 §1/§2 の「5×nch+2」「12 サンプル」との食い違いはこのファイル冒頭の doc 参照 —
-    /// 5 個目の ch パラメータ名が発注書に無いため、明記された 4 項目のみを実装した)。
-    #[test]
-    fn poll_of_two_channels_yields_four_samples_each_plus_two_board_samples() {
-        let mut fake = FakeHv::new();
-        register_ident(&mut fake, 2, "SN-UNUSED");
-        // ch0: 正常(alarm 無し)。
-        fake.set_response(mon_ch(0, ChPar::Vmon), "#CMD:OK,VAL:500.00\r\n");
-        fake.set_response(mon_ch(0, ChPar::Imon), "#CMD:OK,VAL:12.50\r\n");
-        fake.set_response(mon_ch(0, ChPar::Status), "#CMD:OK,VAL:1\r\n"); // bit0 = ON のみ
-        fake.set_response(mon_ch(0, ChPar::Vset), "#CMD:OK,VAL:500.00\r\n");
-        // ch1: TRIP(bit6 = 64)が立っている → alarm。
-        fake.set_response(mon_ch(1, ChPar::Vmon), "#CMD:OK,VAL:0.00\r\n");
-        fake.set_response(mon_ch(1, ChPar::Imon), "#CMD:OK,VAL:0.00\r\n");
-        fake.set_response(mon_ch(1, ChPar::Status), "#CMD:OK,VAL:64\r\n");
-        fake.set_response(mon_ch(1, ChPar::Vset), "#CMD:OK,VAL:800.00\r\n");
+    // 実機(ELITPC、2026-10-12)の全 ch 一括応答。一字も変えない(TODO/119)。
+    const VSET_REPLY: &str =
+        "#CMD:OK,VAL:0350.00;0250.00;0350.00;0250.00;0350.00;0250.00;0600.00;0600.00\r\n";
+    const VMON_REPLY: &str =
+        "#CMD:OK,VAL:0341.06;0250.24;0349.88;0250.22;0349.92;0250.16;0595.96;0599.96\r\n";
+    const IMON_REPLY: &str = "#CMD:OK,VAL:+0009.593;+0008.868;+0009.084;+0009.067;+0009.042;+0008.905;+0003.753;+0005.930\r\n";
+    const STATUS_REPLY: &str = "#CMD:OK,VAL:00033;00001;00001;00001;00001;00001;00001;00001\r\n";
+
+    /// 送信行を記録する薄いラッパ(FakeHv は Link に所有されるので外から見えない)。
+    struct Tap {
+        inner: FakeHv,
+        sent: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+    }
+    impl Read for Tap {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+    impl Write for Tap {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.sent.borrow_mut().extend_from_slice(buf);
+            self.inner.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    fn register_golden(fake: &mut FakeHv) {
+        fake.set_response(mon_ch(ALL_CH, ChPar::Vset), VSET_REPLY);
+        fake.set_response(mon_ch(ALL_CH, ChPar::Vmon), VMON_REPLY);
+        fake.set_response(mon_ch(ALL_CH, ChPar::Imon), IMON_REPLY);
+        fake.set_response(mon_ch(ALL_CH, ChPar::Status), STATUS_REPLY);
         // ボード: BDALARM 非 0(trip ビット = 64)、BDILK = YES。
         fake.set_response(mon_bd(BdPar::Alarm), "#CMD:OK,VAL:64\r\n");
         fake.set_response(mon_bd(BdPar::Ilk), "#CMD:OK,VAL:YES\r\n");
+    }
 
-        let mut driver = HiVoltaDriver::new("hv", fake, String::new());
+    /// poll は要求ちょうど 6 本(全 ch 一括 4 + ボード 2)で、Sample 列は ch 毎 4 サンプル
+    /// (vmon/imon/status/vset)× 8 + ボード 2 = 34(旧実装と同一の並び)。
+    #[test]
+    fn poll_sends_exactly_six_requests_and_yields_the_per_channel_samples() {
+        let mut inner = FakeHv::new();
+        register_ident(&mut inner, 8, "SN-UNUSED");
+        register_golden(&mut inner);
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let io = Tap {
+            inner,
+            sent: sent.clone(),
+        };
+        let mut driver = HiVoltaDriver::new("hv", io, String::new());
         driver.ident().unwrap();
+        sent.borrow_mut().clear();
         let samples = driver.poll().unwrap();
 
-        assert_eq!(samples.len(), 10, "4 x 2ch + board 2 = 10");
+        let text = String::from_utf8(sent.borrow().clone()).unwrap();
+        assert_eq!(
+            text,
+            "$CMD:MON,CH:8,PAR:VMON\r\n$CMD:MON,CH:8,PAR:IMON\r\n\
+             $CMD:MON,CH:8,PAR:STATUS\r\n$CMD:MON,CH:8,PAR:VSET\r\n\
+             $CMD:MON,PAR:BDALARM\r\n$CMD:MON,PAR:BDILK\r\n"
+        );
 
-        // ch0(正常)。
+        assert_eq!(samples.len(), 34, "4 x 8ch + board 2");
+
+        // ch0(STATUS 33 = ON + UNV(bit5)→ alarm)。値は応答の 1 番目。
         assert_eq!(samples[0].param, "vmon");
         assert_eq!(samples[0].node, Some(0));
-        assert_eq!(samples[0].value, 500.0);
+        assert_eq!(samples[0].value, 341.06);
         assert_eq!(samples[0].unit, "V");
-        assert!(!samples[0].alarm, "bit0(ON)だけなら alarm 対象外");
         assert_eq!(samples[1].param, "imon");
+        assert_eq!(samples[1].value, 9.593);
         assert_eq!(samples[1].unit, "µA");
         assert_eq!(samples[2].param, "status");
-        assert_eq!(samples[2].value, 1.0);
+        assert_eq!(samples[2].value, 33.0);
         assert_eq!(samples[2].unit, "bitmask");
         assert_eq!(samples[3].param, "vset");
-        assert_eq!(samples[3].unit, "V");
-
-        // ch1(TRIP)は 4 サンプルとも alarm。
-        for sample in &samples[4..8] {
-            assert_eq!(sample.node, Some(1));
-            assert!(sample.alarm, "TRIP ビットは ch1 の全サンプルに立つ");
+        assert_eq!(samples[3].value, 350.0);
+        for sample in &samples[0..4] {
+            assert!(sample.alarm, "STATUS 33 の UNV は ch0 の全サンプルに alarm");
         }
-        assert_eq!(samples[6].value, 64.0);
+
+        // ch1..7 は STATUS 1(ON のみ)→ alarm なし。ch6 = 末尾から 2 番目の ch。
+        for (ch, chunk) in samples[4..32].chunks(4).enumerate() {
+            let ch = ch + 1;
+            assert!(chunk.iter().all(|s| s.node == Some(ch as u8) && !s.alarm));
+        }
+        assert_eq!(samples[24].value, 595.96, "ch6 vmon");
+        assert_eq!(samples[25].value, 3.753, "ch6 imon");
+        assert_eq!(samples[27].value, 600.0, "ch6 vset");
+        assert_eq!(samples[28].value, 599.96, "ch7 vmon");
+        assert_eq!(samples[29].value, 5.930, "ch7 imon");
 
         // ボード。
-        assert_eq!(samples[8].param, "bdalarm");
-        assert_eq!(samples[8].node, None);
-        assert_eq!(samples[8].value, 64.0);
-        assert!(samples[8].alarm, "BDALARM 非 0 は alarm");
-        assert_eq!(samples[9].param, "bdilk");
-        assert_eq!(samples[9].value, 1.0, "YES = 1.0");
-        assert_eq!(samples[9].unit, "flag");
-        assert!(
-            !samples[9].alarm,
-            "BDILK 自体には alarm を付けない(発注書 §1 に規定無し)"
-        );
+        assert_eq!(samples[32].param, "bdalarm");
+        assert_eq!(samples[32].node, None);
+        assert_eq!(samples[32].value, 64.0);
+        assert!(samples[32].alarm, "BDALARM 非 0 は alarm");
+        assert_eq!(samples[33].param, "bdilk");
+        assert_eq!(samples[33].value, 1.0, "YES = 1.0");
+        assert_eq!(samples[33].unit, "flag");
+        assert!(!samples[33].alarm);
+    }
+
+    /// 応答の値が 7 個や 9 個なら Protocol(切り詰め・埋めをしない)。
+    #[test]
+    fn a_bulk_reply_with_the_wrong_value_count_is_a_protocol_error() {
+        for reply in [
+            "#CMD:OK,VAL:0341.06;0250.24;0349.88;0250.22;0349.92;0250.16;0595.96\r\n",
+            "#CMD:OK,VAL:0341.06;0250.24;0349.88;0250.22;0349.92;0250.16;0595.96;0599.96;0001.00\r\n",
+        ] {
+            let mut fake = FakeHv::new();
+            register_ident(&mut fake, 8, "SN-UNUSED");
+            register_golden(&mut fake);
+            fake.set_response(mon_ch(ALL_CH, ChPar::Vmon), reply);
+            let mut driver = HiVoltaDriver::new("hv", fake, String::new());
+            driver.ident().unwrap();
+            assert!(matches!(driver.poll(), Err(DriverError::Protocol(_))));
+        }
+    }
+
+    /// nch ≠ 8 の機種は ident で Protocol エラー(一括読みの前提が崩れる)。
+    #[test]
+    fn ident_rejects_a_board_that_is_not_eight_channels() {
+        let mut fake = FakeHv::new();
+        register_ident(&mut fake, 4, "SN-UNUSED");
+        let mut driver = HiVoltaDriver::new("hv", fake, String::new());
+        assert!(matches!(driver.ident(), Err(DriverError::Protocol(_))));
     }
 
     /// `#LOC:ERR` 等のエラー応答は `Protocol`(parse_err に数えられる、発注書 §1)。
     #[test]
     fn a_loc_err_reply_is_a_protocol_error() {
         let mut fake = FakeHv::new();
-        register_ident(&mut fake, 1, "SN-UNUSED");
-        fake.set_response(mon_ch(0, ChPar::Vmon), "#LOC:ERR\r\n");
+        register_ident(&mut fake, 8, "SN-UNUSED");
+        fake.set_response(mon_ch(ALL_CH, ChPar::Vmon), "#LOC:ERR\r\n");
 
         let mut driver = HiVoltaDriver::new("hv", fake, String::new());
         driver.ident().unwrap();
@@ -508,7 +582,7 @@ mod tests {
     #[test]
     fn a_silent_device_times_out() {
         let mut fake = FakeHv::new();
-        register_ident(&mut fake, 1, "SN-UNUSED");
+        register_ident(&mut fake, 8, "SN-UNUSED");
         fake.set_silent();
 
         let mut driver = HiVoltaDriver::new("hv", fake, String::new());
