@@ -1,6 +1,6 @@
 # 120 — Slow control 画面を「機器 × ch を 1 行」の表に + HV の Iset / LV の Vset・Iset を読む
 
-**Status: IN PROGRESS**(2026-10-12 起票 Opus。ユーザー「device ch vmon vset imon iset status ON/OFF みたいにしてください。今は同じチャンネルが縦に伸びているのでわかりづらい」。Sonnet 2 レーン)
+**Status: COMPLETED**(2026-10-12 起票・同日完了 Opus。ユーザー「device ch vmon vset imon iset status ON/OFF みたいにしてください。今は同じチャンネルが縦に伸びているのでわかりづらい」。Sonnet 2 レーン)
 
 ## 今
 - `ui/src/app/slow/slow-view.html` の Latest 表は、**1 行 = 1 サンプル**(device / node / param / value / unit / age / alarm)。
@@ -58,3 +58,20 @@
    
    ほかに component の描画 spec を 1 本。既存 spec は green のまま。
 4. ゲート: `cd ui && npm test -- --watch=false && npm run build`。
+
+## 結果(2026-10-12)
+- レーン A(Sonnet): hivolta は `2865d78`、hmp は `cd73c50`。merge は `51a9a17` / `5b77435`。
+  - **1 回目の報告は hmp 部分が誤りだった**: 編集スクリプトが実行を拒否されていたのに、実行済みと思い込んで報告していた。
+    Opus がコミットの stat と実機のログブックで気づき、差し戻した。教訓: サブエージェントの報告は `git show --stat` と実機で確かめる。
+  - hivolta: 全 ch 一括 ISET を足して 7 往復/周期。param `iset` µA。実機の応答 `#CMD:OK,VAL:0015.00;…`(8 値)をゴールデンにした。
+  - hmp: 問い合わせ `VOLT?` / `CURR?`(SCPI マニュアル p.23–24)を足し、param `vset` V / `iset` A。設定コマンドを作る関数は無い。
+- レーン B(Sonnet `0162d77` → merge `de989c1`): `ui/src/app/slow/slow-table.ts`(`buildSlowTable` / `formatStatusBits`)。
+  - Latest を「機器 × ch が 1 行」の表にした(Vmon ← vmon|volt、Imon ← imon|curr、Status は DT1415ET のビット名、ON/OFF は outp かビット 0)。
+  - 写らないサンプルは Other 表に残す。新規テストは 14 本(変換 12 + 描画 1 + ビット 2 — 内訳は spec)。
+- ゲート(main `5b77435`、Mac): fmt OK / clippy 0(feature 有無とも)/ **cargo test 904 passed / 0 failed / 1 ignored**(既存)。UI **324 passed / 5 skipped**、build OK。
+- 実機(ELITPC、run 69 実行中、12:23 UI 差し替え・slowctl 入れ替え、12:28 HMP 版):
+  - hv ch 0–7: iset 15.0 µA、vset 350 / 250 / 350 / 250 / 350 / 250 / 600 / 600 V。
+  - lv: ch1 は volt 3.6 / curr 1.235 / outp 1 / **vset 3.6 V / iset 2.5 A**、ch2 は outp 0 / **vset 3.5 V / iset 1.253 A**。
+- **運用の知見(ユーザー)**: LV ch1(AsAd)の電流は、**Configure 後で ≈ 1.2 A が普通**。1 A 未満は GET の Load HW 前後の値。
+  今日の記録も 11:11(Idle、Configure 前)0.997 A → run 中 1.234 A。LV の電流で AsAd の状態が読める。
+- UI の目視確認はユーザー待ち。
