@@ -43,3 +43,23 @@
   run 64 では graw 1219 に対し ROOT 1041。差 178 のうち、カウントされたのは `batches_abandoned=1` だけ。
   Reset(明示の打ち切り)の経路に限られ、receiver の送出数と decoder の `frames_in` の差としてしか見えない。
   可視化の方法(例: Reset 時に close の前に PULL を drain して数える)は Fable が判断する。
+
+## 結果(2026-10-12)
+- 実装(Opus `07d87f4` → merge `99e7704`):
+  - `src/decoder.rs` の `Handler` に `thread: Option<JoinHandle<()>>` を持たせ、`do_start` で保持する。
+  - `do_reset` は abandon → 停止の合図 → `join_thread()`(receiver の `join_sender` と同じ形。panic していたら `error!`)。`do_stop` は従来どおり待たない。
+  - join の上限(コード読み): poll ≤ 100 ms + 合図の後の送出は最大 2 本 × `send_timeout_ms` = 1000 ms → **≈ 2.1 s < `command_timeout` 5 s**。
+    `send_timeout_ms` は TOML から変えられず、常に 1000 なので、永久ブロックの経路は本番では無い。
+- テスト(`tests/decoder_integration.rs` +2、修正前は `Address already in use` で red):
+  - `reset_returns_only_after_the_thread_has_released_the_pull_port`: Reset の応答に最終カウンタ `batches_abandoned=1` / `eos_abandoned=1` が載る。
+  - `stop_does_not_wait_for_a_blocked_thread_but_the_following_reset_frees_the_port`
+  - 40 回連続で green、並列 3 × 10 で 30/30。
+  - ゲート(main `99e7704`): clippy 0、**cargo test 895 passed / 0 failed / 1 ignored**。
+- **実機(ELITPC、`~/sigstop_test.sh` の再実行、09:46–09:52)**:
+  - 手順: run 65 の途中で root-sink を SIGSTOP → decoder の `batches_out` が 989 で詰まる → controller を kill -9 → 再起動 → start。
+  - 歩き戻しの跡は `eos: did not propagate within 5000 ms`、`run_stop 65` は `abort:controller-restart` / eos_closed false / 255.6 s。
+  - **decoder の Reset(06:51:03.300)から Arm(.305)まで 5 ms で、run 66 は始まった**(修正前は 627 ms で bind をあきらめて失敗)。
+  - `kill -CONT` → root-sink は `FATAL run-number-mismatch run_number_open=65 run_number_incoming=66`(exit 6 = v1.12 の終端条項どおりの検出)。
+  - run 66 の停止は `error:eos-timeout` / eos_closed false(root-sink が不在なので正しい)。decoder の Reset は打ち切ったバッチを数えて join した。
+  - graw: run 65 = 1207 フレーム、run 66 = 102 フレーム、どちらも eventIdx 連番(**正本は無傷**)。run 65 の ROOT は inprogress(可視)。
+  - 試験の後は daq_down / up でスタックを Idle に戻した。
