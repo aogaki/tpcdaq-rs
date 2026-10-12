@@ -50,6 +50,9 @@
   最新値とトレンド(30 min)。status バーの `slow` = ALARM 中の項目数、**0 が平常**。`—` は slowctl が動いていないか monitor の `slow_sub` 未設定。
   `counters` の `poll_err` / `identity_mismatch` が増え続けるなら配線・by-id の取り違え(§5)。**このタブから機器は動かせない**(SPEC §11 — 作動は機器側 GUI)。
 - ALARM は DAQ を止めない(既定)。logbook に `slow` の ALARM / RECOVER が自動で残る。
+  **定期値はログブックに書かない**(run の開始・停止時の値だけ `run_start` / `run_stop` に載る)。全サンプルは InfluxDB(`http://<host>:8086`、Data Explorer、bucket `slowctl`)— 122。
+  表は機器 × ch(Vmon / Vset / Imon / Iset / Status / ON/OFF)。HV ch0 の UNV は「ほかの ch に引っ張られる」既知の挙動なので alarm から外してある(Status 欄には `ON UNV` が出る、121)。
+- **検出器まわりに機器(USB / 電源 / 計測器)を繋いだら、繋ぐ前後でトリガレートを比べる**。不良 USB ケーブル 1 本で、HV 電源のポートを開くだけで偽トリガが 24–54 Hz 出た(2026-10-12、118)。
 - レートスパイクはビーム由来が大半(SURVEY §4)。制御室に連絡。
 
 ## 5. 復旧
@@ -82,3 +85,4 @@
 ## 8. 変更履歴
 - v0.1(2026-09-17、Fable): 骨子。`[TODO]` は現地で埋める。069 0-3 のリハーサル記録を追記予定。
 - v0.2(2026-09-23、Fable): §3.1 Parameters タブ(078)、§4 Slow control タブ(079 / 089)、§5 に slowctl / Parameters の症状、§6 の自動記録を反映。
+- v0.3(2026-10-12、Opus): §4 に slowctl の記録先(InfluxDB)・機器 × ch の表・ch0 UNV・「機器を繋いだらトリガレートを A/B」(118–122)。

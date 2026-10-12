@@ -127,7 +127,9 @@ wait_for_line "$LOGS/controller.log" "controller REST listening" 20 || fail "con
 if grep -q '^\[slowctl\]' "$CONF"; then
     [ -x "$BIN/slowctl" ] || fail "missing binary: $BIN/slowctl"
     start slowctl "$BIN/slowctl" --config "$CONF"
-    wait_for_line "$LOGS/slowctl.log" "status PUB bound" 20 || fail "slowctl"
+    # 監視系の不備(トークン・機器)で DAQ 本体を落とさない — 失敗しても WARNING で続ける(TODO/121、Fable 2026-10-12)。
+    wait_for_line "$LOGS/slowctl.log" "status PUB bound" 20 \
+        || echo "  WARNING: slowctl did not come up (see $LOGS/slowctl.log) — the DAQ itself is up, slow control is not" >&2
 else
     echo "  (no [slowctl] in $CONF — slowctl not started)"
 fi

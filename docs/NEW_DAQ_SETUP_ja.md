@@ -229,6 +229,9 @@ root_sink は両方 graceful、getEccServer は **SIGTERM**。安定したら sy
 - ドライバは実装済み(2026-09-23): `bronkhorst_flowbus`(079 Phase 2)/ `arduino_env`(Phase 3、スケッチは `tools/arduino_env/`)/
   `hivolta` / `hmp2020`(089)。**ELITPC の実例(2026-10-12、TODO/118)**: どちらも USB。`/dev/serial/by-id/usb-CAEN_SPA_DT1415_HV_Power_Supply-if00`(cdc_acm)と
   `usb-HAMEG_HAMEG_HO720_<serial>-if00-port0`(FTDI)。daq は dialout グループなので sudo 不要。**HMP2020 は本体の Interface を USB VCP にする**(RS-232 のままだと書いても応答しない)。
+  **InfluxDB(v0.6、TODO/122)**: slowctl の全サンプルの保存先。`sudo bash tools/deploy/influx_install.sh`(公式の鍵の指紋を確かめてから influxdb2 を入れる)→
+  `bash tools/deploy/influx_setup.sh`(org `elitpc` / bucket `slowctl` / 保持無期限、管理者の名前とパスワードは端末で聞かれる、書き込み専用トークンを `/opt/tpcdaq/influx.token` に 600 で保存)
+  → daq.toml に `[slowctl.influx]`。トークンは slowctl の起動時にだけ読むので、**作り直したら slowctl を再起動**する。閲覧は `http://<host>:8086` の Data Explorer。
   **機器を繋いだら、繋ぐ前後でトリガレートを比べる** — 不良な USB ケーブルで、HiVolta のポートを開くだけで偽トリガが 24–54 Hz 出た(ケーブル交換で解消)。**現地 Phase 0 = node scan** は Python を入れず、`[[slowctl.device]] type = "bronkhorst_flowbus", nodes = "scan"` の
   TOML で `target/release/slowctl --config x.toml` を起動し、logbook の `slow` レコード(`event: "IDENT"`)と `RUST_LOG=info` の起動ログで
   ノード番号・機種・シリアル・単位を確認する。確定したら `nodes = [..]` と `expect_serial` を書く。
