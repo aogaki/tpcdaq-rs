@@ -581,6 +581,150 @@ async fn reset_abandons_the_blocked_send_and_counts_what_was_dropped() {
 }
 
 // ---------------------------------------------------------------------
+// (f2) TODO/116: Reset はスレッドの終了を待ってから返る(PULL ポートが空いている)
+// ---------------------------------------------------------------------
+
+/// 誰も listen していないポート(= PUSH に peer が無く send は必ずブロックする)。
+fn dead_endpoint() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    format!("tcp://{addr}")
+}
+
+/// 下流不在の decoder を Running にし、1 バッチ + EOS を流して **送出でブロックさせる**。
+/// 返り値 = (コマンド REP, decoder の PULL 実 bind アドレス, shutdown, task, 上流 PUSH)。
+///
+/// `eos_in == 1` を見てから返すので、戻った時点でスレッドは「flush → 自分の EOS」の
+/// 送出待ち(sndtimeo 周期で `abandon` を見るだけ)に入っている(か、入る直前)。
+async fn start_blocked_decoder(
+    run: u32,
+    ctx: &zmq::Context,
+) -> (
+    String,
+    String,
+    broadcast::Sender<()>,
+    tokio::task::JoinHandle<()>,
+    zmq::Socket,
+) {
+    let mut params = test_params(dead_endpoint(), vec![0]);
+    // 送出ブロックの契機を「全 EOS 受領 → flush + 自分の EOS」に固定する((f) と同じ理由)。
+    params.batch_max_ms = 60_000;
+    let (cmd_ep, shutdown, task) = start_decoder(params).await;
+
+    let pull_bind = configure_arm(&cmd_ep, run).await;
+    let push = connect_push(ctx, &pull_bind);
+    let started = rpc(&cmd_ep, &Command::Start { run_number: run }).await;
+    assert!(started.success, "{}", started.message);
+
+    send_batch(&push, 0, run, 0, &[make_frame(0, 0, 1, 4)]);
+    send_eos(&push, 0, run);
+    let blocked = poll_until(&cmd_ep, &Command::GetStatus, Duration::from_secs(5), |r| {
+        metric_u64(r, "eos_in") == 1
+    })
+    .await;
+    assert_eq!(
+        metric_u64(&blocked, "batches_out"),
+        0,
+        "下流不在なので送れていない"
+    );
+    (cmd_ep, pull_bind, shutdown, task, push)
+}
+
+/// 同じエンドポイントへ **1 回だけ** bind を試みる(リトライしない = Reset の時点で
+/// ポートが空いていることの検査)。
+fn bind_once(ctx: &zmq::Context, endpoint: &str) -> zmq::Result<zmq::Socket> {
+    let sock = ctx.socket(zmq::PULL).unwrap();
+    sock.set_linger(0).unwrap();
+    sock.bind(endpoint)?;
+    Ok(sock)
+}
+
+/// 実機 ELITPC 2026-10-12 の再現: 下流(root-sink)が詰まって送出でブロックしている decoder に
+/// Reset → 直後の Arm が `Address already in use` で落ちた(スレッドがポートを放すまで ~900 ms)。
+/// Reset が返った時点でスレッドは終わっていて、同じ PULL エンドポイントへ即 bind できること。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reset_returns_only_after_the_thread_has_released_the_pull_port() {
+    const RUN: u32 = 17;
+    let ctx = zmq::Context::new();
+    let (cmd_ep, pull_bind, shutdown, task, _push) = start_blocked_decoder(RUN, &ctx).await;
+
+    // join が永久にブロックしないこと(controller の command_timeout 既定 5 s に収まる)。
+    let reset = tokio::time::timeout(Duration::from_secs(5), rpc(&cmd_ep, &Command::Reset))
+        .await
+        .expect("Reset が 5 s 以内に返らない(join が抜けない)");
+    assert!(reset.success, "{}", reset.message);
+    assert_eq!(reset.state, ComponentState::Idle);
+
+    let rebound = bind_once(&ctx, &pull_bind);
+    assert!(
+        rebound.is_ok(),
+        "Reset が返ったのに {pull_bind} がまだ使用中: {:?}",
+        rebound.err()
+    );
+
+    // join 済みなので Reset の応答そのものが最終カウンタを載せている(ポーリング不要)。
+    // 内訳: flush したバッチ 1 本 + 自分の EOS 1 本 = 両方とも打ち切り。
+    assert_eq!(metric_u64(&reset, "batches_abandoned"), 1);
+    assert_eq!(metric_u64(&reset, "eos_abandoned"), 1);
+    assert_eq!(metric_u64(&reset, "batches_out"), 0);
+
+    // Reset 後もカウンタは読める(破棄の可視化が Reset を許す条件)。
+    let after = rpc(&cmd_ep, &Command::GetStatus).await;
+    assert_eq!(metric_u64(&after, "batches_abandoned"), 1);
+    assert_eq!(metric_u64(&after, "eos_abandoned"), 1);
+
+    drop(rebound);
+    shutdown_and_join(shutdown, task).await;
+}
+
+/// 通常の停止経路(Stop → EOS タイムアウト → Reset)でも同じ。**Stop は待たない**
+/// (非破壊 — 背圧の下では下流が空くまで送り続けるのが正しい)ので、Stop の時点では
+/// スレッドはまだ送出待ちで、ポートを握っている。その後の Reset で初めて空く。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stop_does_not_wait_for_a_blocked_thread_but_the_following_reset_frees_the_port() {
+    const RUN: u32 = 18;
+    let ctx = zmq::Context::new();
+    let (cmd_ep, pull_bind, shutdown, task, _push) = start_blocked_decoder(RUN, &ctx).await;
+
+    // 下流は永久に不在。Stop が join していたらここで返らない。
+    let stopped = tokio::time::timeout(Duration::from_secs(2), rpc(&cmd_ep, &Command::Stop))
+        .await
+        .expect("Stop が送出待ちのスレッドを待っている(Stop は join しない)");
+    assert!(stopped.success, "{}", stopped.message);
+    assert_eq!(stopped.state, ComponentState::Configured);
+    assert_eq!(
+        metric_u64(&stopped, "batches_abandoned"),
+        0,
+        "Stop は送出を打ち切らない(ロスレス)"
+    );
+    // 前提の確認: Stop の後もスレッドは送出待ちのままポートを握っている
+    // (= 次の Reset が「空ける」主体であることをこのテストで見ている)。
+    assert!(
+        bind_once(&ctx, &pull_bind).is_err(),
+        "Stop の後なのに {pull_bind} が空いている(スレッドが送出待ちに居ない)"
+    );
+
+    let reset = tokio::time::timeout(Duration::from_secs(5), rpc(&cmd_ep, &Command::Reset))
+        .await
+        .expect("Reset が 5 s 以内に返らない(join が抜けない)");
+    assert!(reset.success, "{}", reset.message);
+    assert_eq!(reset.state, ComponentState::Idle);
+
+    let rebound = bind_once(&ctx, &pull_bind);
+    assert!(
+        rebound.is_ok(),
+        "Stop → Reset の後なのに {pull_bind} がまだ使用中: {:?}",
+        rebound.err()
+    );
+    assert_eq!(metric_u64(&reset, "batches_abandoned"), 1);
+    assert_eq!(metric_u64(&reset, "eos_abandoned"), 1);
+
+    drop(rebound);
+    shutdown_and_join(shutdown, task).await;
+}
+
+// ---------------------------------------------------------------------
 // (g) TODO/013: 追いつけない decoder が上流 2 ソースの片方を飢餓させない
 // ---------------------------------------------------------------------
 
