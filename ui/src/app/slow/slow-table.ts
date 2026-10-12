@@ -29,6 +29,13 @@ export interface ChannelRow {
   /** 例 `ON UNV`。status を持たない機器は `—`。 */
   readonly status: string;
   readonly onOff: 'ON' | 'OFF' | null;
+  /**
+   * TODO/124 — ON/OFF ボタンを出せる行か。`outp` を持つ = `lv`、`bitmask` の status を持つ = `hv`。
+   * どちらでもなければ null(ボタンを出さない)。
+   */
+  readonly power: 'hv' | 'lv' | null;
+  /** hv の STATUS ビットマスク(生)。無ければ null。 */
+  readonly statusMask: number | null;
   readonly ageMs: number;
   readonly stale: boolean;
   readonly alarm: boolean;
@@ -112,6 +119,9 @@ export function buildSlowTable(samples: readonly SlowSample[], nowMs: number): S
     let onOff: 'ON' | 'OFF' | null = null;
     if (outp) onOff = outp.value !== 0 ? 'ON' : 'OFF';
     else if (status) onOff = Math.floor(status.value) % 2 === 1 ? 'ON' : 'OFF';
+    let power: 'hv' | 'lv' | null = null;
+    if (outp) power = 'lv';
+    else if (status && status.unit === 'bitmask') power = 'hv';
     return {
       key,
       device: group.device,
@@ -122,6 +132,8 @@ export function buildSlowTable(samples: readonly SlowSample[], nowMs: number): S
       iset: cell(group.cols.get('iset')),
       status: status ? statusText(status) : DASH,
       onOff,
+      power,
+      statusMask: status && status.unit === 'bitmask' ? Math.floor(status.value) : null,
       ageMs,
       stale: ageMs > STALE_AGE_MS,
       alarm: members.some((sample) => sample.alarm),

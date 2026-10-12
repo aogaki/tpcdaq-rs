@@ -386,6 +386,60 @@ describe('RunControlClient — token の保持と実際の送信', () => {
   });
 });
 
+describe('RunControlClient.postSlowPower — TODO/124', () => {
+  const reply = (status: number, payload: unknown) => () =>
+    Promise.resolve({ status, json: () => Promise.resolve(payload) } as unknown as Response);
+
+  it('token と {device, ch, on} を POST /api/slow/power に載せる', async () => {
+    const calls: { url: string; body: string }[] = [];
+    const client = new RunControlClient(
+      () => '/api',
+      (url, init) => {
+        calls.push({ url, body: String(init?.body) });
+        return reply(200, { ok: true, before: { outp: { '1': 1, '2': 0 } } })();
+      },
+      null,
+    );
+    client.setToken(TOKEN);
+
+    const result = await client.postSlowPower('lv', 2, true);
+
+    expect(calls).toEqual([
+      { url: '/api/slow/power', body: `{"token":"${TOKEN}","device":"lv","ch":2,"on":true}` },
+    ]);
+    expect(result.ok).toBe(true);
+  });
+
+  it('token が無ければ送らない', async () => {
+    let sent = 0;
+    const client = new RunControlClient(
+      () => '/api',
+      () => {
+        sent += 1;
+        return reply(200, {})();
+      },
+      null,
+    );
+    const result = await client.postSlowPower('hv', 3, false);
+    expect(sent).toBe(0);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('No control token');
+  });
+
+  it('504 の error はそのまま返る', async () => {
+    const client = new RunControlClient(
+      () => '/api',
+      reply(504, { error: 'timeout — state unknown — check the table' }),
+      null,
+    );
+    client.setToken(TOKEN);
+    const result = await client.postSlowPower('hv', 3, false);
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe(504);
+    expect(result.error).toBe('timeout — state unknown — check the table');
+  });
+});
+
 describe('配線と disabled 規則の噛み合わせ', () => {
   it('配線が有効なので押せる操作が実際に送信まで行く', () => {
     expect(RUN_CONTROL_ENABLED).toBe(true);

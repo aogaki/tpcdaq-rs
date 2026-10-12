@@ -150,3 +150,44 @@ td.last-error {
   margin-top: 0.5rem;
   min-height: 18rem;
 }
+
+/* ---- TODO/124 ON/OFF ボタンと確認ダイアログ ---- */
+
+.power-result {
+  margin: 0.5rem 0 0;
+  font: var(--mat-sys-body-small);
+}
+
+.power-result.fail {
+  color: var(--tpc-error);
+}
+
+.power-result.note {
+  margin-top: 0.15rem;
+  font-weight: 600;
+}
+
+.confirm {
+  border: 1px solid var(--tpc-error);
+  border-radius: var(--tpc-radius);
+  background: var(--mat-sys-surface-container-high);
+  color: var(--mat-sys-on-surface);
+  padding: 1rem 1.25rem;
+  max-width: 32rem;
+}
+
+.confirm::backdrop {
+  background: rgb(0 0 0 / 60%);
+}
+
+.confirm .warn {
+  color: var(--tpc-error);
+  font: var(--mat-sys-body-small);
+}
+
+.confirm .row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}

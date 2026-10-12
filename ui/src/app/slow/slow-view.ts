@@ -24,6 +24,10 @@ import {
 import type { EChartsOption } from 'echarts';
 
 import { type EChartsInstance, loadECharts } from '../waveform/echarts-loader';
+import { ControllerApiService } from '../api/controller-api';
+import { parseControllerStatus } from '../api/controller-status';
+import { RunControlApiService } from '../api/run-control-api';
+import { describeError } from '../logbook/logbook-feed';
 import type { SlowPayload } from '../ws/json';
 import { WsClientService } from '../ws/ws-client';
 import { observeResize } from '../display/resize-observer';
@@ -35,7 +39,19 @@ import {
   formatAgeMs,
   formatSlowValue,
 } from './slow-history';
-import { type SlowTable, buildSlowTable } from './slow-table';
+import {
+  type PowerDialog,
+  type PowerOutcome,
+  buildDialog,
+  buttonLabel,
+  disabledReason,
+  interpretOutcome,
+  targetOn,
+} from './slow-power';
+import { type ChannelRow, type SlowTable, buildSlowTable } from './slow-table';
+
+/** controller の相を取り直す間隔(ボタンの有効/無効用。押した瞬間にも取り直す)。 */
+const PHASE_POLL_MS = 5000;
 
 /** age を再計算する刻み(Latest 表の「age」列を進めるだけ — 購読やデータの取得間隔ではない)。 */
 const AGE_TICK_MS = 1000;
@@ -47,6 +63,8 @@ const AGE_TICK_MS = 1000;
 })
 export class SlowView implements OnDestroy {
   private readonly ws = inject(WsClientService);
+  private readonly api = inject(ControllerApiService);
+  private readonly control = inject(RunControlApiService);
 
   readonly maxTrendSeries = MAX_TREND_SERIES;
 
@@ -76,6 +94,7 @@ export class SlowView implements OnDestroy {
   private busy = false;
 
   constructor() {
+    void this.refreshPhase();
     // 到着ごとにリングバッファへ足す(同じ ts_ms を二重に足さない — slowctl の poll_hz より
     // status の 1 Hz 集約が速い場合の重複防止)。
     effect(() => {
@@ -99,8 +118,78 @@ export class SlowView implements OnDestroy {
     );
   }
 
+  // ---- TODO/124 HV / LV の ON/OFF(SPEC §11 v1.42 の唯一の例外) ----
+
+  /** controller の相。取れていなければ null(Idle 必須の操作は無効のまま)。 */
+  readonly phase = signal<string | null>(null);
+  private readonly phaseTimer = setInterval(() => void this.refreshPhase(), PHASE_POLL_MS);
+  private readonly sending = signal(false);
+  /** 確認ダイアログの対象。null = 閉じている。 */
+  readonly pending = signal<{ row: ChannelRow; on: boolean; dialog: PowerDialog } | null>(null);
+  readonly outcome = signal<PowerOutcome | null>(null);
+  private readonly powerDialog = viewChild<ElementRef<HTMLDialogElement>>('powerDialog');
+
+  private readonly powerCtx = computed(() => ({
+    hasToken: this.control.token() !== null,
+    phase: this.phase(),
+    busy: this.sending(),
+  }));
+
+  powerLabel(row: ChannelRow): string {
+    return buttonLabel(row);
+  }
+
+  /** 押せない理由(押せるなら null)。 */
+  powerDisabled(row: ChannelRow): string | null {
+    return disabledReason(row, this.powerCtx());
+  }
+
+  async refreshPhase(): Promise<void> {
+    try {
+      const view = parseControllerStatus(await this.api.getStatus());
+      this.phase.set(view?.phase ?? null);
+    } catch {
+      this.phase.set(null); // 取れない = 不明。Idle とは見なさない。
+    }
+  }
+
+  /** ボタン。相を取り直してから確認ダイアログを開く(古い相で注意文を作らない)。 */
+  async askPower(row: ChannelRow): Promise<void> {
+    await this.refreshPhase();
+    if (this.powerDisabled(row) !== null) return;
+    const dialog = buildDialog(row, this.table().channels, this.phase());
+    this.outcome.set(null);
+    this.pending.set({ row, on: targetOn(row), dialog });
+    this.powerDialog()?.nativeElement.showModal();
+  }
+
+  cancelPower(): void {
+    this.powerDialog()?.nativeElement.close();
+    this.pending.set(null);
+  }
+
+  async confirmPower(): Promise<void> {
+    const target = this.pending();
+    this.cancelPower();
+    if (!target || this.sending()) return;
+    this.sending.set(true);
+    try {
+      const result = await this.control.postSlowPower(target.row.device, target.row.ch, target.on);
+      this.outcome.set(interpretOutcome(target.row, target.on, result));
+    } catch (error) {
+      this.outcome.set({
+        ok: false,
+        text: `${target.row.device} ch ${target.row.ch}: ${describeError(error)}`,
+        notes: [],
+      });
+    } finally {
+      this.sending.set(false);
+    }
+  }
+
   ngOnDestroy(): void {
     clearInterval(this.ageTimer);
+    clearInterval(this.phaseTimer);
     this.chart?.dispose();
     this.chart = null;
   }
