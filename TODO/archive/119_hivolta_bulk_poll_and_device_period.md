@@ -1,6 +1,6 @@
 # 119 — HiVolta の読み出しを全 ch 一括に(34 → 6 往復)+ 機器ごとの読み出し周期 `poll_s`
 
-**Status: IN PROGRESS**(2026-10-12 起票 Opus。118 の発見への緩和策。ユーザー「読み出しができないと記録ができないので大問題」。Sonnet)
+**Status: COMPLETED**(2026-10-12 起票・同日完了。118 の発見への緩和策。ユーザー「読み出しができないと記録ができないので大問題」。Sonnet 実装 2 回、Opus レビュー)
 
 ## 背景(118)
 - HiVolta(DT1415ET)と USB シリアルで 1 往復するたびに、偽トリガが ≈ 1.4 発入る(A/B 試験で特定)。
@@ -62,3 +62,18 @@
    - 開くパスは by-id のまま毎回開く。開けない場合は今の失敗と同じく `DriverError` にして、component の再試行・カウンタに乗せる(silent にしない)。
    - 機器の取り違え防止は今の ident(BDSNUM 照合)を維持する。毎回の poll で BDSNUM を読み直すのは不要(往復が増える)。
 6. テスト: fake のオープナを注入できる形にして、「poll 1 回 = open 1 回 + 要求 6 本 + close 1 回」「poll の間はポートを保持していない(open の数 = poll の数)」を確かめる。
+
+## 結果(2026-10-12)
+- 実装:
+  - §1〜4 は Sonnet `62c6526` → merge `bbbfae2`。全 ch 一括 6 往復(`CH:8`、値の数 ≠ nch は Protocol エラー)と `[[slowctl.device]] poll_s`(> 0 かつ有限)。
+  - §5・§6 は Sonnet `0e87c82` → merge `8199012`。`OnDemandHiVolta` で、シリアルは ident / poll のたびに開いて閉じる。TCP は従来どおり接続を保持。
+- テスト:
+  - driver: 送信行がちょうど 6 本で、実機応答 4 行をゴールデンにしたもの。値の数 7 / 9 → Protocol。nch ≠ 8 → ident エラー。
+  - オンデマンド: open 1 回・要求 6 本・close 1 回 / open 回数 = ident + poll / 開けないときは DriverError。
+  - config: `poll_s` の省略 / 正 / 0・負・NaN。component: `poll_s` が全体の周期より優先されること。
+  - red は 1 回目で確認、2 回目は省略(Sonnet 申告)。
+- ゲート(main `8199012`、Mac): fmt OK / clippy 0(feature `slowctl-fake` 有無とも)/ **cargo test 903 passed / 0 failed / 1 ignored**(既存の `tests/root_sink_monitor_pub.rs:1031`)。
+- 実機(ELITPC、run 69 実行中):
+  - 一括 + 30 s だけでは 42 Hz のまま(ポートを開きっぱなしにしていたため)。
+  - オンデマンド + 30 s で 90 s の平均 6.57 Hz(ベースラインと区別がつかない。見積もりは 1 回の読み出しで ≈ 12 発)。
+  - **その後ユーザーが USB ケーブルを交換して、偽トリガ自体が消えた**(118)。現在は `poll_s = 5`、オンデマンド方式は保険として残す。全機器読み出しで 5.1 Hz。

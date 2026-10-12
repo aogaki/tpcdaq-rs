@@ -56,6 +56,10 @@ docs: [NEW_DAQ_SETUP_ja.md](../docs/NEW_DAQ_SETUP_ja.md) v0.1 + [RUNBOOK_ja.md](
 - 104 / 105 / 106 の archive にも訂正節を足した(1 s の不感時間は CAEN の変換器が原因)。
 - ~~117~~ **完了 → archive**([archive/117](archive/117_graw_writer_release_pull_before_finalize.md)): graw-writer は finalize(fsync)の前に PULL を放す。cargo **896**。
 - ELITPC の現状: Idle。ユーザーが 38 GB を転送中。α run は止めたまま。
+- **同日午後(Opus、ユーザー現地)**: [118](118_hv_lv_readout_on_elitpc.md)(IN PROGRESS)HV(HiVolta DT1415ET)/ LV(HMP2020)を USB で ELITPC に接続し、slowctl で読み出し中。
+  HMP は本体の Interface が RS-232 だった → USB VCP に変更。**HiVolta の USB で偽トリガ(最大 54 Hz)→ 原因は不良 USB ケーブルで、交換して解消**。
+  ~~119~~ **完了 → archive**(全 ch 一括読み出し、機器ごとの `poll_s`、シリアルはオンデマンドで開く。cargo 903)。現在は HV 5 s / LV 1 s で、トリガは 5.1 Hz(正常)。
+  run 69(ユーザー)の 11:15–11:58 は偽トリガで汚れている(区間は 118)。
 
 **2026-10-11(Fable)**: ~~112~~ **完了 → archive**([archive/112](archive/112_apply_and_restart.md)): Parameters の **Apply & restart**(Stop → Idle 確認 → 保存 → Start を 1 ボタン)。遷移はレーン A の統合テスト(5 周 × 2 構成、100 周の Idle 確認、token 横取り)で**正常系に穴なし**、ELITPC 実機 10 周 = 1 周 ≈ 12 s、全 run で late_fragments 0・古いフレーム混入なし。cargo 871 / UI 310。派生: ~~113~~ **完了 → archive**([archive/113](archive/113_start_walks_components_back.md)): run/start がコンポーネントも Idle まで歩き戻す(Running は Stop → Reset)+ current.json アトミック。cargo 879、**SPEC v1.38**、ELITPC 反映済み(run 57〜)。~~108~~ **完了 → archive**([archive/108](archive/108_root_sink_events_complete_overcount.md)): close 行がプロセス通算だった → per-run に(rs_core 74 passed)。ELITPC 反映は次回入れ替え時。
 
@@ -403,9 +407,8 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
   ③ 背面に**ハードのインターロック入力**がある(発動すると全 ch を最速で落とす)→ ガスとの連動は、ソフトではなくこれで行うのが筋。
   085 の「同時 1 クライアント」はマニュアル本文では確認できない → 実機で確かめる(TCP :1470 に 2 本目を張る / GECO2020 を USB にして slowctl は Ethernet)。
 
-  **追記 2(2026-10-12 Opus、118 の実機)**: **HiVolta と通信するたびに偽トリガが入る**(USB シリアル 1 往復あたり ≈ 1.4 発。A/B 試験で特定、HMP2020 は無関係)。
-  → on/off の設計では、「run 中の通信は記録用の読み出しだけ・最小限」「on/off は run 外に限る」かどうかが論点になる。
-  Ethernet(絶縁)で同じことが起きるかは未検証(118 の切り分け (a))。緩和は 119(全 ch 一括読み出し + HV だけ周期を長く)。
+  **追記 2(2026-10-12 Opus、118 の実機)**: HiVolta の USB ポートを開くと偽トリガが入った(24–54 Hz)が、**原因は不良 USB ケーブル**で、交換して完全に消えた
+  (開きっぱなしで毎秒 34 往復しても 5.0 Hz = ベースライン)。機器の本質ではない → on/off の設計の制約にはしない。ただし「新しく機器を繋いだらトリガレートを A/B で確かめる」を手順に。
 
 - **[2026-09-02 起票] オンライントラック再構成のスコープ復活(SPEC §4.4 / §1012 の改訂可否)**
 
