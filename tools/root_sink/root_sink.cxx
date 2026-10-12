@@ -803,8 +803,10 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
         std::optional<rootsink::LateFragment> late =
             eb.feed(rootsink::OwnedFragment::from_view(f, h.run_number), tick);
         if (late.has_value()) {
-          if (c.late_fragments == 0) {
-            // ログはこの 1 回だけ —— ホットパスで per-frame のログ整形をしない
+          if (rootsink::first_late_of_run(
+                  {c.batches, c.events_complete, c.events_incomplete, c.late_fragments},
+                  c.run_at_open)) {
+            // ログは run 毎に 1 回だけ —— ホットパスで per-frame のログ整形をしない
             // (CLAUDE.md)。以降は late_fragments カウンタが可視化を担う。
             std::fprintf(stderr,
                          "root_sink: late fragment run=%u event_idx=%u cobo=%u asad=%u "

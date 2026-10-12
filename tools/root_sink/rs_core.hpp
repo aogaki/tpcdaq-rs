@@ -295,6 +295,11 @@ inline std::string format_run_closed(uint32_t run_number, const RunCounts& now,
   return buf;
 }
 
+// その run で最初の late fragment か。`now` は**この late を数える前**の通算。
+inline bool first_late_of_run(const RunCounts& now, const RunCounts& at_open) {
+  return now.late_fragments == at_open.late_fragments;
+}
+
 }  // namespace rootsink
 
 #endif  // TPCDAQ_ROOT_SINK_RS_CORE_HPP
