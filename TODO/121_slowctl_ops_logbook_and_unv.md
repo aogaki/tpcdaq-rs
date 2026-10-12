@@ -59,3 +59,12 @@
 - ゲート(main `95c7168`、Mac、TIME_WAIT 10): fmt / clippy 0 / **cargo test 907 passed / 0 failed / 1 ignored**。
   D のレーンで receiver_integration が `AddrNotAvailable` で落ちたのは、並列のテストによるポート枯渇だった(main で再現しない)。
 - C → 122(InfluxDB、ユーザー裁定)。
+
+## 結果(2026-10-12 13:21、ユーザーが run 69 を停止した後のスタック上げ直し)
+- 全バイナリは main `93cf2ef` の release ビルド。
+- daq_down の出力: `slowctl stopped` → controller … → `root_sink stopped (1 s)` → `stopped — no leftover processes`。
+- daq_up の出力: … `controller pid 301831` → **`slowctl pid 301860`** → `== up ==`。slowctl は hv / lv を識別し、InfluxDB への書き込みも再開した。
+- **B の実機確認**: 上げ直し直後の `/api/status.log_posts = {accepted: 2, rejected: 0, slow_values_not_logged: 52}`。ログブックに書いたのは IDENT の 2 件だけで、VALUE は数えて書かない。
+- **D**: 12:41 から反映済み(ch0 は status 33 のまま、alarm false。InfluxDB の `alarm` フィールドも false)。
+- ゲート: 107 → 121 B / D をマージした main で cargo 907、122 込みで 929(122 結果節)。
+- SPEC は 118–122 をまとめて v1.41 として Fable に確定してもらう。

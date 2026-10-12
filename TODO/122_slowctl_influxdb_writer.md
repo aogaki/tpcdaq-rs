@@ -89,3 +89,12 @@ Data Explorer で hv / lv の系列が見えること、counters の written が
   - ログ: `slowctl: writing every sample to InfluxDB url="http://127.0.0.1:8086" org="elitpc" bucket="slowctl"`、hv / lv を識別。
   - `influx query`(直近 2 分の last()): hv ch0 imon 9.595 / iset 15 / alarm false(121 D の status_ignore が効いている)、lv ch1 curr 1.235 / iset 2.5 / alarm false。
 - 残り: Data Explorer での目視(ユーザー)、Slow control 画面の Counters の `influx_points_written`、InfluxDB を止めたときの dropped / errors の確認(run 69 の後で)、SPEC(Fable)。
+- **停止試験(13:21–13:23 EEST、ユーザーが `sudo systemctl stop influxdb; sleep 60; sudo systemctl start influxdb`)**:
+  - slowctl は `cannot write to InfluxDB — retrying error=io: Connection refused` を、retry_in_s 1 / 2 / 4 / 8 / 16 / 32 と指数で伸ばしながら出した。
+    その間も読み出しは続き、溜まった点は buffered = 10 → 572。
+  - InfluxDB の復旧(10:22:38Z)後の再試行で、溜めた分が書き込まれた。
+  - 10 s 窓ごとの点数(`aggregateWindow(10s, count)`、10:20:30–10:24:30Z):
+    - hv ch0 vmon は停止中の窓を含めてすべて 2(5 s 周期)。
+    - lv ch1 volt はすべて 10(1 s 周期)。
+    - 例外は 10:21:10 の 7(10:21:03 のスタック上げ直しで slowctl を入れ替えた瞬間)と、問い合わせ時点で進行中だった最後の窓だけ。
+  - → **60 s の停止で欠損なし**(再送バッファの上限 100,000 点 ≈ 1.5 h に対して 572 点)。
