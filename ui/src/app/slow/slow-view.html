@@ -17,6 +17,7 @@
             <th>Iset</th>
             <th>Status</th>
             <th>ON/OFF</th>
+            <th>Power</th>
             <th>Age</th>
           </tr>
         </thead>
@@ -52,15 +53,36 @@
                   <span class="dim">—</span>
                 }
               </td>
+              <td>
+                @if (row.power !== null) {
+                  <button
+                    type="button"
+                    class="power"
+                    [disabled]="powerDisabled(row) !== null"
+                    [attr.title]="powerDisabled(row)"
+                    (click)="askPower(row)"
+                  >
+                    {{ powerLabel(row) }}
+                  </button>
+                } @else {
+                  <span class="dim">—</span>
+                }
+              </td>
               <td [class.stale]="row.stale">{{ formatAge(row.ageMs) }}</td>
             </tr>
           } @empty {
             <tr>
-              <td colspan="9" class="dim">No channels</td>
+              <td colspan="10" class="dim">No channels</td>
             </tr>
           }
         </tbody>
       </table>
+      @if (outcome(); as result) {
+        <p class="power-result" [class.fail]="!result.ok">{{ result.text }}</p>
+        @for (note of result.notes; track note) {
+          <p class="power-result note">{{ note }}</p>
+        }
+      }
     </section>
 
     @if (table().other.length > 0) {
@@ -174,4 +196,26 @@
       </section>
     }
   }
+
+  <!-- TODO/124: in-page confirmation (no window.confirm). Nothing is sent until "Confirm". -->
+  <dialog #powerDialog class="confirm" (cancel)="cancelPower()">
+    @if (pending(); as target) {
+      <h3>{{ target.dialog.title }}</h3>
+      <p>{{ target.dialog.state }}</p>
+      @if (target.dialog.lvBefore.length > 0) {
+        <ul class="before">
+          @for (line of target.dialog.lvBefore; track line) {
+            <li>{{ line }}</li>
+          }
+        </ul>
+      }
+      @for (warning of target.dialog.warnings; track warning) {
+        <p class="warn">{{ warning }}</p>
+      }
+      <div class="row">
+        <button type="button" (click)="cancelPower()">Cancel</button>
+        <button type="button" class="danger" (click)="confirmPower()">Confirm</button>
+      </div>
+    }
+  </dialog>
 </div>

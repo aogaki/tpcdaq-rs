@@ -199,6 +199,25 @@ export class RunControlClient {
     return result;
   }
 
+  /**
+   * TODO/124 `POST /api/slow/power {token, device, ch, on}`(SPEC §8.1)。**投げない**。
+   * token が無ければ送らずに理由を返す。応答の 200 以外・`ok:false` は失敗(`error` はそのまま)。
+   */
+  async postSlowPower(device: string, ch: number, on: boolean): Promise<ActionResult> {
+    const token = this.token();
+    if (token === null || token === '') {
+      return {
+        ok: false,
+        status: 0,
+        error: 'No control token (press Acquire first).',
+        notes: [],
+        summary: '',
+        body: null,
+      };
+    }
+    return this.send('slow/power', { token, device, ch, on });
+  }
+
   /** token を捨てる(release 成功時。UI から明示的に忘れたいときにも使える)。 */
   setToken(token: string | null): void {
     this.token.set(token);
