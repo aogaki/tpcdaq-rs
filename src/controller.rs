@@ -1665,6 +1665,9 @@ struct RunState {
 struct LogPostCounters {
     accepted: AtomicU64,
     rejected: AtomicU64,
+    /// 直近値だけ更新してログブックに書かなかった slow VALUE の件数
+    /// (TODO/121 §B —— 書かないことを silent にしない)。
+    slow_values_not_logged: AtomicU64,
 }
 
 // ---------------------------------------------------------------------
@@ -2101,6 +2104,10 @@ async fn get_status(State(controller): State<Arc<Controller>>) -> Reply {
             "log_posts": {
                 "accepted": controller.log_posts.accepted.load(Ordering::Relaxed),
                 "rejected": controller.log_posts.rejected.load(Ordering::Relaxed),
+                "slow_values_not_logged": controller
+                    .log_posts
+                    .slow_values_not_logged
+                    .load(Ordering::Relaxed),
             },
             "notes": notes,
         })
@@ -3361,6 +3368,15 @@ fn spawn_log_post_thread(
                         if matches!(record, LogbookRecord::Slow { .. }) {
                             let ts = crate::logbook::now_rfc3339_millis();
                             apply_slow_record(&mut lock(&slow_latest), &record, &ts);
+                        }
+                        // TODO/121 §B: 定期値 VALUE は直近値の更新だけ(時系列は別の保存先)。
+                        // IDENT / ALARM / RECOVER / ERROR はまれで安全上の意味があるので書く。
+                        if matches!(&record, LogbookRecord::Slow { event, .. } if event == "VALUE")
+                        {
+                            counters
+                                .slow_values_not_logged
+                                .fetch_add(1, Ordering::Relaxed);
+                            continue;
                         }
                         let mut writer = lock(&logbook);
                         match writer.append(record) {
