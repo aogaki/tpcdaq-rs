@@ -1,6 +1,6 @@
 # 116 — decoder の Reset がスレッドの終了を待たずに返り、直後の Arm が bind に失敗する
 
-**Status: IN PROGRESS**(2026-10-12 起票 Opus。114 の SIGSTOP 実機試験で発見。Opus implementer)
+**Status: COMPLETED**(2026-10-12 起票・同日完了。114 の SIGSTOP 実機試験で発見。Opus implementer、Fable 承認)
 
 ## 事実(ELITPC、2026-10-12 09:28–09:32、`~/sigstop_test.sh`)
 - 手順: α run 64 の途中で root-sink を `kill -STOP`。decoder の `batches_out` が 988 で止まり、ログは `downstream is full — blocking on backpressure`。
@@ -63,3 +63,9 @@
   - run 66 の停止は `error:eos-timeout` / eos_closed false(root-sink が不在なので正しい)。decoder の Reset は打ち切ったバッチを数えて join した。
   - graw: run 65 = 1207 フレーム、run 66 = 102 フレーム、どちらも eventIdx 連番(**正本は無傷**)。run 65 の ROOT は inprogress(可視)。
   - 試験の後は daq_down / up でスタックを Idle に戻した。
+- **Fable 裁定(2026-10-12)**: 116 は承認。
+  - (a) join の上限 0.1 s + 2T は見送り(縮めると下流が生きていても捨てる方向になる)。制約は SPEC の不等式として固定した。
+  - (b) graw-writer → **117**(Sonnet。PULL を所有権で finalize より前に drop する。Reset は join しない)。
+  - (c) Reset 中に status が不達に見える件は SPEC に明記のみ。
+  - (d) **Fable キュー項目「PULL の未読分」は裁定済み**: 新しいカウンタは足さない。`eos_closed:false` の run の実損は、run 単位で receiver の frames と root-sink の entries を照合する(SPEC v1.40 §1.3)。
+- ゲート: 最終 main `99e7704` で fmt OK / clippy 0 / cargo 895 passed / 0 failed / 1 ignored(既存の `tests/root_sink_monitor_pub.rs:1031`)。

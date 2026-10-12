@@ -1,6 +1,6 @@
 # 114 — 113 / 108 の残課題: 歩き戻しで EOS を待つ / root_sink の初回 late ログを run 単位に
 
-**Status: IN PROGRESS**(2026-10-12 起票 Opus。ユーザー「ランは止まってるので残った課題を解決してください」。2 レーン並行)
+**Status: COMPLETED**(2026-10-12 起票・同日完了 Opus。ユーザー「ランは止まってるので残った課題を解決してください」。2 レーン並行、Fable 一括レビュー 2 回)
 
 ## A. 歩き戻しの Stop の後、EOS の伝播を待つ(Rust、Opus レーン)
 
@@ -91,3 +91,7 @@
   | **SIGSTOP**(run 64 → 65) | 114 追補 + 115 | root-sink 停止で decoder の batches_out が 988 で詰まった → controller kill -9 → start: 歩き戻しは `eos: did not propagate`、`run_stop 64` は eos_closed:false で書かれた。**ただし run 65 の Arm が decoder の bind 失敗で落ちた → 116**。graw 1219 フレーム(連番、無傷)/ ROOT 1041 で inprogress のまま(EOS 未着、可視) |
 
 - Fable 一括レビュー: 承認 + 追補 1 件(静止確認)→ 追補は実装済み。SPEC v1.39 / v1.40 の確定は 116 と合わせて Fable に出す。
+- **最終ゲート**(main `99e7704`、115 / 116 込み、Mac、2026-10-12): fmt OK / clippy 警告 0 / **cargo test 895 passed / 0 failed / 1 ignored**。
+  ignored は `tests/root_sink_monitor_pub.rs:1031`(P3 E2E の素材で、cargo test では走らない既存の 1 件)。root_sink `make -j test` は上記のとおり。
+- Fable 2 回目の一括レビュー(114 / 115 / 116 + SPEC): **SPEC v1.39 / v1.40 確定**(3 箇所差し替え)、archive 可。
+  未解決として残すのは、レビュー (b) の狭い経路(controller が自分の停止の第二段で落ちた場合は `eos: not awaited`)。入れない判断で、記載済み。

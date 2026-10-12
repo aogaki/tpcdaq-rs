@@ -1,6 +1,6 @@
 # 115 — 歩き戻しで閉じた前の run の `run_stop` をログブックに書く
 
-**Status: IN PROGRESS**(2026-10-12 起票 Opus、仕様は 114 の一括レビューでの Fable 裁定。Opus implementer)
+**Status: COMPLETED**(2026-10-12 起票・同日完了。仕様は Fable 裁定、Opus implementer)
 
 ## 事実
 - 実機の run 58 / 60(114 の crash 試験)は、controller が run 中に落ちた run。ログブック `logbook.jsonl` には `run_start` しか無く、`run_stop` が無い。
@@ -42,3 +42,4 @@
   - `run_stop 62`(crash 試験)は `{"duration_s": 28.162, "ok": false, "reason": "abort:controller-restart", "forced_eos": false, "eos_closed": true, frames {"0": 89}, files 1 本}` で、`run_start 63` より前に書かれた。
   - `run_stop 64`(SIGSTOP 試験)は eos_closed:false、duration 258.4 s で、Arm の失敗で start 65 が失敗したのに書かれた(start 失敗の経路の実機確認)。
 - 備考: `counters.events_built` / `events_incomplete` / `late_fragments` は通常の停止でも null(root-sink が REP を持たない間は null、§9.2 v1.10)。この票とは無関係。
+- ゲート: 114 と同一(`b18c109` で fmt OK / clippy 0 / cargo 893、最終 `99e7704` で 895 / 0 / 1 ignored)。SPEC **v1.40**(§1.3 / §9.2、Fable 確定)。
