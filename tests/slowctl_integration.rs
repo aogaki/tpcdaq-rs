@@ -607,3 +607,54 @@ fn with_an_influx_section_samples_reach_influxdb_and_the_counters_show_it() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// レビュー 2026-10-12 (a): トークンファイルが無い daq.toml でも `config::load` は通る
+/// (= 同じ TOML を読む controller / monitor は起動できる)。起動に失敗するのは slowctl だけ。
+#[test]
+fn a_missing_influx_token_fails_only_the_slowctl_startup() {
+    let dir = scratch_dir("influx-no-token");
+    let script = dir.join("gas_script.txt");
+    std::fs::write(&script, SCRIPT.as_bytes()).unwrap();
+    let missing_token = dir.join("no-such.token");
+
+    let config = write_config(&dir, &script, free_port(), free_port());
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&config)
+        .unwrap();
+    write!(
+        file,
+        "\n[slowctl.influx]\nurl = \"http://127.0.0.1:8086\"\norg = \"elinp\"\n\
+         bucket = \"slowctl\"\ntoken_file = \"{}\"\n",
+        missing_token.display()
+    )
+    .unwrap();
+    drop(file);
+
+    // controller / monitor と同じ入口(config::load)は通る。
+    let loaded = tpcdaq::config::load(&config).expect("the config must still load");
+    assert!(loaded.slowctl.unwrap().influx.is_some());
+
+    // slowctl だけが起動エラーで終わる(待ち続けない —— 期限付きで終了を見る)。
+    let child = Command::new(env!("CARGO_BIN_EXE_slowctl"))
+        .args(["--config", &config.to_string_lossy()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn slowctl");
+    let mut guard = Proc(child);
+    let deadline = Instant::now() + CONDITION_DEADLINE;
+    let status = loop {
+        if let Some(status) = guard.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "slowctl kept running without a readable token_file"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success(), "exit status = {status:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

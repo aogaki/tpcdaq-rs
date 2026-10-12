@@ -177,6 +177,62 @@ describe('SPEC §10.3 v1.31 status.slow — slowctl → monitor PUB(§2.3)の同
     const notAnObject = parseJsonMessage(statusText({ slow: 'nope' }));
     expect(notAnObject.kind).toBe('error');
   });
+
+  it('TODO/122: counters の influx_* を読む(古い slowctl はキー無し = undefined、型違いは bad-field)', () => {
+    const base = { poll_ok: 7, poll_err: 1, parse_err: 0, reconnects: 0, identity_mismatch: 0 };
+    const countersOf = (counters: Record<string, unknown>) => {
+      const parsed = parseJsonMessage(
+        statusText({ slow: { kind: 'slow', ts_ms: 1, samples: [], counters } }),
+      );
+      return parsed.kind === 'status' ? parsed.status.slow?.counters : parsed.kind;
+    };
+
+    // 122 以降の slowctl: 4 キーが載る。last_error は InfluxDB の言い分(文字列)。
+    expect(
+      countersOf({
+        ...base,
+        influx_points_written: 420,
+        influx_points_dropped: 7,
+        influx_write_errors: 1,
+        influx_last_error: 'HTTP 401: {"code":"unauthorized","message":"unauthorized access"}',
+      }),
+    ).toEqual({
+      ...base,
+      influx_points_written: 420,
+      influx_points_dropped: 7,
+      influx_write_errors: 1,
+      influx_last_error: 'HTTP 401: {"code":"unauthorized","message":"unauthorized access"}',
+    });
+
+    // 一度も失敗していなければ last_error は null(画面では「—」)。
+    const healthy = countersOf({
+      ...base,
+      influx_points_written: 18,
+      influx_points_dropped: 0,
+      influx_write_errors: 0,
+      influx_last_error: null,
+    });
+    expect(healthy).toEqual({
+      ...base,
+      influx_points_written: 18,
+      influx_points_dropped: 0,
+      influx_write_errors: 0,
+      influx_last_error: null,
+    });
+
+    // 122 より前の slowctl: キー自体が無い → undefined(画面では「—」)。bad にはしない。
+    const old = countersOf(base);
+    if (typeof old !== 'object' || old === undefined) throw new Error('expected counters');
+    expect(old.influx_points_written).toBeUndefined();
+    expect(old.influx_points_dropped).toBeUndefined();
+    expect(old.influx_write_errors).toBeUndefined();
+    expect(old.influx_last_error).toBeUndefined();
+
+    // キーはあるが型が違う → status 全体を bad-field(silent に「—」へ倒さない)。
+    expect(countersOf({ ...base, influx_points_written: '420' })).toBe('error');
+    expect(countersOf({ ...base, influx_write_errors: null })).toBe('error');
+    expect(countersOf({ ...base, influx_last_error: 5 })).toBe('error');
+  });
 });
 
 describe('SPEC §5.2 飽和率 = saturated / counted * 100', () => {

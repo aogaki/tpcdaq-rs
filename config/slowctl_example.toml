@@ -60,10 +60,11 @@ alarms = [{ node = 4, param = "fmeasure", lo = 90.0, hi = 110.0 }]
 # 書けない間は再送バッファ(buffer_max_points 点 = Sample 個数)に溜め、溢れたら古い方から落とす。
 # 落とした数・失敗は status の counters(influx_points_dropped / influx_write_errors / influx_last_error)に出る。
 # [slowctl.influx]
-# url = "http://127.0.0.1:8086"
+# url = "http://127.0.0.1:8086"              # https は不可(TLS は未対応、localhost の http を使う)
 # org = "elinp"
 # bucket = "slowctl"
 # token_file = "/opt/tpcdaq/influx.token"   # 書き込み専用トークンを 1 行だけ。TOML にトークンは書かない
+#                                            # 読むのは slowctl の起動時だけ(読めなければ slowctl だけが起動失敗)
 # batch_ms = 1000                            # POST の間隔
 # buffer_max_points = 100000                 # ≈ 1.5 h 分(≈ 18 点/s)
 # timeout_ms = 2000

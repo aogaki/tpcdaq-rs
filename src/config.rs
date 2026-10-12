@@ -260,7 +260,9 @@ pub const DEFAULT_INFLUX_TIMEOUT_MS: u64 = 2000;
 /// `[slowctl.influx]`(TODO/122 §4)。slowctl の全サンプルを InfluxDB v2 write API へ書く。
 ///
 /// **トークンそのものは持たない**(TOML にも `Debug` 出力にも載せない)。持つのはファイルの
-/// パスだけで、中身は [`read_influx_token`] で読む。
+/// パスだけで、**中身を読むのは slowctl の起動時だけ**(`slowctl::influx::read_token`)。
+/// config の検証では読まない —— controller / monitor も同じ TOML を読むので、監視系の
+/// トークンの不備で DAQ 全体を起動不能にしない(never-stop、保存と監視の分離)。
 #[derive(Debug, Clone, PartialEq)]
 pub struct InfluxConfig {
     /// 例 `http://127.0.0.1:8086`(`/api/v2/write` はコードが足す)。
@@ -275,20 +277,6 @@ pub struct InfluxConfig {
     pub buffer_max_points: usize,
     /// 1 回の POST にかける上限(ミリ秒)。
     pub timeout_ms: u64,
-}
-
-/// InfluxDB のトークンファイルを読む(TODO/122 §4: 中身は 1 行、前後の空白は除く)。
-///
-/// 読めない・空なら `Err`(メッセージにパスを含める)。設定検証([`parse`])と slowctl の
-/// 起動の両方がこれを使う —— 「読めること」を起動時に確かめるため。
-pub fn read_influx_token(path: &Path) -> Result<String, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read token_file {}: {e}", path.display()))?;
-    let token = text.trim();
-    if token.is_empty() {
-        return Err(format!("token_file {} is empty", path.display()));
-    }
-    Ok(token.to_string())
 }
 
 /// `[[slowctl.device]]` 1 台分(SPEC §3.1)。
@@ -987,15 +975,30 @@ fn validate_slowctl(slowctl: &SlowctlConfig) -> Result<(), ConfigError> {
 /// `[slowctl.influx]` を検証する(TODO/122 §4)。
 ///
 /// 書けない設定のまま走って「InfluxDB に何も入っていなかった」と後で気づく状態を作らない:
-/// url の形、トークンが読めること、0 や空の値はすべて起動失敗にする。
+/// url の形、0 や空の値は起動失敗にする。
+///
+/// **トークンファイルの中身はここでは読まない**(見るのはパスが空でないことまで)。
+/// 読めないことは slowctl の起動だけが失敗として出す —— [`InfluxConfig`] の doc。
 fn validate_influx(influx: &InfluxConfig) -> Result<(), ConfigError> {
     let invalid =
         |message: String| ConfigError::InvalidSlowctl(format!("[slowctl.influx] {message}"));
-    if !(influx.url.starts_with("http://") || influx.url.starts_with("https://")) {
+    // HTTP クライアント(ureq)は TLS の feature を切ってある。https を通すと実行時に
+    // 必ず失敗し続けるので、ここで止める。
+    if influx.url.starts_with("https://") {
         return Err(invalid(format!(
-            "url must start with http:// or https://, got {:?}",
+            "url {:?}: TLS は未対応、localhost の http を使う (TLS is not built in; \
+             use plain http to a local InfluxDB)",
             influx.url
         )));
+    }
+    if !influx.url.starts_with("http://") {
+        return Err(invalid(format!(
+            "url must start with http://, got {:?}",
+            influx.url
+        )));
+    }
+    if influx.token_file.as_os_str().is_empty() {
+        return Err(invalid("token_file must not be empty".to_string()));
     }
     if influx.org.is_empty() || influx.bucket.is_empty() {
         return Err(invalid("org and bucket must not be empty".to_string()));
@@ -1006,7 +1009,6 @@ fn validate_influx(influx: &InfluxConfig) -> Result<(), ConfigError> {
             influx.batch_ms, influx.buffer_max_points, influx.timeout_ms
         )));
     }
-    read_influx_token(&influx.token_file).map_err(invalid)?;
     Ok(())
 }
 
@@ -2768,17 +2770,10 @@ name = "hv"
     // `[slowctl.influx]`(TODO/122)
     // -----------------------------------------------------------------
 
-    /// テスト用のトークンファイル(中身は前後に空白・改行つき — trim されることを見る)。
-    fn make_temp_token_file(contents: &str) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir =
-            std::env::temp_dir().join(format!("tpcdaq-influx-token-{}-{}", std::process::id(), n));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("influx.token");
-        std::fs::write(&path, contents).unwrap();
-        path
-    }
+    /// どこにも無いトークンファイル。**config はトークンを読まない**(読むのは slowctl の
+    /// 起動時だけ —— 監視系の不備で controller / monitor を起動不能にしない)ので、
+    /// 設定のテストはこのパスで足りる。
+    const ABSENT_TOKEN_FILE: &str = "/nonexistent/tpcdaq-122/influx.token";
 
     /// `[slowctl]` + hv 1 台 + `influx_body`(`[slowctl.influx]` の中身)の TOML。
     fn slowctl_with_influx(geometry: &Path, influx_body: &str) -> String {
@@ -2787,6 +2782,14 @@ name = "hv"
              addr = \"127.0.0.1:1470\"\n[slowctl.influx]\n{influx_body}\n"
         );
         minimal_toml(geometry, &extra)
+    }
+
+    /// url / org / bucket / token_file と、`extra`(任意キー)からなる `[slowctl.influx]` の中身。
+    fn influx_body(url: &str, org: &str, bucket: &str, token_file: &str, extra: &str) -> String {
+        format!(
+            "url = \"{url}\"\norg = \"{org}\"\nbucket = \"{bucket}\"\n\
+             token_file = \"{token_file}\"\n{extra}"
+        )
     }
 
     /// `[slowctl.influx]` が無ければ書かない(= 今と同じ)。既存の `[slowctl]` は無変更で読める。
@@ -2803,38 +2806,35 @@ name = "hv"
     #[test]
     fn an_influx_section_with_only_the_required_keys_gets_the_defaults() {
         let geometry = make_temp_geometry_file();
-        let token = make_temp_token_file("  write-only-token-xyz \n");
-        let body = format!(
-            "url = \"http://127.0.0.1:8086\"\norg = \"elinp\"\nbucket = \"slowctl\"\n\
-             token_file = \"{}\"",
-            token.display()
+        let body = influx_body(
+            "http://127.0.0.1:8086",
+            "elinp",
+            "slowctl",
+            "/opt/tpcdaq/influx.token",
+            "",
         );
         let config = parse(&slowctl_with_influx(&geometry, &body)).unwrap();
         let influx = config.slowctl.unwrap().influx.unwrap();
         assert_eq!(influx.url, "http://127.0.0.1:8086");
         assert_eq!(influx.org, "elinp");
         assert_eq!(influx.bucket, "slowctl");
-        assert_eq!(influx.token_file, token);
+        assert_eq!(influx.token_file, PathBuf::from("/opt/tpcdaq/influx.token"));
         // 発注書 §4 の表: batch_ms 1000 / buffer_max_points 100000 / timeout_ms 2000。
         assert_eq!(influx.batch_ms, 1000);
         assert_eq!(influx.buffer_max_points, 100_000);
         assert_eq!(influx.timeout_ms, 2000);
-        // トークンは 1 行、前後の空白は除く(発注書 §4)。
-        assert_eq!(
-            read_influx_token(&influx.token_file).unwrap(),
-            "write-only-token-xyz"
-        );
     }
 
-    /// 任意キーを書けばその値が入る(https も受け付ける — 発注書 §4 の検証規則)。
+    /// 任意キーを書けばその値が入る。
     #[test]
     fn the_optional_influx_keys_override_the_defaults() {
         let geometry = make_temp_geometry_file();
-        let token = make_temp_token_file("t\n");
-        let body = format!(
-            "url = \"https://influx.example:8086\"\norg = \"o\"\nbucket = \"b\"\n\
-             token_file = \"{}\"\nbatch_ms = 250\nbuffer_max_points = 7\ntimeout_ms = 900",
-            token.display()
+        let body = influx_body(
+            "http://10.0.0.5:8086/",
+            "o",
+            "b",
+            ABSENT_TOKEN_FILE,
+            "batch_ms = 250\nbuffer_max_points = 7\ntimeout_ms = 900",
         );
         let influx = parse(&slowctl_with_influx(&geometry, &body))
             .unwrap()
@@ -2842,7 +2842,7 @@ name = "hv"
             .unwrap()
             .influx
             .unwrap();
-        assert_eq!(influx.url, "https://influx.example:8086");
+        assert_eq!(influx.url, "http://10.0.0.5:8086/");
         assert_eq!(influx.batch_ms, 250);
         assert_eq!(influx.buffer_max_points, 7);
         assert_eq!(influx.timeout_ms, 900);
@@ -2852,12 +2852,11 @@ name = "hv"
     #[test]
     fn an_influx_section_missing_a_required_key_is_rejected() {
         let geometry = make_temp_geometry_file();
-        let token = make_temp_token_file("t\n");
         let all = [
             "url = \"http://127.0.0.1:8086\"".to_string(),
             "org = \"elinp\"".to_string(),
             "bucket = \"slowctl\"".to_string(),
-            format!("token_file = \"{}\"", token.display()),
+            format!("token_file = \"{ABSENT_TOKEN_FILE}\""),
         ];
         for missing in 0..all.len() {
             let body: Vec<&str> = all
@@ -2881,47 +2880,37 @@ name = "hv"
         ));
     }
 
-    /// token_file が読めなければ起動失敗(トークン無しで 401 を延々と打たない)。
+    /// **トークンファイルが無くても `parse` は通る**(レビュー 2026-10-12 (a))。
+    ///
+    /// controller / monitor も同じ daq.toml を読むので、監視系のトークンの不備で DAQ 全体を
+    /// 起動不能にしない(never-stop、保存と監視の分離)。読めないことは slowctl の起動だけが
+    /// 失敗として出す(`tests/slowctl_integration.rs`)。config が見るのは「キーがあって空でない」まで。
     #[test]
-    fn an_unreadable_token_file_is_a_startup_failure() {
+    fn a_missing_token_file_does_not_stop_the_config_from_parsing() {
         let geometry = make_temp_geometry_file();
-        let missing = std::env::temp_dir().join(format!(
-            "tpcdaq-influx-token-missing-{}/influx.token",
-            std::process::id()
-        ));
-        let body = format!(
-            "url = \"http://127.0.0.1:8086\"\norg = \"o\"\nbucket = \"b\"\ntoken_file = \"{}\"",
-            missing.display()
+        let body = influx_body("http://127.0.0.1:8086", "o", "b", ABSENT_TOKEN_FILE, "");
+        let config = parse(&slowctl_with_influx(&geometry, &body)).unwrap();
+        assert_eq!(
+            config.slowctl.unwrap().influx.unwrap().token_file,
+            PathBuf::from(ABSENT_TOKEN_FILE)
         );
-        match parse(&slowctl_with_influx(&geometry, &body)) {
+
+        // 空のパスは書き損じ —— これは config で弾く。
+        let empty = influx_body("http://127.0.0.1:8086", "o", "b", "", "");
+        match parse(&slowctl_with_influx(&geometry, &empty)) {
             Err(ConfigError::InvalidSlowctl(message)) => {
                 assert!(message.contains("token_file"), "message = {message:?}");
             }
             other => panic!("expected InvalidSlowctl, got {other:?}"),
         }
-
-        // 空(空白だけ)のファイルも「読めない」と同じ扱い。
-        let blank = make_temp_token_file(" \n\n");
-        let body = format!(
-            "url = \"http://127.0.0.1:8086\"\norg = \"o\"\nbucket = \"b\"\ntoken_file = \"{}\"",
-            blank.display()
-        );
-        assert!(matches!(
-            parse(&slowctl_with_influx(&geometry, &body)),
-            Err(ConfigError::InvalidSlowctl(_))
-        ));
     }
 
-    /// url は `http://` か `https://` で始まること。
+    /// url は `http://` で始まること。
     #[test]
     fn an_influx_url_without_an_http_scheme_is_rejected() {
         let geometry = make_temp_geometry_file();
-        let token = make_temp_token_file("t\n");
         for bad in ["127.0.0.1:8086", "tcp://127.0.0.1:8086", "", "HTTP//x"] {
-            let body = format!(
-                "url = \"{bad}\"\norg = \"o\"\nbucket = \"b\"\ntoken_file = \"{}\"",
-                token.display()
-            );
+            let body = influx_body(bad, "o", "b", ABSENT_TOKEN_FILE, "");
             match parse(&slowctl_with_influx(&geometry, &body)) {
                 Err(ConfigError::InvalidSlowctl(message)) => {
                     assert!(message.contains("url"), "{bad:?}: message = {message:?}");
@@ -2931,17 +2920,35 @@ name = "hv"
         }
     }
 
+    /// `https://` は検証で拒否する(レビュー 2026-10-12 (b))。HTTP クライアントは TLS を
+    /// 持たない(ureq の default-features を切った)ので、通すと実行時に必ず失敗し続ける。
+    #[test]
+    fn an_https_influx_url_is_rejected_because_tls_is_not_built_in() {
+        let geometry = make_temp_geometry_file();
+        let body = influx_body("https://127.0.0.1:8086", "o", "b", ABSENT_TOKEN_FILE, "");
+        match parse(&slowctl_with_influx(&geometry, &body)) {
+            Err(ConfigError::InvalidSlowctl(message)) => {
+                assert!(
+                    message.contains("TLS は未対応、localhost の http を使う"),
+                    "message = {message:?}"
+                );
+            }
+            other => panic!("https must be rejected, got {other:?}"),
+        }
+    }
+
     /// 0 の batch_ms / buffer_max_points / timeout_ms と空の org / bucket は起動失敗
     /// (半端な値で走らない — SPEC §3.2)。
     #[test]
     fn zero_or_empty_influx_settings_are_rejected() {
         let geometry = make_temp_geometry_file();
-        let token = make_temp_token_file("t\n");
         let base = |org: &str, bucket: &str, extra: &str| {
-            format!(
-                "url = \"http://127.0.0.1:8086\"\norg = \"{org}\"\nbucket = \"{bucket}\"\n\
-                 token_file = \"{}\"\n{extra}",
-                token.display()
+            influx_body(
+                "http://127.0.0.1:8086",
+                org,
+                bucket,
+                ABSENT_TOKEN_FILE,
+                extra,
             )
         };
         for body in [

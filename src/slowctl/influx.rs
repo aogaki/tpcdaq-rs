@@ -25,6 +25,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -34,7 +35,7 @@ use std::time::{Duration, Instant};
 use tracing::{error, warn};
 
 use super::{Sample, SlowCounters};
-use crate::config::{read_influx_token, InfluxConfig};
+use crate::config::InfluxConfig;
 
 /// 読み出しスレッド → writer のチャネル段数(1 段 = 1 poll ぶんの `Vec<Sample>`)。
 ///
@@ -80,19 +81,33 @@ pub struct InfluxParams {
 }
 
 impl InfluxParams {
-    /// `[slowctl.influx]` から作る。トークンはここで読む(設定検証で一度読めることは
-    /// 確かめてあるが、起動までに消えていれば `Err` = 起動失敗)。
+    /// `[slowctl.influx]` から作る。**トークンを読むのはここだけ**(slowctl の起動時)。
+    /// 読めなければ `Err` = slowctl の起動失敗。config の検証では読まない
+    /// (controller / monitor を巻き込まない —— `InfluxConfig` の doc)。
     pub fn from_config(config: &InfluxConfig) -> Result<Self, String> {
         Ok(Self {
             url: config.url.clone(),
             org: config.org.clone(),
             bucket: config.bucket.clone(),
-            token: read_influx_token(&config.token_file)?,
+            token: read_token(&config.token_file)?,
             batch: Duration::from_millis(config.batch_ms),
             buffer_max_points: config.buffer_max_points,
             timeout: Duration::from_millis(config.timeout_ms),
         })
     }
+}
+
+/// InfluxDB のトークンファイルを読む(発注書 §4: 中身は 1 行、前後の空白は除く)。
+///
+/// 読めない・空なら `Err`(メッセージにパスを含める —— どのファイルを直せばよいか分かるように)。
+pub fn read_token(path: &Path) -> Result<String, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read token_file {}: {e}", path.display()))?;
+    let token = text.trim();
+    if token.is_empty() {
+        return Err(format!("token_file {} is empty", path.display()));
+    }
+    Ok(token.to_string())
 }
 
 // ---------------------------------------------------------------------
@@ -647,6 +662,35 @@ mod tests {
              hv,ch=0 vmon=101.5,alarm=false 2000\n\
              lv,ch=0 volt=3.5,alarm=false 1000\n"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // トークンファイル(slowctl の起動時だけ読む)
+    // -----------------------------------------------------------------
+
+    /// 発注書 §4: 中身は 1 行、前後の空白は除く。無い・空ならパス入りの `Err`。
+    #[test]
+    fn the_token_file_is_one_trimmed_line_and_missing_or_blank_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("tpcdaq-influx-token-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let good = dir.join("good.token");
+        std::fs::write(&good, "  write-only-token-xyz \n").unwrap();
+        assert_eq!(read_token(&good).unwrap(), "write-only-token-xyz");
+
+        let blank = dir.join("blank.token");
+        std::fs::write(&blank, " \n\n").unwrap();
+        let message = read_token(&blank).unwrap_err();
+        assert!(message.contains("blank.token"), "message = {message:?}");
+
+        let missing = dir.join("missing.token");
+        let message = read_token(&missing).unwrap_err();
+        assert!(
+            message.contains("token_file") && message.contains("missing.token"),
+            "message = {message:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------

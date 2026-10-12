@@ -152,6 +152,23 @@
               <td>identity_mismatch</td>
               <td class="value">{{ payload.counters.identity_mismatch }}</td>
             </tr>
+            <!-- TODO/122 InfluxDB writer。122 より前の slowctl はキーが無い / last_error が null なら「—」。 -->
+            <tr>
+              <td>influx_points_written</td>
+              <td class="value">{{ payload.counters.influx_points_written ?? '—' }}</td>
+            </tr>
+            <tr [class.attention]="(payload.counters.influx_points_dropped ?? 0) > 0">
+              <td>influx_points_dropped</td>
+              <td class="value">{{ payload.counters.influx_points_dropped ?? '—' }}</td>
+            </tr>
+            <tr [class.attention]="(payload.counters.influx_write_errors ?? 0) > 0">
+              <td>influx_write_errors</td>
+              <td class="value">{{ payload.counters.influx_write_errors ?? '—' }}</td>
+            </tr>
+            <tr>
+              <td>influx_last_error</td>
+              <td class="value last-error">{{ payload.counters.influx_last_error ?? '—' }}</td>
+            </tr>
           </tbody>
         </table>
       </section>

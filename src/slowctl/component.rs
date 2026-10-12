@@ -646,6 +646,16 @@ fn created_ns() -> u64 {
 ///
 /// `stop` が立つまで回り、立ったらデバイススレッドを畳んでソケットを閉じる。
 pub fn run_slowctl(params: SlowctlParams, stop: Arc<AtomicBool>) -> Result<(), SlowctlError> {
+    // TODO/122: InfluxDB のトークンを読むのは slowctl の起動時だけ(config の検証では読まない
+    // —— controller / monitor を巻き込まない)。ソケットを開く前に読み、読めなければ何も
+    // 開かずに起動失敗にする。
+    let influx_params = params
+        .influx
+        .as_ref()
+        .map(InfluxParams::from_config)
+        .transpose()
+        .map_err(SlowctlError::Influx)?;
+
     let context = zmq::Context::new();
 
     let publisher = context
@@ -689,23 +699,22 @@ pub fn run_slowctl(params: SlowctlParams, stop: Arc<AtomicBool>) -> Result<(), S
         "slowctl: LogPost PUSH connected"
     );
 
-    // TODO/122: 全サンプルを InfluxDB へ(任意)。トークンが読めなければ起動失敗。
-    let influx = match &params.influx {
-        Some(config) => {
-            let influx_params = InfluxParams::from_config(config).map_err(SlowctlError::Influx)?;
+    // TODO/122: 全サンプルを InfluxDB へ(任意)。
+    let influx = match influx_params {
+        Some(influx_params) => {
+            info!(
+                url = influx_params.url,
+                org = influx_params.org,
+                bucket = influx_params.bucket,
+                batch_ms = influx_params.batch.as_millis(),
+                buffer_max_points = influx_params.buffer_max_points,
+                "slowctl: writing every sample to InfluxDB"
+            );
             let writer =
                 InfluxWriter::spawn(influx_params).map_err(|source| SlowctlError::Spawn {
                     device: "influx".to_string(),
                     source,
                 })?;
-            info!(
-                url = config.url,
-                org = config.org,
-                bucket = config.bucket,
-                batch_ms = config.batch_ms,
-                buffer_max_points = config.buffer_max_points,
-                "slowctl: writing every sample to InfluxDB"
-            );
             Some(writer)
         }
         None => None,
