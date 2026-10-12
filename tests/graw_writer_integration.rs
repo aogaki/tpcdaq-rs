@@ -48,6 +48,7 @@ fn test_params(
         max_file_bytes,
         flush_interval_ms: 50, // 待ち時間短縮(既定 1000 ms だとポーリングが遅い)
         expected_sources,
+        finalize_delay_ms: 0,
     }
 }
 
@@ -540,6 +541,69 @@ async fn configure_arm_start_stop_sequence_succeeds() {
     let stopped = rpc(&cmd_ep, &Command::Stop).await;
     assert!(stopped.success, "{}", stopped.message);
     assert_eq!(stopped.state, ComponentState::Configured);
+
+    shutdown_and_join(shutdown, task).await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------
+// (f) TODO/117: PULL ポートは finalize(fsync)より前に空く
+// ---------------------------------------------------------------------
+
+/// 同じエンドポイントへ **1 回だけ** bind を試みる(リトライしない)。
+fn bind_once(ctx: &zmq::Context, endpoint: &str) -> zmq::Result<zmq::Socket> {
+    let sock = ctx.socket(zmq::PULL).unwrap();
+    sock.set_linger(0).unwrap();
+    sock.bind(endpoint)?;
+    Ok(sock)
+}
+
+/// 遅い fsync の再現: `finalize_delay_ms` = 2500 ms(テスト専用フック)で finalize を遅らせる。
+/// Stop → Reset の後、受信スレッドは停止合図に最大 POLL_TIMEOUT_MS(200 ms)で気づいて
+/// ループを抜ける。ポートはそこで空くはず(finalize の 2500 ms を待たない)。
+/// Reset 直後の 1 回 bind は受信スレッドの気づきと競合するので、bind の試行を 20 ms 間隔で
+/// 繰り返し、1500 ms 以内(< 2500 ms)に取れることを見る。finalize の後にしか放さない
+/// 実装では ~2500 ms かかって失敗する。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reset_frees_the_pull_port_before_finalize_finishes() {
+    const RUN: u32 = 21;
+    let root = temp_root("port-before-finalize");
+    let mut params = test_params(root.clone(), vec![0], 10 * 1024 * 1024);
+    params.finalize_delay_ms = 2500;
+    let (cmd_ep, shutdown, task) = start_graw_writer(params).await;
+
+    let pull_ep = configure_arm(&cmd_ep, RUN).await;
+    let started = rpc(&cmd_ep, &Command::Start { run_number: RUN }).await;
+    assert!(started.success, "{}", started.message);
+
+    let ctx = zmq::Context::new();
+    let push = connect_push(&ctx, &pull_ep);
+    send_batch(&push, 0, RUN, 0, &[make_frame(1, 40, 0xAB)]);
+    poll_until(&cmd_ep, &Command::GetStatus, Duration::from_secs(5), |r| {
+        !files_of(r).is_empty()
+    })
+    .await;
+
+    let stopped = rpc(&cmd_ep, &Command::Stop).await;
+    assert!(stopped.success, "{}", stopped.message);
+    let reset = rpc(&cmd_ep, &Command::Reset).await;
+    assert!(reset.success, "{}", reset.message);
+    assert_eq!(reset.state, ComponentState::Idle);
+
+    let t0 = Instant::now();
+    let rebound = loop {
+        match bind_once(&ctx, &pull_ep) {
+            Ok(sock) => break sock,
+            Err(e) => {
+                assert!(
+                    t0.elapsed() < Duration::from_millis(1500),
+                    "{pull_ep} がまだ使用中(finalize の終わりを待っている?): {e}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    drop(rebound);
 
     shutdown_and_join(shutdown, task).await;
     let _ = std::fs::remove_dir_all(&root);
