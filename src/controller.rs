@@ -32,9 +32,10 @@
 //! 畳む段の `Reset` が届かないと、そのコンポーネントは `Configured` のまま残り、次の
 //! `Configure` が断られ続ける。`GetStatus` で Idle でないものにだけ `Reset` を撃ち、跡を
 //! audit `run/start.component_walk_back` に残す([`Sequencer::walk_components_back_to_idle`])。
-//! 全員が `Running`(run 中に controller だけが再起動した姿)なら、`Reset` の前に停止経路と
-//! 同じく receiver `Stop` → EOS 待ち → 下流 `Stop` で前の run を閉じる(114 —— `Reset` は
-//! 送出待ちを打ち切るので、送出待ちがあると EOS ごと打ち切られる。競争に頼らない)。
+//! 全員が `Running`(run 中に controller だけが再起動した姿)なら、`Reset` の前に停止経路の
+//! 2 段そのもの(自然 EOS か受信静止 → 閉じていなければ receiver `Stop` → EOS 待ち → 下流
+//! `Stop`)で前の run を閉じる(114 —— `Reset` は送出待ちを打ち切るので、送出待ちがあると
+//! EOS ごと打ち切られる。競争に頼らない)。
 //!
 //! あわせて、`Arm` は前の run が閉じたソケットの解放待ちで一時的に bind に失敗しうるので
 //! 指数バックオフで粘り(粘った実績は audit へ)、run 開始が失敗したときは
@@ -433,6 +434,26 @@ pub struct StartReport {
     /// `"eos: did not propagate within <ms> ms"`(全員 Running)/ `"eos: not awaited — …"`
     /// (一部だけ Running)。空 = 全員 Idle だった(正常な姿)。**audit に残す**。
     pub component_walk_back: Vec<String>,
+    /// 歩き戻しで閉じた前の run(115)。Running が 1 つも居なければ `None`。
+    pub walked_back_run: Option<WalkedBackRun>,
+}
+
+/// 歩き戻しで閉じた前の run(115)= その `run_stop` の材料。書くのは呼び手
+/// ([`start_run_blocking`] が `RunStart` の**前**に)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct WalkedBackRun {
+    /// 前の run の番号。状態調べの `GetStatus` で `run_number` を申告した全員が一致したときだけ
+    /// `Ok`。食い違う/誰も申告しない → `Err(理由)` —— run_stop は書かない(推測で台帳を汚さない)。
+    pub run: Result<u32, String>,
+    /// EOS を receiver `Stop` で注入したか(run_stop の同名の項)。
+    pub forced_eos: bool,
+    /// EOS がチェーンを流れ切ったと観測できたか(一部だけ Running なら待たないので常に `false`)。
+    pub eos_closed: bool,
+    /// **Stop の後・Reset の前**に採った実績(graw-writer は Reset でファイル実績を手放す)。
+    pub counters: Counters,
+    pub files: Vec<OutputFile>,
+    /// 材料集めの異常(`GetStatus` 不達など。silent にしない)。
+    pub notes: Vec<String>,
 }
 
 /// `Arm` のリトライ実績(034 = 論点 B「リトライしたら回数と所要を必ず出す」)。
@@ -472,6 +493,10 @@ pub struct StartFailure {
     pub detail: String,
     /// 巻き戻しで送ったコマンドのうち失敗したものの記録(silent にしない)。
     pub rollback_notes: Vec<String>,
+    /// 歩き戻しで閉じた前の run(115)。start が後で落ちても前の run は閉じているので、
+    /// 呼び手はこれで run_stop を書く。`Box` は `Result` の `Err` を小さく保つため
+    /// (clippy::result_large_err)。
+    pub walked_back_run: Option<Box<WalkedBackRun>>,
 }
 
 impl std::fmt::Display for StartFailure {
@@ -513,11 +538,18 @@ pub struct StopReport {
 pub struct Sequencer<'a> {
     params: &'a ControllerParams,
     transport: &'a mut dyn Transport,
+    /// 歩き戻しで閉じた前の run(115)。歩き戻しが置き、`start_run` の成功報告か
+    /// [`Self::rollback`] の失敗報告が持ち出す(どの段で落ちても失われない)。
+    walked_back_run: Option<WalkedBackRun>,
 }
 
 impl<'a> Sequencer<'a> {
     pub fn new(params: &'a ControllerParams, transport: &'a mut dyn Transport) -> Self {
-        Self { params, transport }
+        Self {
+            params,
+            transport,
+            walked_back_run: None,
+        }
     }
 
     // -----------------------------------------------------------------
@@ -625,6 +657,7 @@ impl<'a> Sequencer<'a> {
             ecc_state_after_reset,
             ecc_walk_back,
             component_walk_back,
+            walked_back_run: self.walked_back_run.take(),
         })
     }
 
@@ -637,9 +670,12 @@ impl<'a> Sequencer<'a> {
     /// 「run を閉じる前に Reset しない」と同じ理由。decoder なら EOS バリアの喪失)。
     ///
     /// * **全員 `Running`**(チェーンが無傷 = 典型は run 中に controller だけが落ちて再起動
-    ///   した姿、114): 停止経路の強制 EOS と同じ手順で前の run を閉じる —— 全 receiver へ
-    ///   `Stop` → [`Self::wait_for_eos`](上限 `eos_timeout`)→ 残り(decoder → graw-writer)へ
-    ///   `Stop`。decoder の `Stop` は自分の EOS を出さない(全 receiver の EOS を受けたときだけ
+    ///   した姿、114): **停止経路の 2 段そのもの**で前の run を閉じる ——
+    ///   [`Self::wait_for_eos_or_quiesce`](自然 EOS か受信静止の早い方。`receiver::drain_task`
+    ///   は Stop で即 break してカーネル受信バッファの未読分を捨てるので、静止を確かめてから
+    ///   Stop する)→ 閉じていなければ全 receiver へ `Stop`(強制 EOS)→ [`Self::wait_for_eos`]
+    ///   (上限 `eos_timeout`)→ 残り(強制 EOS を撃たなかったなら receiver も)へ `Stop`。
+    ///   decoder の `Stop` は自分の EOS を出さない(全 receiver の EOS を受けたときだけ
     ///   出る)ので、この順でないと EOS は root-sink まで届かない。待ちの結果は跡の先頭に
     ///   `"eos: closed"` / `"eos: did not propagate within <ms> ms"` で 1 行残し、**どちらでも
     ///   start は止めない**(届かなければ後の `Reset` が打ち切り、それは各コンポーネントの
@@ -647,7 +683,11 @@ impl<'a> Sequencer<'a> {
     ///   いる(停止経路の ecc stop → receiver Stop と同じ順)。
     /// * **一部だけ `Running`**(チェーンがどこかで既に Reset 済み): EOS は端まで届かず観測も
     ///   できないので待たない。跡の先頭に `"eos: not awaited — …"` を 1 行残し、`Running` の
-    ///   ものは 113 と同じく `Stop` → `Reset`。
+    ///   ものは 113 と同じく `Stop` → `Reset`(Stop は Reset より先に全部済ませる)。
+    ///
+    /// Running が 1 つでも居たら、**Stop の後・Reset の前**に `GetStatus` で前の run の
+    /// run_stop の材料を採り([`WalkedBackRun`]、115)、`self.walked_back_run` に置く。
+    /// run 番号は状態調べの `run_number` の一致からだけ決める([`previous_run_number`])。
     ///
     /// 最後に Idle でない全員へ上流から `Reset`。コンポーネントごとの跡は
     /// `"<名前>: <状態>[-><Stop の着地>]-><Reset の着地>"`
@@ -662,9 +702,15 @@ impl<'a> Sequencer<'a> {
         // 1. 状態調べ(上流から)。`steps` は (相手, 歩き戻し前の状態, 今の状態, 跡の 1 行) を
         //    上流から並べる。何をするかは**歩き戻し前の状態**で決め、失敗の文言は**今の状態**
         //    (直前の手が着地した状態)で名乗る。
+        //    前の run の番号の申告(115)も `(名前, run_number)` で上流から控える。
         let mut steps = Vec::with_capacity(params.components.len());
+        let mut reported_runs = Vec::new();
         for component in params.components.iter().rev() {
-            let state = self.apply(component, &Command::GetStatus)?.state;
+            let response = self.apply(component, &Command::GetStatus)?;
+            let state = response.state;
+            if let Some(run) = response.run_number {
+                reported_runs.push((component.name.as_str(), run));
+            }
             steps.push((
                 component,
                 state,
@@ -677,17 +723,33 @@ impl<'a> Sequencer<'a> {
             .filter(|(_, before, _, _)| *before == ComponentState::Running)
             .count();
         let chain_intact = running > 0 && running == steps.len();
+        // run_stop(115)に載る EOS の顛末。
+        let mut forced_eos = false;
+        let mut eos_closed = false;
 
-        // 2. チェーンが無傷なら前の run を EOS で閉じる(停止経路の強制 EOS と同じ手順)。
+        // 2. チェーンが無傷なら前の run を EOS で閉じる(停止経路の 2 段そのもの、114 追補)。
+        //    第一段 = 自然 EOS か受信静止の早い方まで待つ —— `receiver::drain_task` は Stop で
+        //    即 break し、カーネル受信バッファの未読分を数えずに捨てるので、静止を確かめてから
+        //    Stop する。閉じていなければ全 receiver へ Stop(強制 EOS)→ 第二段 = EOS 待ち。
         if chain_intact {
-            for (component, _, now, step) in steps.iter_mut() {
-                if matches!(component.kind, ComponentKind::Receiver { .. }) {
-                    self.walk_back_step(component, now, &Command::Stop, step)?;
-                }
-            }
             let mut notes = Vec::new();
-            if self.wait_for_eos(&mut notes) {
-                info!(?notes, "previous run closed with EOS before the walk-back");
+            let mut closed = self.wait_for_eos_or_quiesce(&mut notes);
+            forced_eos = !closed;
+            if forced_eos {
+                for (component, _, now, step) in steps.iter_mut() {
+                    if matches!(component.kind, ComponentKind::Receiver { .. }) {
+                        self.walk_back_step(component, now, &Command::Stop, step)?;
+                    }
+                }
+                closed = self.wait_for_eos(&mut notes);
+            }
+            eos_closed = closed;
+            if closed {
+                info!(
+                    forced_eos,
+                    ?notes,
+                    "previous run closed with EOS before the walk-back"
+                );
                 trail.push("eos: closed".to_string());
             } else {
                 let line = format!(
@@ -701,8 +763,11 @@ impl<'a> Sequencer<'a> {
                 );
                 trail.push(line);
             }
+            // 停止経路の畳む段と同じ: 強制 EOS で既に Stop 済みの receiver へは撃ち直さない。
             for (component, _, now, step) in steps.iter_mut() {
-                if !matches!(component.kind, ComponentKind::Receiver { .. }) {
+                let already_stopped =
+                    forced_eos && matches!(component.kind, ComponentKind::Receiver { .. });
+                if !already_stopped {
                     self.walk_back_step(component, now, &Command::Stop, step)?;
                 }
             }
@@ -710,15 +775,39 @@ impl<'a> Sequencer<'a> {
             let line = "eos: not awaited — the chain is broken (not every component is Running)";
             warn!("{line}; Running components are stopped and reset one by one");
             trail.push(line.to_string());
+            // Running のものを上流から Stop(Reset より先に全部 —— 下の材料集めのため)。
+            // receiver の Stop は EOS を注入する(待たないので閉じたかは観測しない)。
+            for (component, before, now, step) in steps.iter_mut() {
+                if *before == ComponentState::Running {
+                    self.walk_back_step(component, now, &Command::Stop, step)?;
+                    forced_eos |= matches!(component.kind, ComponentKind::Receiver { .. });
+                }
+            }
         }
 
-        // 3. Idle でない全員を上流から Reset(チェーンが切れていれば Running はここで Stop も)。
+        // 2'. 前の run の run_stop の材料(115)。Stop の後・Reset の前 —— graw-writer は
+        //     Reset でファイル実績を手放す(停止経路の第 3 段と同じ理由)。
+        if running > 0 {
+            let mut notes = Vec::new();
+            let statuses = self.collect_status(&mut notes);
+            let run = previous_run_number(&reported_runs);
+            if let Err(why) = &run {
+                warn!("{why}");
+            }
+            self.walked_back_run = Some(WalkedBackRun {
+                run,
+                forced_eos,
+                eos_closed,
+                counters: counters_from(params, &statuses),
+                files: files_from(&statuses),
+                notes,
+            });
+        }
+
+        // 3. Idle でない全員を上流から Reset。
         for (component, before, mut now, mut step) in steps {
             if before == ComponentState::Idle {
                 continue;
-            }
-            if before == ComponentState::Running && !chain_intact {
-                self.walk_back_step(component, &mut now, &Command::Stop, &mut step)?;
             }
             self.walk_back_step(component, &mut now, &Command::Reset, &mut step)?;
             warn!(
@@ -906,6 +995,7 @@ impl<'a> Sequencer<'a> {
             stage,
             detail,
             rollback_notes,
+            walked_back_run: self.walked_back_run.take().map(Box::new),
         }
     }
 
@@ -1340,6 +1430,31 @@ impl<'a> Sequencer<'a> {
             }
         }
     }
+}
+
+/// 歩き戻しで閉じた前の run の番号(115)。`reported` は状態調べで `run_number` を申告した
+/// コンポーネント(上流から `(名前, 番号)`)で、**全員が一致したときだけ** `Ok`。
+/// 食い違う/誰も申告しない → `Err(理由)`。状態ファイルの `next_run - 1` は `run/next` で
+/// 手動変更され得るので使わない(推測で台帳を汚さない)。
+fn previous_run_number(reported: &[(&str, u32)]) -> Result<u32, String> {
+    let Some(&(_, first)) = reported.first() else {
+        return Err(
+            "no component reported a run_number — the previous run is unknown; \
+             run_stop not written"
+                .to_string(),
+        );
+    };
+    if reported.iter().all(|&(_, run)| run == first) {
+        return Ok(first);
+    }
+    let listed: Vec<String> = reported
+        .iter()
+        .map(|(name, run)| format!("{name}={run}"))
+        .collect();
+    Err(format!(
+        "components disagree on the previous run number ({}) — run_stop not written",
+        listed.join(", ")
+    ))
 }
 
 /// 同じ文言を何度も積まない(EOS 待ちは毎周期同じ失敗を出しうる)。
@@ -2247,6 +2362,15 @@ fn start_run_blocking(
         sequencer.start_run(run, comment, &run_start_ts)
     };
 
+    // 115: 歩き戻しで閉じた前の run の run_stop を、新しい run の RunStart より**前に**書く
+    // (start が後で落ちても前の run は閉じているので書く)。要約は audit へ(null = 閉じた run 無し)。
+    let walked_back_run = match &result {
+        Ok(report) => report.walked_back_run.as_ref(),
+        Err(failure) => failure.walked_back_run.as_deref(),
+    };
+    let previous_run_stop =
+        walked_back_run.map(|closed| append_walked_back_run_stop(controller, closed));
+
     match result {
         Ok(report) => {
             let (geometry, expected_fragments) = geometry;
@@ -2282,6 +2406,9 @@ fn start_run_blocking(
                     // 113: Idle でなかったコンポーネントを Reset で歩き戻した跡(空 = 全員 Idle)。
                     // 空でない = 前の run の停止で Reset が届かなかった、という運用の可視化。
                     "component_walk_back": report.component_walk_back,
+                    // 115: 歩き戻しで閉じた前の run の run_stop の要約(`{"run", "notes"}`、
+                    // run が null = 番号が決まらず書かなかった)。null = 閉じた run 無し。
+                    "previous_run_stop": previous_run_stop,
                     // 078 レーン B §10-3: この run が使った params の `<id>`(無ければ null =
                     // TOML の config_id だけで走った)。
                     "params_id": params_id}),
@@ -2314,6 +2441,7 @@ fn start_run_blocking(
                     "comment": comment,
                     "stage": failure.stage,
                     "next_run_rewound": rewound,
+                    "previous_run_stop": previous_run_stop,
                     "params_id": params_id,
                 }),
                 operator,
@@ -2323,6 +2451,94 @@ fn start_run_blocking(
             Err(detail)
         }
     }
+}
+
+/// 歩き戻しで閉じた前の run の `run_stop` を書く(115、Fable 裁定)。**新しい run の
+/// `RunStart` より前に**呼ぶ(start が後で落ちても前の run は閉じているので書く)。
+///
+/// * 番号が決まらなければ(`closed.run` が `Err`)書かない —— 理由は要約の notes へ。
+/// * `reason: "abort:controller-restart"`、`ok: false`。EOS の顛末と counters / files は
+///   歩き戻しの材料そのまま。
+/// * `duration_s` はログブックの**同じ番号の** `run_start.ts` から。無ければ `null`。
+/// * ログブックの**最後の** `run_start` は照合だけに使い、番号が違えば note を残す。
+///
+/// 戻り値は audit `run/start.previous_run_stop` に載せる要約 `{"run": N | null, "notes": [...]}`
+/// (書かなかった理由・照合の食い違いを silent にしない)。
+fn append_walked_back_run_stop(controller: &Controller, closed: &WalkedBackRun) -> Value {
+    let mut notes = closed.notes.clone();
+    let run = match &closed.run {
+        Ok(run) => *run,
+        Err(why) => {
+            notes.push(why.clone());
+            return json!({"run": null, "notes": notes});
+        }
+    };
+
+    let records = match crate::logbook::read_since(&controller.logbook_path, 0) {
+        Ok(result) => result.records,
+        Err(e) => {
+            notes.push(format!("cannot read the logbook: {e}"));
+            Vec::new()
+        }
+    };
+    let starts: Vec<(u32, &str)> = records
+        .iter()
+        .filter_map(|line| match &line.record {
+            LogbookRecord::RunStart { run, .. } => Some((*run, line.ts.as_str())),
+            _ => None,
+        })
+        .collect();
+    if let Some(&(last, _)) = starts.last() {
+        if last != run {
+            notes.push(format!(
+                "the last run_start in the logbook is run {last}, not {run}"
+            ));
+        }
+    }
+    let duration_s = match starts.iter().rev().find(|(r, _)| *r == run) {
+        None => {
+            notes.push(format!(
+                "no run_start for run {run} in the logbook — duration_s is null"
+            ));
+            None
+        }
+        Some((_, ts)) => {
+            let seconds = seconds_since(ts, chrono::Local::now().fixed_offset());
+            if seconds.is_none() {
+                notes.push(format!(
+                    "run_start.ts {ts:?} of run {run} is not RFC3339 — duration_s is null"
+                ));
+            }
+            seconds
+        }
+    };
+
+    warn!(
+        run,
+        eos_closed = closed.eos_closed,
+        ?notes,
+        "writing run_stop for the run the walk-back closed (the controller restarted mid-run)"
+    );
+    controller.append(LogbookRecord::RunStop {
+        actor: ACTOR.to_string(),
+        run,
+        duration_s,
+        ok: false,
+        reason: "abort:controller-restart".to_string(),
+        forced_eos: closed.forced_eos,
+        eos_closed: closed.eos_closed,
+        counters: closed.counters.clone(),
+        files: closed.files.clone(),
+        slow: controller.slow_snapshot(),
+    });
+    json!({"run": run, "notes": notes})
+}
+
+/// RFC3339 の `ts` から `now` までの秒(オフセットが違っても同じ瞬間で比べる)。
+/// 読めなければ `None`。
+fn seconds_since(ts: &str, now: chrono::DateTime<chrono::FixedOffset>) -> Option<f64> {
+    let started = chrono::DateTime::parse_from_rfc3339(ts).ok()?;
+    Some((now - started).num_milliseconds() as f64 / 1000.0)
 }
 
 /// [`start_run_blocking`] の params 部分だけを切り出したもの(078 レーン B §10-3)。
@@ -2507,7 +2723,7 @@ fn stop_run_blocking(controller: &Controller, operator: &str, active: Option<Act
     controller.append(LogbookRecord::RunStop {
         actor: ACTOR.to_string(),
         run,
-        duration_s,
+        duration_s: Some(duration_s),
         ok: report.ok,
         reason: report.reason.clone(),
         // 033-A: 停止の顛末は **run_stop(唯一の run 台帳)** にも載せる。ここに無いと
@@ -3345,6 +3561,9 @@ mod tests {
         /// コンポーネント名 → 今の状態(113)。未登録 = `Idle`。断られなかった状態遷移
         /// コマンドはその行き先へ動かす(合法性は見ない — それは統合テストの本物の状態機械の役)。
         states: BTreeMap<String, ComponentState>,
+        /// コンポーネント名 → 応答に載せる `run_number`(115)。未登録 = `null`
+        /// (実コンポーネントは run を持っていないとき鍵を null にする)。
+        run_numbers: BTreeMap<String, u32>,
         slept: Duration,
     }
 
@@ -3397,6 +3616,7 @@ mod tests {
                 receiver_polls: BTreeMap::new(),
                 unreachable: Vec::new(),
                 states: BTreeMap::new(),
+                run_numbers: BTreeMap::new(),
                 slept: Duration::ZERO,
             }
         }
@@ -3405,6 +3625,12 @@ mod tests {
         /// (例: 前の run の停止で Reset が届かず `Configured` のまま残った)。
         fn component_in(mut self, component: &str, state: ComponentState) -> Self {
             self.states.insert(component.to_string(), state);
+            self
+        }
+
+        /// 115: このコンポーネントの応答に `run_number = run` を載せる(前の run の番号の出典)。
+        fn reports_run(mut self, component: &str, run: u32) -> Self {
+            self.run_numbers.insert(component.to_string(), run);
             self
         }
 
@@ -3627,11 +3853,14 @@ mod tests {
                 .get(&name)
                 .copied()
                 .unwrap_or(ComponentState::Idle);
-            let response = if refused {
+            let mut response = if refused {
                 CommandResponse::error(state, format!("mock refuses {action}"))
             } else {
                 CommandResponse::success(state, format!("{action} ok"))
             };
+            if let Some(&run) = self.run_numbers.get(&name) {
+                response = response.with_run_number(run);
+            }
             Ok(response.with_metrics(metrics))
         }
 
@@ -4416,13 +4645,17 @@ mod tests {
             vec!["Configure", "Arm", "Start"]
         );
         assert_eq!(mock.actions("receiver1"), vec!["Configure", "Arm", "Start"]);
+        // Running が居ない = 前の run は通常の停止で既に閉じている(run_stop も書かれている)
+        // ので、歩き戻しは run_stop の材料を作らない(115)。
+        assert_eq!(report.walked_back_run, None);
     }
 
     /// Running のまま残ったコンポーネントは **Stop(EOS を流す)→ Reset** の順で戻し、
     /// Configure はその後(v1.6 の「run を閉じる前に Reset しない」と同じ理由)。
     /// 跡は Stop の着地(§1.3 遷移表: Running --Stop--> Configured)も挟む。
     /// ここは一部だけ Running(receiver0 は Armed)なので EOS は待たず、跡の先頭に
-    /// その旨が載る(114)。
+    /// その旨が載る(114)。Running の Stop は**どの Reset よりも先**(115: 前の run の
+    /// run_stop の材料を Stop の後・Reset の前に採るため)。
     #[test]
     fn a_running_component_is_stopped_before_the_reset_and_configured_after() {
         let params = params_with(&[0]);
@@ -4437,8 +4670,8 @@ mod tests {
             &mock.commands()[..5],
             &[
                 Call::new("ecc", "status"),
-                Call::new("receiver0", "Reset"), // Armed → Reset のみ
                 Call::new("decoder", "Stop"),
+                Call::new("receiver0", "Reset"), // Armed → Reset のみ
                 Call::new("decoder", "Reset"),
                 Call::new("graw-writer", "Configure"),
             ]
@@ -4476,7 +4709,8 @@ mod tests {
         assert!(!mock.commands().iter().any(|c| c.action == "Configure"));
     }
 
-    /// 全員 Idle なら歩き戻しの跡は空(1 本目・正常な連続 run の姿)。
+    /// 全員 Idle なら歩き戻しの跡は空(1 本目・正常な連続 run の姿)。閉じる run も無い
+    /// (115: run_stop は書かない)。
     #[test]
     fn idle_components_leave_an_empty_walk_back_trail() {
         let params = params_with(&[0]);
@@ -4486,6 +4720,7 @@ mod tests {
             .unwrap();
         assert!(report.component_walk_back.is_empty());
         assert!(!mock.commands().iter().any(|c| c.action == "Reset"));
+        assert_eq!(report.walked_back_run, None);
     }
 
     /// 歩き戻しの `Reset` が断られたら run を始めない。**どれが・何の状態で**残ったかを
@@ -4515,17 +4750,25 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// **114 の本体**: run 中に controller だけが落ちて再起動した姿(相 Idle、ECC も
-    /// コンポーネントも全員 Running)。チェーンが無傷なので、停止経路の強制 EOS と同じ手順で
-    /// 前の run を閉じてから歩き戻す: 全 receiver へ `Stop` → EOS 待ち(decoder / graw-writer
-    /// への GetStatus)→ decoder `Stop` → graw-writer `Stop` → 上流から `Reset` × 全員 →
+    /// コンポーネントも全員 Running)。チェーンが無傷なので、**停止経路の 2 段そのもの**で
+    /// 前の run を閉じてから歩き戻す(114 追補): 第一段 = 自然 EOS か受信静止の早い方まで待つ
+    /// (`receiver::drain_task` は Stop で即 break してカーネル受信バッファの未読分を捨てるので、
+    /// 静止を確かめてから Stop する)→ 閉じていなければ全 receiver へ `Stop`(強制 EOS)→
+    /// 第二段 = EOS 待ち → decoder `Stop` → graw-writer `Stop` → 上流から `Reset` × 全員 →
     /// Configure。ECC はそれより先に歩き戻る(= zCoBo は既に止まっている)。
     ///
-    /// 手計算(eos_poll = 200 ms、`eos_after_polls = Some(4)`。MockTransport が数えるのは
-    /// decoder / graw-writer への GetStatus だけ): 状態調べで decoder = 1・graw-writer = 2。
-    /// EOS 待ちの 1 回目は graw-writer = 3(≤ 4 = 未着。`eos_complete` は files_open = 1 の
-    /// graw-writer で打ち切るので decoder へは行かない)→ 200 ms → graw-writer = 4(未着)→
-    /// 200 ms → graw-writer = 5・decoder = 6(> 4 = 到着)。よって EOS 待ちの GetStatus は
-    /// graw-writer × 3 + decoder × 1、眠るのは 2 回 = 400 ms。
+    /// ここは「第一段は静止で切り上がる(EOS は来ない)→ 強制 EOS → 第二段で閉じる」の形。
+    /// 手計算(eos_poll = 200 ms、eos_quiesce = 500 ms、受信バイト数は不変、
+    /// `eos_after_polls = Some(7)`。MockTransport が EOS 側に数えるのは decoder / graw-writer
+    /// への GetStatus だけ):
+    /// - 状態調べ: decoder = 1・graw-writer = 2(receiver は数えない)。
+    /// - 第一段: 1 周 = graw-writer への判定 1 回(files_open = 1 で打ち切るので decoder へは
+    ///   行かない)+ receiver 2 台の bytes。graw-writer = 3, 4, 5, 6 の 4 周で静止 0 → 200 →
+    ///   400 → 600 ms ≥ 500 ms → 切り上げ。眠るのは 3 回 = 600 ms。receiver はそれぞれ
+    ///   状態調べ 1 + 第一段 4 = **5 回**問い合わされてから Stop される。
+    /// - 第二段: graw-writer = 7(≤ 7 = 未着)→ 200 ms → graw-writer = 8・decoder = 9
+    ///   (> 7 = 到着)。眠るのは 1 回 = 200 ms。
+    /// - 合計 800 ms。receiver0 の Stop と decoder の Stop のあいだは graw-writer × 2 + decoder × 1。
     #[test]
     fn a_fully_running_chain_is_closed_with_eos_before_the_walk_back_resets() {
         let params = params_with(&[0, 1]);
@@ -4535,10 +4778,23 @@ mod tests {
             .component_in("decoder", ComponentState::Running)
             .component_in("receiver0", ComponentState::Running)
             .component_in("receiver1", ComponentState::Running);
-        mock.eos_after_polls = Some(4);
+        mock.eos_after_polls = Some(7);
         let report = Sequencer::new(&params, &mut mock)
             .start_run(59, "", "2026-10-12T08:43:00.000")
             .unwrap();
+
+        let first_receiver_stop = mock.index_of("receiver1", "Stop").unwrap();
+        for receiver in ["receiver0", "receiver1"] {
+            let polls = mock.calls[..first_receiver_stop]
+                .iter()
+                .filter(|c| c.component == receiver && c.action == "GetStatus")
+                .count();
+            assert_eq!(
+                polls, 5,
+                "{receiver}: 静止を確かめずに Stop している: {:?}",
+                mock.calls
+            );
+        }
 
         assert_eq!(
             &mock.commands()[..14],
@@ -4568,12 +4824,11 @@ mod tests {
             &[
                 Call::new("graw-writer", "GetStatus"),
                 Call::new("graw-writer", "GetStatus"),
-                Call::new("graw-writer", "GetStatus"),
                 Call::new("decoder", "GetStatus"),
             ],
-            "EOS 待ちが receiver Stop と decoder Stop のあいだに無い"
+            "第二段の EOS 待ちが receiver Stop と decoder Stop のあいだに無い"
         );
-        assert_eq!(mock.slept, Duration::from_millis(400));
+        assert_eq!(mock.slept, Duration::from_millis(800));
         assert_eq!(
             report.component_walk_back,
             vec![
@@ -4586,11 +4841,69 @@ mod tests {
         );
     }
 
+    /// 全員 Running で、**第一段で自然 EOS が成立**する形(実機では ECC の歩き戻しの breakup で
+    /// CoBo がリンクを close し、receiver が EOF から EOS を出す)。強制 EOS は撃たない ——
+    /// receiver の `Stop` は EOS を見届けた**後**に、停止経路の畳む段と同じく下流と一緒に撃つ
+    /// (跡は全員 `Running->Configured->Idle` のまま)。
+    ///
+    /// 手計算(`with_eos_closed` = 最初の判定から閉じている): 状態調べ(receiver0 → decoder →
+    /// graw-writer)の直後、第一段の 1 回目の判定(graw-writer → decoder)で閉じる。眠らない。
+    #[test]
+    fn a_fully_running_chain_whose_eos_arrives_on_its_own_is_not_forced() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .with_eos_closed()
+            .component_in("graw-writer", ComponentState::Running)
+            .component_in("decoder", ComponentState::Running)
+            .component_in("receiver0", ComponentState::Running);
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(59, "", "2026-10-12T08:43:00.000")
+            .unwrap();
+
+        assert_eq!(
+            &mock.calls[..16],
+            &[
+                Call::new("ecc", "status"),
+                // 状態調べ(上流から)。
+                Call::new("receiver0", "GetStatus"),
+                Call::new("decoder", "GetStatus"),
+                Call::new("graw-writer", "GetStatus"),
+                // 第一段: 自然 EOS が成立(receiver の静止観測には進まない)。
+                Call::new("graw-writer", "GetStatus"),
+                Call::new("decoder", "GetStatus"),
+                // 強制 EOS は無し。畳む段と同じく上流から Stop、その後 Reset。
+                Call::new("receiver0", "Stop"),
+                Call::new("decoder", "Stop"),
+                Call::new("graw-writer", "Stop"),
+                // 115: 前の run の run_stop の材料(Stop の後・Reset の前、collect_status の順)。
+                Call::new("graw-writer", "GetStatus"),
+                Call::new("decoder", "GetStatus"),
+                Call::new("receiver0", "GetStatus"),
+                Call::new("receiver0", "Reset"),
+                Call::new("decoder", "Reset"),
+                Call::new("graw-writer", "Reset"),
+                Call::new("graw-writer", "Configure"),
+            ]
+        );
+        assert_eq!(mock.slept, Duration::ZERO);
+        assert_eq!(
+            report.component_walk_back,
+            vec![
+                "eos: closed".to_string(),
+                "receiver0: Running->Configured->Idle".to_string(),
+                "decoder: Running->Configured->Idle".to_string(),
+                "graw-writer: Running->Configured->Idle".to_string(),
+            ]
+        );
+    }
+
     /// 全員 Running だが EOS が `eos_timeout` 内に届かない(例: 下流が詰まって decoder が
     /// 自分の EOS を送れない)。跡に `eos: did not propagate within 5000 ms` を残し、それでも
     /// start は通す —— その後の Reset が送出待ちを EOS ごと打ち切り、打ち切りは各コンポーネントの
-    /// metrics(`messages_abandoned` / `eos_abandoned`)で見える。待つのはちょうど eos_timeout
-    /// (停止経路の第二段と同じ上限)。
+    /// metrics(`messages_abandoned` / `eos_abandoned`)で見える。待ち方は停止経路と同じ 2 段:
+    /// 第一段は受信静止(バイト数不変)で 600 ms(eos_poll 200 ms × 3 回 ≥ eos_quiesce 500 ms)、
+    /// 強制 EOS の後の第二段はハード上限 eos_timeout = 5 000 ms(200 ms × 25 回)まるごと。
+    /// 合計 5 600 ms。
     #[test]
     fn a_running_chain_whose_eos_never_arrives_is_reset_anyway_and_the_run_starts() {
         let params = params_with(&[0]);
@@ -4603,7 +4916,7 @@ mod tests {
             .start_run(59, "", "2026-10-12T08:43:00.000")
             .unwrap();
 
-        assert_eq!(mock.slept, params.eos_timeout);
+        assert_eq!(mock.slept, Duration::from_millis(5_600));
         assert_eq!(
             report.component_walk_back,
             vec![
@@ -4634,6 +4947,9 @@ mod tests {
             .component_in("graw-writer", ComponentState::Running)
             .component_in("decoder", ComponentState::Running)
             .component_in("receiver0", ComponentState::Running)
+            .reports_run("graw-writer", 58)
+            .reports_run("decoder", 58)
+            .reports_run("receiver0", 58)
             .fail_on("receiver0", "Reset");
         let failure = Sequencer::new(&params, &mut mock)
             .start_run(59, "", "2026-10-12T08:43:00.000")
@@ -4648,18 +4964,29 @@ mod tests {
         assert_eq!(mock.actions("receiver0"), vec!["Stop", "Reset"]);
         assert_eq!(mock.actions("decoder"), vec!["Stop"]);
         assert_eq!(mock.actions("graw-writer"), vec!["Stop"]);
+        // 115: run 58 は Reset の前に EOS で閉じて材料も採れているので、歩き戻しが途中で
+        // 落ちても失敗報告に載る(呼び手が run_stop を書く)。
+        let closed = failure
+            .walked_back_run
+            .expect("closed run rides on the failure");
+        assert_eq!(closed.run, Ok(58));
+        assert!(closed.eos_closed);
     }
 
     /// 一部だけ Running(decoder だけ。receiver0 は前の停止で Reset 済み = Idle、graw-writer は
     /// Configured のまま)。チェーンが途中で切れているので EOS は端まで届かず観測もできない ——
     /// **待たない**。跡の先頭に「待たない」旨の 1 行を残し、Running の decoder は 113 と同じく
-    /// Stop → Reset。decoder / graw-writer への GetStatus は状態調べの 1 回ずつだけ。
+    /// Stop → Reset。decoder / graw-writer への GetStatus は状態調べと run_stop の材料集め
+    /// (115)の 1 回ずつだけ。閉じ損ねた run 58 も run_stop の材料になる(`eos_closed: false`。
+    /// receiver は Running でなかったので Stop していない = `forced_eos: false`)。
     #[test]
     fn a_partly_running_chain_is_walked_back_without_waiting_for_eos() {
         let params = params_with(&[0]);
         let mut mock = MockTransport::new(&params)
             .component_in("decoder", ComponentState::Running)
-            .component_in("graw-writer", ComponentState::Configured);
+            .component_in("graw-writer", ComponentState::Configured)
+            .reports_run("decoder", 58)
+            .reports_run("graw-writer", 58);
         let report = Sequencer::new(&params, &mut mock)
             .start_run(59, "", "2026-10-12T08:43:00.000")
             .unwrap();
@@ -4683,8 +5010,8 @@ mod tests {
             })
             .count();
         assert_eq!(
-            eos_side_polls, 2,
-            "状態調べ以外の GetStatus(= EOS 待ち)が出ている: {:?}",
+            eos_side_polls, 4,
+            "状態調べ・材料集め以外の GetStatus(= EOS 待ち)が出ている: {:?}",
             mock.calls
         );
         assert_eq!(mock.slept, Duration::ZERO);
@@ -4697,6 +5024,141 @@ mod tests {
                 "graw-writer: Configured->Idle".to_string(),
             ]
         );
+        let closed = report.walked_back_run.unwrap();
+        assert_eq!(closed.run, Ok(58));
+        assert!(!closed.eos_closed);
+        assert!(!closed.forced_eos);
+    }
+
+    // -----------------------------------------------------------------
+    // 115 — 歩き戻しで閉じた前の run の run_stop の材料
+    // -----------------------------------------------------------------
+
+    /// **115 の本体(材料側)**: 全員 Running で run 58 を EOS で閉じたら、run_stop の材料を
+    /// **Stop の後・Reset の前**に `GetStatus` で採って返す(graw-writer は Reset でファイル
+    /// 実績を手放すため)。run 番号は `run_number` を申告した全員の一致(ここでは graw-writer は
+    /// 申告しない = 数に入れない)。第一段で自然 EOS なので `forced_eos: false`。
+    ///
+    /// 値の出典(MockTransport の metrics): receiver0 の frames = 3000 + 並び順 2 = 3002、
+    /// overflow_frames = 0、decoder の malformed = 7、graw-writer の files は 1 本 30 108 672 B。
+    #[test]
+    fn a_fully_running_chain_hands_its_closed_run_back_for_the_run_stop() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .with_eos_closed()
+            .component_in("graw-writer", ComponentState::Running)
+            .component_in("decoder", ComponentState::Running)
+            .component_in("receiver0", ComponentState::Running)
+            .reports_run("decoder", 58)
+            .reports_run("receiver0", 58);
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(59, "", "2026-10-12T08:43:00.000")
+            .unwrap();
+
+        let last_stop = mock.index_of("graw-writer", "Stop").unwrap();
+        let first_reset = mock.index_of("receiver0", "Reset").unwrap();
+        assert_eq!(
+            &mock.calls[last_stop + 1..first_reset],
+            &[
+                Call::new("graw-writer", "GetStatus"),
+                Call::new("decoder", "GetStatus"),
+                Call::new("receiver0", "GetStatus"),
+            ],
+            "材料集めが Stop の後・Reset の前に無い"
+        );
+        let mut frames = BTreeMap::new();
+        frames.insert("0".to_string(), 3002);
+        assert_eq!(
+            report.walked_back_run,
+            Some(WalkedBackRun {
+                run: Ok(58),
+                forced_eos: false,
+                eos_closed: true,
+                counters: Counters {
+                    events_built: None,
+                    events_incomplete: None,
+                    late_fragments: None,
+                    frames,
+                    overflow_frames: Some(0),
+                    malformed: Some(7),
+                },
+                files: vec![OutputFile {
+                    path: "run0001/CoBo0_AsAd0_ts_0000.graw".to_string(),
+                    bytes: 30_108_672,
+                }],
+                notes: Vec::new(),
+            })
+        );
+    }
+
+    /// run 番号の申告が食い違ったら番号を決めない —— 推測で台帳を汚さない。理由は
+    /// 申告をそのまま並べて残す(呼び手は run_stop を書かずに audit の note へ回す)。
+    #[test]
+    fn a_run_number_the_components_disagree_on_is_not_used() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .with_eos_closed()
+            .component_in("graw-writer", ComponentState::Running)
+            .component_in("decoder", ComponentState::Running)
+            .component_in("receiver0", ComponentState::Running)
+            .reports_run("graw-writer", 58)
+            .reports_run("decoder", 57)
+            .reports_run("receiver0", 58);
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(59, "", "2026-10-12T08:43:00.000")
+            .unwrap();
+
+        let closed = report.walked_back_run.unwrap();
+        assert_eq!(
+            closed.run,
+            Err("components disagree on the previous run number \
+                 (receiver0=58, decoder=57, graw-writer=58) — run_stop not written"
+                .to_string())
+        );
+    }
+
+    /// 一部だけ Running でも receiver が Running なら、その `Stop` が EOS を注入する
+    /// (= `forced_eos: true`)。待たないので `eos_closed: false`。
+    #[test]
+    fn a_running_receiver_in_a_broken_chain_counts_as_a_forced_eos() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .component_in("graw-writer", ComponentState::Running)
+            .component_in("receiver0", ComponentState::Running)
+            .reports_run("graw-writer", 61)
+            .reports_run("receiver0", 61);
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(62, "", "2026-10-12T08:43:00.000")
+            .unwrap();
+
+        let closed = report.walked_back_run.unwrap();
+        assert_eq!(closed.run, Ok(61));
+        assert!(closed.forced_eos);
+        assert!(!closed.eos_closed);
+    }
+
+    /// 歩き戻しの**後**で start が落ちても(ここでは graw-writer が Configure を断る)、
+    /// 前の run は閉じているので材料は失敗報告に載る(呼び手が run_stop を書く)。
+    #[test]
+    fn a_start_that_fails_after_the_walk_back_still_hands_back_the_closed_run() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .with_eos_closed()
+            .component_in("graw-writer", ComponentState::Running)
+            .component_in("decoder", ComponentState::Running)
+            .component_in("receiver0", ComponentState::Running)
+            .reports_run("graw-writer", 58)
+            .reports_run("decoder", 58)
+            .reports_run("receiver0", 58)
+            .fail_on("graw-writer", "Configure");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(59, "", "2026-10-12T08:43:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "Configure");
+        let closed = failure.walked_back_run.unwrap();
+        assert_eq!(closed.run, Ok(58));
+        assert!(closed.eos_closed);
     }
 
     /// GetStatus が届かないコンポーネントも、状態が判らないまま Configure へ進まない。
@@ -5362,6 +5824,178 @@ mod tests {
         );
         controller.acquire("aogaki");
         assert!(controller.authorize("bogus").is_err());
+        let _ = std::fs::remove_dir_all(&controller.params.output_root);
+    }
+
+    // -----------------------------------------------------------------
+    // 115 — 歩き戻しで閉じた前の run の run_stop(台帳側)
+    // -----------------------------------------------------------------
+
+    /// 前の run の `run_start`(controller 自身が書いたものと同じ形)。
+    fn run_start_of(run: u32) -> LogbookRecord {
+        LogbookRecord::RunStart {
+            actor: ACTOR.to_string(),
+            run,
+            config_id: "mock".to_string(),
+            config_ids: None,
+            geometry: GeometryRecord {
+                path: "/tmp/tpcdaq-mock/geometry.dat".to_string(),
+                sha256: "ab12".to_string(),
+            },
+            cobos: vec![CoboListen {
+                id: 0,
+                listen: "0.0.0.0:46005".to_string(),
+            }],
+            operator: "aogaki".to_string(),
+            comment: "alpha".to_string(),
+            expected_fragments: vec![(0, 0), (0, 1)],
+            slow: None,
+            params: None,
+        }
+    }
+
+    /// 歩き戻しが返す材料(非対称な値: CoBo 0 = 68 フレーム、graw 2 本)。
+    fn walked_back(run: Result<u32, String>) -> WalkedBackRun {
+        let mut frames = BTreeMap::new();
+        frames.insert("0".to_string(), 68);
+        WalkedBackRun {
+            run,
+            forced_eos: true,
+            eos_closed: true,
+            counters: Counters {
+                events_built: None,
+                events_incomplete: None,
+                late_fragments: None,
+                frames,
+                overflow_frames: Some(0),
+                malformed: Some(2),
+            },
+            files: vec![
+                OutputFile {
+                    path: "run0058/CoBo0_AsAd0_ts_0000.graw".to_string(),
+                    bytes: 6528,
+                },
+                OutputFile {
+                    path: "run0058/CoBo0_AsAd1_ts_0000.graw".to_string(),
+                    bytes: 6432,
+                },
+            ],
+            notes: Vec::new(),
+        }
+    }
+
+    fn logbook_records(controller: &Controller) -> Vec<LogbookRecord> {
+        crate::logbook::read_since(&controller.logbook_path, 0)
+            .unwrap()
+            .records
+            .into_iter()
+            .map(|line| line.record)
+            .collect()
+    }
+
+    /// `duration_s` は前の run の `run_start.ts` から測る。オフセットが違っても同じ瞬間で比べる。
+    /// 手計算: 08:42:00.000+03:00 = 05:42:00.000Z、now = 05:42:15.250Z → 15.25 s。
+    #[test]
+    fn seconds_since_measures_across_utc_offsets() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-12T05:42:15.250+00:00").unwrap();
+        assert_eq!(
+            seconds_since("2026-10-12T08:42:00.000+03:00", now),
+            Some(15.25)
+        );
+        assert_eq!(seconds_since("not a timestamp", now), None);
+    }
+
+    /// **115 の本体(台帳側)**: 番号が決まった前の run には run_stop を書く ——
+    /// `reason: "abort:controller-restart"`、`ok: false`、EOS の顛末と counters / files は
+    /// 歩き戻しの材料そのまま、`duration_s` はその run の run_start からの経過。
+    /// 戻り値は audit `run/start.previous_run_stop` に載る要約。
+    #[test]
+    fn a_walked_back_run_gets_a_run_stop_marked_controller_restart() {
+        let controller = test_controller("orphan-stop");
+        controller.append(run_start_of(58));
+
+        let summary = append_walked_back_run_stop(&controller, &walked_back(Ok(58)));
+
+        assert_eq!(summary, json!({"run": 58, "notes": []}));
+        let records = logbook_records(&controller);
+        assert_eq!(records.len(), 2, "{records:?}");
+        let LogbookRecord::RunStop {
+            run,
+            duration_s,
+            ok,
+            reason,
+            forced_eos,
+            eos_closed,
+            counters,
+            files,
+            ..
+        } = &records[1]
+        else {
+            panic!("run_stop が書かれていない: {records:?}");
+        };
+        assert_eq!(*run, 58);
+        assert!(!ok);
+        assert_eq!(reason, "abort:controller-restart");
+        assert!(*forced_eos);
+        assert!(*eos_closed);
+        let expected = walked_back(Ok(58));
+        assert_eq!(counters, &expected.counters);
+        assert_eq!(files, &expected.files);
+        // run_start を書いた直後なので経過は 0 s 以上・数秒未満。
+        let duration = duration_s.expect("run_start があるので duration_s は数値");
+        assert!((0.0..10.0).contains(&duration), "{duration}");
+        let _ = std::fs::remove_dir_all(&controller.params.output_root);
+    }
+
+    /// 番号が決まらない(申告の食い違い)なら run_stop は書かない。理由は要約の notes へ
+    /// (audit に残る = silent にしない)。
+    #[test]
+    fn a_walked_back_run_without_an_agreed_number_writes_no_run_stop() {
+        let controller = test_controller("orphan-disagree");
+        controller.append(run_start_of(58));
+        let why = "components disagree on the previous run number \
+                   (receiver0=58, decoder=57) — run_stop not written"
+            .to_string();
+
+        let summary = append_walked_back_run_stop(&controller, &walked_back(Err(why.clone())));
+
+        assert_eq!(summary, json!({"run": null, "notes": [why]}));
+        let records = logbook_records(&controller);
+        assert!(
+            !records
+                .iter()
+                .any(|r| matches!(r, LogbookRecord::RunStop { .. })),
+            "{records:?}"
+        );
+        let _ = std::fs::remove_dir_all(&controller.params.output_root);
+    }
+
+    /// ログブックの最後の run_start は**照合だけ**に使う: 番号が違えば note を残し、
+    /// 同じ番号の run_start が無ければ `duration_s` は null(この経路に限り nullable)。
+    /// run_stop そのものはコンポーネントの申告した番号で書く。
+    #[test]
+    fn a_walked_back_run_missing_from_the_logbook_gets_a_null_duration_and_notes() {
+        let controller = test_controller("orphan-no-start");
+        controller.append(run_start_of(57));
+
+        let summary = append_walked_back_run_stop(&controller, &walked_back(Ok(58)));
+
+        assert_eq!(
+            summary,
+            json!({"run": 58, "notes": [
+                "the last run_start in the logbook is run 57, not 58",
+                "no run_start for run 58 in the logbook — duration_s is null",
+            ]})
+        );
+        let records = logbook_records(&controller);
+        let Some(LogbookRecord::RunStop {
+            run, duration_s, ..
+        }) = records.last()
+        else {
+            panic!("run_stop が書かれていない: {records:?}");
+        };
+        assert_eq!(*run, 58);
+        assert_eq!(*duration_s, None);
         let _ = std::fs::remove_dir_all(&controller.params.output_root);
     }
 
