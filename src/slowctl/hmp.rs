@@ -68,6 +68,17 @@ pub fn meas_curr() -> &'static str {
     "MEAS:CURR?"
 }
 
+/// `VOLT?` 要求文字列 —— **設定値**の読み出し(p.23 `[SOURce:]VOLTage…?`、応答例 `10.000`)。
+/// 問い合わせのみ。設定コマンド(`VOLT <値>`)を作る関数は作らない(SPEC §11、TODO/120)。
+pub fn volt_query() -> &'static str {
+    "VOLT?"
+}
+
+/// `CURR?` 要求文字列 —— **設定値**の読み出し(p.24、応答例 `5.0000`)。問い合わせのみ。
+pub fn curr_query() -> &'static str {
+    "CURR?"
+}
+
 /// `OUTP?` 要求文字列(p.9 短縮形規則 + p.26 コマンド表 `OUTPut[:STATe]?`)。
 pub fn outp_query() -> &'static str {
     "OUTP?"
@@ -265,6 +276,13 @@ mod tests {
         assert_eq!(outp_query(), "OUTP?");
         // p.20 コマンド表 "SYSTem:ERRor[:NEXT]?" の短縮形。
         assert_eq!(syst_err(), "SYST:ERR?");
+    }
+
+    /// TODO/120: 設定値の読み出し(問い合わせ形のみ)。
+    #[test]
+    fn set_value_queries_are_query_forms() {
+        assert_eq!(volt_query(), "VOLT?");
+        assert_eq!(curr_query(), "CURR?");
     }
 
     /// TODO/089 レビュー: `nsel()` は非クエリなので選択の確認に使うクエリ形。
