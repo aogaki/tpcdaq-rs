@@ -32,9 +32,10 @@
 //! 畳む段の `Reset` が届かないと、そのコンポーネントは `Configured` のまま残り、次の
 //! `Configure` が断られ続ける。`GetStatus` で Idle でないものにだけ `Reset` を撃ち、跡を
 //! audit `run/start.component_walk_back` に残す([`Sequencer::walk_components_back_to_idle`])。
-//! 全員が `Running`(run 中に controller だけが再起動した姿)なら、`Reset` の前に停止経路と
-//! 同じく receiver `Stop` → EOS 待ち → 下流 `Stop` で前の run を閉じる(114 —— `Reset` は
-//! 送出待ちを打ち切るので、送出待ちがあると EOS ごと打ち切られる。競争に頼らない)。
+//! 全員が `Running`(run 中に controller だけが再起動した姿)なら、`Reset` の前に停止経路の
+//! 2 段そのもの(自然 EOS か受信静止 → 閉じていなければ receiver `Stop` → EOS 待ち → 下流
+//! `Stop`)で前の run を閉じる(114 —— `Reset` は送出待ちを打ち切るので、送出待ちがあると
+//! EOS ごと打ち切られる。競争に頼らない)。
 //!
 //! あわせて、`Arm` は前の run が閉じたソケットの解放待ちで一時的に bind に失敗しうるので
 //! 指数バックオフで粘り(粘った実績は audit へ)、run 開始が失敗したときは
@@ -637,9 +638,12 @@ impl<'a> Sequencer<'a> {
     /// 「run を閉じる前に Reset しない」と同じ理由。decoder なら EOS バリアの喪失)。
     ///
     /// * **全員 `Running`**(チェーンが無傷 = 典型は run 中に controller だけが落ちて再起動
-    ///   した姿、114): 停止経路の強制 EOS と同じ手順で前の run を閉じる —— 全 receiver へ
-    ///   `Stop` → [`Self::wait_for_eos`](上限 `eos_timeout`)→ 残り(decoder → graw-writer)へ
-    ///   `Stop`。decoder の `Stop` は自分の EOS を出さない(全 receiver の EOS を受けたときだけ
+    ///   した姿、114): **停止経路の 2 段そのもの**で前の run を閉じる ——
+    ///   [`Self::wait_for_eos_or_quiesce`](自然 EOS か受信静止の早い方。`receiver::drain_task`
+    ///   は Stop で即 break してカーネル受信バッファの未読分を捨てるので、静止を確かめてから
+    ///   Stop する)→ 閉じていなければ全 receiver へ `Stop`(強制 EOS)→ [`Self::wait_for_eos`]
+    ///   (上限 `eos_timeout`)→ 残り(強制 EOS を撃たなかったなら receiver も)へ `Stop`。
+    ///   decoder の `Stop` は自分の EOS を出さない(全 receiver の EOS を受けたときだけ
     ///   出る)ので、この順でないと EOS は root-sink まで届かない。待ちの結果は跡の先頭に
     ///   `"eos: closed"` / `"eos: did not propagate within <ms> ms"` で 1 行残し、**どちらでも
     ///   start は止めない**(届かなければ後の `Reset` が打ち切り、それは各コンポーネントの
@@ -678,16 +682,28 @@ impl<'a> Sequencer<'a> {
             .count();
         let chain_intact = running > 0 && running == steps.len();
 
-        // 2. チェーンが無傷なら前の run を EOS で閉じる(停止経路の強制 EOS と同じ手順)。
+        // 2. チェーンが無傷なら前の run を EOS で閉じる(停止経路の 2 段そのもの、114 追補)。
+        //    第一段 = 自然 EOS か受信静止の早い方まで待つ —— `receiver::drain_task` は Stop で
+        //    即 break し、カーネル受信バッファの未読分を数えずに捨てるので、静止を確かめてから
+        //    Stop する。閉じていなければ全 receiver へ Stop(強制 EOS)→ 第二段 = EOS 待ち。
         if chain_intact {
-            for (component, _, now, step) in steps.iter_mut() {
-                if matches!(component.kind, ComponentKind::Receiver { .. }) {
-                    self.walk_back_step(component, now, &Command::Stop, step)?;
-                }
-            }
             let mut notes = Vec::new();
-            if self.wait_for_eos(&mut notes) {
-                info!(?notes, "previous run closed with EOS before the walk-back");
+            let mut closed = self.wait_for_eos_or_quiesce(&mut notes);
+            let forced_eos = !closed;
+            if forced_eos {
+                for (component, _, now, step) in steps.iter_mut() {
+                    if matches!(component.kind, ComponentKind::Receiver { .. }) {
+                        self.walk_back_step(component, now, &Command::Stop, step)?;
+                    }
+                }
+                closed = self.wait_for_eos(&mut notes);
+            }
+            if closed {
+                info!(
+                    forced_eos,
+                    ?notes,
+                    "previous run closed with EOS before the walk-back"
+                );
                 trail.push("eos: closed".to_string());
             } else {
                 let line = format!(
@@ -701,8 +717,11 @@ impl<'a> Sequencer<'a> {
                 );
                 trail.push(line);
             }
+            // 停止経路の畳む段と同じ: 強制 EOS で既に Stop 済みの receiver へは撃ち直さない。
             for (component, _, now, step) in steps.iter_mut() {
-                if !matches!(component.kind, ComponentKind::Receiver { .. }) {
+                let already_stopped =
+                    forced_eos && matches!(component.kind, ComponentKind::Receiver { .. });
+                if !already_stopped {
                     self.walk_back_step(component, now, &Command::Stop, step)?;
                 }
             }
@@ -4515,17 +4534,25 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// **114 の本体**: run 中に controller だけが落ちて再起動した姿(相 Idle、ECC も
-    /// コンポーネントも全員 Running)。チェーンが無傷なので、停止経路の強制 EOS と同じ手順で
-    /// 前の run を閉じてから歩き戻す: 全 receiver へ `Stop` → EOS 待ち(decoder / graw-writer
-    /// への GetStatus)→ decoder `Stop` → graw-writer `Stop` → 上流から `Reset` × 全員 →
+    /// コンポーネントも全員 Running)。チェーンが無傷なので、**停止経路の 2 段そのもの**で
+    /// 前の run を閉じてから歩き戻す(114 追補): 第一段 = 自然 EOS か受信静止の早い方まで待つ
+    /// (`receiver::drain_task` は Stop で即 break してカーネル受信バッファの未読分を捨てるので、
+    /// 静止を確かめてから Stop する)→ 閉じていなければ全 receiver へ `Stop`(強制 EOS)→
+    /// 第二段 = EOS 待ち → decoder `Stop` → graw-writer `Stop` → 上流から `Reset` × 全員 →
     /// Configure。ECC はそれより先に歩き戻る(= zCoBo は既に止まっている)。
     ///
-    /// 手計算(eos_poll = 200 ms、`eos_after_polls = Some(4)`。MockTransport が数えるのは
-    /// decoder / graw-writer への GetStatus だけ): 状態調べで decoder = 1・graw-writer = 2。
-    /// EOS 待ちの 1 回目は graw-writer = 3(≤ 4 = 未着。`eos_complete` は files_open = 1 の
-    /// graw-writer で打ち切るので decoder へは行かない)→ 200 ms → graw-writer = 4(未着)→
-    /// 200 ms → graw-writer = 5・decoder = 6(> 4 = 到着)。よって EOS 待ちの GetStatus は
-    /// graw-writer × 3 + decoder × 1、眠るのは 2 回 = 400 ms。
+    /// ここは「第一段は静止で切り上がる(EOS は来ない)→ 強制 EOS → 第二段で閉じる」の形。
+    /// 手計算(eos_poll = 200 ms、eos_quiesce = 500 ms、受信バイト数は不変、
+    /// `eos_after_polls = Some(7)`。MockTransport が EOS 側に数えるのは decoder / graw-writer
+    /// への GetStatus だけ):
+    /// - 状態調べ: decoder = 1・graw-writer = 2(receiver は数えない)。
+    /// - 第一段: 1 周 = graw-writer への判定 1 回(files_open = 1 で打ち切るので decoder へは
+    ///   行かない)+ receiver 2 台の bytes。graw-writer = 3, 4, 5, 6 の 4 周で静止 0 → 200 →
+    ///   400 → 600 ms ≥ 500 ms → 切り上げ。眠るのは 3 回 = 600 ms。receiver はそれぞれ
+    ///   状態調べ 1 + 第一段 4 = **5 回**問い合わされてから Stop される。
+    /// - 第二段: graw-writer = 7(≤ 7 = 未着)→ 200 ms → graw-writer = 8・decoder = 9
+    ///   (> 7 = 到着)。眠るのは 1 回 = 200 ms。
+    /// - 合計 800 ms。receiver0 の Stop と decoder の Stop のあいだは graw-writer × 2 + decoder × 1。
     #[test]
     fn a_fully_running_chain_is_closed_with_eos_before_the_walk_back_resets() {
         let params = params_with(&[0, 1]);
@@ -4535,10 +4562,23 @@ mod tests {
             .component_in("decoder", ComponentState::Running)
             .component_in("receiver0", ComponentState::Running)
             .component_in("receiver1", ComponentState::Running);
-        mock.eos_after_polls = Some(4);
+        mock.eos_after_polls = Some(7);
         let report = Sequencer::new(&params, &mut mock)
             .start_run(59, "", "2026-10-12T08:43:00.000")
             .unwrap();
+
+        let first_receiver_stop = mock.index_of("receiver1", "Stop").unwrap();
+        for receiver in ["receiver0", "receiver1"] {
+            let polls = mock.calls[..first_receiver_stop]
+                .iter()
+                .filter(|c| c.component == receiver && c.action == "GetStatus")
+                .count();
+            assert_eq!(
+                polls, 5,
+                "{receiver}: 静止を確かめずに Stop している: {:?}",
+                mock.calls
+            );
+        }
 
         assert_eq!(
             &mock.commands()[..14],
@@ -4568,12 +4608,11 @@ mod tests {
             &[
                 Call::new("graw-writer", "GetStatus"),
                 Call::new("graw-writer", "GetStatus"),
-                Call::new("graw-writer", "GetStatus"),
                 Call::new("decoder", "GetStatus"),
             ],
-            "EOS 待ちが receiver Stop と decoder Stop のあいだに無い"
+            "第二段の EOS 待ちが receiver Stop と decoder Stop のあいだに無い"
         );
-        assert_eq!(mock.slept, Duration::from_millis(400));
+        assert_eq!(mock.slept, Duration::from_millis(800));
         assert_eq!(
             report.component_walk_back,
             vec![
@@ -4586,11 +4625,65 @@ mod tests {
         );
     }
 
+    /// 全員 Running で、**第一段で自然 EOS が成立**する形(実機では ECC の歩き戻しの breakup で
+    /// CoBo がリンクを close し、receiver が EOF から EOS を出す)。強制 EOS は撃たない ——
+    /// receiver の `Stop` は EOS を見届けた**後**に、停止経路の畳む段と同じく下流と一緒に撃つ
+    /// (跡は全員 `Running->Configured->Idle` のまま)。
+    ///
+    /// 手計算(`with_eos_closed` = 最初の判定から閉じている): 状態調べ(receiver0 → decoder →
+    /// graw-writer)の直後、第一段の 1 回目の判定(graw-writer → decoder)で閉じる。眠らない。
+    #[test]
+    fn a_fully_running_chain_whose_eos_arrives_on_its_own_is_not_forced() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .with_eos_closed()
+            .component_in("graw-writer", ComponentState::Running)
+            .component_in("decoder", ComponentState::Running)
+            .component_in("receiver0", ComponentState::Running);
+        let report = Sequencer::new(&params, &mut mock)
+            .start_run(59, "", "2026-10-12T08:43:00.000")
+            .unwrap();
+
+        assert_eq!(
+            &mock.calls[..13],
+            &[
+                Call::new("ecc", "status"),
+                // 状態調べ(上流から)。
+                Call::new("receiver0", "GetStatus"),
+                Call::new("decoder", "GetStatus"),
+                Call::new("graw-writer", "GetStatus"),
+                // 第一段: 自然 EOS が成立(receiver の静止観測には進まない)。
+                Call::new("graw-writer", "GetStatus"),
+                Call::new("decoder", "GetStatus"),
+                // 強制 EOS は無し。畳む段と同じく上流から Stop、その後 Reset。
+                Call::new("receiver0", "Stop"),
+                Call::new("decoder", "Stop"),
+                Call::new("graw-writer", "Stop"),
+                Call::new("receiver0", "Reset"),
+                Call::new("decoder", "Reset"),
+                Call::new("graw-writer", "Reset"),
+                Call::new("graw-writer", "Configure"),
+            ]
+        );
+        assert_eq!(mock.slept, Duration::ZERO);
+        assert_eq!(
+            report.component_walk_back,
+            vec![
+                "eos: closed".to_string(),
+                "receiver0: Running->Configured->Idle".to_string(),
+                "decoder: Running->Configured->Idle".to_string(),
+                "graw-writer: Running->Configured->Idle".to_string(),
+            ]
+        );
+    }
+
     /// 全員 Running だが EOS が `eos_timeout` 内に届かない(例: 下流が詰まって decoder が
     /// 自分の EOS を送れない)。跡に `eos: did not propagate within 5000 ms` を残し、それでも
     /// start は通す —— その後の Reset が送出待ちを EOS ごと打ち切り、打ち切りは各コンポーネントの
-    /// metrics(`messages_abandoned` / `eos_abandoned`)で見える。待つのはちょうど eos_timeout
-    /// (停止経路の第二段と同じ上限)。
+    /// metrics(`messages_abandoned` / `eos_abandoned`)で見える。待ち方は停止経路と同じ 2 段:
+    /// 第一段は受信静止(バイト数不変)で 600 ms(eos_poll 200 ms × 3 回 ≥ eos_quiesce 500 ms)、
+    /// 強制 EOS の後の第二段はハード上限 eos_timeout = 5 000 ms(200 ms × 25 回)まるごと。
+    /// 合計 5 600 ms。
     #[test]
     fn a_running_chain_whose_eos_never_arrives_is_reset_anyway_and_the_run_starts() {
         let params = params_with(&[0]);
@@ -4603,7 +4696,7 @@ mod tests {
             .start_run(59, "", "2026-10-12T08:43:00.000")
             .unwrap();
 
-        assert_eq!(mock.slept, params.eos_timeout);
+        assert_eq!(mock.slept, Duration::from_millis(5_600));
         assert_eq!(
             report.component_walk_back,
             vec![
