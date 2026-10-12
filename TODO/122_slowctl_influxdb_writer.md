@@ -63,3 +63,17 @@ Data Explorer で hv / lv の系列が見えること、counters の written が
 
 ## SPEC(Opus 下書き → Fable 確定)
 §3.1 に `[slowctl.influx]`、§2.3 か §9 に line protocol の形(measurement / tag / field と単位の表)、§11 の slowctl の行に「全サンプルは InfluxDB」を追記する。
+
+## 進捗(2026-10-12)
+- 実装(Opus `3344b5b` + レビュー修正 `49e7e45` → merge `68c614e`):
+  - `src/slowctl/influx.rs`: line protocol の組み立て、`InfluxSink`(try_send)、writer スレッド、再送バッファ(古い方から落として数える)、バックオフ 1 → 60 s、NaN / inf は数えて落とす、停止時は 1 回だけ書き出す。
+  - `ureq` 3.3 を default-features なし(TLS / gzip なし)で使い、`proxy(None)`。
+  - status PUB の counters に `influx_points_written` / `_dropped` / `influx_write_errors` / `influx_last_error`(`serde(default)` で旧版とも互換)。
+  - 「点」の単位は Sample 1 個。
+- Opus のレビューで直したもの:
+  - (a) トークンは slowctl の起動時にだけ読む。`config::parse` では読まない。同じ daq.toml を読む controller / monitor が、監視系のトークンの不備で起動不能にならないように。
+  - (b) `https://` は検証で拒否する(TLS なしのため)。
+  - (c) UI の Counters 表に influx の 4 項目を出す。
+- line protocol の実例(テストのオラクル): `hv,ch=0 vmon=341.06,imon=9.593,status=33,vset=350,iset=15,alarm=true 1760259600000` / `hv,ch=board bdalarm=0,bdilk=0,alarm=false …` / `lv,ch=1 volt=3.6,curr=0.997,outp=1,vset=3.6,iset=1.2,alarm=false …`
+- ゲート(main `68c614e`、Mac): fmt / clippy 0 / **cargo test 929 passed / 0 failed / 1 ignored** / UI **325 passed / 5 skipped**、build OK。
+- **実機は、ユーザーが influxdb2 を入れて org / bucket / トークンを用意するのを待っている**(12:13 時点で未導入)。

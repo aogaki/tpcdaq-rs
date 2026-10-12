@@ -41,3 +41,21 @@
   - 実機ゴールデン(ch0 STATUS 33)で、`status_ignore` なし → ch0 alarm、ch0 UNV を外す → ch0 alarm なし・status 値は 33 のまま。
   - ch0 が 33 + TRIP(64)なら外していても alarm。
   - `flags = ["TRIP"]` は設定エラー。
+
+## 進捗(2026-10-12)
+- **A**(Opus `8f8a804`)
+  - daq_up: `[slowctl]` があれば controller の後に slowctl を起動し、`status PUB bound` を待つ。
+  - daq_down: ORDER の先頭と取り残しの掃除に slowctl を加えた。
+  - `config/daq_example.toml` に HV / LV の by-id 例、NEW_DAQ_SETUP を v0.6 に。
+  - `bash -n` は通過。**実機のスタック上げ直しでの確認は run 69 の停止待ち**。
+- **B**(Sonnet `ce3c591` → merge `95c7168`)
+  - LogPost の `Slow{VALUE}` は `slow_latest` を更新するだけで、ログブックには書かない。
+  - `/api/status` の `log_posts.slow_values_not_logged` で件数を数える。
+  - テストは red(VALUE が 3 行書かれる)→ green。
+  - **ELITPC への反映(controller の入れ替え)は run 69 の停止待ち**。
+- **D**(Sonnet `2e3e743` → merge `c3714cd`)
+  - `status_ignore`(UNV / OVV だけ)で、alarm の判定からそのビットを除く。STATUS の値は変えない。
+  - **ELITPC に反映済み(12:41)**: `status_ignore = [{ ch = 0, flags = ["UNV"] }]`。ch0 は status 33 のまま VALUE として出て、ALARM は出ない。
+- ゲート(main `95c7168`、Mac、TIME_WAIT 10): fmt / clippy 0 / **cargo test 907 passed / 0 failed / 1 ignored**。
+  D のレーンで receiver_integration が `AddrNotAvailable` で落ちたのは、並列のテストによるポート枯渇だった(main で再現しない)。
+- C → 122(InfluxDB、ユーザー裁定)。
