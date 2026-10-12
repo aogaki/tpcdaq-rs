@@ -146,3 +146,35 @@ SPEC §11 / §3.1 / §3.2 / §8.1 / §9.2 と CLAUDE.md の文案は Fable 作�
 - ELITPC の `/opt/tpcdaq/daq.toml` の hv を `poll_s = 5.0` → **1.0** にした(バックアップは `daq.toml.bak-2026-10-12-hv1s`)。slowctl だけを入れ替えた(12:51:51Z)。読むときだけ開く方式はそのまま。
 - run 70 の実行中に、60 s ずつトリガレートを測った: **5 s 周期で 4.92 Hz → 1 s 周期で 4.73 Hz**(統計誤差 ≈ ±0.3 Hz の範囲で変化なし。新しいケーブルなので偽トリガは出ない)。
 - マニュアル(日英)の「HV 5 秒」を「1 秒」に直した。
+
+## 進捗(2026-10-12)
+- 実装:
+  - レーン C(Sonnet `91dfc8d` → merge `0fece9a`)
+  - レーン B(Opus `6bf3a5f` → merge `692a7ff`)
+  - レーン A(Opus `0e9b301` + `ad3de3e`(期限切れは実行しない / LV も after を検証)+ `51e5b10`(SET 後に 100 ms × 最大 10 回読み直す)→ merge `70cffee` / `ed05974`)
+  - 各レーンの報告は `git show --stat` とテスト名で照合してから受け入れた(CLAUDE.md の新ルール)。
+- ゲート(main `ed05974`、Mac): fmt OK / clippy 0(feature 有無とも)/ **cargo test 992 passed / 0 failed / 1 ignored**(既存)/ UI **349 passed / 5 skipped**、build OK。
+- ELITPC への反映(13:10Z):
+  - `/opt/tpcdaq/daq.toml` に `cmd_bind` と `slow_cmd` を追加(バックアップは `.bak-2026-10-12-power`)。
+  - daq_down / up と UI の差し替え。`power on/off REP bound (… localhost only)`。
+- 機器を動かさない確認(Opus、curl):
+  - 不正な token → 401。
+  - hv ch 8 → 400。
+  - 未登録の device → 400。
+  - 3 件とも audit に残った(operator、phase Idle)。
+- 実機(ユーザーが UI で操作):
+  - **HV ch 0–7 の OFF**(16:13–16:14 EEST):
+    - 全 ch が RDWN 10 V/s(InfluxDB の vmon の直線当てはめで **−9.55〜−9.62 V/s**)で ≈ 0 V まで下がった。
+    - ただし応答は 8 件とも 502 `channel did not switch (status=1)` の**偽陰性**だった。SET 直後の STATUS に DOWN ビットがまだ立っていなかったため。
+    - `51e5b10`(読み直し)で修正し、13:23Z に slowctl だけ入れ替えた。ログブックには「実際は切り替わった」旨の comment を残した。
+  - **LV ch2 の ON → OFF**(16:17、空き ch): 2 件とも ok。ch1 は before / after とも 1 のままで、**ch2 だけが切り替わった**。
+  - **LV ch1 の OFF**(16:23:34、操作者 Soiciro = ユーザーの UI 操作): slowctl を入れ替えている最中に controller が REQ を送り、新しい slowctl の REP(13:23:35.226Z に bind)が受けて実行した(ok、ch1 1 → 0)。
+    controller の 10 s 窓の中なので、仕様どおりの動作。**AsAd の電源は今 OFF**(ユーザーに意図の確認を依頼した)。
+- **残り**:
+  - HV の ON(ランプアップ 2 V/s、ch 7 で ≈ 5 分)の実機確認。修正後の判定で ok になること。
+  - 前面スイッチ OFF での DIS 拒否(任意)。
+  - run 中に HV ON / LV OFF が 409 になることの実機確認(B のテストで代わりにしている)。
+  - SPEC の結果節と archive。
+- マニュアル:
+  - 最新イベント API を英語タブの付録に取り込み、claude.ai へのリンクを無くした。
+  - PDF は日英とも `reference/_manual/ELITPC_DAQ_Manual_{ja,en}_2026-10-12.pdf`(11 / 14 ページ)。
