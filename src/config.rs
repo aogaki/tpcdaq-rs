@@ -268,6 +268,9 @@ pub struct SlowDeviceConfig {
     /// `[lo, hi]` 逸脱の監視規則。
     #[serde(default)]
     pub alarms: Vec<crate::slowctl::AlarmRule>,
+    /// この機器だけの読み出し周期(秒、TODO/119)。省略 = `1 / poll_hz`。
+    #[serde(default)]
+    pub poll_s: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -873,6 +876,14 @@ fn validate_slowctl(slowctl: &SlowctlConfig) -> Result<(), ConfigError> {
                 "device {:?} of type {:?} needs an `addr`",
                 device.name, device.device_type
             )));
+        }
+        if let Some(poll_s) = device.poll_s {
+            if !poll_s.is_finite() || poll_s <= 0.0 {
+                return Err(ConfigError::InvalidSlowctl(format!(
+                    "device {:?}: poll_s must be greater than 0, got {poll_s}",
+                    device.name
+                )));
+            }
         }
         device
             .nodes
@@ -2502,6 +2513,29 @@ name = "gas"
             parse(&minimal_toml(&geometry, extra)),
             Err(ConfigError::InvalidSlowctl(_))
         ));
+    }
+
+    /// TODO/119: `poll_s` は省略可、指定すれば保持される。0・負・NaN は起動失敗。
+    #[test]
+    fn a_device_poll_s_is_optional_and_must_be_positive() {
+        let geometry = make_temp_geometry_file();
+        let with = |poll: &str| {
+            let extra = format!(
+                "[slowctl]\n[[slowctl.device]]\ntype = \"hivolta\"\nname = \"hv\"\n\
+                 addr = \"127.0.0.1:1470\"\n{poll}\n"
+            );
+            parse(&minimal_toml(&geometry, &extra))
+        };
+        let config = with("").unwrap();
+        assert_eq!(config.slowctl.unwrap().device[0].poll_s, None);
+        let config = with("poll_s = 5.0").unwrap();
+        assert_eq!(config.slowctl.unwrap().device[0].poll_s, Some(5.0));
+        for bad in ["poll_s = 0.0", "poll_s = -1.0", "poll_s = nan"] {
+            assert!(
+                matches!(with(bad), Err(ConfigError::InvalidSlowctl(_))),
+                "{bad}"
+            );
+        }
     }
 
     /// TODO/089 レビュー: `hivolta` は `addr` だけでも起動できる(TCP 優先経路)。

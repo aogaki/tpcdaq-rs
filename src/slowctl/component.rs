@@ -139,6 +139,15 @@ impl SlowctlParams {
     pub fn poll_interval(&self) -> Duration {
         Duration::from_secs_f64(1.0 / self.poll_hz)
     }
+
+    /// 機器ごとの周期。`poll_s` があればそれ、無ければ [`Self::poll_interval`](TODO/119)。
+    /// `poll_s` は設定検証で正の有限値が保証されている。
+    pub fn device_poll_interval(&self, device: &SlowDeviceConfig) -> Duration {
+        match device.poll_s {
+            Some(poll_s) => Duration::from_secs_f64(poll_s),
+            None => self.poll_interval(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -642,7 +651,6 @@ pub fn run_slowctl(params: SlowctlParams, stop: Arc<AtomicBool>) -> Result<(), S
     );
 
     let (tx, rx) = mpsc::sync_channel(EVENT_QUEUE);
-    let poll_interval = params.poll_interval();
     let mut counters = Vec::with_capacity(params.devices.len());
     let mut threads = Vec::with_capacity(params.devices.len());
     for device in &params.devices {
@@ -654,6 +662,7 @@ pub fn run_slowctl(params: SlowctlParams, stop: Arc<AtomicBool>) -> Result<(), S
                 let device = device.clone();
                 let tx = tx.clone();
                 let stop = Arc::clone(&stop);
+                let poll_interval = params.device_poll_interval(&device);
                 move || device_loop(device, poll_interval, tx, device_counters, stop)
             })
             .map_err(|source| SlowctlError::Spawn {
@@ -923,7 +932,27 @@ mod tests {
             nodes: NodesSpec::List(vec![3]),
             expect_serial: String::new(),
             alarms,
+            poll_s: None,
         }
+    }
+
+    /// TODO/119: 機器の `poll_s` が周期に反映され、無ければ全体の `poll_hz` 由来。
+    #[test]
+    fn a_device_poll_s_overrides_the_global_interval() {
+        let mut slow = device("hv", Vec::new());
+        let params = SlowctlParams {
+            status_pub: String::new(),
+            log_push: String::new(),
+            poll_hz: 2.0,
+            log_every_s: 60,
+            devices: vec![slow.clone()],
+        };
+        assert_eq!(
+            params.device_poll_interval(&slow),
+            Duration::from_millis(500)
+        );
+        slow.poll_s = Some(5.0);
+        assert_eq!(params.device_poll_interval(&slow), Duration::from_secs(5));
     }
 
     fn sample(value: f64, ts_ms: u64) -> Sample {
