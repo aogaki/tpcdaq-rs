@@ -659,23 +659,30 @@ impl<'a> Sequencer<'a> {
     fn walk_components_back_to_idle(&mut self, trail: &mut Vec<String>) -> Result<(), String> {
         let params = self.params;
 
-        // 1. 状態調べ(上流から)。`steps` は (相手, 見えた状態, 跡の 1 行) を上流から並べる。
+        // 1. 状態調べ(上流から)。`steps` は (相手, 歩き戻し前の状態, 今の状態, 跡の 1 行) を
+        //    上流から並べる。何をするかは**歩き戻し前の状態**で決め、失敗の文言は**今の状態**
+        //    (直前の手が着地した状態)で名乗る。
         let mut steps = Vec::with_capacity(params.components.len());
         for component in params.components.iter().rev() {
             let state = self.apply(component, &Command::GetStatus)?.state;
-            steps.push((component, state, format!("{}: {state}", component.name)));
+            steps.push((
+                component,
+                state,
+                state,
+                format!("{}: {state}", component.name),
+            ));
         }
         let running = steps
             .iter()
-            .filter(|(_, state, _)| *state == ComponentState::Running)
+            .filter(|(_, before, _, _)| *before == ComponentState::Running)
             .count();
         let chain_intact = running > 0 && running == steps.len();
 
         // 2. チェーンが無傷なら前の run を EOS で閉じる(停止経路の強制 EOS と同じ手順)。
         if chain_intact {
-            for (component, state, step) in steps.iter_mut() {
+            for (component, _, now, step) in steps.iter_mut() {
                 if matches!(component.kind, ComponentKind::Receiver { .. }) {
-                    self.walk_back_step(component, *state, &Command::Stop, step)?;
+                    self.walk_back_step(component, now, &Command::Stop, step)?;
                 }
             }
             let mut notes = Vec::new();
@@ -694,9 +701,9 @@ impl<'a> Sequencer<'a> {
                 );
                 trail.push(line);
             }
-            for (component, state, step) in steps.iter_mut() {
+            for (component, _, now, step) in steps.iter_mut() {
                 if !matches!(component.kind, ComponentKind::Receiver { .. }) {
-                    self.walk_back_step(component, *state, &Command::Stop, step)?;
+                    self.walk_back_step(component, now, &Command::Stop, step)?;
                 }
             }
         } else if running > 0 {
@@ -706,14 +713,14 @@ impl<'a> Sequencer<'a> {
         }
 
         // 3. Idle でない全員を上流から Reset(チェーンが切れていれば Running はここで Stop も)。
-        for (component, state, mut step) in steps {
-            if state == ComponentState::Idle {
+        for (component, before, mut now, mut step) in steps {
+            if before == ComponentState::Idle {
                 continue;
             }
-            if state == ComponentState::Running && !chain_intact {
-                self.walk_back_step(component, state, &Command::Stop, &mut step)?;
+            if before == ComponentState::Running && !chain_intact {
+                self.walk_back_step(component, &mut now, &Command::Stop, &mut step)?;
             }
-            self.walk_back_step(component, state, &Command::Reset, &mut step)?;
+            self.walk_back_step(component, &mut now, &Command::Reset, &mut step)?;
             warn!(
                 component = component.name,
                 walked = step,
@@ -724,21 +731,24 @@ impl<'a> Sequencer<'a> {
         Ok(())
     }
 
-    /// 歩き戻しの 1 手(`Stop` / `Reset`)。着地した状態を跡 `step` に `"->状態"` で足す。
-    /// 断られた/届かなければ、どれが・何の状態で残ったかを文言に載せて `Err`。
+    /// 歩き戻しの 1 手(`Stop` / `Reset`)。通ったら `now` を着地した状態に進め、跡 `step` に
+    /// `"->状態"` で足す。断られた/届かなければ、どれが・**今**何の状態で残ったか(`now` =
+    /// 直前の手の着地。例: Stop の後の Reset が断られたら Configured)を文言に載せて `Err`。
     fn walk_back_step(
         &mut self,
         component: &ComponentEndpoint,
-        seen: ComponentState,
+        now: &mut ComponentState,
         command: &Command,
         step: &mut String,
     ) -> Result<(), String> {
+        let left = *now;
         let landed = self.apply(component, command).map_err(|detail| {
             format!(
-                "{detail} — {} was left {seen}; refusing to start a run",
+                "{detail} — {} was left {left}; refusing to start a run",
                 component.name
             )
         })?;
+        *now = landed.state;
         step.push_str(&format!("->{}", landed.state));
         Ok(())
     }
@@ -4610,6 +4620,34 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// 全員 Running の経路で receiver / 下流の `Stop` が通り EOS も閉じた**後**に receiver0 の
+    /// `Reset` が断られたら、文言は**その時点の**状態(Stop の着地 = Configured)を名乗る ——
+    /// 歩き戻し前の Running ではない(オペレータが次に何を見るべきかを誤らせない)。
+    /// Reset は上流から 1 つずつなので、receiver0 で止まり decoder / graw-writer には届かない。
+    #[test]
+    fn a_reset_refused_after_the_eos_close_names_the_state_the_component_was_left_in() {
+        let params = params_with(&[0]);
+        let mut mock = MockTransport::new(&params)
+            .with_eos_closed()
+            .component_in("graw-writer", ComponentState::Running)
+            .component_in("decoder", ComponentState::Running)
+            .component_in("receiver0", ComponentState::Running)
+            .fail_on("receiver0", "Reset");
+        let failure = Sequencer::new(&params, &mut mock)
+            .start_run(59, "", "2026-10-12T08:43:00.000")
+            .unwrap_err();
+
+        assert_eq!(failure.stage, "walk-back");
+        assert!(
+            failure.detail.contains("receiver0 was left Configured"),
+            "{}",
+            failure.detail
+        );
+        assert_eq!(mock.actions("receiver0"), vec!["Stop", "Reset"]);
+        assert_eq!(mock.actions("decoder"), vec!["Stop"]);
+        assert_eq!(mock.actions("graw-writer"), vec!["Stop"]);
     }
 
     /// 一部だけ Running(decoder だけ。receiver0 は前の停止で Reset 済み = Idle、graw-writer は
