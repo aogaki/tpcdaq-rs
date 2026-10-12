@@ -1,4 +1,4 @@
-# 新 DAQ 機セットアップ手順(Ubuntu 26.04 LTS)— v0.5(2026-10-08: 実機 ELITPC で §1・§3〜§8 を実施した結果を反映 — TODO/107)
+# 新 DAQ 機セットアップ手順(Ubuntu 26.04 LTS)— v0.6(2026-10-12: slowctl を起動スクリプトへ、HV / LV の USB 実例 — TODO/118・121)/ v0.5(2026-10-08: 実機 ELITPC で §1・§3〜§8 を実施した結果を反映 — TODO/107)
 
 <!-- v0.4(2026-10-08): OS を 26.04 に。ECC のネイティブ起動を最初に確認、ダメなら 16.04 コンテナ -->
 
@@ -213,7 +213,7 @@ receiver → getEccServer → ecc_bridge → controller → slowctl**(slowctl �
 root_sink は両方 graceful、getEccServer は **SIGTERM**。安定したら systemd ユーザーユニット(`After=` で順序、`KillSignal=SIGINT`)へ。
 **listen-before-start**(receiver が 46005 を listen してから ECC start)は controller が担保するので、手順として気にするのは「receiver が上がっていること」だけ。
 
-**起動・停止スクリプト(v0.5)**: `tools/deploy/daq_up.sh` / `daq_down.sh`(slowctl はまだ含めない)。ホスト固有のパスは
+**起動・停止スクリプト(v0.5、slowctl は v0.6)**: `tools/deploy/daq_up.sh` / `daq_down.sh`。TOML に `[slowctl]` があれば daq_up が controller の後に slowctl を起動し(status PUB の bind を待つ。機器が繋がっていなくても起動は失敗にしない)、daq_down は最初に止める(TODO/121)。ホスト固有のパスは
 `/opt/tpcdaq/daq.env`(雛形 `tools/deploy/daq.env.example`)、DAQ 設定は `/opt/tpcdaq/daq.toml`(雛形 `config/daq_example.toml`、
 パスフレーズを書くので chmod 600)。daq_up.sh は TOML から output_root / geometry / build_timeout_ms / raw_tree を拾って root_sink に渡し、
 `ulimit -n 65536`、ECC の古いライブラリは getEccServer にだけ渡す、各プロセスを setsid で切り離す(ssh から叩いて返ってくる)。
@@ -227,7 +227,9 @@ root_sink は両方 graceful、getEccServer は **SIGTERM**。安定したら sy
 - Bronkhorst: USB-RS232 → 先頭機器 D-sub(ProPar 38400 8N1)。HMP2020: USB-B(CDC → `/dev/ttyACM*`、HO720)。Arduino MKR1000: USB。
 - HiVolta: Ethernet(TCP :1470、LOCAL モードのまま読むだけ)。
 - ドライバは実装済み(2026-09-23): `bronkhorst_flowbus`(079 Phase 2)/ `arduino_env`(Phase 3、スケッチは `tools/arduino_env/`)/
-  `hivolta` / `hmp2020`(089)。**現地 Phase 0 = node scan** は Python を入れず、`[[slowctl.device]] type = "bronkhorst_flowbus", nodes = "scan"` の
+  `hivolta` / `hmp2020`(089)。**ELITPC の実例(2026-10-12、TODO/118)**: どちらも USB。`/dev/serial/by-id/usb-CAEN_SPA_DT1415_HV_Power_Supply-if00`(cdc_acm)と
+  `usb-HAMEG_HAMEG_HO720_<serial>-if00-port0`(FTDI)。daq は dialout グループなので sudo 不要。**HMP2020 は本体の Interface を USB VCP にする**(RS-232 のままだと書いても応答しない)。
+  **機器を繋いだら、繋ぐ前後でトリガレートを比べる** — 不良な USB ケーブルで、HiVolta のポートを開くだけで偽トリガが 24–54 Hz 出た(ケーブル交換で解消)。**現地 Phase 0 = node scan** は Python を入れず、`[[slowctl.device]] type = "bronkhorst_flowbus", nodes = "scan"` の
   TOML で `target/release/slowctl --config x.toml` を起動し、logbook の `slow` レコード(`event: "IDENT"`)と `RUST_LOG=info` の起動ログで
   ノード番号・機種・シリアル・単位を確認する。確定したら `nodes = [..]` と `expect_serial` を書く。
 - ✅ 各ポートで機器が名乗る(ProPar node 128 の 113/3、SCPI `*IDN?`、HiVolta `BDSNUM`、Arduino の JSON 行)= IDENT レコードが揃う。
@@ -245,7 +247,7 @@ root_sink は両方 graceful、getEccServer は **SIGTERM**。安定したら sy
 | 6 | UI | 別 PC のブラウザで monitor / waveform / logbook が更新 |
 | 7 | stop → reset | audit `ecc_walk_back` が `["status->Ready","breakup->Prepared","reset->Described","reset->Idle"]` |
 | 8 | logbook | `run_start` / `run_stop` 行、`forced_eos` / `eos_closed` が期待どおり |
-| 9 | slowctl(079) | logbook に各機器の `IDENT`、WS status JSON に `slow`(UI の Slow control ビュー)、`run_start.slow` に直近値 |
+| 9 | slowctl(079 / 118 / 121) | logbook に各機器の `IDENT`、WS status JSON に `slow`(UI の Slow control ビュー)、`run_start.slow` に直近値 |
 | 10 | params(078) | UI の Parameters で保存 → `<ecc_config_dir>/configure-<id>.xcfg` が生え、run/start の audit `params_id` と ECC の configure が `<id>` |
 
 ## 11. 未確定・追記予定

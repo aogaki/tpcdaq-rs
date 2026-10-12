@@ -22,7 +22,7 @@ source "$ENV_FILE"
 LOGS=$TPCDAQ_LOGS
 DRAIN_S=${ROOT_SINK_DRAIN_S:-600}
 
-ORDER="controller ecc_bridge ecc_server receiver0 decoder graw_writer monitor root_sink"
+ORDER="slowctl controller ecc_bridge ecc_server receiver0 decoder graw_writer monitor root_sink"
 root_sink_left=0
 
 for name in $ORDER; do
@@ -65,7 +65,7 @@ done
 # 取りこぼしの点検(pid ファイルの外で残ったもの)。実行ファイルのパスで厳密に絞る。
 # 書き切り待ちで残した root_sink は対象外(SIGKILL しない)。
 leftovers=0
-pats=("$GET_BIN/bin/getEccServer" "$TPCDAQ_REPO/target/release/"{controller,ecc_bridge,receiver,decoder,graw_writer,monitor})
+pats=("$GET_BIN/bin/getEccServer" "$TPCDAQ_REPO/target/release/"{slowctl,controller,ecc_bridge,receiver,decoder,graw_writer,monitor})
 [ "$root_sink_left" = "0" ] && pats+=("$TPCDAQ_REPO/tools/root_sink/root_sink")
 for pat in "${pats[@]}"; do
     pids=$(pgrep -f "^$pat( |$)" 2>/dev/null)

@@ -25,6 +25,26 @@ raw_tree = true                    # run{N}_raw.root(macros 直結、075)
 ws_listen = "0.0.0.0:9000"
 # slow_sub = "tcp://127.0.0.1:47006"   # slowctl を動かすときに有効化(v1.31)
 
+# slowctl(HV / LV の監視のみ — 作動 API は無い、SPEC §11)。この節があれば daq_up.sh が controller の後に起動する(TODO/121)。
+# 機器は /dev/serial/by-id/ の名前で指す(挿し直しや USB の口を変えても不変)。open 時に expect_serial と照合する。
+# [slowctl]
+# status_pub = "tcp://*:47006"
+# poll_hz = 1.0
+# log_every_s = 60
+#
+# [[slowctl.device]]
+# type = "hivolta"                     # CAEN DT1415ET(8 ch)、USB VCP 9600 8N1
+# name = "hv"
+# port = "/dev/serial/by-id/usb-CAEN_SPA_DT1415_HV_Power_Supply-if00"
+# expect_serial = "<BDSNUM>"
+# poll_s = 5.0                         # HV だけ周期を変えられる(TODO/119)。不良 USB ケーブルは偽トリガを作った(TODO/118)— 繋いだらトリガレートを確かめる
+#
+# [[slowctl.device]]
+# type = "hmp2020"                     # R&S/HAMEG HMP2020(AsAd 電源)。本体の Interface を **USB VCP** にしておく(RS-232 のままだと応答しない — 118)
+# name = "lv"
+# port = "/dev/serial/by-id/usb-HAMEG_HAMEG_HO720_<serial>-if00-port0"
+# expect_serial = "<*IDN? の serial>"
+
 [controller]
 rest_listen = "0.0.0.0:8080"
 passphrase = "<run 制御のパスフレーズ>"

@@ -6,6 +6,7 @@
 #
 # 起動順は reference/_spike/demo/start_demo.sh と同じ(下流から):
 #   root_sink → monitor → graw_writer → decoder → receiver0 → getEccServer → ecc_bridge → controller
+#   (→ slowctl: 設定に [slowctl] があるときだけ、TODO/121)
 # 各プロセスは setsid で切り離す(ssh から叩いても返ってくる)。pid は $LOGS/<name>.pid。
 # 停止は tools/deploy/daq_down.sh。**起動しただけでは ECC は zCoBo に繋がない**(describe は run/start 時)。
 #
@@ -119,6 +120,17 @@ wait_for_line "$LOGS/ecc_bridge.log" "BIND " 20 || fail "ecc_bridge"
 # 6. controller(REST)
 start controller "$BIN/controller" --config "$CONF"
 wait_for_line "$LOGS/controller.log" "controller REST listening" 20 || fail "controller"
+
+# 7. slowctl(HV / LV / ガス / 環境の監視のみ — SPEC §11。TODO/118・121)。設定に [slowctl] があるときだけ。
+#    LogPost は controller の PULL(47005)へ PUSH するので controller の後。待つのは status PUB の bind まで:
+#    機器が繋がっていなくても slowctl は再試行しながら動き続ける(識別の失敗は slowctl.log と UI に出る)ので、起動の失敗にはしない。
+if grep -q '^\[slowctl\]' "$CONF"; then
+    [ -x "$BIN/slowctl" ] || fail "missing binary: $BIN/slowctl"
+    start slowctl "$BIN/slowctl" --config "$CONF"
+    wait_for_line "$LOGS/slowctl.log" "status PUB bound" 20 || fail "slowctl"
+else
+    echo "  (no [slowctl] in $CONF — slowctl not started)"
+fi
 
 echo "== up =="
 REST=$(toml_get rest_listen)
