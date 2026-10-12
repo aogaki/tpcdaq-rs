@@ -220,11 +220,49 @@ pub fn parse_reply(line: &str) -> Result<Vec<String>, HvError> {
     Ok(parts)
 }
 
+/// `status_ignore` の 1 規則: この ch の指定フラグを alarm 判定から外す(TODO/121 §D)。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusIgnore {
+    pub ch: u8,
+    pub flags: Vec<String>,
+}
+
+/// ch ごとの「alarm から外すビット」(index = ch)。
+pub type IgnoreMasks = [u16; 8];
+
+/// 規則を ch 別マスクにする。**外せるのは `UNV`(bit5)と `OVV`(bit4)だけ**。
+/// それ以外のフラグ名・範囲外の ch はエラー(安全側)。
+pub fn ignore_masks(rules: &[StatusIgnore]) -> Result<IgnoreMasks, String> {
+    let mut masks = [0u16; 8];
+    for rule in rules {
+        let slot = masks
+            .get_mut(usize::from(rule.ch))
+            .ok_or_else(|| format!("status_ignore: ch {} is out of range 0..=7", rule.ch))?;
+        for flag in &rule.flags {
+            *slot |= match flag.as_str() {
+                "OVV" => 1 << 4,
+                "UNV" => 1 << 5,
+                other => {
+                    return Err(format!(
+                        "status_ignore: flag {other:?} cannot be ignored (only UNV / OVV)"
+                    ))
+                }
+            };
+        }
+    }
+    Ok(masks)
+}
+
 /// チャンネル STATUS ビットマスク(User Manual rev.16 p.23、10 進数で読む)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChStatus(pub u16);
 
 impl ChStatus {
+    /// `ignore` のビットを落とした値(alarm 判定用。出力する STATUS 値には使わない)。
+    pub fn without(self, ignore: u16) -> Self {
+        Self(self.0 & !ignore)
+    }
     pub fn on(self) -> bool {
         self.0 & (1 << 0) != 0
     }

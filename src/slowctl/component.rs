@@ -264,12 +264,20 @@ fn open_driver(device: &SlowDeviceConfig) -> Result<Box<dyn Driver + Send>, Slow
             Ok(Box::new(driver))
         }
         "hivolta" => {
+            let status_ignore =
+                super::hivolta::ignore_masks(&device.status_ignore).map_err(|message| {
+                    SlowctlError::Device {
+                        device: device.name.clone(),
+                        message,
+                    }
+                })?;
             // TODO/089 §1: `addr`(TCP)優先、無ければ `port`(serial 9600 8N1)。
             if let Some(addr) = device.addr.as_deref() {
                 let driver = super::hivolta_driver::open_tcp(
                     &device.name,
                     addr,
                     device.expect_serial.clone(),
+                    status_ignore,
                 )
                 .map_err(to_device_error)?;
                 Ok(Box::new(driver))
@@ -280,6 +288,7 @@ fn open_driver(device: &SlowDeviceConfig) -> Result<Box<dyn Driver + Send>, Slow
                     &device.name,
                     port,
                     device.expect_serial.clone(),
+                    status_ignore,
                 );
                 Ok(Box::new(driver))
             }
@@ -933,6 +942,7 @@ mod tests {
             expect_serial: String::new(),
             alarms,
             poll_s: None,
+            status_ignore: Vec::new(),
         }
     }
 

@@ -21,7 +21,8 @@ use std::time::Duration;
 use tracing::info;
 
 use super::hivolta::{
-    mon_bd, mon_ch, parse_alarm, parse_status, BdPar, ChPar, HvLink, HvLinkError, ALL_CH,
+    mon_bd, mon_ch, parse_alarm, parse_status, BdPar, ChPar, HvLink, HvLinkError, IgnoreMasks,
+    ALL_CH,
 };
 use super::{now_ms, Driver, DriverError, Ident, Sample};
 
@@ -53,6 +54,8 @@ pub struct HiVoltaDriver<T: Read + Write> {
     expect_serial: String,
     /// `ident` の `BDNCH` で確定するチャンネル数(**焼き込まない** —— TODO/089 §1)。
     nch: u8,
+    /// ch ごとに alarm 判定から外すビット(TODO/121 §D)。出力する STATUS 値は変えない。
+    status_ignore: IgnoreMasks,
 }
 
 impl<T: Read + Write> HiVoltaDriver<T> {
@@ -62,7 +65,14 @@ impl<T: Read + Write> HiVoltaDriver<T> {
             link: HvLink::new(io),
             expect_serial,
             nch: 0,
+            status_ignore: [0; 8],
         }
+    }
+
+    /// ch ごとに alarm から外すビットを設定する。
+    pub fn with_status_ignore(mut self, status_ignore: IgnoreMasks) -> Self {
+        self.status_ignore = status_ignore;
+        self
     }
 
     /// `ident` が確定したチャンネル数(テスト用)。
@@ -239,15 +249,16 @@ impl<T: Read + Write> Driver for HiVoltaDriver<T> {
             // 発注書 §1: 「STATUS ビット → alarm」= ovc|ovv|unv|trip|ovp|ovt|kill|intlk|fail。
             // bronkhorst.rs の「Alarm info ≠ 0 はそのノードの全サンプルに立てる」流儀を踏襲し、
             // この ch の 4 サンプル全部に同じ alarm を立てる。
-            let alarm = status.ovc()
-                || status.ovv()
-                || status.unv()
-                || status.trip()
-                || status.ovp()
-                || status.ovt()
-                || status.kill()
-                || status.intlk()
-                || status.fail();
+            let judged = status.without(self.status_ignore[usize::from(ch) % 8]);
+            let alarm = judged.ovc()
+                || judged.ovv()
+                || judged.unv()
+                || judged.trip()
+                || judged.ovp()
+                || judged.ovt()
+                || judged.kill()
+                || judged.intlk()
+                || judged.fail();
 
             samples.push(Sample {
                 device: self.device.clone(),
@@ -343,6 +354,7 @@ pub fn open_tcp(
     device: &str,
     addr: &str,
     expect_serial: String,
+    status_ignore: IgnoreMasks,
 ) -> Result<HiVoltaDriver<TcpStream>, DriverError> {
     let target = addr
         .to_socket_addrs()
@@ -360,7 +372,7 @@ pub fn open_tcp(
         .set_write_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)))
         .map_err(|e| DriverError::Protocol(format!("set_write_timeout on {addr} failed: {e}")))?;
     info!(device, addr, "slowctl: hivolta tcp connected");
-    Ok(HiVoltaDriver::new(device, stream, expect_serial))
+    Ok(HiVoltaDriver::new(device, stream, expect_serial).with_status_ignore(status_ignore))
 }
 
 type SerialBox = Box<dyn serialport::SerialPort>;
@@ -371,6 +383,7 @@ pub fn open_serial(
     device: &str,
     port: &str,
     expect_serial: String,
+    status_ignore: IgnoreMasks,
 ) -> OnDemandHiVolta<SerialBox, impl FnMut() -> Result<SerialBox, DriverError> + Send> {
     let port = port.to_string();
     let open = move || {
@@ -382,7 +395,7 @@ pub fn open_serial(
             .open()
             .map_err(|e| DriverError::Protocol(format!("cannot open serial port {port}: {e}")))
     };
-    OnDemandHiVolta::new(device, open, expect_serial)
+    OnDemandHiVolta::new(device, open, expect_serial).with_status_ignore(status_ignore)
 }
 
 // ---------------------------------------------------------------------
@@ -399,6 +412,7 @@ pub struct OnDemandHiVolta<T: Read + Write, F: FnMut() -> Result<T, DriverError>
     open: F,
     expect_serial: String,
     nch: u8,
+    status_ignore: IgnoreMasks,
 }
 
 impl<T: Read + Write, F: FnMut() -> Result<T, DriverError>> OnDemandHiVolta<T, F> {
@@ -408,7 +422,13 @@ impl<T: Read + Write, F: FnMut() -> Result<T, DriverError>> OnDemandHiVolta<T, F
             open,
             expect_serial,
             nch: 0,
+            status_ignore: [0; 8],
         }
+    }
+
+    pub fn with_status_ignore(mut self, status_ignore: IgnoreMasks) -> Self {
+        self.status_ignore = status_ignore;
+        self
     }
 }
 
@@ -423,7 +443,8 @@ impl<T: Read + Write, F: FnMut() -> Result<T, DriverError>> Driver for OnDemandH
 
     fn poll(&mut self) -> Result<Vec<Sample>, DriverError> {
         let io = (self.open)()?;
-        let mut driver = HiVoltaDriver::new(self.device.clone(), io, self.expect_serial.clone());
+        let mut driver = HiVoltaDriver::new(self.device.clone(), io, self.expect_serial.clone())
+            .with_status_ignore(self.status_ignore);
         driver.nch = self.nch;
         driver.poll()
     }
@@ -532,6 +553,42 @@ mod tests {
         // ボード: BDALARM 非 0(trip ビット = 64)、BDILK = YES。
         fake.set_response(mon_bd(BdPar::Alarm), "#CMD:OK,VAL:64\r\n");
         fake.set_response(mon_bd(BdPar::Ilk), "#CMD:OK,VAL:YES\r\n");
+    }
+
+    fn poll_golden(ignore: IgnoreMasks, status_reply: &str) -> Vec<Sample> {
+        let mut fake = FakeHv::new();
+        register_ident(&mut fake, 8, "SN-UNUSED");
+        register_golden(&mut fake);
+        fake.set_response(mon_ch(ALL_CH, ChPar::Status), status_reply);
+        let mut driver = HiVoltaDriver::new("hv", fake, String::new()).with_status_ignore(ignore);
+        driver.ident().unwrap();
+        driver.poll().unwrap()
+    }
+
+    /// TODO/121 §D: 実機ゴールデン(ch0 = 33 = ON|UNV)。無指定なら alarm、UNV を外せば alarm なし、
+    /// どちらでも status 値は 33 のまま。
+    #[test]
+    fn ignoring_unv_on_ch0_clears_its_alarm_but_keeps_the_status_value() {
+        let before = poll_golden([0; 8], STATUS_REPLY);
+        assert!(before[..5].iter().all(|s| s.alarm));
+
+        let mut ignore = [0u16; 8];
+        ignore[0] = 1 << 5;
+        let after = poll_golden(ignore, STATUS_REPLY);
+        assert!(after[..5].iter().all(|s| !s.alarm));
+        assert_eq!(after[2].param, "status");
+        assert_eq!(after[2].value, 33.0);
+    }
+
+    /// ch0 = 33 + TRIP(64) = 97: UNV を外していても TRIP で alarm。
+    #[test]
+    fn a_trip_still_alarms_even_when_unv_is_ignored() {
+        let mut ignore = [0u16; 8];
+        ignore[0] = 1 << 5;
+        let reply = "#CMD:OK,VAL:00097;00001;00001;00001;00001;00001;00001;00001\r\n";
+        let samples = poll_golden(ignore, reply);
+        assert!(samples[..5].iter().all(|s| s.alarm));
+        assert_eq!(samples[2].value, 97.0);
     }
 
     /// poll は要求ちょうど 7 本(全 ch 一括 5 + ボード 2)で、Sample 列は ch 毎 5 サンプル
