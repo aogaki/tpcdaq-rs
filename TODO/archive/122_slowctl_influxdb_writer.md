@@ -1,6 +1,6 @@
 # 122 — slowctl の全サンプルを InfluxDB に書く(時系列の保存先)
 
-**Status: IN PROGRESS**(2026-10-12 起票 Opus。ユーザー「保存先は InfluxDB にしましょう。テキストファイルはバカデカくなるのでつらい」。Opus implementer)
+**Status: COMPLETED**(2026-10-12 起票・同日完了。ユーザー「保存先は InfluxDB にしましょう。テキストファイルはバカデカくなるのでつらい」。Opus implementer、Fable 一括レビュー承認)
 
 ## 背景
 - 121 B で、slowctl の定期値(VALUE)はログブックに書かなくなった。ログブックに残るのは run_start / run_stop の `slow` スナップショットと、IDENT / ALARM / RECOVER / ERROR だけ。
@@ -98,3 +98,13 @@ Data Explorer で hv / lv の系列が見えること、counters の written が
     - lv ch1 volt はすべて 10(1 s 周期)。
     - 例外は 10:21:10 の 7(10:21:03 のスタック上げ直しで slowctl を入れ替えた瞬間)と、問い合わせ時点で進行中だった最後の窓だけ。
   - → **60 s の停止で欠損なし**(再送バッファの上限 100,000 点 ≈ 1.5 h に対して 572 点)。
+
+## 結果(まとめ)
+- ゲート(Mac): `cargo fmt --check && cargo clippy --tests -- -D warnings && cargo clippy --tests --features slowctl-fake -- -D warnings && cargo test` と `cd ui && npm test -- --watch=false && npm run build`。
+  - merge `68c614e` の時点で cargo **929 passed / 0 failed / 1 ignored**(ignored は既存の `tests/root_sink_monitor_pub.rs:1031`)、UI **325 passed / 5 skipped**(既存の conformance)。最終 main `651b734` で 931。
+- 新規テスト:
+  - influx.rs 単体 10 本(line protocol の実機例 / エスケープ / まとめ方 / v2 write への POST とトークン / 500 → 再試行 / 4xx / サーバ不在で古い方から落とす / チャネル満杯 / NaN / finish で書き出す)と、トークン読み込み 1 本。
+  - config 7 本(+ レビュー後の https 拒否とトークンを読まない parse)、mod 1 本、統合 2 本(実バイナリ + 偽 InfluxDB / トークンが無いと slowctl だけが起動失敗)、UI `json.spec.ts` 1 本。
+- 環境: Mac(テスト)と ELITPC(InfluxDB 2.9.1、2026-10-12)。実機の数値は上の「実機」節(InfluxDB の 60 s 停止で欠損なし、停止中の 572 点を復旧後に書き込み)。
+- **未実施**: ユーザーによる Data Explorer と UI Counters の目視(移動のため後日)。
+- SPEC **v1.41** §9.3(InfluxDB = モニタ系、正本は §9.2 のスナップショット)、§2.3 counters、§3.1 `[slowctl.influx]`(Fable 確定、`9e0dc43`)。

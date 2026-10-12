@@ -56,7 +56,10 @@ docs: [NEW_DAQ_SETUP_ja.md](../docs/NEW_DAQ_SETUP_ja.md) v0.1 + [RUNBOOK_ja.md](
 - 104 / 105 / 106 の archive にも訂正節を足した(1 s の不感時間は CAEN の変換器が原因)。
 - ~~117~~ **完了 → archive**([archive/117](archive/117_graw_writer_release_pull_before_finalize.md)): graw-writer は finalize(fsync)の前に PULL を放す。cargo **896**。
 - ELITPC の現状: Idle。ユーザーが 38 GB を転送中。α run は止めたまま。
-- **同日午後(Opus、ユーザー現地)**: [118](118_hv_lv_readout_on_elitpc.md)(IN PROGRESS)HV(HiVolta DT1415ET)/ LV(HMP2020)を USB で ELITPC に接続し、slowctl で読み出し中。
+- **同日午後(Opus、ユーザー現地)**: ~~118~~ / ~~120~~ / ~~121~~ / ~~122~~ **完了 → archive**(Fable 一括レビュー、**SPEC v1.41**、cargo 931 / UI 325)。HV / LV を ELITPC で常時読み出し(HV 5 s・LV 1 s)、
+  画面は機器 × ch の表、ログブックは run の開始・停止時の値 + IDENT / ALARM のみ、**全サンプルは InfluxDB 2.9.1**(`http://<ELITPC>:8086`、bucket `slowctl`、停止 60 s で欠損なし)、
+  ch0 の UNV は alarm から除外(起動時に告知)、slowctl は daq_up / daq_down に組み込み。未実施: ユーザーの目視(Data Explorer / UI Counters)。
+  経緯: [118](archive/118_hv_lv_readout_on_elitpc.md)(IN PROGRESS → 完了)HV(HiVolta DT1415ET)/ LV(HMP2020)を USB で ELITPC に接続し、slowctl で読み出し中。
   HMP は本体の Interface が RS-232 だった → USB VCP に変更。**HiVolta の USB で偽トリガ(最大 54 Hz)→ 原因は不良 USB ケーブルで、交換して解消**。
   ~~119~~ **完了 → archive**(全 ch 一括読み出し、機器ごとの `poll_s`、シリアルはオンデマンドで開く。cargo 903)。現在は HV 5 s / LV 1 s で、トリガは 5.1 Hz(正常)。
   run 69(ユーザー)の 11:15–11:58 は偽トリガで汚れている(区間は 118)。

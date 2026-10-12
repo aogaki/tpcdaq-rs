@@ -1,6 +1,6 @@
 # 121 — slowctl の運用仕上げ: 起動スクリプト / ログブックに定期値を書かない / HV ch0 の UNV を alarm から外す
 
-**Status: IN PROGRESS**(2026-10-12 起票 Opus。118 の残り 1〜3 へのユーザー回答に基づく)
+**Status: COMPLETED**(2026-10-12 起票・同日完了 Opus。118 の残り 1〜3 へのユーザー回答に基づく。Fable 一括レビュー承認)
 
 ## ユーザー回答(2026-10-12)
 1. 「進めてください。設定としてデバイスファイルを指す方がいいですか? それとも自動検出?」
@@ -68,3 +68,15 @@
 - **D**: 12:41 から反映済み(ch0 は status 33 のまま、alarm false。InfluxDB の `alarm` フィールドも false)。
 - ゲート: 107 → 121 B / D をマージした main で cargo 907、122 込みで 929(122 結果節)。
 - SPEC は 118–122 をまとめて v1.41 として Fable に確定してもらう。
+
+## 結果(追記、Fable レビュー後)
+- 実行したゲート(Mac、各マージ後): `cargo fmt --check && cargo clippy --tests -- -D warnings && cargo clippy --tests --features slowctl-fake -- -D warnings && cargo test`
+  → 最終の main `651b734` で **931 passed / 0 failed / 1 ignored**(ignored は既存の `tests/root_sink_monitor_pub.rs:1031`)。
+- 新規・変更したテスト:
+  - B: `the_run_records_carry_the_latest_slow_values`(VALUE 2 本 + IDENT の番兵 → ログブックに VALUE なし、`slow_values_not_logged == 2`、run_start / run_stop の `slow` に値が載る)、
+    `log_posts_are_stamped_with_ts_and_seq_and_bad_ones_are_counted`(ALARM がログブックに書かれる)。
+  - D: `ignoring_unv_on_ch0_clears_its_alarm_but_keeps_the_status_value` / `a_trip_still_alarms_even_when_unv_is_ignored` / `status_ignore_accepts_only_unv_and_ovv`。
+  - Fable 指摘(silent 2 点、Sonnet `68f02f7` → merge `651b734`): `status_ignore_on_a_non_hivolta_device_is_rejected` / `ignore_notices_lists_only_channels_with_a_mask`。
+    起動時の info は実機で確認した(10:35:11Z `slowctl: alarm judgement ignores these STATUS flags (status_ignore) device=hv ch=0 flags=["UNV"]`)。
+- A の追補: daq_up は slowctl が上がらなくても WARNING で続ける(監視系の不備で DAQ を落とさない、Fable (d))。`bash -n` は通過。実機の上げ直し(13:21)では slowctl も正常に起動した。
+- SPEC **v1.41**(Fable 確定、`9e0dc43`)。
