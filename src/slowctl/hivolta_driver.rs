@@ -8,7 +8,8 @@
 //! # power ON / OFF の手順(TODO/124 Fable 6)
 //!
 //! 単 ch の STATUS(before)→ DIS(前面スイッチ OFF)なら SET を送らずに拒否 → SET →
-//! `#LOC:ERR` なら「LOCAL モード」→ 単 ch の STATUS(after)→ 要求どおりかを [`switched`] で判定。
+//! `#LOC:ERR` なら「LOCAL モード」→ 単 ch の STATUS(after)→ 要求どおりかを [`switched`] で判定
+//! (満たすまで 100 ms 間隔で最大 10 回読み直す —— 実機は OFF 直後に DOWN をまだ立てていない)。
 //! before / after は**生の STATUS**(`status_ignore` は alarm の判定にだけ効く)。
 //!
 //! # 発注書 §1/§2 の食い違いについて(2026-09-23、報告事項)
@@ -32,7 +33,10 @@ use super::hivolta::{
     mon_bd, mon_ch, parse_alarm, parse_status, set_power, BdPar, ChPar, ChStatus, HvError, HvLink,
     HvLinkError, IgnoreMasks, ALL_CH,
 };
-use super::{now_ms, Driver, DriverError, Ident, PowerOutcome, PowerRefused, Sample};
+use super::{
+    now_ms, Driver, DriverError, Ident, PowerOutcome, PowerRefused, Sample, POWER_CHECK_INTERVAL,
+    POWER_CHECK_TRIES,
+};
 
 /// TCP 接続タイムアウト(発注書 §1: `connect_timeout` 3 s)。
 pub const CONNECT_TIMEOUT_MS: u64 = 3_000;
@@ -199,11 +203,21 @@ impl<T: Read + Write> HiVoltaDriver<T> {
                 )))
             }
         }
-        let after = self.read_status(ch).map_err(|e| {
-            PowerRefused::without_after(format!(
-                "SET was sent but reading the STATUS back failed ({e})"
-            ))
-        })?;
+        // 実機 2026-10-12: 機器が状態ビットを立てるまで少し掛かる —— 条件を満たすまで読み直す。
+        let mut after = ChStatus(0);
+        for attempt in 0..POWER_CHECK_TRIES {
+            if attempt > 0 {
+                std::thread::sleep(POWER_CHECK_INTERVAL);
+            }
+            after = self.read_status(ch).map_err(|e| {
+                PowerRefused::without_after(format!(
+                    "SET was sent but reading the STATUS back failed ({e})"
+                ))
+            })?;
+            if switched(on, after) {
+                break;
+            }
+        }
         if !switched(on, after) {
             return Err(PowerRefused {
                 error: format!("channel did not switch (status={})", after.0),
@@ -1020,6 +1034,52 @@ mod tests {
                 after: Some(json!({"status": 0, "flags": []})),
             })
         );
+    }
+
+    /// 実機 ELITPC 2026-10-12: OFF の SET 直後の STATUS はまだ DOWN が立たず 1 のまま。
+    /// SET 後は 100 ms 間隔で読み直す —— 1・2 回目は 1、3 回目で 5(ON + DOWN)なら成功。
+    #[test]
+    fn an_off_whose_down_bit_shows_on_the_third_read_succeeds() {
+        let status = "$CMD:MON,CH:3,PAR:STATUS\r\n";
+        let mut fake = FakeHv::new();
+        fake.push_response(status, "#CMD:OK,VAL:00001\r\n"); // before
+        fake.push_response(status, "#CMD:OK,VAL:00001\r\n"); // after 1 回目
+        fake.push_response(status, "#CMD:OK,VAL:00001\r\n"); // after 2 回目
+        fake.push_response(status, "#CMD:OK,VAL:00005\r\n"); // after 3 回目 = ON + DOWN
+        let (mut driver, sent) = identified(fake);
+
+        let started = std::time::Instant::now();
+        let outcome = driver.set_power(3, false).unwrap();
+
+        assert_eq!(outcome.before, json!({"status": 1, "flags": ["ON"]}));
+        assert_eq!(
+            outcome.result,
+            Ok(json!({"status": 5, "flags": ["ON", "DOWN"]}))
+        );
+        // before 1 + after 3 = 4 回。読み直しの間隔 2 回ぶん(100 ms × 2)は待っている。
+        assert_eq!(sent_text(&sent).matches(status).count(), 4);
+        assert!(started.elapsed() >= Duration::from_millis(200));
+    }
+
+    /// 10 回読んでも条件を満たさなければ従来のエラー。after は最後に読んだ STATUS。
+    #[test]
+    fn an_off_that_never_shows_down_fails_after_ten_reads() {
+        let status = "$CMD:MON,CH:3,PAR:STATUS\r\n";
+        let mut fake = FakeHv::new();
+        fake.set_response(status, "#CMD:OK,VAL:00001\r\n"); // 何度読んでも 1
+        let (mut driver, sent) = identified(fake);
+
+        let outcome = driver.set_power(3, false).unwrap();
+
+        assert_eq!(
+            outcome.result,
+            Err(PowerRefused {
+                error: "channel did not switch (status=1)".to_string(),
+                after: Some(json!({"status": 1, "flags": ["ON"]})),
+            })
+        );
+        // before 1 + after 10 = 11 回。
+        assert_eq!(sent_text(&sent).matches(status).count(), 11);
     }
 
     /// Fable 6 の after の判定: ON の要求は ON ビット(RUP が同時でも可)、OFF の要求は
