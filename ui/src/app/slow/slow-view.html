@@ -6,43 +6,100 @@
   } @else {
     <section class="card">
       <h2>Latest</h2>
-      <table class="latest">
+      <table class="channels">
         <thead>
           <tr>
-            <th>device</th>
-            <th>node</th>
-            <th>param</th>
-            <th>value</th>
-            <th>unit</th>
-            <th>age</th>
-            <th>alarm</th>
+            <th>Device</th>
+            <th>Ch</th>
+            <th>Vmon</th>
+            <th>Vset</th>
+            <th>Imon</th>
+            <th>Iset</th>
+            <th>Status</th>
+            <th>ON/OFF</th>
+            <th>Age</th>
           </tr>
         </thead>
         <tbody>
-          @for (row of rows(); track row.key) {
+          @for (row of table().channels; track row.key) {
             <tr [class.alarm]="row.alarm">
               <td>{{ row.device }}</td>
-              <td>{{ row.node ?? '—' }}</td>
-              <td>{{ row.param }}</td>
-              <td class="value">{{ formatValue(row.value) }}</td>
-              <td>{{ row.unit }}</td>
-              <td [class.stale]="row.stale">{{ formatAge(row.ageMs) }}</td>
+              <td>{{ row.ch }}</td>
+              <td class="value">
+                {{ row.vmon.text }}<small>{{ row.vmon.unit }}</small>
+              </td>
+              <td class="value">
+                {{ row.vset.text }}<small>{{ row.vset.unit }}</small>
+              </td>
+              <td class="value">
+                {{ row.imon.text }}<small>{{ row.imon.unit }}</small>
+              </td>
+              <td class="value">
+                {{ row.iset.text }}<small>{{ row.iset.unit }}</small>
+              </td>
               <td>
+                {{ row.status }}
                 @if (row.alarm) {
                   <span class="badge alarm">ALARM</span>
+                }
+              </td>
+              <td>
+                @if (row.onOff === 'ON') {
+                  <span class="onoff on">ON</span>
+                } @else if (row.onOff === 'OFF') {
+                  <span class="onoff off">OFF</span>
                 } @else {
                   <span class="dim">—</span>
                 }
               </td>
+              <td [class.stale]="row.stale">{{ formatAge(row.ageMs) }}</td>
             </tr>
           } @empty {
             <tr>
-              <td colspan="7" class="dim">No samples</td>
+              <td colspan="9" class="dim">No channels</td>
             </tr>
           }
         </tbody>
       </table>
     </section>
+
+    @if (table().other.length > 0) {
+      <section class="card">
+        <h2>Other</h2>
+        <table class="other">
+          <thead>
+            <tr>
+              <th>device</th>
+              <th>node</th>
+              <th>param</th>
+              <th>value</th>
+              <th>unit</th>
+              <th>age</th>
+              <th>alarm</th>
+            </tr>
+          </thead>
+          <tbody>
+            @for (row of table().other; track row.key) {
+              <tr [class.alarm]="row.alarm">
+                <td>{{ row.device }}</td>
+                <td>{{ row.node ?? '—' }}</td>
+                <td>{{ row.param }}</td>
+                <td class="value">{{ formatValue(row.value) }}</td>
+                <td>{{ row.unit }}</td>
+                <td [class.stale]="row.stale">{{ formatAge(row.ageMs) }}</td>
+                <td>
+                  @if (row.alarm) {
+                    <span class="badge alarm">ALARM</span>
+                  } @else {
+                    <span class="dim">—</span>
+                  }
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </section>
+    }
 
     <section class="card">
       <header>

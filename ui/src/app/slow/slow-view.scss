@@ -69,6 +69,24 @@ tr.alarm td {
   color: var(--tpc-warn);
 }
 
+td small {
+  margin-left: 0.2rem;
+  color: var(--mat-sys-on-surface-variant);
+  font-size: 0.68rem;
+}
+
+.onoff {
+  font-weight: 600;
+}
+
+.onoff.on {
+  color: var(--tpc-ok);
+}
+
+.onoff.off {
+  color: var(--mat-sys-on-surface-variant);
+}
+
 td.stale {
   color: var(--mat-sys-on-surface-variant);
   opacity: 0.6;

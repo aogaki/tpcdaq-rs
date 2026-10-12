@@ -30,13 +30,12 @@ import { observeResize } from '../display/resize-observer';
 import {
   MAX_TREND_SERIES,
   type SlowHistoryMap,
-  type SlowRow,
   appendSlowSamples,
   capSeriesSelection,
   formatAgeMs,
   formatSlowValue,
-  sortedSlowRows,
 } from './slow-history';
+import { type SlowTable, buildSlowTable } from './slow-table';
 
 /** age を再計算する刻み(Latest 表の「age」列を進めるだけ — 購読やデータの取得間隔ではない)。 */
 const AGE_TICK_MS = 1000;
@@ -58,9 +57,10 @@ export class SlowView implements OnDestroy {
   private readonly nowMs = signal(Date.now());
   private readonly ageTimer = setInterval(() => this.nowMs.set(Date.now()), AGE_TICK_MS);
 
-  readonly rows = computed<readonly SlowRow[]>(() => {
+  /** Latest: ch 表(機器 × ch 1 行)+ 列に写らないサンプルの Other 表(TODO/120)。 */
+  readonly table = computed<SlowTable>(() => {
     const slow = this.slow();
-    return slow ? sortedSlowRows(slow.samples, this.nowMs()) : [];
+    return slow ? buildSlowTable(slow.samples, this.nowMs()) : { channels: [], other: [] };
   });
 
   private readonly history = signal<SlowHistoryMap>(new Map());
