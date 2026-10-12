@@ -69,3 +69,25 @@
 - **実機の追加試験**: run 中に root-sink を `kill -STOP` → controller を kill -9 → 再起動 → start。
   期待は、跡に `eos: did not propagate`、`eos_abandoned` / `messages_abandoned` が出ること、`kill -CONT` 後に root-sink が exit 6 になること。
 - **前の run の `run_stop`** → 115 として別チケット(Fable 裁定済み)。
+
+## 結果(2026-10-12)
+- **B**(Sonnet `9f223b2` → merge `15b1863`):
+  - `rs_core.hpp` に `first_late_of_run(now, at_open)`、`root_sink.cxx` はそれで判定する。
+  - `test_rs_core` に `test_first_late_of_run_is_per_run` を追加(red → green)。
+  - Mac の `make -j test`: tpc_wire 68 / **rs_core 78** / eb_core 175 / geo 426 / monitor_hist 202 / monitor_pub 92、failed 0。test-root 170 / 99 / 88 green(Sonnet)。
+- **A**(Opus `c9a9c1b` + `bc41682` → merge `36b5976`、追補 `3cd5ef2` → merge `b18c109`):
+  - `walk_components_back_to_idle` を書き直した。状態調べ → 全員 Running なら停止経路の 2 段(`wait_for_eos_or_quiesce` → 強制 EOS → `wait_for_eos`)→ 下流 Stop → Reset。
+  - 一部だけ Running なら待たない(跡は `eos: not awaited`)。
+  - `walk_back_step` は失敗時に、その時点の実状態を名乗る。
+  - テスト: 単体 +6(順序 / slept 800 ms / 自然 EOS で強制なし / 届かない 5600 ms / 一部だけ / 文言が Configured)、統合 +1(controller だけを作り直して start → 跡 `eos: closed`)。
+  - ゲート(main `b18c109`、115 込み): clippy 0、**cargo test 893 passed / 0 failed / 1 ignored**。
+- **実機(ELITPC、α 4.5 Hz)**:
+
+  | 試験 | ビルド | 結果 |
+  |---|---|---|
+  | crash(run 58 → 59) | 113 | start は通った。run 58 は EOS で閉じた(低レートでは競争に勝つ)。跡に eos 行なし |
+  | crash(run 60 → 61) | 114A | 跡 `eos: closed` + 全員 `Running->Configured->Idle`、graw 63 = ROOT 63、inprogress なし。run 61 の close 行は `events_complete=43`(108 の per-run 修正の実機確認) |
+  | crash(run 62 → 63) | 114 追補 + 115 | 跡 `eos: closed`(`forced_eos:false` = breakup の EOF で第一段が自然に閉じた)。`run_stop 62` = `abort:controller-restart`、ok false、eos_closed true、frames 89 = ROOT 89、run_start 63 より前 |
+  | **SIGSTOP**(run 64 → 65) | 114 追補 + 115 | root-sink 停止で decoder の batches_out が 988 で詰まった → controller kill -9 → start: 歩き戻しは `eos: did not propagate`、`run_stop 64` は eos_closed:false で書かれた。**ただし run 65 の Arm が decoder の bind 失敗で落ちた → 116**。graw 1219 フレーム(連番、無傷)/ ROOT 1041 で inprogress のまま(EOS 未着、可視) |
+
+- Fable 一括レビュー: 承認 + 追補 1 件(静止確認)→ 追補は実装済み。SPEC v1.39 / v1.40 の確定は 116 と合わせて Fable に出す。

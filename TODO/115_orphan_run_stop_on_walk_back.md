@@ -30,3 +30,15 @@
 - 統合: 114 の `a_restarted_controller_closes_the_running_run_with_eos_before_the_next_start` を延長し、ログブックの JSONL が
   `run_start 1 → run_stop 1(abort:controller-restart)→ run_start 2 → run_stop 2` の順になること。
 - runs.yaml: `logbook2runs` に通すと、run 1 に `no run_stop` 注記が出ないこと。
+
+## 結果(2026-10-12)
+- 実装(Opus `80db949` → merge `b18c109`):
+  - `WalkedBackRun{run, forced_eos, eos_closed, counters, files, notes}`(`StartReport` / `StartFailure` の両方で返す)。
+  - 純関数 `previous_run_number`(申告者全員の一致のみ)。
+  - `append_walked_back_run_stop` を `RunStart` の前に、start が失敗しても呼ぶ。
+  - `LogbookRecord::RunStop.duration_s: Option<f64>`、audit `run/start.previous_run_stop`。
+- テスト: 単体 +8、統合の延長(JSONL の順序、`logbook2runs` CLI に通して `no run_stop` が出ないこと)。cargo 893。
+- 実機:
+  - `run_stop 62`(crash 試験)は `{"duration_s": 28.162, "ok": false, "reason": "abort:controller-restart", "forced_eos": false, "eos_closed": true, frames {"0": 89}, files 1 本}` で、`run_start 63` より前に書かれた。
+  - `run_stop 64`(SIGSTOP 試験)は eos_closed:false、duration 258.4 s で、Arm の失敗で start 65 が失敗したのに書かれた(start 失敗の経路の実機確認)。
+- 備考: `counters.events_built` / `events_incomplete` / `late_fragments` は通常の停止でも null(root-sink が REP を持たない間は null、§9.2 v1.10)。この票とは無関係。
