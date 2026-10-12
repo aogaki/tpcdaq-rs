@@ -36,6 +36,7 @@ pub const PARAM_VMON: &str = "vmon";
 pub const PARAM_IMON: &str = "imon";
 pub const PARAM_STATUS: &str = "status";
 pub const PARAM_VSET: &str = "vset";
+pub const PARAM_ISET: &str = "iset";
 pub const PARAM_BDALARM: &str = "bdalarm";
 pub const PARAM_BDILK: &str = "bdilk";
 
@@ -216,14 +217,15 @@ impl<T: Read + Write> Driver for HiVoltaDriver<T> {
 
     fn poll(&mut self) -> Result<Vec<Sample>, DriverError> {
         let ts_ms = now_ms();
-        let mut samples = Vec::with_capacity(usize::from(self.nch) * 4 + 2);
+        let mut samples = Vec::with_capacity(usize::from(self.nch) * 5 + 2);
 
         // TODO/119: 通信 1 往復ごとに偽トリガが入る(TODO/118)ので、全 ch 一括(CH:8)で
-        // 4 往復 + ボード 2 往復 = 6 往復/周期にする。
+        // 5 往復 + ボード 2 往復 = 7 往復/周期にする(TODO/120: ISET を追加)。
         let vmon_all = self.bulk(ChPar::Vmon, "VMON")?;
         let imon_all = self.bulk(ChPar::Imon, "IMON")?;
         let status_all = self.bulk(ChPar::Status, "STATUS")?;
         let vset_all = self.bulk(ChPar::Vset, "VSET")?;
+        let iset_all = self.bulk(ChPar::Iset, "ISET")?;
 
         for ch in 0..self.nch {
             let i = usize::from(ch);
@@ -232,6 +234,7 @@ impl<T: Read + Write> Driver for HiVoltaDriver<T> {
             let status =
                 parse_status(&status_all[i]).map_err(|e| DriverError::Protocol(e.to_string()))?;
             let vset = parse_f64_value(&vset_all[i], "VSET")?;
+            let iset = parse_f64_value(&iset_all[i], "ISET")?;
 
             // 発注書 §1: 「STATUS ビット → alarm」= ovc|ovv|unv|trip|ovp|ovt|kill|intlk|fail。
             // bronkhorst.rs の「Alarm info ≠ 0 はそのノードの全サンプルに立てる」流儀を踏襲し、
@@ -279,6 +282,15 @@ impl<T: Read + Write> Driver for HiVoltaDriver<T> {
                 param: PARAM_VSET.to_string(),
                 value: vset,
                 unit: UNIT_V.to_string(),
+                ts_ms,
+                alarm,
+            });
+            samples.push(Sample {
+                device: self.device.clone(),
+                node: Some(ch),
+                param: PARAM_ISET.to_string(),
+                value: iset,
+                unit: UNIT_UA.to_string(),
                 ts_ms,
                 alarm,
             });
@@ -486,6 +498,9 @@ mod tests {
     const VMON_REPLY: &str =
         "#CMD:OK,VAL:0341.06;0250.24;0349.88;0250.22;0349.92;0250.16;0595.96;0599.96\r\n";
     const IMON_REPLY: &str = "#CMD:OK,VAL:+0009.593;+0008.868;+0009.084;+0009.067;+0009.042;+0008.905;+0003.753;+0005.930\r\n";
+    // 実機応答(ELITPC、2026-10-12)。一字も変えない。
+    const ISET_REPLY: &str =
+        "#CMD:OK,VAL:0015.00;0015.00;0015.00;0015.00;0015.00;0015.00;0015.00;0015.00\r\n";
     const STATUS_REPLY: &str = "#CMD:OK,VAL:00033;00001;00001;00001;00001;00001;00001;00001\r\n";
 
     /// 送信行を記録する薄いラッパ(FakeHv は Link に所有されるので外から見えない)。
@@ -513,15 +528,16 @@ mod tests {
         fake.set_response(mon_ch(ALL_CH, ChPar::Vmon), VMON_REPLY);
         fake.set_response(mon_ch(ALL_CH, ChPar::Imon), IMON_REPLY);
         fake.set_response(mon_ch(ALL_CH, ChPar::Status), STATUS_REPLY);
+        fake.set_response(mon_ch(ALL_CH, ChPar::Iset), ISET_REPLY);
         // ボード: BDALARM 非 0(trip ビット = 64)、BDILK = YES。
         fake.set_response(mon_bd(BdPar::Alarm), "#CMD:OK,VAL:64\r\n");
         fake.set_response(mon_bd(BdPar::Ilk), "#CMD:OK,VAL:YES\r\n");
     }
 
-    /// poll は要求ちょうど 6 本(全 ch 一括 4 + ボード 2)で、Sample 列は ch 毎 4 サンプル
-    /// (vmon/imon/status/vset)× 8 + ボード 2 = 34(旧実装と同一の並び)。
+    /// poll は要求ちょうど 7 本(全 ch 一括 5 + ボード 2)で、Sample 列は ch 毎 5 サンプル
+    /// (vmon/imon/status/vset/iset)× 8 + ボード 2 = 42(旧実装と同一の並び)。
     #[test]
-    fn poll_sends_exactly_six_requests_and_yields_the_per_channel_samples() {
+    fn poll_sends_exactly_seven_requests_and_yields_the_per_channel_samples() {
         let mut inner = FakeHv::new();
         register_ident(&mut inner, 8, "SN-UNUSED");
         register_golden(&mut inner);
@@ -540,10 +556,10 @@ mod tests {
             text,
             "$CMD:MON,CH:8,PAR:VMON\r\n$CMD:MON,CH:8,PAR:IMON\r\n\
              $CMD:MON,CH:8,PAR:STATUS\r\n$CMD:MON,CH:8,PAR:VSET\r\n\
-             $CMD:MON,PAR:BDALARM\r\n$CMD:MON,PAR:BDILK\r\n"
+             $CMD:MON,CH:8,PAR:ISET\r\n$CMD:MON,PAR:BDALARM\r\n$CMD:MON,PAR:BDILK\r\n"
         );
 
-        assert_eq!(samples.len(), 34, "4 x 8ch + board 2");
+        assert_eq!(samples.len(), 42, "5 x 8ch + board 2");
 
         // ch0(STATUS 33 = ON + UNV(bit5)→ alarm)。値は応答の 1 番目。
         assert_eq!(samples[0].param, "vmon");
@@ -558,30 +574,37 @@ mod tests {
         assert_eq!(samples[2].unit, "bitmask");
         assert_eq!(samples[3].param, "vset");
         assert_eq!(samples[3].value, 350.0);
-        for sample in &samples[0..4] {
+        assert_eq!(samples[4].param, "iset");
+        assert_eq!(samples[4].node, Some(0));
+        assert_eq!(samples[4].value, 15.0);
+        assert_eq!(samples[4].unit, "µA");
+        for sample in &samples[0..5] {
             assert!(sample.alarm, "STATUS 33 の UNV は ch0 の全サンプルに alarm");
         }
 
         // ch1..7 は STATUS 1(ON のみ)→ alarm なし。ch6 = 末尾から 2 番目の ch。
-        for (ch, chunk) in samples[4..32].chunks(4).enumerate() {
+        for (ch, chunk) in samples[5..40].chunks(5).enumerate() {
             let ch = ch + 1;
             assert!(chunk.iter().all(|s| s.node == Some(ch as u8) && !s.alarm));
         }
-        assert_eq!(samples[24].value, 595.96, "ch6 vmon");
-        assert_eq!(samples[25].value, 3.753, "ch6 imon");
-        assert_eq!(samples[27].value, 600.0, "ch6 vset");
-        assert_eq!(samples[28].value, 599.96, "ch7 vmon");
-        assert_eq!(samples[29].value, 5.930, "ch7 imon");
+        assert_eq!(samples[30].value, 595.96, "ch6 vmon");
+        assert_eq!(samples[31].value, 3.753, "ch6 imon");
+        assert_eq!(samples[33].value, 600.0, "ch6 vset");
+        assert_eq!(samples[35].value, 599.96, "ch7 vmon");
+        assert_eq!(samples[36].value, 5.930, "ch7 imon");
+        assert_eq!(samples[39].param, "iset");
+        assert_eq!(samples[39].node, Some(7));
+        assert_eq!(samples[39].value, 15.0, "ch7 iset");
 
         // ボード。
-        assert_eq!(samples[32].param, "bdalarm");
-        assert_eq!(samples[32].node, None);
-        assert_eq!(samples[32].value, 64.0);
-        assert!(samples[32].alarm, "BDALARM 非 0 は alarm");
-        assert_eq!(samples[33].param, "bdilk");
-        assert_eq!(samples[33].value, 1.0, "YES = 1.0");
-        assert_eq!(samples[33].unit, "flag");
-        assert!(!samples[33].alarm);
+        assert_eq!(samples[40].param, "bdalarm");
+        assert_eq!(samples[40].node, None);
+        assert_eq!(samples[40].value, 64.0);
+        assert!(samples[40].alarm, "BDALARM 非 0 は alarm");
+        assert_eq!(samples[41].param, "bdilk");
+        assert_eq!(samples[41].value, 1.0, "YES = 1.0");
+        assert_eq!(samples[41].unit, "flag");
+        assert!(!samples[41].alarm);
     }
 
     /// 応答の値が 7 個や 9 個なら Protocol(切り詰め・埋めをしない)。
@@ -691,9 +714,9 @@ mod tests {
         )
     }
 
-    /// poll 1 回 = open 1 回 + 要求 6 本 + close 1 回(TODO/119 §5/§6)。
+    /// poll 1 回 = open 1 回 + 要求 7 本 + close 1 回(TODO/119 §5/§6)。
     #[test]
-    fn on_demand_poll_is_one_open_six_requests_one_close() {
+    fn on_demand_poll_is_one_open_seven_requests_one_close() {
         let (mut driver, c) = counted_driver("");
         driver.ident().unwrap();
         c.sent.borrow_mut().clear();
@@ -701,11 +724,11 @@ mod tests {
 
         let samples = driver.poll().unwrap();
 
-        assert_eq!(samples.len(), 34);
+        assert_eq!(samples.len(), 42);
         assert_eq!(c.opens.get() - opens0, 1);
         assert_eq!(c.closes.get() - closes0, 1, "poll の終わりで閉じている");
         let text = String::from_utf8(c.sent.borrow().clone()).unwrap();
-        assert_eq!(text.matches("\r\n").count(), 6);
+        assert_eq!(text.matches("\r\n").count(), 7);
         assert!(text.starts_with("$CMD:MON,CH:8,PAR:VMON"));
     }
 
