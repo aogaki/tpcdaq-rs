@@ -53,3 +53,19 @@
 ## ゲート
 `cargo fmt && cargo clippy --tests -- -D warnings && cargo test` / `cd tools/root_sink && make -j test`(可能なら `make -j test-root`)。
 実機(ELITPC): controller だけを kill -9 → 再起動 → start で、前の run が root-sink で閉じること(`run N closed`、`run_inprogress` が残らないこと)。
+
+## Fable 一括レビュー(2026-10-12、スポット Fable、読み取り専用)
+- **判定: 承認(main `36b5976`)+ 追補 1 件**。
+  - (a) EOS が届かなくても start を止めない判断は、v1.12 の終端条項を start 側に当てはめたもので、ロスレス規約の範囲内。
+    root-sink は次の run の最初の Data で exit 6 になる(正しい検出)。このことを SPEC に明記する。
+  - (b) 「一部だけ Running なら待たない」には、取りこぼしの経路が 1 つある。controller が自分の停止の第二段の最中に落ちた場合
+    (receiver が Configured のまま EOS を送出中)。狭く、`messages_abandoned` で可視なので、今回は入れない(KISS)。
+  - (c) **silent の穴**: `receiver::drain_task` は Stop で即 break し、カーネル受信バッファの未読分を数えずに捨てる。
+    停止経路はそのために `wait_for_eos_or_quiesce` を Stop の前に置いているが、114 の歩き戻しは静止を確かめずに Stop している。
+    実害が出ていないのは、breakup で FIN が来るという書かれていないタイミングのおかげ。
+- **追補**: 全員 Running の経路を停止経路の 2 段そのものにする。
+  `wait_for_eos_or_quiesce` → 閉じていなければ全 receiver に `Stop` → `wait_for_eos` → 下流に `Stop`。跡の形式は変えない。
+  SPEC v1.39 の確定文は Fable 作で、追補が green になってからコミットする。
+- **実機の追加試験**: run 中に root-sink を `kill -STOP` → controller を kill -9 → 再起動 → start。
+  期待は、跡に `eos: did not propagate`、`eos_abandoned` / `messages_abandoned` が出ること、`kill -CONT` 後に root-sink が exit 6 になること。
+- **前の run の `run_stop`** → 115 として別チケット(Fable 裁定済み)。
