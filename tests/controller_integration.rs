@@ -485,7 +485,7 @@ async fn harness_full(
         });
     }
 
-    let (BoundEndpoints { rest, log_pull }, ecc) = spawn_controller(
+    let (BoundEndpoints { rest, log_pull }, ecc, _) = spawn_controller(
         &shutdown,
         &output_root,
         cobos,
@@ -512,6 +512,7 @@ async fn harness_full(
 
 /// fake ECC + controller(REST)を起動する。コンポーネントはフェイク([`harness_full`])でも
 /// 本物([`real_chain`]、112)でもよい —— controller から見えるのはコマンド REP だけ。
+/// 使った [`ControllerParams`] も返す(114: 同じ params で controller だけを作り直すため)。
 async fn spawn_controller(
     shutdown: &broadcast::Sender<()>,
     output_root: &Path,
@@ -520,7 +521,7 @@ async fn spawn_controller(
     ui_dir: Option<PathBuf>,
     config_ids: ConfigIds,
     ecc_config_dir: Option<PathBuf>,
-) -> (BoundEndpoints, FakeEcc) {
+) -> (BoundEndpoints, FakeEcc, ControllerParams) {
     let ecc = FakeEcc::spawn();
     let params = ControllerParams {
         rest_listen: "127.0.0.1:0".to_string(),
@@ -550,6 +551,15 @@ async fn spawn_controller(
         status_timeout: Duration::from_secs(2),
     };
 
+    let bound = launch_controller(params.clone(), shutdown).await;
+    (bound, ecc, params)
+}
+
+/// controller を `params` のまま 1 つ起動し、`shutdown` で止まるようにする。
+async fn launch_controller(
+    params: ControllerParams,
+    shutdown: &broadcast::Sender<()>,
+) -> BoundEndpoints {
     let (bound_tx, bound_rx) = oneshot::channel();
     let shutdown_rx = shutdown.subscribe();
     tokio::spawn(async move {
@@ -557,7 +567,7 @@ async fn spawn_controller(
             panic!("controller failed: {e}");
         }
     });
-    (bound_rx.await.unwrap(), ecc)
+    bound_rx.await.unwrap()
 }
 
 impl Harness {
@@ -2650,6 +2660,9 @@ struct RealChain {
     data_port: u16,
     sink: SinkDrain,
     components: Vec<common::Component>,
+    /// controller の起動パラメタ(114: [`RealChain::restart_controller`] が同じものを使う)。
+    params: ControllerParams,
+    /// **controller だけ**を止める合図(コンポーネントはそれぞれ自分の合図を持つ)。
     shutdown: broadcast::Sender<()>,
 }
 
@@ -2697,7 +2710,7 @@ async fn real_chain(tag: &str) -> (RealChain, PathBuf) {
     }];
 
     let (shutdown, _) = broadcast::channel(1);
-    let (BoundEndpoints { rest, .. }, ecc) = spawn_controller(
+    let (BoundEndpoints { rest, .. }, ecc, params) = spawn_controller(
         &shutdown,
         &output_root,
         cobos,
@@ -2715,12 +2728,26 @@ async fn real_chain(tag: &str) -> (RealChain, PathBuf) {
         data_port,
         sink,
         components,
+        params,
         shutdown,
     };
     (chain, ecc_config_dir)
 }
 
 impl RealChain {
+    /// **controller だけ**を作り直す(114: run 中に controller が落ちて再起動した姿)。
+    ///
+    /// 古い controller を止める —— controller は止まるときコンポーネントにも ECC にも何も
+    /// 送らないので、kill -9 と同じく**全員 Running のまま**残る。新しい controller は同じ
+    /// params(同じ output_root = ログブックと採番を引き継ぐ、同じ fake ECC)で起動し、相は Idle。
+    async fn restart_controller(&mut self) {
+        let _ = self.shutdown.send(());
+        let (shutdown, _) = broadcast::channel(1);
+        let BoundEndpoints { rest, .. } = launch_controller(self.params.clone(), &shutdown).await;
+        self.rest = rest;
+        self.shutdown = shutdown;
+    }
+
     fn acquire(&self, operator: &str) -> String {
         let (status, body) = post(
             self.rest,
@@ -2944,6 +2971,125 @@ async fn back_to_back_apply_and_restart_with_real_components_relistens_every_rou
     wait_until("sink received 6 EOS", || chain.sink.eos_runs().len() == 6);
     assert_eq!(chain.sink.eos_runs(), vec![1, 2, 3, 4, 5, 6]);
     assert!(chain.sink.data_batches.load(Ordering::Relaxed) > 0);
+
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    chain.shutdown();
+}
+
+/// **114 の統合版**(ELITPC 実機ベースライン 2026-10-12 の再現): 本物の receiver / decoder /
+/// graw-writer で run 1 を走らせ、29 フレーム流したところで **controller だけ**を作り直す
+/// (相 Idle、コンポーネント 3 つと ECC は Running のまま)。次の `run/start` はチェーンが
+/// 無傷なので、Reset の前に receiver `Stop` → EOS 待ち → 下流 `Stop` で run 1 を閉じ、通る。
+///
+/// 照合: audit `component_walk_back` = `"eos: closed"` + 各コンポーネントの
+/// `Running->Configured->Idle` / `ecc_walk_back` = Running からの 5 段 / decoder 下流
+/// (root-sink の席)が run 1 の EOS を受けた / run 1 の graw は AsAd 毎に送った数 × 96 B。
+///
+/// このテストの低レートでは 113 の「Stop 直後の Reset」でも EOS が競争に勝ちうる
+/// (実機ベースラインと同じ)。114 の差は、待って確かめたことが跡に `eos: closed` で残る点。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_controller_closes_the_running_run_with_eos_before_the_next_start() {
+    let (mut chain, ecc_config_dir) = real_chain("walk-back-eos").await;
+    let token = chain.acquire("aogaki");
+    let (status, body) = post(
+        chain.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "before the crash"}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["run"], json!(1));
+
+    // --- fake CoBo: run 1 のデータリンクを張って 29 フレーム送る(close しない)---
+    // AsAd は偶奇で交互 → AsAd0 = 15 フレーム、AsAd1 = 14 フレーム(非対称)。
+    let frames = 29u32;
+    let mut link = TcpStream::connect(("127.0.0.1", chain.data_port)).unwrap();
+    for i in 0..frames {
+        link.write_all(&synth_frame(i, (i % 2) as u8)).unwrap();
+    }
+    wait_until("run 1: receiver frames == 29", || {
+        chain.receiver_frames() == u64::from(frames)
+    });
+
+    // --- controller だけが落ちて再起動する ---
+    chain.restart_controller().await;
+    let (_, status_body) = get(chain.rest, "/api/status");
+    assert_eq!(status_body["phase"], json!("Idle"), "前提: {status_body}");
+    for component in status_body["components"].as_array().unwrap() {
+        assert_eq!(component["state"], json!("Running"), "前提: {component}");
+    }
+    assert!(
+        chain.sink.eos_runs().is_empty(),
+        "前提: run 1 はまだ閉じていない"
+    );
+
+    // 操作権はプロセスと一緒に消えているので取り直す。
+    let token = chain.acquire("aogaki");
+    let (status, body) = post(
+        chain.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "after the restart"}),
+    );
+    assert_eq!(status, 200, "歩き戻せば start が通る: {body}");
+    assert_eq!(body["run"], json!(2), "採番は状態ファイルから引き継ぐ");
+    drop(link); // 実 CoBo が前 run のリンクを close するのは breakup
+
+    let records = chain.logbook();
+    let audit = records
+        .iter()
+        .rev()
+        .find(|r| r["action"] == json!("run/start") && r["ok"] == json!(true))
+        .unwrap();
+    assert_eq!(audit["params"]["run"], json!(2));
+    assert_eq!(
+        audit["params"]["component_walk_back"],
+        json!([
+            "eos: closed",
+            "receiver0: Running->Configured->Idle",
+            "decoder: Running->Configured->Idle",
+            "graw-writer: Running->Configured->Idle",
+        ]),
+        "{audit}"
+    );
+    assert_eq!(
+        audit["params"]["ecc_walk_back"],
+        json!([
+            "status->Running",
+            "stop->Ready",
+            "breakup->Prepared",
+            "reset->Described",
+            "reset->Idle",
+        ]),
+        "{audit}"
+    );
+
+    // --- run 1 は EOS で閉じた: root-sink の席が EOS を受け、graw-writer は全ファイルを閉じた ---
+    wait_until("sink received the EOS of run 1", || {
+        chain.sink.eos_runs() == vec![1]
+    });
+    let mut graw: Vec<(String, u64)> = std::fs::read_dir(chain.output_root.join("run0001"))
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().to_string();
+            (name, entry.metadata().unwrap().len())
+        })
+        .collect();
+    graw.sort();
+    assert_eq!(graw.len(), 2, "{graw:?}");
+    // 手計算: AsAd0 = 15 × 96 = 1440 B、AsAd1 = 14 × 96 = 1344 B(合計 29 × 96 = 2784 B)。
+    assert!(graw[0].0.starts_with("CoBo0_AsAd0_"), "{graw:?}");
+    assert_eq!(graw[0].1, 1440, "{graw:?}");
+    assert!(graw[1].0.starts_with("CoBo0_AsAd1_"), "{graw:?}");
+    assert_eq!(graw[1].1, 1344, "{graw:?}");
+
+    // --- run 2 は通常どおり止まる(歩き戻した後のチェーンが正しく動く)---
+    let (status, stop) = post(chain.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{stop}");
+    assert_eq!(stop["run"], json!(2), "{stop}");
+    assert_eq!(stop["ok"], json!(true), "{stop}");
+    wait_until("sink received the EOS of run 2", || {
+        chain.sink.eos_runs() == vec![1, 2]
+    });
 
     let _ = std::fs::remove_dir_all(&ecc_config_dir);
     chain.shutdown();
