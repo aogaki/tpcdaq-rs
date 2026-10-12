@@ -168,7 +168,10 @@ pub enum LogbookRecord {
     RunStop {
         actor: String,
         run: u32,
-        duration_s: f64,
+        /// run の長さ(秒)。通常の停止では常に数値。**歩き戻しで閉じた前の run**(115、
+        /// `reason: "abort:controller-restart"`)に限り、ログブックに同じ番号の `run_start` が
+        /// 見つからなければ `null`(鍵は常に出る —— 位置も変えない)。
+        duration_s: Option<f64>,
         ok: bool,
         /// `"normal"` / `"error:eos-timeout"` / `"abort:<原因>"`(SPEC §9.2)。
         /// abort は**停止を開始した時点の起因**であり、EOS の顛末は下の 2 つが持つ
@@ -584,7 +587,7 @@ mod tests {
         LogbookRecord::RunStop {
             actor: "controller".to_string(),
             run: 58,
-            duration_s: 12.5,
+            duration_s: Some(12.5),
             ok: true,
             reason: "normal".to_string(),
             // 033-A(SPEC §9.2 v1.12 + v1.14): **実機の正常停止**の姿。`ecc stop` は
@@ -722,7 +725,7 @@ mod tests {
         let record = LogbookRecord::RunStop {
             actor: "controller".to_string(),
             run: 1,
-            duration_s: 27.040875875,
+            duration_s: Some(27.040875875),
             ok: true,
             reason: "normal".to_string(),
             forced_eos: false,

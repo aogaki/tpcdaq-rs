@@ -2979,11 +2979,15 @@ async fn back_to_back_apply_and_restart_with_real_components_relistens_every_rou
 /// **114 の統合版**(ELITPC 実機ベースライン 2026-10-12 の再現): 本物の receiver / decoder /
 /// graw-writer で run 1 を走らせ、29 フレーム流したところで **controller だけ**を作り直す
 /// (相 Idle、コンポーネント 3 つと ECC は Running のまま)。次の `run/start` はチェーンが
-/// 無傷なので、Reset の前に receiver `Stop` → EOS 待ち → 下流 `Stop` で run 1 を閉じ、通る。
+/// 無傷なので、Reset の前に停止経路の 2 段(受信静止 → receiver `Stop` → EOS 待ち → 下流
+/// `Stop`)で run 1 を閉じ、通る。リンクは握ったままなので第一段は静止で切り上がり、強制 EOS。
 ///
 /// 照合: audit `component_walk_back` = `"eos: closed"` + 各コンポーネントの
 /// `Running->Configured->Idle` / `ecc_walk_back` = Running からの 5 段 / decoder 下流
 /// (root-sink の席)が run 1 の EOS を受けた / run 1 の graw は AsAd 毎に送った数 × 96 B。
+/// 115: ログブックは `run_start 1 → run_stop 1(abort:controller-restart)→ run_start 2 →
+/// run_stop 2` の順、run_stop 1 の counters / files は送った数どおり、`logbook2runs` は
+/// run 1 に `no run_stop` を付けない。
 ///
 /// このテストの低レートでは 113 の「Stop 直後の Reset」でも EOS が競争に勝ちうる
 /// (実機ベースラインと同じ)。114 の差は、待って確かめたことが跡に `eos: closed` で残る点。
@@ -3090,6 +3094,75 @@ async fn a_restarted_controller_closes_the_running_run_with_eos_before_the_next_
     wait_until("sink received the EOS of run 2", || {
         chain.sink.eos_runs() == vec![1, 2]
     });
+
+    // --- 115: 歩き戻しで閉じた run 1 の run_stop が、run 2 の run_start より前にある ---
+    let records = chain.logbook();
+    let ledger: Vec<(String, u64)> = records
+        .iter()
+        .filter(|r| r["type"] == json!("run_start") || r["type"] == json!("run_stop"))
+        .map(|r| {
+            (
+                r["type"].as_str().unwrap().to_string(),
+                r["run"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ledger,
+        vec![
+            ("run_start".to_string(), 1),
+            ("run_stop".to_string(), 1),
+            ("run_start".to_string(), 2),
+            ("run_stop".to_string(), 2),
+        ]
+    );
+    let run_stop_1 = records
+        .iter()
+        .find(|r| r["type"] == json!("run_stop") && r["run"] == json!(1))
+        .unwrap();
+    assert_eq!(run_stop_1["ok"], json!(false), "{run_stop_1}");
+    assert_eq!(
+        run_stop_1["reason"],
+        json!("abort:controller-restart"),
+        "{run_stop_1}"
+    );
+    assert_eq!(run_stop_1["forced_eos"], json!(true), "{run_stop_1}");
+    assert_eq!(run_stop_1["eos_closed"], json!(true), "{run_stop_1}");
+    assert_eq!(
+        run_stop_1["counters"]["frames"],
+        json!({"0": 29}),
+        "{run_stop_1}"
+    );
+    // 手計算: 29 × 96 = 2784 B を AsAd 毎の 2 本に(Reset の前に採ったので手放されていない)。
+    let files = run_stop_1["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2, "{run_stop_1}");
+    let bytes: u64 = files.iter().map(|f| f["bytes"].as_u64().unwrap()).sum();
+    assert_eq!(bytes, 2784, "{run_stop_1}");
+    assert!(
+        run_stop_1["duration_s"].as_f64().unwrap() >= 0.0,
+        "{run_stop_1}"
+    );
+    let start_2 = records
+        .iter()
+        .find(|r| r["action"] == json!("run/start") && r["params"]["run"] == json!(2))
+        .unwrap();
+    assert_eq!(
+        start_2["params"]["previous_run_stop"],
+        json!({"run": 1, "notes": []}),
+        "{start_2}"
+    );
+
+    // --- runs.yaml 変換(082)は run 1 に「no run_stop」を付けない ---
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_logbook2runs"))
+        .arg(chain.output_root.join("logbook.jsonl"))
+        .output()
+        .unwrap();
+    let yaml = String::from_utf8_lossy(&output.stdout);
+    let warnings = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{warnings}");
+    assert!(!yaml.contains("no run_stop"), "{yaml}");
+    assert!(yaml.contains("abort:controller-restart"), "{yaml}");
+    assert!(!warnings.contains("got a run_stop"), "{warnings}");
 
     let _ = std::fs::remove_dir_all(&ecc_config_dir);
     chain.shutdown();

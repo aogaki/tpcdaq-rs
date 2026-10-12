@@ -729,7 +729,7 @@ mod tests {
             record: LogbookRecord::RunStop {
                 actor: "controller".to_string(),
                 run: 57,
-                duration_s: 12.5,
+                duration_s: Some(12.5),
                 ok: true,
                 reason: "normal".to_string(),
                 forced_eos: true,
@@ -847,7 +847,7 @@ mod tests {
                 record: LogbookRecord::RunStop {
                     actor: "controller".to_string(),
                     run: 57,
-                    duration_s: 1.0,
+                    duration_s: Some(1.0),
                     ok: true,
                     reason: "normal".to_string(),
                     forced_eos: true,
@@ -1067,7 +1067,7 @@ mod tests {
                 record: LogbookRecord::RunStop {
                     actor: "controller".to_string(),
                     run: 57,
-                    duration_s: 1.0,
+                    duration_s: Some(1.0),
                     ok: true,
                     reason: "normal".to_string(),
                     forced_eos: true,
