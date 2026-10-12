@@ -351,26 +351,70 @@ pub fn open_tcp(
     Ok(HiVoltaDriver::new(device, stream, expect_serial))
 }
 
-/// `/dev/serial/by-id/…` を開く(発注書 §1: `addr` が無い場合のフォールバック、9600 8N1)。
+type SerialBox = Box<dyn serialport::SerialPort>;
+
+/// `/dev/serial/by-id/…` 用のドライバ(発注書 §1: `addr` が無い場合のフォールバック、9600 8N1)。
+/// ポートはここでは開かない(`ident` / `poll` のたびに開閉する —— [`OnDemandHiVolta`])。
 pub fn open_serial(
     device: &str,
     port: &str,
     expect_serial: String,
-) -> Result<HiVoltaDriver<Box<dyn serialport::SerialPort>>, DriverError> {
-    let handle = serialport::new(port, BAUD_RATE)
-        .data_bits(serialport::DataBits::Eight)
-        .parity(serialport::Parity::None)
-        .stop_bits(serialport::StopBits::One)
-        .timeout(Duration::from_millis(READ_TIMEOUT_MS))
-        .open()
-        .map_err(|e| DriverError::Protocol(format!("cannot open serial port {port}: {e}")))?;
-    info!(
-        device,
-        port,
-        baud = BAUD_RATE,
-        "slowctl: hivolta serial port open"
-    );
-    Ok(HiVoltaDriver::new(device, handle, expect_serial))
+) -> OnDemandHiVolta<SerialBox, impl FnMut() -> Result<SerialBox, DriverError> + Send> {
+    let port = port.to_string();
+    let open = move || {
+        serialport::new(&port, BAUD_RATE)
+            .data_bits(serialport::DataBits::Eight)
+            .parity(serialport::Parity::None)
+            .stop_bits(serialport::StopBits::One)
+            .timeout(Duration::from_millis(READ_TIMEOUT_MS))
+            .open()
+            .map_err(|e| DriverError::Protocol(format!("cannot open serial port {port}: {e}")))
+    };
+    OnDemandHiVolta::new(device, open, expect_serial)
+}
+
+// ---------------------------------------------------------------------
+// シリアル(USB)経路: 読むときだけポートを開く(TODO/119 追補 §5)
+// ---------------------------------------------------------------------
+
+/// `ident` / `poll` のたびに `open` でポートを開き、スコープの終わりで閉じる [`Driver`]。
+///
+/// DT1415ET は USB のシリアルポートを**開いているだけ**で検出器に偽トリガを作る(実機確認済み)
+/// ので、呼び出しの間はポートを保持しない。`nch` は最初の `ident` で確定したものを保持し、
+/// `poll` では BDSNUM を読み直さない(往復が増える)。
+pub struct OnDemandHiVolta<T: Read + Write, F: FnMut() -> Result<T, DriverError>> {
+    device: String,
+    open: F,
+    expect_serial: String,
+    nch: u8,
+}
+
+impl<T: Read + Write, F: FnMut() -> Result<T, DriverError>> OnDemandHiVolta<T, F> {
+    pub fn new(device: impl Into<String>, open: F, expect_serial: String) -> Self {
+        Self {
+            device: device.into(),
+            open,
+            expect_serial,
+            nch: 0,
+        }
+    }
+}
+
+impl<T: Read + Write, F: FnMut() -> Result<T, DriverError>> Driver for OnDemandHiVolta<T, F> {
+    fn ident(&mut self) -> Result<Vec<Ident>, DriverError> {
+        let io = (self.open)()?;
+        let mut driver = HiVoltaDriver::new(self.device.clone(), io, self.expect_serial.clone());
+        let idents = driver.ident()?;
+        self.nch = driver.nch();
+        Ok(idents)
+    }
+
+    fn poll(&mut self) -> Result<Vec<Sample>, DriverError> {
+        let io = (self.open)()?;
+        let mut driver = HiVoltaDriver::new(self.device.clone(), io, self.expect_serial.clone());
+        driver.nch = self.nch;
+        driver.poll()
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -587,5 +631,104 @@ mod tests {
 
         let mut driver = HiVoltaDriver::new("hv", fake, String::new());
         assert!(matches!(driver.ident(), Err(DriverError::Timeout)));
+    }
+
+    /// open / close / 送信行を数える。close は Drop で数える(スコープ終わりで確実に閉じる証拠)。
+    struct Counters {
+        opens: std::cell::Cell<u32>,
+        closes: std::cell::Cell<u32>,
+        sent: std::cell::RefCell<Vec<u8>>,
+    }
+    struct Counted {
+        inner: FakeHv,
+        c: std::rc::Rc<Counters>,
+    }
+    impl Read for Counted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+    impl Write for Counted {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.c.sent.borrow_mut().extend_from_slice(buf);
+            self.inner.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+    impl Drop for Counted {
+        fn drop(&mut self) {
+            self.c.closes.set(self.c.closes.get() + 1);
+        }
+    }
+
+    fn counted_driver(
+        expect_serial: &str,
+    ) -> (
+        OnDemandHiVolta<Counted, impl FnMut() -> Result<Counted, DriverError>>,
+        std::rc::Rc<Counters>,
+    ) {
+        let c = std::rc::Rc::new(Counters {
+            opens: std::cell::Cell::new(0),
+            closes: std::cell::Cell::new(0),
+            sent: std::cell::RefCell::new(Vec::new()),
+        });
+        let c2 = c.clone();
+        let open = move || {
+            c2.opens.set(c2.opens.get() + 1);
+            let mut inner = FakeHv::new();
+            register_ident(&mut inner, 8, "SN-1");
+            register_golden(&mut inner);
+            Ok(Counted {
+                inner,
+                c: c2.clone(),
+            })
+        };
+        (
+            OnDemandHiVolta::new("hv", open, expect_serial.to_string()),
+            c,
+        )
+    }
+
+    /// poll 1 回 = open 1 回 + 要求 6 本 + close 1 回(TODO/119 §5/§6)。
+    #[test]
+    fn on_demand_poll_is_one_open_six_requests_one_close() {
+        let (mut driver, c) = counted_driver("");
+        driver.ident().unwrap();
+        c.sent.borrow_mut().clear();
+        let (opens0, closes0) = (c.opens.get(), c.closes.get());
+
+        let samples = driver.poll().unwrap();
+
+        assert_eq!(samples.len(), 34);
+        assert_eq!(c.opens.get() - opens0, 1);
+        assert_eq!(c.closes.get() - closes0, 1, "poll の終わりで閉じている");
+        let text = String::from_utf8(c.sent.borrow().clone()).unwrap();
+        assert_eq!(text.matches("\r\n").count(), 6);
+        assert!(text.starts_with("$CMD:MON,CH:8,PAR:VMON"));
+    }
+
+    /// open の回数 = ident と poll の回数の合計(間は保持しない)。ident は poll で繰り返さない。
+    #[test]
+    fn on_demand_opens_equal_the_number_of_ident_and_poll_calls() {
+        let (mut driver, c) = counted_driver("SN-1");
+        driver.ident().unwrap();
+        assert_eq!((c.opens.get(), c.closes.get()), (1, 1));
+        for _ in 0..3 {
+            driver.poll().unwrap();
+        }
+        assert_eq!((c.opens.get(), c.closes.get()), (4, 4));
+    }
+
+    /// 開けなければ DriverError(silent にしない)。
+    #[test]
+    fn on_demand_open_failure_is_a_driver_error() {
+        let open = || -> Result<Counted, DriverError> {
+            Err(DriverError::Protocol("cannot open serial port x".into()))
+        };
+        let mut driver = OnDemandHiVolta::new("hv", open, String::new());
+        assert!(matches!(driver.ident(), Err(DriverError::Protocol(_))));
+        assert!(matches!(driver.poll(), Err(DriverError::Protocol(_))));
     }
 }
