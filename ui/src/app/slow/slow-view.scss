@@ -109,6 +109,11 @@ tr.attention td {
   font-weight: 600;
 }
 
+/* influx_last_error は InfluxDB の JSON 本文(最大 1 KiB)—— カードからはみ出さず折り返す。 */
+td.last-error {
+  overflow-wrap: anywhere;
+}
+
 /* ---- Trend ---- */
 
 .picks {

@@ -42,6 +42,9 @@ pub mod bronkhorst;
 /// slowctl コンポーネント本体(デバイススレッド + status PUB + LogPost)。
 pub mod component;
 
+/// 全サンプルを InfluxDB v2 write API へ書く writer スレッド(TODO/122)。
+pub mod influx;
+
 /// テスト用の偽デバイス(= [`fake::FakeProPar`] を噛ませた [`bronkhorst`] ドライバ)。
 #[cfg(any(test, feature = "slowctl-fake"))]
 pub mod fake_device;
@@ -259,13 +262,29 @@ impl LogPolicy {
 }
 
 /// SPEC §2.3 の `counters`(slowctl → monitor PUB)。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `influx_*` は TODO/122(`[slowctl.influx]` が無ければ 0 / null のまま)。**点 = `Sample`
+/// 1 個**(line protocol の field 1 個。`alarm` field は数えない)。`#[serde(default)]` は
+/// 122 より前の slowctl が出したペイロードも monitor が読めるようにするため。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlowCounters {
     pub poll_ok: u64,
     pub poll_err: u64,
     pub parse_err: u64,
     pub reconnects: u64,
     pub identity_mismatch: u64,
+    /// InfluxDB に書けた点数。
+    #[serde(default)]
+    pub influx_points_written: u64,
+    /// 落とした点数(チャネル満杯・再送バッファ溢れ・NaN/inf・停止時の書き残し)。
+    #[serde(default)]
+    pub influx_points_dropped: u64,
+    /// 失敗した POST の回数(接続不可・タイムアウト・HTTP 4xx/5xx)。
+    #[serde(default)]
+    pub influx_write_errors: u64,
+    /// 最後に失敗した POST の内容。一度も失敗していなければ null。
+    #[serde(default)]
+    pub influx_last_error: Option<String>,
 }
 
 /// slowctl → monitor PUB のペイロード(SPEC §2.3 v1.31、kind = [`SLOW_KIND`])。
@@ -423,12 +442,48 @@ mod domain_tests {
                 parse_err: 1,
                 reconnects: 3,
                 identity_mismatch: 0,
+                influx_points_written: 420,
+                influx_points_dropped: 7,
+                influx_write_errors: 1,
+                influx_last_error: Some("HTTP 503: busy".to_string()),
             },
         };
         let bytes = rmp_serde::to_vec_named(&payload).unwrap();
         let back: SlowPayload = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(back, payload);
         assert_eq!(back.samples[1].node, None, "node は nullable(SPEC §9.2)");
+    }
+
+    /// TODO/122 より前の slowctl の `counters`(5 キー)も読める —— influx 系は 0 / None。
+    /// monitor だけ先に入れ替わっても、status の `slow` が壊れない。
+    #[test]
+    fn counters_without_the_influx_keys_still_decode() {
+        #[derive(Serialize)]
+        struct OldCounters {
+            poll_ok: u64,
+            poll_err: u64,
+            parse_err: u64,
+            reconnects: u64,
+            identity_mismatch: u64,
+        }
+        let old = OldCounters {
+            poll_ok: 9,
+            poll_err: 1,
+            parse_err: 0,
+            reconnects: 2,
+            identity_mismatch: 0,
+        };
+        let bytes = rmp_serde::to_vec_named(&old).unwrap();
+        let back: SlowCounters = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(
+            back,
+            SlowCounters {
+                poll_ok: 9,
+                poll_err: 1,
+                reconnects: 2,
+                ..SlowCounters::default()
+            }
+        );
     }
 
     /// logbook / status のキーは `"<device>/<node>/<param>"`、node 無しは `"-"`(SPEC §9.2)。

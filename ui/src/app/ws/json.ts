@@ -36,6 +36,15 @@ export interface SlowCounters {
   readonly parse_err: number;
   readonly reconnects: number;
   readonly identity_mismatch: number;
+  /**
+   * TODO/122 の InfluxDB writer(点 = Sample 1 個)。**122 より前の slowctl はキー自体が
+   * 無い = `undefined`**(画面では「—」)。`[slowctl.influx]` が無い slowctl は 0 を出す。
+   */
+  readonly influx_points_written?: number;
+  readonly influx_points_dropped?: number;
+  readonly influx_write_errors?: number;
+  /** 最後に失敗した POST の内容。`null` = 一度も失敗していない、`undefined` = 古い slowctl。 */
+  readonly influx_last_error?: string | null;
 }
 
 /** slowctl → monitor PUB ペイロード(SPEC §2.3 v1.31、`status` の `slow` に同梱される)。 */
@@ -204,7 +213,32 @@ function slowSampleAt(value: unknown): SlowSample | null {
   return { device, node, param, value: sampleValue, unit, ts_ms: tsMs, alarm };
 }
 
-/** `counters`(SPEC §2.3、Rust `SlowCounters` の 5 キーそのまま)。 */
+/** 型違いの印(キーが無い = `undefined` と区別する)。 */
+const BAD = Symbol('bad');
+
+/** 任意の数値キー: 無ければ `undefined`、あって数値でなければ `BAD`。 */
+function optionalNumberAt(
+  object: Record<string, unknown>,
+  key: string,
+): number | undefined | typeof BAD {
+  if (object[key] === undefined) return undefined;
+  return numberAt(object, key) ?? BAD;
+}
+
+/** 任意の「文字列か null」キー: 無ければ `undefined`、型違いは `BAD`。 */
+function optionalNullableStringAt(
+  object: Record<string, unknown>,
+  key: string,
+): string | null | undefined | typeof BAD {
+  const value = object[key];
+  if (value === undefined || value === null || typeof value === 'string') return value;
+  return BAD;
+}
+
+/**
+ * `counters`(SPEC §2.3、Rust `SlowCounters`)。5 キーは必須、TODO/122 の `influx_*` 4 キーは
+ * 任意(122 より前の slowctl には無い)。**あるのに型が違えば** `null`(呼び手が bad-field)。
+ */
 function slowCountersAt(value: unknown): SlowCounters | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const object = value as Record<string, unknown>;
@@ -213,12 +247,20 @@ function slowCountersAt(value: unknown): SlowCounters | null {
   const parseErr = numberAt(object, 'parse_err');
   const reconnects = numberAt(object, 'reconnects');
   const identityMismatch = numberAt(object, 'identity_mismatch');
+  const influxWritten = optionalNumberAt(object, 'influx_points_written');
+  const influxDropped = optionalNumberAt(object, 'influx_points_dropped');
+  const influxErrors = optionalNumberAt(object, 'influx_write_errors');
+  const influxLastError = optionalNullableStringAt(object, 'influx_last_error');
   if (
     pollOk === null ||
     pollErr === null ||
     parseErr === null ||
     reconnects === null ||
-    identityMismatch === null
+    identityMismatch === null ||
+    influxWritten === BAD ||
+    influxDropped === BAD ||
+    influxErrors === BAD ||
+    influxLastError === BAD
   ) {
     return null;
   }
@@ -228,6 +270,10 @@ function slowCountersAt(value: unknown): SlowCounters | null {
     parse_err: parseErr,
     reconnects,
     identity_mismatch: identityMismatch,
+    influx_points_written: influxWritten,
+    influx_points_dropped: influxDropped,
+    influx_write_errors: influxErrors,
+    influx_last_error: influxLastError,
   };
 }
 

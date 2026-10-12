@@ -242,6 +242,41 @@ pub struct SlowctlConfig {
     pub log_every_s: u64,
     /// `[[slowctl.device]]`。
     pub device: Vec<SlowDeviceConfig>,
+    /// `[slowctl.influx]`(TODO/122)。**省略可** —— 省略 = InfluxDB に書かない(従来と同一)。
+    pub influx: Option<InfluxConfig>,
+}
+
+/// `[slowctl.influx]` の `batch_ms` の既定(TODO/122 §4)。
+pub const DEFAULT_INFLUX_BATCH_MS: u64 = 1000;
+
+/// `[slowctl.influx]` の `buffer_max_points` の既定(TODO/122 §4)。
+///
+/// 1 点 = `Sample` 1 個。HV 42 値 / 5 s + LV 10 値 / 1 s ≈ 18 点/s なので ≈ 1.5 h 分。
+pub const DEFAULT_INFLUX_BUFFER_MAX_POINTS: usize = 100_000;
+
+/// `[slowctl.influx]` の `timeout_ms` の既定(TODO/122 §4)。
+pub const DEFAULT_INFLUX_TIMEOUT_MS: u64 = 2000;
+
+/// `[slowctl.influx]`(TODO/122 §4)。slowctl の全サンプルを InfluxDB v2 write API へ書く。
+///
+/// **トークンそのものは持たない**(TOML にも `Debug` 出力にも載せない)。持つのはファイルの
+/// パスだけで、**中身を読むのは slowctl の起動時だけ**(`slowctl::influx::read_token`)。
+/// config の検証では読まない —— controller / monitor も同じ TOML を読むので、監視系の
+/// トークンの不備で DAQ 全体を起動不能にしない(never-stop、保存と監視の分離)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct InfluxConfig {
+    /// 例 `http://127.0.0.1:8086`(`/api/v2/write` はコードが足す)。
+    pub url: String,
+    pub org: String,
+    pub bucket: String,
+    /// トークンを 1 行だけ書いたファイル(前後の空白は除く)。
+    pub token_file: PathBuf,
+    /// POST の間隔(ミリ秒)。
+    pub batch_ms: u64,
+    /// 再送バッファの上限(点 = `Sample` 1 個)。超えたら古い方から捨てて数える。
+    pub buffer_max_points: usize,
+    /// 1 回の POST にかける上限(ミリ秒)。
+    pub timeout_ms: u64,
 }
 
 /// `[[slowctl.device]]` 1 台分(SPEC §3.1)。
@@ -499,6 +534,23 @@ struct RawSlowctl {
     poll_hz: Option<f64>,
     log_every_s: Option<u64>,
     device: Vec<SlowDeviceConfig>,
+    influx: Option<RawInflux>,
+}
+
+/// `[slowctl.influx]` の TOML そのまま(TODO/122)。url / org / bucket / token_file は必須。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawInflux {
+    url: String,
+    org: String,
+    bucket: String,
+    token_file: PathBuf,
+    #[serde(default)]
+    batch_ms: Option<u64>,
+    #[serde(default)]
+    buffer_max_points: Option<usize>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -758,6 +810,17 @@ fn resolve(raw: RawConfig) -> Config {
             poll_hz: raw.poll_hz.unwrap_or(DEFAULT_SLOWCTL_POLL_HZ),
             log_every_s: raw.log_every_s.unwrap_or(DEFAULT_SLOWCTL_LOG_EVERY_S),
             device: raw.device,
+            influx: raw.influx.map(|influx| InfluxConfig {
+                url: influx.url,
+                org: influx.org,
+                bucket: influx.bucket,
+                token_file: influx.token_file,
+                batch_ms: influx.batch_ms.unwrap_or(DEFAULT_INFLUX_BATCH_MS),
+                buffer_max_points: influx
+                    .buffer_max_points
+                    .unwrap_or(DEFAULT_INFLUX_BUFFER_MAX_POINTS),
+                timeout_ms: influx.timeout_ms.unwrap_or(DEFAULT_INFLUX_TIMEOUT_MS),
+            }),
         }
     });
 
@@ -902,6 +965,49 @@ fn validate_slowctl(slowctl: &SlowctlConfig) -> Result<(), ConfigError> {
                 )));
             }
         }
+    }
+    if let Some(influx) = &slowctl.influx {
+        validate_influx(influx)?;
+    }
+    Ok(())
+}
+
+/// `[slowctl.influx]` を検証する(TODO/122 §4)。
+///
+/// 書けない設定のまま走って「InfluxDB に何も入っていなかった」と後で気づく状態を作らない:
+/// url の形、0 や空の値は起動失敗にする。
+///
+/// **トークンファイルの中身はここでは読まない**(見るのはパスが空でないことまで)。
+/// 読めないことは slowctl の起動だけが失敗として出す —— [`InfluxConfig`] の doc。
+fn validate_influx(influx: &InfluxConfig) -> Result<(), ConfigError> {
+    let invalid =
+        |message: String| ConfigError::InvalidSlowctl(format!("[slowctl.influx] {message}"));
+    // HTTP クライアント(ureq)は TLS の feature を切ってある。https を通すと実行時に
+    // 必ず失敗し続けるので、ここで止める。
+    if influx.url.starts_with("https://") {
+        return Err(invalid(format!(
+            "url {:?}: TLS は未対応、localhost の http を使う (TLS is not built in; \
+             use plain http to a local InfluxDB)",
+            influx.url
+        )));
+    }
+    if !influx.url.starts_with("http://") {
+        return Err(invalid(format!(
+            "url must start with http://, got {:?}",
+            influx.url
+        )));
+    }
+    if influx.token_file.as_os_str().is_empty() {
+        return Err(invalid("token_file must not be empty".to_string()));
+    }
+    if influx.org.is_empty() || influx.bucket.is_empty() {
+        return Err(invalid("org and bucket must not be empty".to_string()));
+    }
+    if influx.batch_ms == 0 || influx.buffer_max_points == 0 || influx.timeout_ms == 0 {
+        return Err(invalid(format!(
+            "batch_ms / buffer_max_points / timeout_ms must be greater than 0, got {} / {} / {}",
+            influx.batch_ms, influx.buffer_max_points, influx.timeout_ms
+        )));
     }
     Ok(())
 }
@@ -2658,6 +2764,208 @@ name = "hv"
         assert_eq!(slowctl.status_pub, DEFAULT_SLOWCTL_STATUS_PUB);
         assert_eq!(slowctl.device[0].device_type, "bronkhorst_flowbus");
         assert_eq!(slowctl.device[0].alarms.len(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // `[slowctl.influx]`(TODO/122)
+    // -----------------------------------------------------------------
+
+    /// どこにも無いトークンファイル。**config はトークンを読まない**(読むのは slowctl の
+    /// 起動時だけ —— 監視系の不備で controller / monitor を起動不能にしない)ので、
+    /// 設定のテストはこのパスで足りる。
+    const ABSENT_TOKEN_FILE: &str = "/nonexistent/tpcdaq-122/influx.token";
+
+    /// `[slowctl]` + hv 1 台 + `influx_body`(`[slowctl.influx]` の中身)の TOML。
+    fn slowctl_with_influx(geometry: &Path, influx_body: &str) -> String {
+        let extra = format!(
+            "[slowctl]\n[[slowctl.device]]\ntype = \"hivolta\"\nname = \"hv\"\n\
+             addr = \"127.0.0.1:1470\"\n[slowctl.influx]\n{influx_body}\n"
+        );
+        minimal_toml(geometry, &extra)
+    }
+
+    /// url / org / bucket / token_file と、`extra`(任意キー)からなる `[slowctl.influx]` の中身。
+    fn influx_body(url: &str, org: &str, bucket: &str, token_file: &str, extra: &str) -> String {
+        format!(
+            "url = \"{url}\"\norg = \"{org}\"\nbucket = \"{bucket}\"\n\
+             token_file = \"{token_file}\"\n{extra}"
+        )
+    }
+
+    /// `[slowctl.influx]` が無ければ書かない(= 今と同じ)。既存の `[slowctl]` は無変更で読める。
+    #[test]
+    fn a_slowctl_without_an_influx_section_writes_nothing_to_influxdb() {
+        let geometry = make_temp_geometry_file();
+        let extra = "[slowctl]\n[[slowctl.device]]\ntype = \"hivolta\"\nname = \"hv\"\n\
+                     addr = \"127.0.0.1:1470\"\n";
+        let config = parse(&minimal_toml(&geometry, extra)).unwrap();
+        assert_eq!(config.slowctl.unwrap().influx, None);
+    }
+
+    /// 必須 4 キーだけ書けば、残り 3 キーには発注書 §4 の既定が入る。
+    #[test]
+    fn an_influx_section_with_only_the_required_keys_gets_the_defaults() {
+        let geometry = make_temp_geometry_file();
+        let body = influx_body(
+            "http://127.0.0.1:8086",
+            "elinp",
+            "slowctl",
+            "/opt/tpcdaq/influx.token",
+            "",
+        );
+        let config = parse(&slowctl_with_influx(&geometry, &body)).unwrap();
+        let influx = config.slowctl.unwrap().influx.unwrap();
+        assert_eq!(influx.url, "http://127.0.0.1:8086");
+        assert_eq!(influx.org, "elinp");
+        assert_eq!(influx.bucket, "slowctl");
+        assert_eq!(influx.token_file, PathBuf::from("/opt/tpcdaq/influx.token"));
+        // 発注書 §4 の表: batch_ms 1000 / buffer_max_points 100000 / timeout_ms 2000。
+        assert_eq!(influx.batch_ms, 1000);
+        assert_eq!(influx.buffer_max_points, 100_000);
+        assert_eq!(influx.timeout_ms, 2000);
+    }
+
+    /// 任意キーを書けばその値が入る。
+    #[test]
+    fn the_optional_influx_keys_override_the_defaults() {
+        let geometry = make_temp_geometry_file();
+        let body = influx_body(
+            "http://10.0.0.5:8086/",
+            "o",
+            "b",
+            ABSENT_TOKEN_FILE,
+            "batch_ms = 250\nbuffer_max_points = 7\ntimeout_ms = 900",
+        );
+        let influx = parse(&slowctl_with_influx(&geometry, &body))
+            .unwrap()
+            .slowctl
+            .unwrap()
+            .influx
+            .unwrap();
+        assert_eq!(influx.url, "http://10.0.0.5:8086/");
+        assert_eq!(influx.batch_ms, 250);
+        assert_eq!(influx.buffer_max_points, 7);
+        assert_eq!(influx.timeout_ms, 900);
+    }
+
+    /// 必須キー(url / org / bucket / token_file)が 1 つでも欠ければ起動失敗。
+    #[test]
+    fn an_influx_section_missing_a_required_key_is_rejected() {
+        let geometry = make_temp_geometry_file();
+        let all = [
+            "url = \"http://127.0.0.1:8086\"".to_string(),
+            "org = \"elinp\"".to_string(),
+            "bucket = \"slowctl\"".to_string(),
+            format!("token_file = \"{ABSENT_TOKEN_FILE}\""),
+        ];
+        for missing in 0..all.len() {
+            let body: Vec<&str> = all
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != missing)
+                .map(|(_, line)| line.as_str())
+                .collect();
+            let result = parse(&slowctl_with_influx(&geometry, &body.join("\n")));
+            assert!(
+                matches!(result, Err(ConfigError::Parse(_))),
+                "missing {:?} must be rejected, got {result:?}",
+                all[missing]
+            );
+        }
+        // 綴り間違いも黙って無視しない(deny_unknown_fields)。
+        let typo = format!("{}\nbatch_msec = 10", all.join("\n"));
+        assert!(matches!(
+            parse(&slowctl_with_influx(&geometry, &typo)),
+            Err(ConfigError::Parse(_))
+        ));
+    }
+
+    /// **トークンファイルが無くても `parse` は通る**(レビュー 2026-10-12 (a))。
+    ///
+    /// controller / monitor も同じ daq.toml を読むので、監視系のトークンの不備で DAQ 全体を
+    /// 起動不能にしない(never-stop、保存と監視の分離)。読めないことは slowctl の起動だけが
+    /// 失敗として出す(`tests/slowctl_integration.rs`)。config が見るのは「キーがあって空でない」まで。
+    #[test]
+    fn a_missing_token_file_does_not_stop_the_config_from_parsing() {
+        let geometry = make_temp_geometry_file();
+        let body = influx_body("http://127.0.0.1:8086", "o", "b", ABSENT_TOKEN_FILE, "");
+        let config = parse(&slowctl_with_influx(&geometry, &body)).unwrap();
+        assert_eq!(
+            config.slowctl.unwrap().influx.unwrap().token_file,
+            PathBuf::from(ABSENT_TOKEN_FILE)
+        );
+
+        // 空のパスは書き損じ —— これは config で弾く。
+        let empty = influx_body("http://127.0.0.1:8086", "o", "b", "", "");
+        match parse(&slowctl_with_influx(&geometry, &empty)) {
+            Err(ConfigError::InvalidSlowctl(message)) => {
+                assert!(message.contains("token_file"), "message = {message:?}");
+            }
+            other => panic!("expected InvalidSlowctl, got {other:?}"),
+        }
+    }
+
+    /// url は `http://` で始まること。
+    #[test]
+    fn an_influx_url_without_an_http_scheme_is_rejected() {
+        let geometry = make_temp_geometry_file();
+        for bad in ["127.0.0.1:8086", "tcp://127.0.0.1:8086", "", "HTTP//x"] {
+            let body = influx_body(bad, "o", "b", ABSENT_TOKEN_FILE, "");
+            match parse(&slowctl_with_influx(&geometry, &body)) {
+                Err(ConfigError::InvalidSlowctl(message)) => {
+                    assert!(message.contains("url"), "{bad:?}: message = {message:?}");
+                }
+                other => panic!("{bad:?} must be rejected, got {other:?}"),
+            }
+        }
+    }
+
+    /// `https://` は検証で拒否する(レビュー 2026-10-12 (b))。HTTP クライアントは TLS を
+    /// 持たない(ureq の default-features を切った)ので、通すと実行時に必ず失敗し続ける。
+    #[test]
+    fn an_https_influx_url_is_rejected_because_tls_is_not_built_in() {
+        let geometry = make_temp_geometry_file();
+        let body = influx_body("https://127.0.0.1:8086", "o", "b", ABSENT_TOKEN_FILE, "");
+        match parse(&slowctl_with_influx(&geometry, &body)) {
+            Err(ConfigError::InvalidSlowctl(message)) => {
+                assert!(
+                    message.contains("TLS は未対応、localhost の http を使う"),
+                    "message = {message:?}"
+                );
+            }
+            other => panic!("https must be rejected, got {other:?}"),
+        }
+    }
+
+    /// 0 の batch_ms / buffer_max_points / timeout_ms と空の org / bucket は起動失敗
+    /// (半端な値で走らない — SPEC §3.2)。
+    #[test]
+    fn zero_or_empty_influx_settings_are_rejected() {
+        let geometry = make_temp_geometry_file();
+        let base = |org: &str, bucket: &str, extra: &str| {
+            influx_body(
+                "http://127.0.0.1:8086",
+                org,
+                bucket,
+                ABSENT_TOKEN_FILE,
+                extra,
+            )
+        };
+        for body in [
+            base("o", "b", "batch_ms = 0"),
+            base("o", "b", "buffer_max_points = 0"),
+            base("o", "b", "timeout_ms = 0"),
+            base("", "b", ""),
+            base("o", "", ""),
+        ] {
+            assert!(
+                matches!(
+                    parse(&slowctl_with_influx(&geometry, &body)),
+                    Err(ConfigError::InvalidSlowctl(_))
+                ),
+                "{body}"
+            );
+        }
     }
 
     /// SPEC §3.2: slowctl の Batch source_id は 200(旧 psu)。

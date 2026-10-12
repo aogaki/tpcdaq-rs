@@ -40,6 +40,10 @@ toml = "1.1.4"
 tower-http = { version = "0.6.11", features = ["fs"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# slowctl → InfluxDB v2 write API の HTTP POST(TODO/122)。ブロッキングで小さく、slowctl の
+# std スレッド型にそのまま合う(tokio を持ち込まない)。書き先は localhost なので TLS は
+# 要らない —— default-features(rustls + gzip)を切って依存を小さくする。
+ureq = { version = "3.3.0", default-features = false }
 zmq = "0.10"
 
 # slowctl の FakeProPar(TODO/079 §2.5)をテスト以外からも使えるようにする明示フラグ。
