@@ -35,11 +35,13 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
-use axum::response::Response;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
@@ -1114,6 +1116,8 @@ pub struct MonitorCounters {
     pub clients_dropped_slow: AtomicU64,
     /// 解釈できなかった C→S メッセージ数。
     pub bad_client_messages: AtomicU64,
+    /// `GET /api/last-event` の要求数(200 / 404 とも)。
+    pub last_event_requests: AtomicU64,
 }
 
 impl MonitorCounters {
@@ -1194,6 +1198,9 @@ pub struct Hub {
     /// slowctl の最新 `slow` ペイロード(SPEC §10.3 v1.31)。購読していなければ `None` の
     /// まま = `status` JSON に `slow` は出ない(従来と同一の JSON)。
     last_slow: Mutex<Option<crate::slowctl::SlowPayload>>,
+    /// 直近に受けた built event と受信時刻(`GET /api/last-event` 用、TODO/123)。
+    /// WS 購読の有無に関係なく常に差し替える(Arc の差し替えだけ。JSON 化は要求時)。
+    last_event: Mutex<Option<(Arc<BuiltEventPayload>, SystemTime)>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1216,6 +1223,7 @@ impl Hub {
             meta_run: AtomicU32::new(0),
             last_run_state: Mutex::new(None),
             last_slow: Mutex::new(None),
+            last_event: Mutex::new(None),
         })
     }
 
@@ -1383,6 +1391,10 @@ impl Hub {
     ///
     /// **ここでは WS へ配らない** —— `slow` は root-sink の 1 Hz `status` に同梱して出る
     /// (新しい WS メッセージ型を作らない、SPEC §2.1 の「受け皿は既存の口」)。
+    fn on_event(&self, event: Arc<BuiltEventPayload>) {
+        *lock(&self.last_event) = Some((event, SystemTime::now()));
+    }
+
     fn on_slow(&self, slow: &crate::slowctl::SlowPayload) {
         *lock(&self.last_slow) = Some(slow.clone());
     }
@@ -1483,39 +1495,42 @@ impl Ingest {
         let restarts: u64 = self.gaps.values().map(GapTracker::restarts).sum();
         counters.source_restarts.store(restarts, Ordering::Relaxed);
 
-        match &message.payload {
+        match message.payload {
             MonitorPayload::Status(status) => {
                 MonitorCounters::bump(&counters.status_in, 1);
-                self.hub.on_status(status);
+                self.hub.on_status(&status);
             }
             MonitorPayload::HistSnapshot(snapshot) => {
                 MonitorCounters::bump(&counters.snapshots_in, 1);
                 self.frames.clear();
-                self.converter.histos(snapshot, &mut self.frames);
+                self.converter.histos(&snapshot, &mut self.frames);
                 self.hub.publish_live(Stream::Histos, &mut self.frames);
             }
             MonitorPayload::BuiltEvent(event) => {
                 MonitorCounters::bump(&counters.events_in, 1);
+                // Box → Arc は所有権の移動(items のバイト列はコピーしない)。
+                let event: Arc<BuiltEventPayload> = Arc::from(event);
+                self.hub.on_event(Arc::clone(&event));
                 self.frames.clear();
-                self.converter.uvw(event, &mut self.frames);
+                self.converter.uvw(&event, &mut self.frames);
                 self.hub.publish_live(Stream::Uvw, &mut self.frames);
                 // 0x03 は**購読しているクライアントが居るときだけ**作る(SPEC §10.3 の帯域制御)。
                 if self.hub.waveforms_wanted() {
                     self.frames.clear();
-                    self.converter.waveforms(event, &mut self.frames);
+                    self.converter.waveforms(&event, &mut self.frames);
                     self.hub.publish_live(Stream::Waveforms, &mut self.frames);
                 }
             }
             MonitorPayload::Slow(slow) => {
                 MonitorCounters::bump(&counters.slow_in, 1);
-                self.hub.on_slow(slow);
+                self.hub.on_slow(&slow);
             }
             MonitorPayload::Unknown(kind) => {
                 MonitorCounters::bump(&counters.unknown_kind, 1);
                 if !self.logged_unknown_kind {
                     self.logged_unknown_kind = true;
                     info!(
-                        kind,
+                        kind = %kind,
                         "monitor: unknown payload kind on the monitor PUB — counted and ignored"
                     );
                 }
@@ -1627,7 +1642,94 @@ fn ws_router(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/", get(ws_upgrade))
         .route("/ws", get(ws_upgrade))
+        .route("/api/last-event", get(last_event))
         .with_state(hub)
+}
+
+/// `GET /api/last-event`(TODO/123)。直近の built event を graw 相当の数値で返す。
+/// 変換は要求が来たときだけ(モニタ系 — 通常経路に負荷をかけない)。
+async fn last_event(State(hub): State<Arc<Hub>>) -> Response {
+    MonitorCounters::bump(&hub.counters.last_event_requests, 1);
+    let latest = lock(&hub.last_event).clone();
+    let (status, body) = match latest {
+        Some((event, received)) => (
+            StatusCode::OK,
+            last_event_json(&event, received, SystemTime::now()),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            serde_json::json!({"error": "no event received yet"}),
+        ),
+    };
+    (
+        status,
+        [(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")],
+        axum::Json(body),
+    )
+        .into_response()
+}
+
+fn unix_ms(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// built event → `GET /api/last-event` の JSON(TODO/123)。
+///
+/// `adc[aget][ch][bucket]` は生 ADC(FPN 込み・減算なし、0x03 と同じ並び)。
+/// 読まれていないセルは `-1`。範囲外 item は捨ててフラグメント毎に
+/// `items_out_of_range` として数える(silent にしない)。
+pub fn last_event_json(
+    event: &BuiltEventPayload,
+    received: SystemTime,
+    now: SystemTime,
+) -> serde_json::Value {
+    let n_aget = AGET_CHIPS_PER_ASAD as usize;
+    let n_ch = RAW_CH_PER_AGET as usize;
+    let n_bk = N_BUCKETS as usize;
+    let mut counts = ConvertCounts::default();
+    let mut logged = false;
+    let fragments: Vec<serde_json::Value> = event
+        .fragments
+        .iter()
+        .map(|f| {
+            let mut grid = vec![-1i16; n_aget * n_ch * n_bk];
+            let mut out_of_range = 0u64;
+            for word in ItemWords::new(&f.items, &mut counts, &mut logged) {
+                let item = crate::msg::unpack_item(word);
+                let (a, c, b) = (item.aget as usize, item.chan as usize, item.bucket as usize);
+                if a >= n_aget || c >= n_ch || b >= n_bk {
+                    out_of_range += 1;
+                    continue;
+                }
+                grid[(a * n_ch + c) * n_bk + b] = item.adc as i16;
+            }
+            let adc: Vec<Vec<&[i16]>> = grid
+                .chunks(n_ch * n_bk)
+                .map(|aget| aget.chunks(n_bk).collect())
+                .collect();
+            serde_json::json!({
+                "cobo": f.cobo, "asad": f.asad,
+                "event_idx": f.event_idx, "event_time": f.event_time,
+                "frame_type": f.frame_type, "revision": f.revision,
+                "read_offset": f.read_offset, "status": f.status,
+                "mult": f.mult, "window_out": f.window_out, "last_cell": f.last_cell,
+                "n_aget": n_aget, "n_ch": n_ch, "n_buckets": n_bk,
+                "items_out_of_range": out_of_range,
+                "adc": adc,
+            })
+        })
+        .collect();
+    let age = now.duration_since(received).unwrap_or_default();
+    serde_json::json!({
+        "run": event.run,
+        "event_idx": event.event_idx,
+        "complete": event.complete,
+        "received_unix_ms": unix_ms(received),
+        "age_ms": age.as_millis() as u64,
+        "fragments": fragments,
+    })
 }
 
 async fn ws_upgrade(State(hub): State<Arc<Hub>>, upgrade: WebSocketUpgrade) -> Response {
@@ -1872,6 +1974,80 @@ TestAux0\t0\t0\t0\t4
         let geometry = Arc::new(geometry::parse(GEOMETRY_TEXT));
         assert_eq!(geometry.max_strip, [2, 1, 3], "U2/V1/W3(面の幅)");
         DisplayConverter::new(geometry)
+    }
+
+    // -----------------------------------------------------------------
+    // 0. GET /api/last-event の JSON(TODO/123)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn last_event_json_places_known_items_and_marks_the_rest_unread() {
+        let t0 = UNIX_EPOCH + std::time::Duration::from_millis(1_760_259_600_123);
+        let now = t0 + std::time::Duration::from_millis(120);
+        let event = built_event(
+            70,
+            1234,
+            false,
+            vec![
+                // asad 0: (aget1,ch11,bk7)=1234, (aget3,ch67,bk511)=4095, 範囲外 2 個
+                // (aget3,ch68,bk0) = ch 超過、(aget0,ch0,bk0) は範囲内で ADC 0 と -1 を区別。
+                fragment(
+                    0,
+                    0,
+                    &[
+                        (1, 11, 7, 1234),
+                        (3, 67, 511, 4095),
+                        (3, 68, 0, 5),
+                        (2, 127, 3, 6),
+                        (0, 0, 0, 0),
+                    ],
+                ),
+                fragment(0, 1, &[(2, 5, 9, 77)]),
+            ],
+        );
+        let v = last_event_json(&event, t0, now);
+
+        assert_eq!(v["run"], 70);
+        assert_eq!(v["event_idx"], 1234);
+        assert_eq!(v["complete"], false);
+        assert_eq!(v["received_unix_ms"], 1_760_259_600_123u64);
+        assert_eq!(v["age_ms"], 120);
+        let frags = v["fragments"].as_array().unwrap();
+        assert_eq!(frags.len(), 2, "asad 0 / 1 の両方");
+
+        let f = &frags[0];
+        assert_eq!((f["cobo"].as_u64(), f["asad"].as_u64()), (Some(0), Some(0)));
+        // fragment() ヘルパの固定ヘッダ値がそのまま出る。
+        assert_eq!(f["event_time"], 0x0000_1234_5678_9abcu64);
+        assert_eq!(f["frame_type"], 2);
+        assert_eq!(f["revision"], 5);
+        assert_eq!(f["read_offset"], 136);
+        assert_eq!(f["status"], 0);
+        assert_eq!(f["mult"], serde_json::json!([68, 0, 17, 3]));
+        assert_eq!(f["window_out"], 512);
+        assert_eq!(f["last_cell"], serde_json::json!([7, 9, 11, 13]));
+        assert_eq!(
+            (
+                f["n_aget"].as_u64(),
+                f["n_ch"].as_u64(),
+                f["n_buckets"].as_u64()
+            ),
+            (Some(4), Some(68), Some(512))
+        );
+        assert_eq!(f["items_out_of_range"], 2);
+        assert_eq!(f["adc"][1][11][7], 1234);
+        assert_eq!(f["adc"][3][67][511], 4095);
+        assert_eq!(f["adc"][0][0][0], 0, "ADC 0 は読まれた値");
+        assert_eq!(f["adc"][0][0][1], -1, "未読は -1");
+        assert_eq!(f["adc"][1][11][8], -1);
+        assert_eq!(f["adc"][2].as_array().unwrap().len(), 68);
+        assert_eq!(f["adc"][2][0].as_array().unwrap().len(), 512);
+
+        let g = &frags[1];
+        assert_eq!(g["asad"], 1);
+        assert_eq!(g["items_out_of_range"], 0);
+        assert_eq!(g["adc"][2][5][9], 77);
+        assert_eq!(g["adc"][1][11][7], -1, "フラグメント間で混ざらない");
     }
 
     // -----------------------------------------------------------------
