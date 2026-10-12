@@ -275,12 +275,12 @@ fn open_driver(device: &SlowDeviceConfig) -> Result<Box<dyn Driver + Send>, Slow
                 Ok(Box::new(driver))
             } else {
                 let port = device.port.as_deref().ok_or_else(missing_port)?;
+                // TODO/119 §5: ポートはここで開かない(ident / poll のたびに開閉する)。
                 let driver = super::hivolta_driver::open_serial(
                     &device.name,
                     port,
                     device.expect_serial.clone(),
-                )
-                .map_err(to_device_error)?;
+                );
                 Ok(Box::new(driver))
             }
         }
@@ -1056,14 +1056,9 @@ mod tests {
         config.addr = None;
         config.port = Some("/dev/serial/by-id/does-not-exist-089-hivolta-test".to_string());
 
-        let error = match open_driver(&config) {
-            Err(e) => e,
-            Ok(_) => panic!("a nonexistent serial port should not open"),
-        };
-        let SlowctlError::Device { device, message } = error else {
-            panic!("expected SlowctlError::Device");
-        };
-        assert_eq!(device, "hv");
+        // TODO/119 §5: 開くのは ident / poll のとき(open_driver 自体は開かない)。
+        let mut driver = open_driver(&config).unwrap();
+        let message = driver.ident().unwrap_err().to_string();
         assert!(
             message.contains("cannot open serial port"),
             "message = {message:?}(addr が無ければ port へ落ちることの確認)"
