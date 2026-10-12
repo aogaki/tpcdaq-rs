@@ -786,3 +786,69 @@ async fn client_count_tracks_connections_and_disconnections() {
 
     monitor.stop().await;
 }
+
+// =====================================================================
+// GET /api/last-event(TODO/123)
+// =====================================================================
+
+/// 素の HTTP/1.1 GET(HTTP クライアント依存を足さない)。(status, headers, body) を返す。
+async fn http_get(monitor: &Monitor, path: &str) -> (u16, String, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let host = monitor
+        .ws_url
+        .trim_start_matches("ws://")
+        .trim_end_matches("/ws");
+    let mut stream = tokio::net::TcpStream::connect(host).await.unwrap();
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    tokio::time::timeout(RECV_TIMEOUT, stream.read_to_end(&mut raw))
+        .await
+        .expect("HTTP response timed out")
+        .unwrap();
+    let text = String::from_utf8(raw).unwrap();
+    let (head, body) = text.split_once("\r\n\r\n").unwrap();
+    let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, head.to_ascii_lowercase(), body.to_string())
+}
+
+#[tokio::test]
+async fn last_event_api_is_404_before_any_event_and_returns_the_latest_after() {
+    let mut publisher = Publisher::bind();
+    let monitor = Monitor::start(&publisher.endpoint, 64).await;
+
+    let (status, head, body) = http_get(&monitor, "/api/last-event").await;
+    assert_eq!(status, 404);
+    assert!(head.contains("access-control-allow-origin: *"), "{head}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["error"], "no event received yet");
+
+    // WS クライアントは繋がない(購読の有無に関係なく保持されること)。
+    // SUB の slow joiner 対策: 届くまで 2 件を送り直す。後の方 = event_idx 22。
+    let mut latest = None;
+    for _ in 0..40 {
+        publisher.event(70, 21, true, vec![fragment(0, 0, &[(1, 11, 7, 1234)])]);
+        publisher.event(70, 22, true, vec![fragment(0, 0, &[(2, 5, 9, 321)])]);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (status, head, body) = http_get(&monitor, "/api/last-event").await;
+        if status == 200 {
+            latest = Some((head, body));
+            break;
+        }
+    }
+    let (head, body) = latest.expect("no event reached the monitor");
+    assert!(head.contains("access-control-allow-origin: *"), "{head}");
+    assert!(head.contains("application/json"), "{head}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["run"], 70);
+    assert_eq!(v["event_idx"], 22, "後に送った方が返る");
+    assert_eq!(v["fragments"][0]["adc"][2][5][9], 321);
+    assert_eq!(
+        v["fragments"][0]["adc"][1][11][7], -1,
+        "前のイベントは混ざらない"
+    );
+    assert!(v["age_ms"].as_u64().unwrap() < 60_000);
+    assert!(v["received_unix_ms"].as_u64().unwrap() > 1_700_000_000_000);
+
+    monitor.stop().await;
+}
