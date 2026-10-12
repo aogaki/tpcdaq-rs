@@ -154,6 +154,15 @@ pub struct PowerOutcome {
     pub result: Result<serde_json::Value, PowerRefused>,
 }
 
+/// SET 後に状態を読み直す間隔と最大回数(TODO/124、実機 ELITPC 2026-10-12)。
+///
+/// DT1415ET は OFF の SET 直後の STATUS にまだ DOWN を立てていない(status = 1 のまま)ので、
+/// 1 回だけ読むと実際には落ちている ch を「切り替わらない」と誤判定した(8 ch 全部)。
+/// 条件を満たした時点で成功、最大 10 回(≈ 1 s)読んでも満たさなければ失敗。LV も同じ形。
+pub const POWER_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+/// [`POWER_CHECK_INTERVAL`] の回数。
+pub const POWER_CHECK_TRIES: u32 = 10;
+
 /// [`PowerOutcome::result`] の失敗側(TODO/124)。
 #[derive(Debug, Clone, PartialEq)]
 pub struct PowerRefused {

@@ -18,6 +18,9 @@ use std::io::{self, Read, Write};
 /// 要求行 → 応答行の完全一致で応答するインメモリ応答器。
 pub struct FakeHv {
     responses: HashMap<String, String>,
+    /// 要求行ごとに**順に消費する**応答([`FakeHv::push_response`])。尽きたら `responses` →
+    /// 内部の STATUS へ戻る(読むたびに変わる STATUS を模す、TODO/124 実機 2026-10-12)。
+    sequenced: HashMap<String, VecDeque<String>>,
     /// ch ごとの STATUS(TODO/124)。`PAR:ON` / `PAR:OFF` が bit 0 を書き換える。
     status: [u16; 8],
     /// LOCAL モード(SET はすべて `#LOC:ERR`)。
@@ -37,6 +40,7 @@ impl FakeHv {
     pub fn new() -> Self {
         Self {
             responses: HashMap::new(),
+            sequenced: HashMap::new(),
             status: [0; 8],
             local: false,
             silent: false,
@@ -54,6 +58,20 @@ impl FakeHv {
     ) -> &mut Self {
         self.responses
             .insert(request_line.into(), reply_line.into());
+        self
+    }
+
+    /// `request_line` への応答を**順番に消費するキュー**へ 1 個積む(fake_hmp と同じ形)。
+    /// 尽きたら [`FakeHv::set_response`] の固定応答、無ければ内部の STATUS で答える。
+    pub fn push_response(
+        &mut self,
+        request_line: impl Into<String>,
+        reply_line: impl Into<String>,
+    ) -> &mut Self {
+        self.sequenced
+            .entry(request_line.into())
+            .or_default()
+            .push_back(reply_line.into());
         self
     }
 
@@ -139,7 +157,12 @@ impl Write for FakeHv {
                 // 拒否するのと同じ扱い(生文字列を送りつける負性テストを受け止める側)。
                 let reply = self.answer_set(&line);
                 self.outgoing.extend(reply.as_bytes());
-            } else if let Some(reply) = self.responses.get(&line) {
+            } else if let Some(reply) = self
+                .sequenced
+                .get_mut(&line)
+                .and_then(VecDeque::pop_front)
+                .or_else(|| self.responses.get(&line).cloned())
+            {
                 self.outgoing.extend(reply.as_bytes());
             } else if let Some(reply) = self.answer_status(&line) {
                 self.outgoing.extend(reply.as_bytes());
@@ -326,5 +349,19 @@ mod tests {
             ask(&mut fake, "$CMD:MON,CH:3,PAR:STATUS\r\n"),
             "#CMD:OK,VAL:04096\r\n"
         );
+    }
+
+    /// 積んだ応答は順に消費され、尽きたら登録 → 内部の値へ戻る(読むたびに変わる STATUS を
+    /// 模す —— 実機 2026-10-12: OFF の直後はまだ DOWN が立たない)。
+    #[test]
+    fn pushed_replies_are_consumed_in_order_then_fall_back() {
+        let mut fake = FakeHv::new();
+        fake.set_status(3, 4);
+        fake.push_response("$CMD:MON,CH:3,PAR:STATUS\r\n", "#CMD:OK,VAL:00001\r\n");
+        fake.push_response("$CMD:MON,CH:3,PAR:STATUS\r\n", "#CMD:OK,VAL:00005\r\n");
+        let read = |fake: &mut FakeHv| ask(fake, "$CMD:MON,CH:3,PAR:STATUS\r\n");
+        assert_eq!(read(&mut fake), "#CMD:OK,VAL:00001\r\n");
+        assert_eq!(read(&mut fake), "#CMD:OK,VAL:00005\r\n");
+        assert_eq!(read(&mut fake), "#CMD:OK,VAL:00004\r\n", "尽きたら内部の値");
     }
 }
