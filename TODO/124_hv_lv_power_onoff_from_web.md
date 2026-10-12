@@ -86,3 +86,58 @@
 - §11 安全境界 v1.42: 「web が持てる物理的作動は **HV / LV の ch ごとの on/off だけ**(ユーザー裁定 2026-10-12)」を足す。規則・操作権・確認・audit・機器側の許可(REMOTE と前面スイッチ)を明記する。電圧値・上限・ランプ・ガス・バルブは引き続き載せない。
 - §3.1 `cmd_bind` / `slow_cmd`、§3.2 に 47007、§8.1 に `POST /api/slow/power`、§9.2 に audit `slow/power`。
 - CLAUDE.md の「やらないこと」の該当行を同じ内容に更新する(ユーザーの明示の依頼に基づく)。
+
+## Fable 設計確定(2026-10-12、スポット。上の設計に優先する)
+判定: **骨格は承認、以下 7 点を反映して着手**。レーン: **A = Opus、B = Opus**(power_inflight と spawn_blocking の復旧が残る)、**C = Sonnet**。
+
+### A(slowctl)の修正
+1. **REP は専用の std スレッド `slowctl-cmd`**(`main_loop` には混ぜない)。`rcvtimeo = DRAIN_TIMEOUT` で `stop` を見ながら回す。
+   - 流れ: recv → 静的検証(device 名・type が hivolta / hmp2020・ch 範囲・op)→ 機器の `SyncSender<PowerCommand>` に `try_send` → `reply_rx.recv_timeout(5 s)` → REP に返す。
+   - REQ / REP なので**どの経路でも必ず 1 通返す**。send が失敗(EFSM)したらソケットを作り直す。
+2. **キューの深さは 1**(`sync_channel(1)`)。満杯なら即 `"device busy"`。
+3. **コマンドは device_loop が受ける**。セッション中の sleep に加え、**backoff の sleep でも drain する**。
+   - セッション中なら実行する。backoff 中なら即 `{"ok":false,"error":"device not connected"}`。
+   - `sleep_until_stop` の `thread::sleep` を `cmd_rx.recv_timeout(DRAIN_TIMEOUT.min(残り))` に置き換える。
+4. **コマンドを実行したら、残りの sleep を捨ててすぐ poll する**(表が古いまま残らないように)。
+5. **5 s を超えて遅れて届いた結果**は、返し先が無くても `warn!` で device / ch / on / after を出す。
+6. **HV**:
+   - `OnDemandHiVolta::set_power` の流れは open → `HiVoltaDriver`(nch を引き継ぐ)→ before の STATUS(`CH:X` 単発)→ SET → after の STATUS。スコープの終わりで閉じる。
+   - **before に DIS(isdis)が立っていれば SET を送らない**: `"front switch is OFF (DIS)"`。
+   - after の検証: ON の要求なら `on()` が真であること(RUP が同時でも可)。OFF の要求なら `!on() || ramp_down()`。満たさなければ `"channel did not switch (status=…)"`。
+   - before / after には `status_ignore` を**適用しない**(生の STATUS を返す)。`flags` は ChStatus の既存のビット名を全部並べる。
+7. **LV は両 ch を返す**: `{"outp":{"1":1,"2":0}}`(`INST:NSEL 1` → `OUTP?`、`INST:NSEL 2` → `OUTP?`。それぞれ `INST:NSEL?` で確認する)。`OUTP ON` はマスタも ON にするので、ほかの ch が変わったことを隠さない。
+8. **`cmd_bind` は opt-in**(省略 = REP を開かない)。
+9. `fake_hv` は **`PAR:ON|OFF` だけを受理して内部の status を書き換える**。ほかの SET は従来どおり `#LOC:ERR`。
+
+### B(controller)の修正
+1. **`slow_cmd` は opt-in**(省略 = `POST /api/slow/power` は 503)。`ControllerParams` に `slow_cmd: Option<String>` と `slow_devices: Vec<(name, type)>`(`Config.slowctl.device` から)を足す。
+2. **「同じロック区間で検査と送信」は却下**(std Mutex を REQ の 10 s のあいだ握れない)。**run/start と同じ手口 = 短いロック + 占有の印**にする。
+   - `RunState.power_inflight: Option<PowerInflight{device,ch,on,operator}>` を足す。
+   - `slow/power` の流れ(ロック内で順に判定):
+     1. power_inflight が Some なら 409 `"another power command is in flight"`。
+     2. 規則: HV ON と LV OFF は `phase == Idle` のときだけ。Starting / Stopping / Running はすべて 409。
+     3. 通ったら印を立ててロックを放し、`spawn_blocking` で REQ を送る。完了したらロック内で None に戻す。panic からの復旧も run/start と同じ形にする。
+   - **run/start**: Idle の検査と同じロック内で、`power_inflight.is_some()` なら 409 `"slow-control power command in flight — retry in a few seconds"`。run/stop は塞がない。
+3. 504 / timeout の文言には **「state unknown — check the table」** を入れる。audit には `error:"timeout"` と before を残す。
+4. **audit は 401 / 400 / 409 / 503 / 504 を含む全経路で 1 行**。
+
+### C(UI)の修正
+- 確認ダイアログには、LV では両 ch の before を出す。結果でほかの ch が変わったら、そのことを明示する。
+- Running 中の HV OFF では「ramp-down により run のデータが終わる」という注意を出す。
+
+### テスト・実機の追加
+- A:
+  - backoff 中のコマンドは即 `device not connected`。
+  - timeout の後に遅れて届いた結果を warn する。
+  - コマンドの後はすぐ poll する。
+  - HMP は両 ch を読み戻す。
+  - HV は before の DIS で拒否し、after を検証する。`#LOC:ERR` も扱う。
+- B:
+  - power_inflight 中の run/start は 409。power の二重投入も 409。
+  - HV ON は Starting / Stopping でも 409。
+  - `slow_cmd` を省略すると 503。
+  - 全経路で audit が 1 行。
+- 実機: 既存の 4 項目に加えて、**「LV ch2 を ON にしたとき ch1 の outp が変わらない」**を確かめる。**HV OFF @ Running は実機ではやらない**(データを失う)。B の 200 テストで代わりにする。
+
+### 確定文
+SPEC §11 / §3.1 / §3.2 / §8.1 / §9.2 と CLAUDE.md の文案は Fable 作で、Opus が反映済み(v1.42、コミットは本票の起票後)。
