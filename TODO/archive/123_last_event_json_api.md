@@ -1,6 +1,6 @@
 # 123 — 最新の 1 イベントを JSON で返す web API(analysis team の要望)
 
-**Status: IN PROGRESS**(2026-10-12 起票 Opus。ユーザー「analysis team からのリクエストで、last event だけを返す web API 作れますか? JSON 形式で graw ファイルを数値化した 1 イベントで OK です」。Sonnet)
+**Status: COMPLETED**(2026-10-12 起票・同日完了 Opus。ユーザー「analysis team からのリクエストで、last event だけを返す web API 作れますか? JSON 形式で graw ファイルを数値化した 1 イベントで OK です」。Sonnet)
 
 ## 方針
 - **monitor**(port 9000、axum。今は WS の `/` と `/ws` だけ)に `GET /api/last-event` を足す。
@@ -82,3 +82,12 @@
   - 次の run での実イベントの確認(adc の形、event_idx が進むこと、応答時間と大きさ)。
   - analysis team に、ジオメトリ(ストリップ対応)が要るかの確認(ユーザー経由)。
   - SPEC(§10 に monitor の HTTP 節)の Fable 確定。
+
+## 結果(2026-10-12、実イベント)
+- ユーザーが run 70 を開始(「見る限り良さそうですね」)。ELITPC 上で `GET 127.0.0.1:9000/api/last-event` を 1.5 s 間隔で 2 回取得した:
+  - 応答: run 70、complete true、**event_idx 592 → 603**(進む)、age_ms 401 / 75、**545 kB / 36 ms・546 kB / 40 ms**、CORS `*`。
+  - フラグメント: cobo 0 / asad 0、shape **4 × 68 × 512**、frame_type 1、event_time 11600903222、**unread 0**(全読み出し)、**items_out_of_range 0**、ADC 345–1507。
+- ゲートは上の進捗節のとおり(cargo 933 / 0 / 1 ignored)。スキップしたテストは無し。
+- 残り:
+  - analysis team にジオメトリ(ストリップ対応)が要るかの確認(ユーザー経由)。要るなら別票にする。
+  - SPEC 追記の Fable 確定(CURRENT の Fable キューに文案)。

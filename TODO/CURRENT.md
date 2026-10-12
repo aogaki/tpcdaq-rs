@@ -59,6 +59,7 @@ docs: [NEW_DAQ_SETUP_ja.md](../docs/NEW_DAQ_SETUP_ja.md) v0.1 + [RUNBOOK_ja.md](
 - **同日午後(Opus、ユーザー現地)**: ~~118~~ / ~~120~~ / ~~121~~ / ~~122~~ **完了 → archive**(Fable 一括レビュー、**SPEC v1.41**、cargo 931 / UI 325)。HV / LV を ELITPC で常時読み出し(HV 5 s・LV 1 s)、
   画面は機器 × ch の表、ログブックは run の開始・停止時の値 + IDENT / ALARM のみ、**全サンプルは InfluxDB 2.9.1**(`http://<ELITPC>:8086`、bucket `slowctl`、停止 60 s で欠損なし)、
   ch0 の UNV は alarm から除外(起動時に告知)、slowctl は daq_up / daq_down に組み込み。未実施: ユーザーの目視(Data Explorer / UI Counters)。
+  ~~123~~ **完了 → archive**([archive/123](archive/123_last_event_json_api.md)): analysis team 向けに monitor の `GET :9000/api/last-event`(最新 1 イベントを JSON、生 ADC 4×68×512、未読 -1、≈ 545 kB / 40 ms)。SPEC の文案は Fable キューに。
   経緯: [118](archive/118_hv_lv_readout_on_elitpc.md)(IN PROGRESS → 完了)HV(HiVolta DT1415ET)/ LV(HMP2020)を USB で ELITPC に接続し、slowctl で読み出し中。
   HMP は本体の Interface が RS-232 だった → USB VCP に変更。**HiVolta の USB で偽トリガ(最大 54 Hz)→ 原因は不良 USB ケーブルで、交換して解消**。
   ~~119~~ **完了 → archive**(全 ch 一括読み出し、機器ごとの `poll_s`、シリアルはオンデマンドで開く。cargo 903)。現在は HV 5 s / LV 1 s で、トリガは 5.1 Hz(正常)。
@@ -412,6 +413,14 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
   **追記 2(2026-10-12 Opus、118 の実機)**: HiVolta の USB ポートを開くと偽トリガが入った(24–54 Hz)が、**原因は不良 USB ケーブル**で、交換して完全に消えた
   (開きっぱなしで毎秒 34 往復しても 5.0 Hz = ベースライン)。機器の本質ではない → on/off の設計の制約にはしない。ただし「新しく機器を繋いだらトリガレートを A/B で確かめる」を手順に。
+
+- **[2026-10-12 起票] SPEC §10 に monitor の HTTP `GET /api/last-event`(TODO/123、実装・実機済み)— 文案の確定だけ**
+  文案(§10 の末尾に「### 10.5 解析向け HTTP(v1.42)」):
+  monitor(`ws_listen` のポート)は WS に加えて **`GET /api/last-event`** を持つ。応答は、root-sink から最後に受けた built event(`event_publish_hz` で間引き済み)を JSON にしたもの:
+  `{run, event_idx, complete, received_unix_ms, age_ms, fragments: [{cobo, asad, event_idx, event_time, frame_type, revision, read_offset, status, mult, window_out, last_cell, n_aget, n_ch, n_buckets, items_out_of_range, adc}]}`。
+  - `adc[aget][ch][bucket]` は生 ADC(FPN 込み・減算なし、0x03 と同じ並び)、読まれていない位置は `-1`。範囲外の item は捨てて数える。
+  - 受信前は 404 `{"error": "no event received yet"}`。`Access-Control-Allow-Origin: *`。GET のみ。JSON への変換は要求時だけ(モニタ系、取得系に影響しない)。
+  - 実測は ≈ 545 kB / 40 ms(123 結果節)。
 
 - **[2026-09-02 起票] オンライントラック再構成のスコープ復活(SPEC §4.4 / §1012 の改訂可否)**
 
