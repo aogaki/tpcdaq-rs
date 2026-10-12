@@ -13,7 +13,14 @@
 - decoder の Stop は残バッチを flush するが、**自分の EOS は出さない**。decoder の EOS は全 receiver の EOS を受けたときにだけ出る。
   したがって EOS を root-sink まで通すには、停止経路と同じく「receiver を Stop → EOS 到達を待つ → 下流を Stop」の順が要る。
 - 典型例: **run 中に controller だけが落ちて再起動した**場合。新しい controller は Idle で、コンポーネントは全員 Running のまま、
-  ECC も Running。113 以前は start が `Configure refused in state Running` で失敗した。113 では start は通るが、前の run は root-sink 側で閉じられないまま残る。
+  ECC も Running。113 以前は start が `Configure refused in state Running` で失敗した。
+- **実機ベースライン(2026-10-12 08:42、ELITPC、113 のビルド、`~/crash_test.sh baseline-113`)**: α run 58 の 15 s 目に controller を kill -9 → 再起動
+  (相 Idle、3 コンポーネントと ECC は Running のまま)→ start は通った(run 59)。audit `component_walk_back` は全員 `Running->Configured->Idle`、
+  ECC は `status->Running, stop->Ready, breakup->Prepared, reset->Described, reset->Idle`。**run 58 は root-sink で EOS により閉じた**
+  (`run 58 closed (… events_complete=68 …)` が `run 59 opened` より前、raw / PEventTPC とも 68 件で finalize、inprogress なし)。
+  → **低レートでは EOS が Stop → Reset の REQ 往復より先に抜けて、競争に勝つ**(起票時の「閉じられないまま残る」は試験前の推定で、低レートでは誤り)。
+  待ちが要るのは、送出待ちが溜まっているとき(高レートで下流が詰まり、PUSH が HWM で止まっている)。このときは Reset が EOS ごと打ち切る。
+  この修正はロスレス規約上の正しさ(競争に頼らない)のためのもので、低レートの実運用では今も実害が出ていない。
 
 ### 仕様(Opus が実装、Fable の 113 裁定の実現。SPEC §1.3 v1.38 の 1 文を差し替え)
 1. まず全コンポーネントの状態を(上流から)`GetStatus` で調べる。不達の扱いは今と同じ(stage `walk-back` で失敗)。
