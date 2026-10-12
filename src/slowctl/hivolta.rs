@@ -254,6 +254,25 @@ pub fn ignore_masks(rules: &[StatusIgnore]) -> Result<IgnoreMasks, String> {
     Ok(masks)
 }
 
+/// 起動時の告知用: マスクが 0 でない ch について `(ch, 無視されるフラグ名)` を返す。
+/// alarm を黙らせる設定は黙らせずに告知する(silent 禁止)。
+pub fn ignore_notices(masks: &IgnoreMasks) -> Vec<(u8, Vec<&'static str>)> {
+    let mut notices = Vec::new();
+    for (ch, mask) in (0u8..).zip(masks.iter()) {
+        let mut flags = Vec::new();
+        if mask & (1 << 4) != 0 {
+            flags.push("OVV");
+        }
+        if mask & (1 << 5) != 0 {
+            flags.push("UNV");
+        }
+        if !flags.is_empty() {
+            notices.push((ch, flags));
+        }
+    }
+    notices
+}
+
 /// チャンネル STATUS ビットマスク(User Manual rev.16 p.23、10 進数で読む)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChStatus(pub u16);
@@ -424,6 +443,19 @@ impl<T: Read + Write> HvLink<T> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// 告知は mask != 0 の ch だけ。ch 2 = UNV、ch 5 = OVV+UNV(bit4=16, bit5=32)。
+    #[test]
+    fn ignore_notices_lists_only_channels_with_a_mask() {
+        let mut masks: IgnoreMasks = [0; 8];
+        masks[2] = 1 << 5;
+        masks[5] = (1 << 4) | (1 << 5);
+        assert_eq!(
+            ignore_notices(&masks),
+            vec![(2, vec!["UNV"]), (5, vec!["OVV", "UNV"])]
+        );
+        assert!(ignore_notices(&[0; 8]).is_empty());
+    }
 
     // ---- ①要求文字列の完全一致(ch 単体 / 全 ch / ボード)。p.22 の表そのまま。 ----
 

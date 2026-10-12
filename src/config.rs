@@ -943,6 +943,13 @@ fn validate_slowctl(slowctl: &SlowctlConfig) -> Result<(), ConfigError> {
                 device.name, device.device_type
             )));
         }
+        if device.device_type != "hivolta" && !device.status_ignore.is_empty() {
+            return Err(ConfigError::InvalidSlowctl(format!(
+                "device {:?} of type {:?}: status_ignore is only for hivolta devices \
+                 (status_ignore は hivolta のみ)",
+                device.name, device.device_type
+            )));
+        }
         crate::slowctl::hivolta::ignore_masks(&device.status_ignore)
             .map_err(|e| ConfigError::InvalidSlowctl(format!("device {:?}: {e}", device.name)))?;
         if let Some(poll_s) = device.poll_s {
@@ -2663,6 +2670,33 @@ status_ignore = [{ ch = 8, flags = ["UNV"] }]
             parse(&minimal_toml(&geometry, bad_ch)),
             Err(ConfigError::InvalidSlowctl(_))
         ));
+    }
+
+    /// TODO/121 レビュー: `status_ignore` は hivolta 専用。他の型に書いたら黙殺せず起動失敗。
+    /// 空の配列は「書いていない」と同じなので可。
+    #[test]
+    fn status_ignore_on_a_non_hivolta_device_is_rejected() {
+        let geometry = make_temp_geometry_file();
+        let with = |device: &str, ignore: &str| {
+            let extra = format!("[slowctl]\n[[slowctl.device]]\n{device}\n{ignore}\n");
+            parse(&minimal_toml(&geometry, &extra))
+        };
+        let hmp = "type = \"hmp2020\"\nname = \"lv\"\nport = \"/dev/ttyUSB0\"";
+        let flowbus = "type = \"bronkhorst_flowbus\"\nname = \"gas\"\nport = \"/dev/ttyUSB1\"";
+        let rule = "status_ignore = [{ ch = 0, flags = [\"UNV\"] }]";
+        for device in [hmp, flowbus] {
+            let err = with(device, rule).unwrap_err();
+            let ConfigError::InvalidSlowctl(message) = err else {
+                panic!("expected InvalidSlowctl");
+            };
+            assert!(message.contains("status_ignore"), "{message}");
+            assert!(message.contains("hivolta"), "{message}");
+            assert!(
+                message.contains("lv") || message.contains("gas"),
+                "{message}"
+            );
+            assert!(with(device, "status_ignore = []").is_ok());
+        }
     }
 
     /// TODO/119: `poll_s` は省略可、指定すれば保持される。0・負・NaN は起動失敗。
