@@ -77,3 +77,15 @@ Data Explorer で hv / lv の系列が見えること、counters の written が
 - line protocol の実例(テストのオラクル): `hv,ch=0 vmon=341.06,imon=9.593,status=33,vset=350,iset=15,alarm=true 1760259600000` / `hv,ch=board bdalarm=0,bdilk=0,alarm=false …` / `lv,ch=1 volt=3.6,curr=0.997,outp=1,vset=3.6,iset=1.2,alarm=false …`
 - ゲート(main `68c614e`、Mac): fmt / clippy 0 / **cargo test 929 passed / 0 failed / 1 ignored** / UI **325 passed / 5 skipped**、build OK。
 - **実機は、ユーザーが influxdb2 を入れて org / bucket / トークンを用意するのを待っている**(12:13 時点で未導入)。
+
+## 実機(2026-10-12 13:1x–13:20、ELITPC)
+- InfluxDB の導入はユーザー(sudo)。スクリプト `~/influx_install.sh` / `~/influx_setup.sh` を Opus が用意した。
+  - 1 回目の install が黙って失敗した。原因は、Opus が鍵の確認用に daq で落とした `/tmp/influxdata-archive.key` が残っていたこと。
+    ELITPC は `fs.protected_regular = 2` なので、root でもその上書きを拒否する。`curl --silent` だったのでエラーが見えなかった。
+    → 一時ディレクトリを `mktemp -d` にし、`curl -fsSL` で失敗が見えるように直して、2 回目で成功した。
+  - 結果: **influxdb2 2.9.1-1**(CLI は influxdb2-cli 2.8.0-1)、`/health` pass。org `elitpc`、bucket `slowctl`(保持期間無期限)。
+    書き込み専用トークンは `/opt/tpcdaq/influx.token`(89 bytes、600、daq 所有。画面には出していない)。
+- 全バイナリを main `93cf2ef` で release ビルド(走っているプロセスは旧 inode のまま)。daq.toml(バックアップ `daq.toml.bak-2026-10-12-influx`)に `[slowctl.influx]` を追加し、10:19:34Z に slowctl だけ入れ替えた。
+  - ログ: `slowctl: writing every sample to InfluxDB url="http://127.0.0.1:8086" org="elitpc" bucket="slowctl"`、hv / lv を識別。
+  - `influx query`(直近 2 分の last()): hv ch0 imon 9.595 / iset 15 / alarm false(121 D の status_ignore が効いている)、lv ch1 curr 1.235 / iset 2.5 / alarm false。
+- 残り: Data Explorer での目視(ユーザー)、Slow control 画面の Counters の `influx_points_written`、InfluxDB を止めたときの dropped / errors の確認(run 69 の後で)、SPEC(Fable)。
