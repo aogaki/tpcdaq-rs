@@ -282,7 +282,24 @@ static void test_run_closed_line_reports_per_run_counts() {
         "events_incomplete=7 late_fragments=5)\n");
 }
 
+static void test_first_late_of_run_is_per_run() {
+  // 判定は「今の late を数える前」の通算と run 開始時点の比較。
+  // 出典 = 手計算: run 1 で late 3 件(通算 3)→ run 2 開始時 at_open.late=3。
+  RunCounts total;
+  RunCounts at_open;  // run 1 開始
+  CHECK(first_late_of_run(total, at_open));  // run 1 の 1 件目
+  total.late_fragments = 1;
+  CHECK(!first_late_of_run(total, at_open));  // 2 件目
+  total.late_fragments = 3;
+
+  at_open = total;  // run 2 開始(通算 3)
+  CHECK(first_late_of_run(total, at_open));  // run 2 の最初(通算では 0 でない)
+  total.late_fragments = 4;
+  CHECK(!first_late_of_run(total, at_open));  // run 2 の 2 件目
+}
+
 int main() {
+  test_first_late_of_run_is_per_run();
   test_channel_is_fifo();
   test_pop_blocks_until_a_push_arrives();
   test_push_blocks_when_full_and_resumes_after_pop();
