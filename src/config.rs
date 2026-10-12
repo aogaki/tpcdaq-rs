@@ -502,6 +502,9 @@ pub struct ControllerConfig {
     /// `<output_root>/params` は `router_ip` と同じく呼び出し側([`crate::controller::Controller`])
     /// で解決する(ここでは解決しない — output_root は同じ `Config` の別セクションにある)。
     pub params_dir: Option<PathBuf>,
+    /// 124(SPEC §3.1 v1.42): slowctl の power REP(`[slowctl] cmd_bind`)への REQ 接続先。
+    /// **opt-in** —— 省略 = `POST /api/slow/power` は 503(作動の経路を既定で開かない)。
+    pub slow_cmd: Option<String>,
 }
 
 // ---------------------------------------------------------------------
@@ -648,6 +651,9 @@ struct RawController {
     ecc_config_dir: Option<PathBuf>,
     #[serde(default)]
     params_dir: Option<PathBuf>,
+    // ---- 124 で追記(省略可 = 作動 API 無し)----
+    #[serde(default)]
+    slow_cmd: Option<String>,
 }
 
 /// `[controller] config_id` の 2 通りの書き方(SPEC §3.1 v1.13)。
@@ -865,6 +871,7 @@ fn resolve(raw: RawConfig) -> Config {
         router_ip: raw.controller.router_ip,
         ecc_config_dir: raw.controller.ecc_config_dir,
         params_dir: raw.controller.params_dir,
+        slow_cmd: raw.controller.slow_cmd,
     };
 
     Config {
@@ -2213,6 +2220,9 @@ ws_listen = "0.0.0.0:9000"
         // 呼び出し側で足す」流儀 —— controller.rs の `Controller::params_dir` 参照)。
         assert_eq!(config.controller.ecc_config_dir, None);
         assert_eq!(config.controller.params_dir, None);
+        // 124(SPEC §3.1 v1.42): `slow_cmd` は opt-in。省略 = None(= POST /api/slow/power は 503。
+        // 既定の 47007 を勝手に入れて作動の経路を開かない)。
+        assert_eq!(config.controller.slow_cmd, None);
 
         let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
     }
@@ -2239,6 +2249,7 @@ ecc_command = "tcp://10.0.0.7:47200"
 router_ip = "10.0.0.1"
 ecc_config_dir = "/srv/tpcdaq-ecc-config"
 params_dir = "/srv/tpcdaq-params"
+slow_cmd = "tcp://127.0.0.1:47017"
 "#,
         );
         let config = parse(&toml_str).unwrap();
@@ -2269,6 +2280,11 @@ params_dir = "/srv/tpcdaq-params"
         assert_eq!(
             config.controller.params_dir,
             Some(PathBuf::from("/srv/tpcdaq-params"))
+        );
+        // 124: 既定ポート 47007 ではない非対称値(既定に化けたら落ちる)。
+        assert_eq!(
+            config.controller.slow_cmd.as_deref(),
+            Some("tcp://127.0.0.1:47017")
         );
 
         let _ = std::fs::remove_dir_all(geometry.parent().unwrap());

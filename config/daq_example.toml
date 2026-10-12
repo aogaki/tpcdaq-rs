@@ -56,3 +56,6 @@ config_id = { describe = "zCobo", prepare = "<physics 設定 id>", configure = "
 ui_dir = "/opt/tpcdaq/ui"          # ui/dist/ui/browser のコピー
 ecc_config_dir = "<ECC の設定リポジトリ>"   # getEccServer --config-repo-url と同じ(078 の生成 xcfg の出力先)
 params_dir = "/srv/tpcdaq/params"
+# HV / LV の ch ごとの ON/OFF を web から(SPEC §11 v1.42、TODO/124)。slowctl の [slowctl] cmd_bind と同じ口を書く。
+# 省略 = POST /api/slow/power は 503(作動の経路を開かない)。HV ON と LV OFF は run が Idle のときだけ。
+# slow_cmd = "tcp://127.0.0.1:47007"

@@ -392,11 +392,12 @@ async fn harness_with_config_ids(
     ui_dir: Option<PathBuf>,
     config_ids: ConfigIds,
 ) -> Harness {
-    harness_full(tag, cobo_ids, eos_closed, ui_dir, config_ids, None).await
+    harness_full(tag, cobo_ids, eos_closed, ui_dir, config_ids, None, None).await
 }
 
 /// [`harness_with_config_ids`] の `ecc_config_dir` 指定版(078 レーン B: params 系 REST の
-/// テスト用 — `None` なら従来どおり params REST は 503)。
+/// テスト用 — `None` なら従来どおり params REST は 503)。`slow_cmd` は 124 の power REQ の
+/// 接続先(`None` なら `POST /api/slow/power` は 503)。
 async fn harness_full(
     tag: &str,
     cobo_ids: &[u32],
@@ -404,6 +405,7 @@ async fn harness_full(
     ui_dir: Option<PathBuf>,
     config_ids: ConfigIds,
     ecc_config_dir: Option<PathBuf>,
+    slow_cmd: Option<String>,
 ) -> Harness {
     let (shutdown, _) = broadcast::channel(1);
     let output_root = temp_root(tag);
@@ -493,6 +495,7 @@ async fn harness_full(
         ui_dir,
         config_ids,
         ecc_config_dir,
+        slow_cmd,
     )
     .await;
 
@@ -513,6 +516,7 @@ async fn harness_full(
 /// fake ECC + controller(REST)を起動する。コンポーネントはフェイク([`harness_full`])でも
 /// 本物([`real_chain`]、112)でもよい —— controller から見えるのはコマンド REP だけ。
 /// 使った [`ControllerParams`] も返す(114: 同じ params で controller だけを作り直すため)。
+#[allow(clippy::too_many_arguments)]
 async fn spawn_controller(
     shutdown: &broadcast::Sender<()>,
     output_root: &Path,
@@ -521,6 +525,7 @@ async fn spawn_controller(
     ui_dir: Option<PathBuf>,
     config_ids: ConfigIds,
     ecc_config_dir: Option<PathBuf>,
+    slow_cmd: Option<String>,
 ) -> (BoundEndpoints, FakeEcc, ControllerParams) {
     let ecc = FakeEcc::spawn();
     let params = ControllerParams {
@@ -549,6 +554,14 @@ async fn spawn_controller(
         command_timeout: Duration::from_secs(5),
         ecc_timeout: Duration::from_secs(5),
         status_timeout: Duration::from_secs(2),
+        slow_cmd,
+        // `[[slowctl.device]]` の (name, type) の代役。power を持たない型(gas)も混ぜる
+        // —— 400「type 非対応」の判定材料(124 §2)。
+        slow_devices: vec![
+            ("hv".to_string(), "hivolta".to_string()),
+            ("lv".to_string(), "hmp2020".to_string()),
+            ("gas".to_string(), "bronkhorst_flowbus".to_string()),
+        ],
     };
 
     let bound = launch_controller(params.clone(), shutdown).await;
@@ -1703,6 +1716,7 @@ async fn params_harness(tag: &str) -> (Harness, PathBuf) {
         None,
         ConfigIds::same("integration"),
         Some(ecc_config_dir.clone()),
+        None,
     )
     .await;
     (harness, ecc_config_dir)
@@ -2738,6 +2752,7 @@ async fn real_chain(tag: &str) -> (RealChain, PathBuf) {
         None,
         ConfigIds::same("integration"),
         Some(ecc_config_dir.clone()),
+        None,
     )
     .await;
 
@@ -3186,4 +3201,482 @@ async fn a_restarted_controller_closes_the_running_run_with_eos_before_the_next_
 
     let _ = std::fs::remove_dir_all(&ecc_config_dir);
     chain.shutdown();
+}
+
+// ---------------------------------------------------------------------
+// POST /api/slow/power(TODO/124 レーン B、SPEC §8.1 / §9.2 / §11 v1.42)
+// ---------------------------------------------------------------------
+
+/// 偽 slowctl の power REP。TODO/124 §1 の JSON 形で答える(実 slowctl はレーン A)。
+///
+/// `hold` が立っている間は、受けた要求への応答を**保留する**(controller の
+/// `power_inflight` の窓を作る)。`release` しなければ最後まで返さない(504 の再現)。
+struct FakeSlowctl {
+    endpoint: String,
+    requests: Arc<Mutex<Vec<Value>>>,
+    hold: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FakeSlowctl {
+    fn spawn(answer: fn(&Value) -> Value, hold: bool) -> Self {
+        let context = zmq::Context::new();
+        let socket = context.socket(zmq::REP).unwrap();
+        socket.set_rcvtimeo(200).unwrap();
+        socket.bind("tcp://127.0.0.1:*").unwrap();
+        let endpoint = socket.get_last_endpoint().unwrap().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let hold = Arc::new(AtomicBool::new(hold));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let thread_requests = Arc::clone(&requests);
+        let thread_hold = Arc::clone(&hold);
+        let thread_stop = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                let Ok(message) = socket.recv_bytes(0) else {
+                    continue; // EAGAIN = 200 ms の目覚まし
+                };
+                let request: Value = serde_json::from_slice(&message).unwrap_or(Value::Null);
+                thread_requests.lock().unwrap().push(request.clone());
+                while thread_hold.load(Ordering::Relaxed) {
+                    if thread_stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let _ = socket.send(answer(&request).to_string().as_bytes(), 0);
+            }
+        });
+        Self {
+            endpoint,
+            requests,
+            hold,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn requests(&self) -> Vec<Value> {
+        self.requests.lock().unwrap().clone()
+    }
+
+    /// 保留していた応答を返させる(以降は即答)。
+    fn release(&self) {
+        self.hold.store(false, Ordering::Relaxed);
+    }
+}
+
+impl Drop for FakeSlowctl {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// slowctl の成功応答(TODO/124 §1 / Fable A-7)。要求の device / ch / on をそのまま映す。
+///
+/// * HV: `status` は STATUS のビットマスク。33 = ON(bit0 = 1)+ UNV(bit5 = 32)、0 = 全部落ち。
+/// * LV: **両 ch** の `outp`。要求の ch だけが切り替わり、もう一方は 1 のまま。
+fn slowctl_ok(request: &Value) -> Value {
+    let on = request["on"].as_bool().unwrap();
+    let (before, after) = if request["device"] == json!("lv") {
+        let ch = request["ch"].as_u64().unwrap().to_string();
+        let outp = |state: bool| {
+            let mut outp = json!({"1": 1, "2": 1});
+            outp[&ch] = json!(u8::from(state));
+            json!({ "outp": outp })
+        };
+        (outp(!on), outp(on))
+    } else {
+        let hv_on = json!({"status": 33, "flags": ["ON", "UNV"]});
+        let hv_off = json!({"status": 0, "flags": []});
+        if on {
+            (hv_off, hv_on)
+        } else {
+            (hv_on, hv_off)
+        }
+    };
+    json!({
+        "ok": true,
+        "device": request["device"],
+        "ch": request["ch"],
+        "on": on,
+        "before": before,
+        "after": after,
+    })
+}
+
+/// slowctl が断る応答。hv は機器の `#LOC:ERR`(TODO/124 §1 の文言)、lv は**形の崩れた**
+/// 応答(`ok` が無い)—— どちらも slowctl 側の失敗なので 502。
+fn slowctl_refuses(request: &Value) -> Value {
+    if request["device"] == json!("hv") {
+        json!({
+            "ok": false,
+            "error": "module is in LOCAL mode",
+            "before": {"status": 33, "flags": ["ON", "UNV"]},
+        })
+    } else {
+        json!({"unexpected": true})
+    }
+}
+
+/// power の要求本文(SPEC §8.1 v1.42)。
+fn power_body(token: &str, device: &str, ch: u64, on: bool) -> Value {
+    json!({"token": token, "device": device, "ch": ch, "on": on})
+}
+
+/// ログブックの audit `slow/power` を受けた順に。
+fn power_audits(records: &[Value]) -> Vec<Value> {
+    records
+        .iter()
+        .filter(|r| r["type"] == json!("audit") && r["action"] == json!("slow/power"))
+        .cloned()
+        .collect()
+}
+
+/// `harness` + 偽 slowctl(controller の `slow_cmd` をその REP に向ける)。
+async fn power_harness(
+    tag: &str,
+    answer: fn(&Value) -> Value,
+    hold: bool,
+) -> (Harness, FakeSlowctl) {
+    let slowctl = FakeSlowctl::spawn(answer, hold);
+    let harness = harness_full(
+        tag,
+        &[0],
+        true,
+        None,
+        ConfigIds::same("integration"),
+        None,
+        Some(slowctl.endpoint.clone()),
+    )
+    .await;
+    (harness, slowctl)
+}
+
+/// Fable B-1: `slow_cmd` を書かなければ作動の経路は無い = 503。断りも audit に 1 行残る。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_power_is_503_when_slow_cmd_is_not_configured() {
+    let harness = harness("power-503", &[0], true, None).await;
+    let token = harness.acquire("aogaki");
+
+    let (status, body) = post(
+        harness.rest,
+        "/api/slow/power",
+        power_body(&token, "hv", 3, false),
+    );
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"], json!("slow_cmd is not configured"));
+
+    let audits = power_audits(&harness.logbook());
+    assert_eq!(audits.len(), 1, "{audits:?}");
+    assert_eq!(audits[0]["ok"], json!(false));
+    assert_eq!(audits[0]["operator"], json!("aogaki"));
+    assert_eq!(audits[0]["error"], json!("slow_cmd is not configured"));
+    assert_eq!(
+        audits[0]["params"],
+        json!({"device": "hv", "ch": 3, "on": false, "phase": "Idle",
+               "before": null, "after": null})
+    );
+
+    harness.shutdown();
+}
+
+/// token 不正は 401、device 不在・type 非対応・ch 範囲外・形の崩れは 400。どれも slowctl へは
+/// 1 通も送らず、**1 リクエスト = audit 1 行**(Fable B-4)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_power_rejects_a_bad_token_with_401_and_bad_input_with_400_without_sending() {
+    let (harness, slowctl) = power_harness("power-400", slowctl_ok, false).await;
+    let token = harness.acquire("aogaki");
+
+    let (status, body) = post(
+        harness.rest,
+        "/api/slow/power",
+        power_body("bogus", "hv", 3, false),
+    );
+    assert_eq!(status, 401, "{body}");
+
+    // ch の範囲は hivolta 0–7、hmp2020 1–2(124 §1)。端の外側を両側から。
+    let bad_requests = [
+        json!({"token": token, "device": "nope", "ch": 1, "on": true}), // 設定に無い
+        json!({"token": token, "device": "gas", "ch": 3, "on": true}),  // 電源ではない型
+        json!({"token": token, "device": "hv", "ch": 8, "on": false}),  // hivolta の上端 7 の外
+        json!({"token": token, "device": "lv", "ch": 0, "on": true}),   // hmp2020 の下端 1 の外
+        json!({"token": token, "device": "lv", "ch": 3, "on": true}),   // hmp2020 の上端 2 の外
+        json!({"token": token, "device": "hv", "ch": -1, "on": false}), // 負
+        json!({"token": token, "device": "hv", "ch": "3", "on": false}), // 文字列
+        json!({"token": token, "device": "hv", "ch": 3, "on": "false"}), // on が真偽値でない
+        json!({"token": token, "ch": 3, "on": false}),                  // device 無し
+    ];
+    for bad in &bad_requests {
+        let (status, body) = post(harness.rest, "/api/slow/power", bad.clone());
+        assert_eq!(status, 400, "{bad} => {body}");
+        assert!(body["error"].is_string(), "{bad} => {body}");
+    }
+
+    assert!(slowctl.requests().is_empty(), "{:?}", slowctl.requests());
+
+    // 手計算: 401 が 1 + 400 が 9 = 10 行、全部 ok:false。
+    let audits = power_audits(&harness.logbook());
+    assert_eq!(audits.len(), 10, "{audits:?}");
+    assert!(audits.iter().all(|a| a["ok"] == json!(false)), "{audits:?}");
+    assert_eq!(audits[0]["operator"], json!("<unauthorized>"));
+    assert_eq!(audits[0]["params"]["device"], json!("hv"));
+    assert_eq!(audits[0]["params"]["phase"], json!("Idle"));
+    assert_eq!(audits[3]["params"]["ch"], json!(8));
+
+    harness.shutdown();
+}
+
+/// 規則(SPEC §11 v1.42): HV ON と LV OFF は Idle だけ、HV OFF と LV ON は常時。
+/// 通ったものは slowctl に `{op:"power", device, ch, on}` を送り、**応答をそのまま** 200 で返す。
+/// HV OFF @ Running は実機ではやらない(データを失う)ので、ここで代わりに確かめる(Fable)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_power_forwards_allowed_commands_and_refuses_hv_on_and_lv_off_while_running() {
+    let (harness, slowctl) = power_harness("power-rule", slowctl_ok, false).await;
+    let token = harness.acquire("aogaki");
+    let power = |device: &str, ch: u64, on: bool| {
+        post(
+            harness.rest,
+            "/api/slow/power",
+            power_body(&token, device, ch, on),
+        )
+    };
+
+    // --- Idle: 4 通りとも通る ---
+    let (status, body) = power("hv", 3, true);
+    assert_eq!(status, 200, "{body}");
+    let expected_hv_on = slowctl_ok(&json!({"device": "hv", "ch": 3, "on": true}));
+    assert_eq!(body, expected_hv_on, "slowctl の応答そのまま");
+    let (status, body) = power("lv", 2, false);
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["before"], json!({"outp": {"1": 1, "2": 1}}));
+    assert_eq!(body["after"], json!({"outp": {"1": 1, "2": 0}}));
+
+    // --- Running ---
+    let (status, body) = post(harness.rest, "/api/run/start", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+
+    let (status, body) = power("hv", 3, true);
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        body["error"],
+        json!("HV ON is allowed only while no run is active")
+    );
+    let (status, body) = power("lv", 2, false);
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        body["error"],
+        json!("LV OFF is refused while a run is active — stop the run first")
+    );
+
+    let (status, body) = power("hv", 5, false);
+    assert_eq!(status, 200, "HV OFF はいつでも可: {body}");
+    assert_eq!(body["after"], json!({"status": 0, "flags": []}));
+    let (status, body) = power("lv", 1, true);
+    assert_eq!(status, 200, "LV ON はいつでも可: {body}");
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+
+    // 409 の 2 通は slowctl に届いていない。届いた 4 通は要求の形そのまま(token は載せない)。
+    assert_eq!(
+        slowctl.requests(),
+        vec![
+            json!({"op": "power", "device": "hv", "ch": 3, "on": true}),
+            json!({"op": "power", "device": "lv", "ch": 2, "on": false}),
+            json!({"op": "power", "device": "hv", "ch": 5, "on": false}),
+            json!({"op": "power", "device": "lv", "ch": 1, "on": true}),
+        ]
+    );
+
+    // audit: 6 行(200 が 4 + 409 が 2)、受けた順。
+    let audits = power_audits(&harness.logbook());
+    assert_eq!(
+        audits
+            .iter()
+            .map(|a| (a["params"]["phase"].clone(), a["ok"].clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (json!("Idle"), json!(true)),
+            (json!("Idle"), json!(true)),
+            (json!("Running"), json!(false)),
+            (json!("Running"), json!(false)),
+            (json!("Running"), json!(true)),
+            (json!("Running"), json!(true)),
+        ],
+        "{audits:?}"
+    );
+    // HV OFF @ Running の行は slowctl の before / after をそのまま持つ。
+    assert_eq!(
+        audits[4]["params"],
+        json!({"device": "hv", "ch": 5, "on": false, "phase": "Running",
+               "before": {"status": 33, "flags": ["ON", "UNV"]},
+               "after": {"status": 0, "flags": []}})
+    );
+    assert_eq!(audits[4]["operator"], json!("aogaki"));
+    assert_eq!(audits[4]["error"], Value::Null);
+    assert_eq!(
+        audits[2]["error"],
+        json!("HV ON is allowed only while no run is active")
+    );
+    assert_eq!(audits[2]["params"]["before"], Value::Null);
+
+    harness.shutdown();
+}
+
+/// slowctl が `ok:false` なら 502 で error をそのまま返す(機器の `#LOC:ERR` など)。
+/// 形の崩れた応答も slowctl 側の失敗 = 502。どちらも audit に 1 行。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_power_maps_a_slowctl_refusal_to_502_with_its_error_text() {
+    let (harness, slowctl) = power_harness("power-502", slowctl_refuses, false).await;
+    let token = harness.acquire("aogaki");
+
+    let (status, body) = post(
+        harness.rest,
+        "/api/slow/power",
+        power_body(&token, "hv", 3, true),
+    );
+    assert_eq!(status, 502, "{body}");
+    assert_eq!(body["error"], json!("module is in LOCAL mode"));
+    assert_eq!(
+        body["before"],
+        json!({"status": 33, "flags": ["ON", "UNV"]})
+    );
+
+    let (status, body) = post(
+        harness.rest,
+        "/api/slow/power",
+        power_body(&token, "lv", 2, true),
+    );
+    assert_eq!(status, 502, "{body}");
+    assert!(body["error"].is_string(), "{body}");
+
+    assert_eq!(slowctl.requests().len(), 2);
+    let audits = power_audits(&harness.logbook());
+    assert_eq!(audits.len(), 2, "{audits:?}");
+    assert_eq!(audits[0]["ok"], json!(false));
+    assert_eq!(audits[0]["error"], json!("module is in LOCAL mode"));
+    assert_eq!(
+        audits[0]["params"]["before"],
+        json!({"status": 33, "flags": ["ON", "UNV"]})
+    );
+    assert_eq!(audits[0]["params"]["after"], Value::Null);
+    assert_eq!(audits[1]["ok"], json!(false));
+
+    harness.shutdown();
+}
+
+/// slowctl が 10 s 答えなければ 504。文言は「状態不明 — 表で確認」、audit は
+/// `error:"timeout"` と before(届いていないので null)。印は外れて次の run/start は通る。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_power_without_a_reply_is_504_state_unknown_and_releases_the_mark() {
+    let (harness, slowctl) = power_harness("power-504", slowctl_ok, true).await;
+    let token = harness.acquire("aogaki");
+
+    let started = Instant::now();
+    let (status, body) = post(
+        harness.rest,
+        "/api/slow/power",
+        power_body(&token, "hv", 3, false),
+    );
+    let waited = started.elapsed();
+    assert_eq!(status, 504, "{body}");
+    let error = body["error"].as_str().unwrap();
+    assert!(error.contains("state unknown — check the table"), "{error}");
+    // REQ の上限 10 s(124 §2)を待ってから諦める(早すぎず、REST の 30 s 読みより前)。
+    assert!(
+        waited >= Duration::from_secs(10) && waited < Duration::from_secs(20),
+        "{waited:?}"
+    );
+    assert_eq!(slowctl.requests().len(), 1);
+
+    let audits = power_audits(&harness.logbook());
+    assert_eq!(audits.len(), 1, "{audits:?}");
+    assert_eq!(audits[0]["ok"], json!(false));
+    assert_eq!(audits[0]["error"], json!("timeout"));
+    assert_eq!(audits[0]["params"]["before"], Value::Null);
+    assert_eq!(audits[0]["params"]["after"], Value::Null);
+
+    let (status, body) = post(harness.rest, "/api/run/start", json!({"token": token}));
+    assert_eq!(status, 200, "504 の後は印が外れている: {body}");
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+
+    harness.shutdown();
+}
+
+/// Fable B-2: power の実行中(`power_inflight`)は run/start と 2 本目の power を 409 で弾き、
+/// run/stop は塞がない。終われば印は外れて run/start が通る。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_power_command_in_flight_refuses_run_start_and_a_second_power_command() {
+    let (harness, slowctl) = power_harness("power-inflight", slowctl_ok, true).await;
+    let token = harness.acquire("aogaki");
+    let rest = harness.rest;
+
+    let (status, body) = post(rest, "/api/run/start", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+
+    // HV OFF(Running でも可)を投げ、slowctl が応答を保留している間に他を叩く。
+    let in_flight = {
+        let body = power_body(&token, "hv", 3, false);
+        std::thread::spawn(move || post(rest, "/api/slow/power", body))
+    };
+    wait_until("the fake slowctl to receive the power request", || {
+        slowctl.requests().len() == 1
+    });
+
+    let (status, body) = post(rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "run/stop は power に塞がれない: {body}");
+
+    let (status, body) = post(rest, "/api/run/start", json!({"token": token}));
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(
+        body["error"],
+        json!("slow-control power command in flight — retry in a few seconds")
+    );
+
+    let (status, body) = post(rest, "/api/slow/power", power_body(&token, "lv", 1, true));
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("another power command is in flight"),
+        "{body}"
+    );
+
+    slowctl.release();
+    let (status, body) = in_flight.join().unwrap();
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["after"], json!({"status": 0, "flags": []}));
+    assert_eq!(slowctl.requests().len(), 1, "2 本目は slowctl に届かない");
+
+    let (status, body) = post(rest, "/api/run/start", json!({"token": token}));
+    assert_eq!(status, 200, "印が外れた後の run/start は通る: {body}");
+    let (status, body) = post(rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+
+    let records = harness.logbook();
+    let audits = power_audits(&records);
+    // 2 本目の 409 が先に書かれ、1 本目は応答が返ってから書かれる。
+    assert_eq!(audits.len(), 2, "{audits:?}");
+    assert_eq!(audits[0]["ok"], json!(false));
+    assert_eq!(audits[0]["params"]["device"], json!("lv"));
+    assert_eq!(audits[1]["ok"], json!(true));
+    assert_eq!(audits[1]["params"]["device"], json!("hv"));
+    assert_eq!(
+        audit_trail(&records, &["run/start"]),
+        vec![
+            ("run/start".to_string(), true),
+            ("run/start".to_string(), false),
+            ("run/start".to_string(), true),
+        ]
+    );
+
+    harness.shutdown();
 }

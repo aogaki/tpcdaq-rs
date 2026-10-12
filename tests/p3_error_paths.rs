@@ -223,6 +223,9 @@ impl Topology {
             command_timeout: options.command_timeout,
             ecc_timeout: Duration::from_secs(30),
             status_timeout: Duration::from_secs(1),
+            // 124: power の経路は使わない(省略 = 503)。
+            slow_cmd: None,
+            slow_devices: Vec::new(),
         };
         let (controller_shutdown, controller_rx) = broadcast::channel(1);
         let (rest_tx, rest_rx) = oneshot::channel();
