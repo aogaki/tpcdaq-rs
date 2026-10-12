@@ -1,8 +1,15 @@
 //! CAEN DT1415ET(HiVolta)ドライバ —— [`Driver`] 実装(TODO/089)。
 //!
 //! `hivolta.rs`(TODO/085)のコーデックに実トランスポート(TCP :1470 / USB VCP 9600 8N1)を
-//! 差しただけのもの(`bronkhorst.rs` / `arduino.rs` と同じ形)。**書き込みは無い**
-//! (085 と同じ安全境界 —— コーデックに `$CMD:SET,...` を生成する関数が無い)。
+//! 差しただけのもの(`bronkhorst.rs` / `arduino.rs` と同じ形)。**書くのは ch の ON / OFF だけ**
+//! (SPEC §11 v1.42、TODO/124 —— [`Driver::set_power`])。SET 行はコーデックの
+//! [`set_power`](super::hivolta::set_power) でしか作らない(このファイルは SET 行を自前で組まない)。
+//!
+//! # power ON / OFF の手順(TODO/124 Fable 6)
+//!
+//! 単 ch の STATUS(before)→ DIS(前面スイッチ OFF)なら SET を送らずに拒否 → SET →
+//! `#LOC:ERR` なら「LOCAL モード」→ 単 ch の STATUS(after)→ 要求どおりかを [`switched`] で判定。
+//! before / after は**生の STATUS**(`status_ignore` は alarm の判定にだけ効く)。
 //!
 //! # 発注書 §1/§2 の食い違いについて(2026-09-23、報告事項)
 //!
@@ -18,13 +25,14 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+use serde_json::json;
 use tracing::info;
 
 use super::hivolta::{
-    mon_bd, mon_ch, parse_alarm, parse_status, BdPar, ChPar, HvLink, HvLinkError, IgnoreMasks,
-    ALL_CH,
+    mon_bd, mon_ch, parse_alarm, parse_status, set_power, BdPar, ChPar, ChStatus, HvError, HvLink,
+    HvLinkError, IgnoreMasks, ALL_CH,
 };
-use super::{now_ms, Driver, DriverError, Ident, Sample};
+use super::{now_ms, Driver, DriverError, Ident, PowerOutcome, PowerRefused, Sample};
 
 /// TCP 接続タイムアウト(発注書 §1: `connect_timeout` 3 s)。
 pub const CONNECT_TIMEOUT_MS: u64 = 3_000;
@@ -130,7 +138,81 @@ fn parse_bdilk(value: &str) -> Result<f64, DriverError> {
     }
 }
 
+/// power 応答の HV 形 `{"status": <生の値>, "flags": [...]}`(TODO/124 Fable 6)。
+pub fn status_json(status: ChStatus) -> serde_json::Value {
+    json!({"status": status.0, "flags": status.flag_names()})
+}
+
+/// SET 後の STATUS が要求どおりか(TODO/124 Fable 6)。ON の要求は ON ビット(RUP が同時でも可)、
+/// OFF の要求は ON ビットが落ちているか、ランプダウン中。
+pub fn switched(on: bool, after: ChStatus) -> bool {
+    if on {
+        after.on()
+    } else {
+        !after.on() || after.ramp_down()
+    }
+}
+
+/// `node < nch` でなければ拒否(`CH:8` は全 ch まとめての意味 —— 1 ch の操作が全 ch に化けない)。
+fn check_channel(node: u8, nch: u8) -> Result<(), DriverError> {
+    if node < nch {
+        Ok(())
+    } else {
+        Err(DriverError::Protocol(format!(
+            "ch {node} is out of range (this module has {nch} channels, 0..{nch})"
+        )))
+    }
+}
+
 impl<T: Read + Write> HiVoltaDriver<T> {
+    /// 単 ch の STATUS(`CH:X` 単発)。
+    fn read_status(&mut self, ch: u8) -> Result<ChStatus, DriverError> {
+        let value = single_value(
+            self.link
+                .exchange(&mon_ch(ch, ChPar::Status))
+                .map_err(driver_error)?,
+            "STATUS",
+        )?;
+        parse_status(&value).map_err(|e| DriverError::Protocol(e.to_string()))
+    }
+
+    /// before を読んだ後の手順(DIS → SET → after → 判定)。`Err` の `error` は応答の
+    /// `error` そのもの、読めた after は応答の `after` に載る。
+    fn switch(
+        &mut self,
+        ch: u8,
+        on: bool,
+        before: ChStatus,
+    ) -> Result<serde_json::Value, PowerRefused> {
+        if before.isdis() {
+            return Err(PowerRefused::without_after("front switch is OFF (DIS)"));
+        }
+        match self.link.exchange(&set_power(ch, on)) {
+            Ok(_) => {}
+            Err(HvLinkError::Protocol(HvError::Loc)) => {
+                return Err(PowerRefused::without_after("module is in LOCAL mode"))
+            }
+            Err(e) => {
+                return Err(PowerRefused::without_after(format!(
+                    "SET failed ({}) — state unknown, check the table",
+                    driver_error(e)
+                )))
+            }
+        }
+        let after = self.read_status(ch).map_err(|e| {
+            PowerRefused::without_after(format!(
+                "SET was sent but reading the STATUS back failed ({e})"
+            ))
+        })?;
+        if !switched(on, after) {
+            return Err(PowerRefused {
+                error: format!("channel did not switch (status={})", after.0),
+                after: Some(status_json(after)),
+            });
+        }
+        Ok(status_json(after))
+    }
+
     /// 全 ch 一括(`CH:8`)で 1 パラメータ読む。値の数が `nch` と違えば Protocol エラー
     /// (黙って切り詰めない・埋めない)。
     fn bulk(&mut self, par: ChPar, what: &str) -> Result<Vec<String>, DriverError> {
@@ -343,6 +425,17 @@ impl<T: Read + Write> Driver for HiVoltaDriver<T> {
 
         Ok(samples)
     }
+
+    /// TODO/124 Fable 6。before が読めなければ `Err`(応答の before は null)。
+    fn set_power(&mut self, node: u8, on: bool) -> Result<PowerOutcome, DriverError> {
+        check_channel(node, self.nch)?;
+        let before = self.read_status(node)?;
+        let result = self.switch(node, on, before);
+        Ok(PowerOutcome {
+            before: status_json(before),
+            result,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -447,6 +540,16 @@ impl<T: Read + Write, F: FnMut() -> Result<T, DriverError>> Driver for OnDemandH
             .with_status_ignore(self.status_ignore);
         driver.nch = self.nch;
         driver.poll()
+    }
+
+    /// TODO/124 Fable 6: open → `HiVoltaDriver`(nch を引き継ぐ)→ before → SET → after。
+    /// ポートはスコープの終わりで閉じる。ch の範囲は**開く前に**見る(開くだけで偽トリガが出る)。
+    fn set_power(&mut self, node: u8, on: bool) -> Result<PowerOutcome, DriverError> {
+        check_channel(node, self.nch)?;
+        let io = (self.open)()?;
+        let mut driver = HiVoltaDriver::new(self.device.clone(), io, self.expect_serial.clone());
+        driver.nch = self.nch;
+        driver.set_power(node, on)
     }
 }
 
@@ -799,6 +902,220 @@ mod tests {
             driver.poll().unwrap();
         }
         assert_eq!((c.opens.get(), c.closes.get()), (4, 4));
+    }
+
+    // -----------------------------------------------------------------
+    // TODO/124: ch の ON / OFF(before の STATUS → SET → after の STATUS)
+    // -----------------------------------------------------------------
+
+    /// ident 済み(nch = 8)のドライバと、送った行の記録。
+    fn identified(fake: FakeHv) -> (HiVoltaDriver<Tap>, std::rc::Rc<std::cell::RefCell<Vec<u8>>>) {
+        let mut inner = fake;
+        register_ident(&mut inner, 8, "SN-UNUSED");
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let io = Tap {
+            inner,
+            sent: sent.clone(),
+        };
+        let mut driver = HiVoltaDriver::new("hv", io, String::new());
+        driver.ident().unwrap();
+        sent.borrow_mut().clear();
+        (driver, sent)
+    }
+
+    fn sent_text(sent: &std::rc::Rc<std::cell::RefCell<Vec<u8>>>) -> String {
+        String::from_utf8(sent.borrow().clone()).unwrap()
+    }
+
+    /// ON: 単 ch の STATUS(before)→ SET → 単 ch の STATUS(after)の 3 往復だけ。
+    #[test]
+    fn set_power_on_reads_the_status_sends_set_and_reads_it_back() {
+        let (mut driver, sent) = identified(FakeHv::new());
+
+        let outcome = driver.set_power(3, true).unwrap();
+
+        assert_eq!(
+            sent_text(&sent),
+            "$CMD:MON,CH:3,PAR:STATUS\r\n$CMD:SET,CH:3,PAR:ON\r\n$CMD:MON,CH:3,PAR:STATUS\r\n"
+        );
+        assert_eq!(outcome.before, json!({"status": 0, "flags": []}));
+        assert_eq!(outcome.result, Ok(json!({"status": 1, "flags": ["ON"]})));
+    }
+
+    /// OFF: ch6 が ON(1)から 0 へ。
+    #[test]
+    fn set_power_off_turns_the_channel_off() {
+        let mut fake = FakeHv::new();
+        fake.set_status(6, 1);
+        let (mut driver, sent) = identified(fake);
+
+        let outcome = driver.set_power(6, false).unwrap();
+
+        assert!(sent_text(&sent).contains("$CMD:SET,CH:6,PAR:OFF\r\n"));
+        assert_eq!(outcome.before, json!({"status": 1, "flags": ["ON"]}));
+        assert_eq!(outcome.result, Ok(json!({"status": 0, "flags": []})));
+    }
+
+    /// Fable 6: before に DIS(bit 12 = 4096、前面スイッチ OFF)が立っていれば SET を送らない。
+    #[test]
+    fn a_dis_in_the_before_status_refuses_without_sending_set() {
+        let mut fake = FakeHv::new();
+        fake.set_status(3, 4096);
+        let (mut driver, sent) = identified(fake);
+
+        let outcome = driver.set_power(3, true).unwrap();
+
+        assert_eq!(
+            sent_text(&sent),
+            "$CMD:MON,CH:3,PAR:STATUS\r\n",
+            "SET は送らない"
+        );
+        assert_eq!(outcome.before, json!({"status": 4096, "flags": ["DIS"]}));
+        assert_eq!(
+            outcome.result,
+            Err(PowerRefused {
+                error: "front switch is OFF (DIS)".to_string(),
+                after: None,
+            })
+        );
+    }
+
+    /// `#LOC:ERR`(LOCAL モード)は「module is in LOCAL mode」。before は残る。
+    #[test]
+    fn a_loc_err_reply_to_set_means_local_mode() {
+        let mut fake = FakeHv::new();
+        fake.set_status(2, 1);
+        fake.set_local();
+        let (mut driver, _sent) = identified(fake);
+
+        let outcome = driver.set_power(2, false).unwrap();
+
+        assert_eq!(outcome.before, json!({"status": 1, "flags": ["ON"]}));
+        assert_eq!(
+            outcome.result,
+            Err(PowerRefused {
+                error: "module is in LOCAL mode".to_string(),
+                after: None,
+            })
+        );
+    }
+
+    /// SET は `#CMD:OK` でも after が変わっていなければエラー(status は生の値を載せる)。
+    /// 読めた after は応答に載せる(LV と揃える — レビュー 2026-10-12)。
+    #[test]
+    fn a_channel_that_did_not_switch_is_an_error() {
+        let mut fake = FakeHv::new();
+        // 単 ch の STATUS を 0 に固定(登録した応答は内部の値より優先)。
+        fake.set_response(mon_ch(4, ChPar::Status), "#CMD:OK,VAL:00000\r\n");
+        let (mut driver, sent) = identified(fake);
+
+        let outcome = driver.set_power(4, true).unwrap();
+
+        assert!(sent_text(&sent).contains("$CMD:SET,CH:4,PAR:ON\r\n"));
+        assert_eq!(outcome.before, json!({"status": 0, "flags": []}));
+        assert_eq!(
+            outcome.result,
+            Err(PowerRefused {
+                error: "channel did not switch (status=0)".to_string(),
+                after: Some(json!({"status": 0, "flags": []})),
+            })
+        );
+    }
+
+    /// Fable 6 の after の判定: ON の要求は ON ビット(RUP が同時でも可)、OFF の要求は
+    /// ON ビットが落ちているか RDW 中。
+    #[test]
+    fn the_switch_check_accepts_a_ramp_in_progress() {
+        // ON の要求: 1 = ON、3 = ON + UP → 可。2 = UP だけ、0 → 不可。
+        assert!(switched(true, ChStatus(1)));
+        assert!(switched(true, ChStatus(3)));
+        assert!(!switched(true, ChStatus(2)));
+        assert!(!switched(true, ChStatus(0)));
+        // OFF の要求: 0、5 = ON + DOWN、4 = DOWN → 可。1 = ON のまま、3 = ON + UP → 不可。
+        assert!(switched(false, ChStatus(0)));
+        assert!(switched(false, ChStatus(5)));
+        assert!(switched(false, ChStatus(4)));
+        assert!(!switched(false, ChStatus(1)));
+        assert!(!switched(false, ChStatus(3)));
+    }
+
+    /// Fable 6: before / after に status_ignore を**適用しない**(alarm から外した UNV も載る)。
+    #[test]
+    fn before_and_after_carry_the_raw_status_even_with_status_ignore() {
+        let mut fake = FakeHv::new();
+        fake.set_status(0, 32); // UNV だけ
+        let (driver, _sent) = identified(fake);
+        let mut ignore = [0u16; 8];
+        ignore[0] = 1 << 5;
+        let mut driver = driver.with_status_ignore(ignore);
+
+        let outcome = driver.set_power(0, true).unwrap();
+
+        assert_eq!(outcome.before, json!({"status": 32, "flags": ["UNV"]}));
+        assert_eq!(
+            outcome.result,
+            Ok(json!({"status": 33, "flags": ["ON", "UNV"]}))
+        );
+    }
+
+    /// ch ≥ nch は何も送らずに拒否(`CH:8` は全 ch まとめての意味になる)。
+    #[test]
+    fn a_channel_outside_nch_is_refused_before_anything_is_sent() {
+        let (mut driver, sent) = identified(FakeHv::new());
+        assert!(matches!(
+            driver.set_power(8, true),
+            Err(DriverError::Protocol(_))
+        ));
+        assert!(sent.borrow().is_empty(), "何も送っていない");
+    }
+
+    /// before が読めなければ `Err`(応答の before は null になる)。
+    #[test]
+    fn a_silent_device_fails_before_reading_the_before_status() {
+        let mut fake = FakeHv::new();
+        register_ident(&mut fake, 8, "SN-UNUSED");
+        let mut driver = HiVoltaDriver::new("hv", fake, String::new());
+        driver.ident().unwrap();
+        driver.link = HvLink::new({
+            let mut silent = FakeHv::new();
+            silent.set_silent();
+            silent
+        });
+        assert!(matches!(
+            driver.set_power(1, true),
+            Err(DriverError::Timeout)
+        ));
+    }
+
+    /// Fable 6: オンデマンド経路は open 1 回 → 3 往復 → close 1 回(nch は ident から引き継ぐ)。
+    #[test]
+    fn on_demand_set_power_is_one_open_three_exchanges_one_close() {
+        let (mut driver, c) = counted_driver("");
+        driver.ident().unwrap();
+        c.sent.borrow_mut().clear();
+        let (opens0, closes0) = (c.opens.get(), c.closes.get());
+
+        let outcome = driver.set_power(5, true).unwrap();
+
+        assert_eq!(c.opens.get() - opens0, 1);
+        assert_eq!(c.closes.get() - closes0, 1, "スコープの終わりで閉じている");
+        let text = String::from_utf8(c.sent.borrow().clone()).unwrap();
+        assert_eq!(
+            text,
+            "$CMD:MON,CH:5,PAR:STATUS\r\n$CMD:SET,CH:5,PAR:ON\r\n$CMD:MON,CH:5,PAR:STATUS\r\n"
+        );
+        assert_eq!(outcome.result, Ok(json!({"status": 1, "flags": ["ON"]})));
+    }
+
+    /// ident 前(nch = 0)はポートを開かずに拒否する(開くだけで偽トリガが出る機器 — TODO/119)。
+    #[test]
+    fn on_demand_set_power_before_ident_does_not_open_the_port() {
+        let (mut driver, c) = counted_driver("");
+        assert!(matches!(
+            driver.set_power(0, true),
+            Err(DriverError::Protocol(_))
+        ));
+        assert_eq!(c.opens.get(), 0);
     }
 
     /// 開けなければ DriverError(silent にしない)。

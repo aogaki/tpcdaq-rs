@@ -2,7 +2,8 @@
 //!
 //! **Phase 1(このユニット、TODO/079 §2.5)の範囲 = ProPar ASCII コーデックと同期リンクのみ。**
 //! シリアルポート配線・tokio・TOML 設定・component 本体・logbook 出力は Phase 2 以降。
-//! 安全境界(書き込みコマンドを実装しない = 監視のみ)は TODO/079 §1.5 / SPEC §11 に従う。
+//! 安全境界は SPEC §11 に従う: 監視・記録・アラームが本分で、**書けるのは HV / LV の ch ごとの
+//! ON / OFF だけ**(v1.42 の唯一の例外、TODO/124 —— [`Driver::set_power`])。
 
 /// ProPar ASCII コーデック(純関数、IO なし)。Bronkhorst 9.17.027 §3.3–§3.9。
 pub mod propar;
@@ -14,10 +15,10 @@ pub mod link;
 #[cfg(any(test, feature = "slowctl-fake"))]
 pub mod fake;
 
-/// CAEN DT1415ET 読み出しコーデック(純関数、IO なし)。TODO/085。監視のみ(SET 系の型は無い)。
+/// CAEN DT1415ET 読み出しコーデック(純関数、IO なし)。TODO/085。SET は ch の ON/OFF だけ(TODO/124)。
 pub mod hivolta;
 
-/// R&S/HAMEG HMP2020 読み出しコーデック(純関数、IO なし)。TODO/085。監視のみ(SET 系の型は無い)。
+/// R&S/HAMEG HMP2020 読み出しコーデック(純関数、IO なし)。TODO/085。設定系は OUTP ON/OFF だけ(TODO/124)。
 pub mod hmp;
 
 /// インメモリ HiVolta 応答器(テスト専用、または `slowctl-fake` feature)。TODO/085。
@@ -133,18 +134,62 @@ pub enum DriverError {
     /// open 時の名乗り照合に失敗(TODO/079 §2.1 のポート取り違え対策)。
     #[error("device identity mismatch: expected {expected}, got {got}")]
     Identity { expected: String, got: String },
+
+    /// この機器に power ON/OFF は無い([`Driver::set_power`] の既定、TODO/124)。
+    #[error("this device has no power on/off")]
+    Unsupported,
+}
+
+/// [`Driver::set_power`] の結果(TODO/124、SPEC §11 v1.42)。
+///
+/// `before` / `after` は slowctl の REP 応答にそのまま載る JSON
+/// (HV = `{"status": 33, "flags": ["ON", "UNV"]}`、LV = `{"outp": {"1": 1, "2": 0}}`)。
+/// `before` を読む前に失敗したときは `Err(DriverError)`(応答の `before` は null)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PowerOutcome {
+    /// SET 前の状態。
+    pub before: serde_json::Value,
+    /// `Ok(after)` = 切り替わった。`Err` = 機器が拒否した / 切り替わらなかった /
+    /// SET 後の読み戻しに失敗した。
+    pub result: Result<serde_json::Value, PowerRefused>,
+}
+
+/// [`PowerOutcome::result`] の失敗側(TODO/124)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PowerRefused {
+    /// そのまま応答の `error` になる理由。
+    pub error: String,
+    /// SET 後に状態を読めていれば、その状態(応答の `after` に載る —— 「切り替わらなかった」の
+    /// 中身を隠さない、レビュー 2026-10-12)。SET を送っていない・読めなかったなら `None`。
+    pub after: Option<serde_json::Value>,
+}
+
+impl PowerRefused {
+    /// SET 後の状態が無い拒否(DIS・LOCAL・送信失敗など)。
+    pub fn without_after(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            after: None,
+        }
+    }
 }
 
 /// スロー制御デバイス 1 台。**同期(ブロッキング)**——呼び出し側が専用スレッドを持つ。
 ///
-/// **書き込み API は存在しない**(TODO/079 §1.5 / SPEC §11 の安全境界: 監視・記録・
-/// アラームのみ。setpoint を書く経路を型として作らない)。
+/// **書き込みは [`Driver::set_power`](ch の ON / OFF)だけ**(SPEC §11 安全境界 v1.42 の
+/// 唯一の例外、TODO/124)。電圧値・電流上限・ランプ・setpoint・バルブを書く経路は型として作らない。
 pub trait Driver {
     /// 起動時の識別(node scan 含む)。以後 [`Driver::poll`] が返すノード集合を確定する。
     fn ident(&mut self) -> Result<Vec<Ident>, DriverError>;
 
     /// 1 周期分の計測値。
     fn poll(&mut self) -> Result<Vec<Sample>, DriverError>;
+
+    /// ch(`node`)の ON / OFF(TODO/124)。実装するのは HV(DT1415ET)と LV(HMP2020)だけ。
+    /// 既定は [`DriverError::Unsupported`]。
+    fn set_power(&mut self, _node: u8, _on: bool) -> Result<PowerOutcome, DriverError> {
+        Err(DriverError::Unsupported)
+    }
 }
 
 /// [`AlarmRule::evaluate`] の遷移(遷移が無ければ `None`)。
@@ -484,6 +529,24 @@ mod domain_tests {
                 ..SlowCounters::default()
             }
         );
+    }
+
+    /// TODO/124: power を持たない機器(ガス・環境)は `set_power` の既定 = Unsupported。
+    #[test]
+    fn a_driver_without_power_control_reports_unsupported() {
+        struct ReadOnly;
+        impl Driver for ReadOnly {
+            fn ident(&mut self) -> Result<Vec<Ident>, DriverError> {
+                Ok(Vec::new())
+            }
+            fn poll(&mut self) -> Result<Vec<Sample>, DriverError> {
+                Ok(Vec::new())
+            }
+        }
+        assert!(matches!(
+            ReadOnly.set_power(3, true),
+            Err(DriverError::Unsupported)
+        ));
     }
 
     /// logbook / status のキーは `"<device>/<node>/<param>"`、node 無しは `"-"`(SPEC §9.2)。

@@ -1,7 +1,17 @@
 //! R&S/HAMEG HMP2020 ドライバ —— [`Driver`] 実装(TODO/089)。
 //!
 //! `hmp.rs`(TODO/085)の `ScpiLink` に USB CDC(`/dev/ttyACM*`)を差しただけのもの
-//! (`bronkhorst.rs` / `arduino.rs` と同じ形)。**書き込みは無い**(085 と同じ安全境界)。
+//! (`bronkhorst.rs` / `arduino.rs` と同じ形)。**書くのは出力の ON / OFF だけ**
+//! (SPEC §11 v1.42、TODO/124 —— [`Driver::set_power`]、コマンドはコーデックの
+//! [`outp_set`] だけ)。
+//!
+//! # power ON / OFF の手順(TODO/124 §1 + Fable 7)
+//!
+//! 両 ch の `OUTP?`(before)→ `INST:NSEL n` + `INST:NSEL?` で確認 → `OUTP ON|OFF` →
+//! 両 ch の `OUTP?`(after)→ `SYST:ERR?` が 0 → after の ch n が要求どおり(違えば
+//! `channel did not switch (outp=…)`、レビュー 2026-10-12)。`OUTP ON` は選んだ ch と出力(マスタ)を同時に
+//! ON にするので、ほかの ch が変わったことを隠さないよう**両 ch**を返す。各 ch の読み出しも
+//! `INST:NSEL?` で選択を確かめてから行う。
 //!
 //! # `INST:NSEL` の送り方(2026-09-23、レビュー反映)
 //!
@@ -17,13 +27,15 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::time::Duration;
 
+use serde_json::json;
 use tracing::info;
 
 use super::hmp::{
-    curr_query, idn, meas_curr, meas_volt, nsel, nsel_query, outp_query, parse_bool01, parse_f64,
-    parse_idn, parse_syst_err, syst_err, volt_query, LinkError, ScpiLink, MAX_CH, MIN_CH,
+    curr_query, idn, meas_curr, meas_volt, nsel, nsel_query, outp_query, outp_set, parse_bool01,
+    parse_f64, parse_idn, parse_syst_err, syst_err, volt_query, LinkError, ScpiLink, MAX_CH,
+    MIN_CH,
 };
-use super::{now_ms, Driver, DriverError, Ident, Sample};
+use super::{now_ms, Driver, DriverError, Ident, PowerOutcome, PowerRefused, Sample};
 
 /// 読み出しタイムアウト(ミリ秒)。
 pub const READ_TIMEOUT_MS: u64 = 2_000;
@@ -75,6 +87,78 @@ fn driver_error(error: LinkError) -> DriverError {
     }
 }
 
+impl<T: Read + Write> HmpDriver<T> {
+    /// `INST:NSEL ch` を送り、`INST:NSEL?` で選択が効いたことを確かめる ——
+    /// 黙って別 ch を読んだり切り替えたりしない(CLAUDE.md)。
+    fn select(&mut self, ch: u8) -> Result<(), DriverError> {
+        let nsel_cmd = nsel(ch).map_err(|e| DriverError::Protocol(e.to_string()))?;
+        // 非クエリなので送るだけ(応答は待たない、このファイル冒頭の doc 参照)。
+        self.link.send(&nsel_cmd).map_err(driver_error)?;
+
+        let selected_reply = self.link.exchange(nsel_query()).map_err(driver_error)?;
+        let selected: u8 = selected_reply.trim().parse().map_err(|_| {
+            DriverError::Protocol(format!(
+                "INST:NSEL?: not a channel number: {selected_reply:?}"
+            ))
+        })?;
+        if selected != ch {
+            return Err(DriverError::Protocol(format!(
+                "INST:NSEL {ch} did not take effect (INST:NSEL? reports {selected})"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 両 ch の `OUTP?` を `{"outp": {"1": 0|1, "2": 0|1}}` で返す(TODO/124 Fable 7)。
+    fn read_outputs(&mut self) -> Result<serde_json::Value, DriverError> {
+        let mut outputs = serde_json::Map::new();
+        for ch in MIN_CH..=MAX_CH {
+            self.select(ch)?;
+            let reply = self.link.exchange(outp_query()).map_err(driver_error)?;
+            let on = parse_bool01(&reply).map_err(|e| DriverError::Protocol(e.to_string()))?;
+            outputs.insert(ch.to_string(), json!(u8::from(on)));
+        }
+        Ok(json!({ "outp": outputs }))
+    }
+
+    /// before を読んだ後の手順(選択 → `OUTP ON|OFF` → after → `SYST:ERR?` → after の検証)。
+    /// `Err` の `error` は応答の `error` そのもの。after を読めた後の失敗は after も載せる。
+    fn switch(&mut self, ch: u8, on: bool) -> Result<serde_json::Value, PowerRefused> {
+        self.select(ch).map_err(|e| {
+            PowerRefused::without_after(format!(
+                "cannot select ch {ch} ({e}) — nothing was switched"
+            ))
+        })?;
+        self.link.send(outp_set(on)).map_err(|e| {
+            PowerRefused::without_after(format!("sending {} failed ({e})", outp_set(on)))
+        })?;
+        let after = self.read_outputs().map_err(|e| {
+            PowerRefused::without_after(format!(
+                "{} was sent but reading OUTP? back failed ({e})",
+                outp_set(on)
+            ))
+        })?;
+        let refused = |error: String| PowerRefused {
+            error,
+            after: Some(after.clone()),
+        };
+        let err_reply = self
+            .link
+            .exchange(syst_err())
+            .map_err(|e| refused(format!("SYST:ERR? failed ({})", driver_error(e))))?;
+        let (code, message) = parse_syst_err(&err_reply).map_err(|e| refused(e.to_string()))?;
+        if code != 0 {
+            return Err(refused(format!("SYST:ERR {code}: {message}")));
+        }
+        // レビュー 2026-10-12: HV と同じく、要求した ch が要求どおりになったかを確かめる。
+        let outp = &after["outp"][ch.to_string().as_str()];
+        if *outp != json!(u8::from(on)) {
+            return Err(refused(format!("channel did not switch (outp={outp})")));
+        }
+        Ok(after)
+    }
+}
+
 impl<T: Read + Write> Driver for HmpDriver<T> {
     fn ident(&mut self) -> Result<Vec<Ident>, DriverError> {
         let reply = self.link.exchange(idn()).map_err(driver_error)?;
@@ -109,22 +193,8 @@ impl<T: Read + Write> Driver for HmpDriver<T> {
         let mut samples = Vec::with_capacity(10);
 
         for ch in MIN_CH..=MAX_CH {
-            let nsel_cmd = nsel(ch).map_err(|e| DriverError::Protocol(e.to_string()))?;
-            // 非クエリなので送るだけ(応答は待たない、このファイル冒頭の doc 参照)。
-            self.link.send(&nsel_cmd).map_err(driver_error)?;
-
-            // 選択が効いたかを確認する —— 黙って別 ch の値を読まない(CLAUDE.md)。
-            let selected_reply = self.link.exchange(nsel_query()).map_err(driver_error)?;
-            let selected: u8 = selected_reply.trim().parse().map_err(|_| {
-                DriverError::Protocol(format!(
-                    "INST:NSEL?: not a channel number: {selected_reply:?}"
-                ))
-            })?;
-            if selected != ch {
-                return Err(DriverError::Protocol(format!(
-                    "INST:NSEL {ch} did not take effect (INST:NSEL? reports {selected})"
-                )));
-            }
+            // 選択が効いたかを確認してから読む —— 黙って別 ch の値を読まない(CLAUDE.md)。
+            self.select(ch)?;
 
             let volt_reply = self.link.exchange(meas_volt()).map_err(driver_error)?;
             let volt = parse_f64(&volt_reply).map_err(|e| DriverError::Protocol(e.to_string()))?;
@@ -197,6 +267,18 @@ impl<T: Read + Write> Driver for HmpDriver<T> {
         }
 
         Ok(samples)
+    }
+
+    /// TODO/124 §1 + Fable 7。before が読めなければ `Err`(応答の before は null)。
+    fn set_power(&mut self, node: u8, on: bool) -> Result<PowerOutcome, DriverError> {
+        if !(MIN_CH..=MAX_CH).contains(&node) {
+            return Err(DriverError::Protocol(format!(
+                "ch {node} is out of range (HMP2020: {MIN_CH}..={MAX_CH})"
+            )));
+        }
+        let before = self.read_outputs()?;
+        let result = self.switch(node, on);
+        Ok(PowerOutcome { before, result })
     }
 }
 
@@ -369,6 +451,156 @@ mod tests {
         fake.set_silent();
         let mut driver = HmpDriver::new("hv_hmp", fake, String::new());
         assert!(matches!(driver.ident(), Err(DriverError::Timeout)));
+    }
+
+    // -----------------------------------------------------------------
+    // TODO/124: 出力の ON / OFF(Fable 7 = 両 ch の before / after)
+    // -----------------------------------------------------------------
+
+    /// 送信行を記録する薄いラッパ(FakeHmp は Link に所有されるので外から見えない)。
+    struct Tap {
+        inner: FakeHmp,
+        sent: std::rc::Rc<std::cell::RefCell<Vec<u8>>>,
+    }
+    impl Read for Tap {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+    impl Write for Tap {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.sent.borrow_mut().extend_from_slice(buf);
+            self.inner.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    fn tapped(fake: FakeHmp) -> (HmpDriver<Tap>, std::rc::Rc<std::cell::RefCell<Vec<u8>>>) {
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let io = Tap {
+            inner: fake,
+            sent: sent.clone(),
+        };
+        (HmpDriver::new("lv", io, String::new()), sent)
+    }
+
+    const NO_ERROR: &str = "0, \"No error\"\n";
+
+    /// ch2 を ON: 両 ch を読む(before)→ ch2 を選んで `OUTP ON` → 両 ch を読む(after)→
+    /// `SYST:ERR?` = 0。ch1(もともと ON)は変わらない。
+    #[test]
+    fn set_power_on_ch2_reads_both_channels_before_and_after() {
+        let mut fake = FakeHmp::new();
+        fake.set_output(1, true);
+        fake.set_response("SYST:ERR?\n", NO_ERROR);
+        let (mut driver, sent) = tapped(fake);
+
+        let outcome = driver.set_power(2, true).unwrap();
+
+        assert_eq!(
+            String::from_utf8(sent.borrow().clone()).unwrap(),
+            "INST:NSEL 1\nINST:NSEL?\nOUTP?\nINST:NSEL 2\nINST:NSEL?\nOUTP?\n\
+             INST:NSEL 2\nINST:NSEL?\nOUTP ON\n\
+             INST:NSEL 1\nINST:NSEL?\nOUTP?\nINST:NSEL 2\nINST:NSEL?\nOUTP?\n\
+             SYST:ERR?\n"
+        );
+        assert_eq!(outcome.before, json!({"outp": {"1": 1, "2": 0}}));
+        assert_eq!(outcome.result, Ok(json!({"outp": {"1": 1, "2": 1}})));
+    }
+
+    /// ch1 を OFF: ch2 は ON のまま(`OUTP OFF` は選んだ ch だけ)。
+    #[test]
+    fn set_power_off_ch1_leaves_ch2_as_it_was() {
+        let mut fake = FakeHmp::new();
+        fake.set_output(1, true);
+        fake.set_output(2, true);
+        fake.set_response("SYST:ERR?\n", NO_ERROR);
+        let (mut driver, sent) = tapped(fake);
+
+        let outcome = driver.set_power(1, false).unwrap();
+
+        assert!(String::from_utf8(sent.borrow().clone())
+            .unwrap()
+            .contains("INST:NSEL 1\nINST:NSEL?\nOUTP OFF\n"));
+        assert_eq!(outcome.before, json!({"outp": {"1": 1, "2": 1}}));
+        assert_eq!(outcome.result, Ok(json!({"outp": {"1": 0, "2": 1}})));
+    }
+
+    /// 切り替え後の `SYST:ERR?` が非 0 ならエラー(before と、読めた after は残る)。
+    #[test]
+    fn a_nonzero_syst_err_after_the_switch_is_an_error_with_the_before() {
+        let mut fake = FakeHmp::new();
+        fake.set_response("SYST:ERR?\n", "-221, \"Settings conflict\"\n");
+        let (mut driver, _sent) = tapped(fake);
+
+        let outcome = driver.set_power(2, true).unwrap();
+
+        assert_eq!(outcome.before, json!({"outp": {"1": 0, "2": 0}}));
+        assert_eq!(
+            outcome.result,
+            Err(PowerRefused {
+                error: "SYST:ERR -221: Settings conflict".to_string(),
+                after: Some(json!({"outp": {"1": 0, "2": 1}})),
+            })
+        );
+    }
+
+    /// レビュー 2026-10-12: HV と同じく after を検証する。`OUTP ON` の後も ch2 の `OUTP?` が 0 なら
+    /// 「channel did not switch (outp=0)」(before / after は応答に載る)。
+    #[test]
+    fn an_lv_channel_that_did_not_switch_is_an_error_with_before_and_after() {
+        let mut fake = FakeHmp::new();
+        // OUTP? の 4 回(before ch1, ch2 → after ch1, ch2)を全部 0 に固定 = 出力が上がらない体。
+        for _ in 0..4 {
+            fake.push_response("OUTP?\n", "0\n");
+        }
+        fake.set_response("SYST:ERR?\n", NO_ERROR);
+        let (mut driver, sent) = tapped(fake);
+
+        let outcome = driver.set_power(2, true).unwrap();
+
+        assert!(String::from_utf8(sent.borrow().clone())
+            .unwrap()
+            .contains("INST:NSEL 2\nINST:NSEL?\nOUTP ON\n"));
+        assert_eq!(outcome.before, json!({"outp": {"1": 0, "2": 0}}));
+        assert_eq!(
+            outcome.result,
+            Err(PowerRefused {
+                error: "channel did not switch (outp=0)".to_string(),
+                after: Some(json!({"outp": {"1": 0, "2": 0}})),
+            })
+        );
+    }
+
+    /// ch は 1–2 だけ。範囲外は何も送らずに拒否。
+    #[test]
+    fn a_channel_outside_1_and_2_is_refused_before_anything_is_sent() {
+        for ch in [0u8, 3] {
+            let (mut driver, sent) = tapped(FakeHmp::new());
+            assert!(matches!(
+                driver.set_power(ch, true),
+                Err(DriverError::Protocol(_))
+            ));
+            assert!(sent.borrow().is_empty(), "ch {ch}: 何も送っていない");
+        }
+    }
+
+    /// before を読む途中で選択が効かなければ `Err`(応答の before は null)。`OUTP` は送らない。
+    #[test]
+    fn a_selection_failure_while_reading_the_before_is_a_driver_error() {
+        let mut fake = FakeHmp::new();
+        fake.push_response("INST:NSEL?\n", "9\n");
+        let (mut driver, sent) = tapped(fake);
+
+        assert!(matches!(
+            driver.set_power(2, true),
+            Err(DriverError::Protocol(_))
+        ));
+        assert!(!String::from_utf8(sent.borrow().clone())
+            .unwrap()
+            .contains("OUTP ON"));
     }
 
     /// HMP2020 は ch 1–2 のみ —— `nsel` の `Err` で自然に縛られる(生成段階、hmp.rs 側で

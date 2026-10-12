@@ -3,8 +3,9 @@
 # **実運用 TOML には `[slowctl]` をまだ書かない**(現地 Phase 0 で先頭機器・ノード番号・
 # by-id の実名を確定してから — TODO/079 §1.2 / §4)。ここは形の見本である。
 #
-# slowctl は **監視・記録・アラームのみ**(SPEC §11 の安全境界)。setpoint / バルブを
-# 動かすキーは存在しない。
+# slowctl は **監視・記録・アラーム**が本分(SPEC §11 の安全境界)。setpoint / バルブ /
+# 電圧値 / ランプを動かすキーは存在しない。唯一の作動は HV / LV の ch ごとの ON / OFF で、
+# 下の cmd_bind を書いたときだけ口が開く(SPEC §11 v1.42、TODO/124)。
 
 [system]
 experiment = "mini_eTPC"
@@ -31,6 +32,10 @@ slow_sub = "tcp://127.0.0.1:47006"     # slowctl の status PUB(v1.31)。省略 
 
 [slowctl]                              # v1.31(TODO/079)
 status_pub = "tcp://*:47006"           # SPEC §3.2 の既定ポート
+# HV / LV の ch ごとの ON / OFF を controller から受ける REP(v1.42、TODO/124)。**opt-in** ——
+# 省略 = 開かない(作動 API 無し)。tcp://127.0.0.1:<port> 以外は設定エラー(localhost 限定)。
+# controller 側は [controller] slow_cmd に同じ口を書く。受けるのは hivolta(ch 0–7)/ hmp2020(ch 1–2)だけ。
+# cmd_bind = "tcp://127.0.0.1:47007"
 log_push = "tcp://127.0.0.1:47005"     # controller のログ投稿 PULL(省略時もこの既定)
 poll_hz = 1.0                          # 全デバイス共通の読み出し周期
 log_every_s = 60                       # 値が変わらなくても VALUE を書く間隔(変化 2 % でも書く)

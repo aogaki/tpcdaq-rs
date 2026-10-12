@@ -1,12 +1,13 @@
 //! R&S/HAMEG HMP2020 読み出しコーデック(SCPI Programmers Manual EN、USB CDC `/dev/ttyACM*`)。
-//! **純関数のみ(IO 無し)**: 監視コマンドの生成と応答の解析だけを持つ。
+//! **純関数のみ(IO 無し)**: 監視コマンドの生成と応答の解析、それと出力の ON / OFF だけを持つ。
 //!
-//! # 監視のみ(SPEC §11 安全境界)
+//! # 書けるのは出力の ON / OFF だけ(SPEC §11 安全境界 v1.42、TODO/124)
 //!
-//! `[SOURce:]VOLTage`/`[SOURce:]CURRent`/`OUTPut[:STATe] ON` 等の**設定系コマンドを生成する
-//! 関数は無い**。`nsel()` は電圧/電流を書き換えず、後続の `MEAS:*?`/`OUTP?` が読む対象チャンネルを
-//! 選ぶだけ(SCPI で「別の instrument を選ぶ」だけの操作 — 9.17.027 の ProPar と同様、読み出し
-//! チェーンの一部として許容する)。
+//! 設定系で生成できるのは [`outp_set`](`OUTP ON` / `OUTP OFF`)**だけ**。
+//! `[SOURce:]VOLTage <値>` / `[SOURce:]CURRent <値>` / `APPLy` 等の**電圧・電流を設定する関数は無い**
+//! (値は機器側で設定する — ユーザー裁定 2026-10-12)。`nsel()` は電圧/電流を書き換えず、後続の
+//! `MEAS:*?`/`OUTP?`/`OUTP ON|OFF` が対象にするチャンネルを選ぶだけ(SCPI で「別の instrument を
+//! 選ぶ」だけの操作 — 9.17.027 の ProPar と同様、読み出しチェーンの一部として許容する)。
 //!
 //! # コマンド長短形(SCPI Programmers Manual p.9)
 //!
@@ -82,6 +83,19 @@ pub fn curr_query() -> &'static str {
 /// `OUTP?` 要求文字列(p.9 短縮形規則 + p.26 コマンド表 `OUTPut[:STATe]?`)。
 pub fn outp_query() -> &'static str {
     "OUTP?"
+}
+
+/// `OUTP ON` / `OUTP OFF`(p.26 `OUTPut[:STATe] ON|OFF` の短縮形、非クエリ = 応答なし)。
+///
+/// **このコーデックで唯一の設定系コマンド**(SPEC §11 v1.42、TODO/124)。p.26: `OUTP ON` は
+/// `INST:NSEL` で選んだ ch と**出力(マスタ)を同時に** ON にする。`OUTP OFF` は選んだ ch だけを
+/// OFF にし、出力ボタンは残る。だから呼び出し側は両 ch の前後を読む(TODO/124 Fable 7)。
+pub fn outp_set(on: bool) -> &'static str {
+    if on {
+        "OUTP ON"
+    } else {
+        "OUTP OFF"
+    }
 }
 
 /// `SYST:ERR?` 要求文字列(p.9 短縮形規則 + p.20 コマンド表 `SYSTem:ERRor[:NEXT]?`)。
@@ -283,6 +297,40 @@ mod tests {
     fn set_value_queries_are_query_forms() {
         assert_eq!(volt_query(), "VOLT?");
         assert_eq!(curr_query(), "CURR?");
+    }
+
+    /// TODO/124: p.26 `OUTPut[:STATe] ON|OFF` の短縮形。ON は選んだ ch と出力(マスタ)を ON、
+    /// OFF は選んだ ch だけ OFF。
+    #[test]
+    fn outp_set_is_the_manual_short_form() {
+        assert_eq!(outp_set(true), "OUTP ON");
+        assert_eq!(outp_set(false), "OUTP OFF");
+    }
+
+    /// 本体側(テスト節より前)のソースにある設定系の文字列リテラルは `OUTP ON` / `OUTP OFF`
+    /// の 2 個だけ。電圧・電流(`VOLT <値>` / `CURR <値>` / `APPL`)の設定は作らない
+    /// (SPEC §11 v1.42 — 値は機器側)。
+    #[test]
+    fn outp_on_off_are_the_only_setter_strings_in_the_hmp_sources() {
+        fn production_part(source: &str) -> &str {
+            let end = source.find("#[cfg(test)]").unwrap_or(source.len());
+            &source[..end]
+        }
+        for source in [
+            production_part(include_str!("hmp.rs")),
+            production_part(include_str!("hmp_driver.rs")),
+        ] {
+            assert_eq!(source.matches("\"VOLT ").count(), 0);
+            assert_eq!(source.matches("\"CURR ").count(), 0);
+            assert_eq!(source.matches("\"APPL").count(), 0);
+            assert_eq!(
+                source.matches("\"OUTP ").count(),
+                source.matches("\"OUTP ON\"").count() + source.matches("\"OUTP OFF\"").count()
+            );
+        }
+        let codec = production_part(include_str!("hmp.rs"));
+        assert_eq!(codec.matches("\"OUTP ON\"").count(), 1);
+        assert_eq!(codec.matches("\"OUTP OFF\"").count(), 1);
     }
 
     /// TODO/089 レビュー: `nsel()` は非クエリなので選択の確認に使うクエリ形。
