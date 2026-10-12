@@ -458,3 +458,152 @@ fn a_config_without_a_slowctl_section_exits_cleanly() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------------------------------------------------------------------
+// TODO/122: `[slowctl.influx]` —— 全サンプルを InfluxDB v2 write API へ
+// ---------------------------------------------------------------------
+
+/// 偽 InfluxDB が受けた要求 1 本の (要求行, Authorization, 本文)。
+type InfluxRequest = (String, String, String);
+
+/// 1 接続 1 要求で受け、記録して 204 を返す偽 InfluxDB(`TcpListener` だけで組む)。
+fn fake_influx(listener: TcpListener) -> std::sync::mpsc::Receiver<InfluxRequest> {
+    use std::io::{BufRead, BufReader, Read};
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else { return };
+            let mut reader = BufReader::new(&stream);
+            let mut request_line = String::new();
+            if reader.read_line(&mut request_line).is_err() {
+                continue;
+            }
+            let mut authorization = String::new();
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_err() {
+                    break;
+                }
+                let line = line.trim_end();
+                if line.is_empty() {
+                    break;
+                }
+                if let Some((name, value)) = line.split_once(':') {
+                    match name.trim().to_ascii_lowercase().as_str() {
+                        "authorization" => authorization = value.trim().to_string(),
+                        "content-length" => length = value.trim().parse().unwrap_or(0),
+                        _ => {}
+                    }
+                }
+            }
+            let mut body = vec![0; length];
+            if reader.read_exact(&mut body).is_err() {
+                continue;
+            }
+            let _ = (&stream).write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+            let request = (
+                request_line.trim_end().to_string(),
+                authorization,
+                String::from_utf8_lossy(&body).into_owned(),
+            );
+            if tx.send(request).is_err() {
+                return;
+            }
+        }
+    });
+    rx
+}
+
+/// `[slowctl.influx]` があれば、読み出した値が line protocol で偽 InfluxDB に届き、
+/// status PUB の counters に `influx_points_written` が出る(配線の端から端まで)。
+#[test]
+fn with_an_influx_section_samples_reach_influxdb_and_the_counters_show_it() {
+    let dir = scratch_dir("influx");
+    let script = dir.join("gas_script.txt");
+    std::fs::write(&script, SCRIPT.as_bytes()).unwrap();
+    let token = dir.join("influx.token");
+    std::fs::write(&token, b"  tok-e2e-122\n").unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let influx_addr = listener.local_addr().unwrap();
+    let requests = fake_influx(listener);
+
+    let pub_port = free_port();
+    let log_port = free_port();
+    let config = write_config(&dir, &script, pub_port, log_port);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&config)
+        .unwrap();
+    write!(
+        file,
+        "\n[slowctl.influx]\nurl = \"http://{influx_addr}\"\norg = \"elinp\"\n\
+         bucket = \"slowctl\"\ntoken_file = \"{}\"\nbatch_ms = 100\n",
+        token.display()
+    )
+    .unwrap();
+    drop(file);
+
+    let context = zmq::Context::new();
+    let (_log_pull, sub) = open_sockets(&context, pub_port, log_port);
+
+    let child = Command::new(env!("CARGO_BIN_EXE_slowctl"))
+        .args(["--config", &config.to_string_lossy()])
+        .env("RUST_LOG", "warn")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn slowctl");
+    let _guard = Proc(child);
+
+    // スクリプト 1 行目の 100.0 が `gas,ch=3 … fmeasure=100 …` で届く(node 3 = ch タグ)。
+    let deadline = Instant::now() + CONDITION_DEADLINE;
+    let mut seen = Vec::new();
+    let mut found = None;
+    while found.is_none() && Instant::now() < deadline {
+        let Ok(request) = requests.recv_timeout(Duration::from_millis(200)) else {
+            continue;
+        };
+        if request
+            .2
+            .lines()
+            .any(|l| l.starts_with("gas,ch=3 ") && l.contains("fmeasure=100,"))
+        {
+            found = Some(request);
+        } else {
+            seen.push(request);
+        }
+    }
+    let (request_line, authorization, body) =
+        found.unwrap_or_else(|| panic!("no fmeasure=100 line reached InfluxDB: {seen:?}"));
+    assert_eq!(
+        request_line,
+        "POST /api/v2/write?org=elinp&bucket=slowctl&precision=ms HTTP/1.1"
+    );
+    assert_eq!(
+        authorization, "Token tok-e2e-122",
+        "token_file は trim して読む"
+    );
+    assert!(
+        body.lines().all(|l| l.starts_with("gas,ch=3 ")),
+        "IDENT(文字列)は書かない — 行はサンプルだけ: {body:?}"
+    );
+
+    // status PUB の counters にも出る。
+    let mut written = 0;
+    while written == 0 && Instant::now() < deadline {
+        let Some(payload) = next_slow_payload(&sub, deadline) else {
+            break;
+        };
+        written = payload.counters.influx_points_written;
+        assert_eq!(payload.counters.influx_write_errors, 0);
+        assert_eq!(payload.counters.influx_last_error, None);
+    }
+    assert!(
+        written > 0,
+        "influx_points_written が status PUB に出ていない"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -21,6 +21,9 @@
 //!   slowctl が先に立つと起動時の IDENT が必ず失敗するため、これが無いと機器の識別記録が
 //!   実機で常に消える。`VALUE`(次が来る)と `ERROR`(次回集計に入る)は再送しない。
 //!   捨てた分は `log_dropped` に数えて warn する(silent にしない — CLAUDE.md)。
+//! * InfluxDB(TODO/122、`[slowctl.influx]` があるときだけ)= **モニタ系**。全サンプルを
+//!   [`super::influx`] の writer スレッドへ `try_send` で渡す。落ちた分は
+//!   `influx_points_dropped` に数え、読み出しスレッドは HTTP を待たない。
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -31,10 +34,11 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tracing::{error, info, warn};
 
-use crate::config::{Config, SlowDeviceConfig, SLOWCTL_SOURCE_ID};
+use crate::config::{Config, InfluxConfig, SlowDeviceConfig, SLOWCTL_SOURCE_ID};
 use crate::logbook::{LogbookRecord, SLOW_ACTOR};
 
 use super::bronkhorst::open_serial;
+use super::influx::{InfluxCounters, InfluxParams, InfluxSink, InfluxWriter};
 use super::{
     now_ms, AlarmEvent, AlarmRule, Driver, DriverError, Ident, LogPolicy, Sample, SlowCounters,
     SlowPayload, SLOW_KIND,
@@ -106,6 +110,10 @@ pub enum SlowctlError {
 
     #[error("device {device}: {message}")]
     Device { device: String, message: String },
+
+    /// `[slowctl.influx]` の writer を起動できない(トークンが読めない等、TODO/122)。
+    #[error("InfluxDB writer: {0}")]
+    Influx(String),
 }
 
 // ---------------------------------------------------------------------
@@ -120,6 +128,8 @@ pub struct SlowctlParams {
     pub poll_hz: f64,
     pub log_every_s: u64,
     pub devices: Vec<SlowDeviceConfig>,
+    /// `[slowctl.influx]`(TODO/122)。`None` = InfluxDB に書かない。
+    pub influx: Option<InfluxConfig>,
 }
 
 impl SlowctlParams {
@@ -132,6 +142,7 @@ impl SlowctlParams {
             poll_hz: slowctl.poll_hz,
             log_every_s: slowctl.log_every_s,
             devices: slowctl.device.clone(),
+            influx: slowctl.influx.clone(),
         })
     }
 
@@ -172,6 +183,8 @@ impl Counters {
             parse_err: self.parse_err.load(Ordering::Relaxed),
             reconnects: self.reconnects.load(Ordering::Relaxed),
             identity_mismatch: self.identity_mismatch.load(Ordering::Relaxed),
+            // influx_* は機器ごとではなく writer 1 本の持ち物(main_loop が上書きする)。
+            ..SlowCounters::default()
         }
     }
 
@@ -212,6 +225,7 @@ fn counter_delta(now: &SlowCounters, previous: &SlowCounters) -> Option<SlowCoun
         identity_mismatch: now
             .identity_mismatch
             .saturating_sub(previous.identity_mismatch),
+        ..SlowCounters::default() // influx_* は ERROR レコードに載せない
     };
     let empty = delta.poll_err == 0
         && delta.parse_err == 0
@@ -321,12 +335,16 @@ fn open_driver(device: &SlowDeviceConfig) -> Result<Box<dyn Driver + Send>, Slow
 }
 
 /// 1 デバイスぶんのブロッキングループ(専用 std スレッド)。
+///
+/// `influx` があれば、poll ごとのサンプルを InfluxDB writer にも渡す(TODO/122)。渡し方は
+/// `try_send` だけ —— **読み出しは決して止めない**(満杯なら落として数える)。
 fn device_loop(
     device: SlowDeviceConfig,
     poll_interval: Duration,
     tx: SyncSender<DeviceEvent>,
     counters: Arc<Counters>,
     stop: Arc<AtomicBool>,
+    influx: Option<InfluxSink>,
 ) {
     let mut backoff = BACKOFF_MIN;
     let mut opened_once = false;
@@ -348,7 +366,15 @@ fn device_loop(
         };
         opened_once = true;
 
-        if run_one_session(driver, &device, poll_interval, &tx, &counters, &stop) {
+        if run_one_session(
+            driver,
+            &device,
+            poll_interval,
+            &tx,
+            &counters,
+            &stop,
+            influx.as_ref(),
+        ) {
             return; // 停止合図(またはチャネル切断)
         }
         sleep_until_stop(backoff, &stop);
@@ -364,6 +390,7 @@ fn run_one_session(
     tx: &SyncSender<DeviceEvent>,
     counters: &Arc<Counters>,
     stop: &Arc<AtomicBool>,
+    influx: Option<&InfluxSink>,
 ) -> bool {
     match driver.ident() {
         Ok(idents) => {
@@ -390,6 +417,9 @@ fn run_one_session(
             Ok(samples) => {
                 counters.poll_ok.fetch_add(1, Ordering::Relaxed);
                 consecutive_errors = 0;
+                if let Some(influx) = influx {
+                    influx.offer(&samples);
+                }
                 if tx.send(DeviceEvent::Samples(samples)).is_err() {
                     return true;
                 }
@@ -659,6 +689,28 @@ pub fn run_slowctl(params: SlowctlParams, stop: Arc<AtomicBool>) -> Result<(), S
         "slowctl: LogPost PUSH connected"
     );
 
+    // TODO/122: 全サンプルを InfluxDB へ(任意)。トークンが読めなければ起動失敗。
+    let influx = match &params.influx {
+        Some(config) => {
+            let influx_params = InfluxParams::from_config(config).map_err(SlowctlError::Influx)?;
+            let writer =
+                InfluxWriter::spawn(influx_params).map_err(|source| SlowctlError::Spawn {
+                    device: "influx".to_string(),
+                    source,
+                })?;
+            info!(
+                url = config.url,
+                org = config.org,
+                bucket = config.bucket,
+                batch_ms = config.batch_ms,
+                buffer_max_points = config.buffer_max_points,
+                "slowctl: writing every sample to InfluxDB"
+            );
+            Some(writer)
+        }
+        None => None,
+    };
+
     let (tx, rx) = mpsc::sync_channel(EVENT_QUEUE);
     let mut counters = Vec::with_capacity(params.devices.len());
     let mut threads = Vec::with_capacity(params.devices.len());
@@ -672,7 +724,8 @@ pub fn run_slowctl(params: SlowctlParams, stop: Arc<AtomicBool>) -> Result<(), S
                 let tx = tx.clone();
                 let stop = Arc::clone(&stop);
                 let poll_interval = params.device_poll_interval(&device);
-                move || device_loop(device, poll_interval, tx, device_counters, stop)
+                let influx = influx.as_ref().map(InfluxWriter::sink);
+                move || device_loop(device, poll_interval, tx, device_counters, stop, influx)
             })
             .map_err(|source| SlowctlError::Spawn {
                 device: device.name.clone(),
@@ -682,13 +735,25 @@ pub fn run_slowctl(params: SlowctlParams, stop: Arc<AtomicBool>) -> Result<(), S
     }
     drop(tx); // 本体は受けるだけ(全スレッドが終われば recv が切れる)
 
-    main_loop(&params, &rx, &publisher, &log_push, &counters, &stop);
+    main_loop(
+        &params,
+        &rx,
+        &publisher,
+        &log_push,
+        &counters,
+        influx.as_ref().map(|w| w.counters().as_ref()),
+        &stop,
+    );
 
     stop.store(true, Ordering::Relaxed);
     for handle in threads {
         if handle.join().is_err() {
             error!("slowctl: a device thread panicked");
         }
+    }
+    // デバイススレッドの sink が全部落ちた後でないと writer は畳めない(InfluxWriter::finish)。
+    if let Some(writer) = influx {
+        writer.finish();
     }
     info!("slowctl: stopped");
     Ok(())
@@ -701,6 +766,7 @@ fn main_loop(
     publisher: &zmq::Socket,
     log_push: &zmq::Socket,
     counters: &[Arc<Counters>],
+    influx: Option<&InfluxCounters>,
     stop: &Arc<AtomicBool>,
 ) {
     let mut aggregator = Aggregator::new(&params.devices, params.log_every_s);
@@ -746,7 +812,11 @@ fn main_loop(
 
         if last_publish.elapsed() >= PUBLISH_INTERVAL {
             last_publish = Instant::now();
-            let payload = aggregator.payload(sum_counters(counters));
+            let mut totals = sum_counters(counters);
+            if let Some(influx) = influx {
+                influx.write_into(&mut totals);
+            }
+            let payload = aggregator.payload(totals);
             match encode_pub(
                 SLOWCTL_SOURCE_ID,
                 // slowctl は run チェーンの外に居る(run 番号を知らない)。SPEC §2.2 の
@@ -956,6 +1026,7 @@ mod tests {
             poll_hz: 2.0,
             log_every_s: 60,
             devices: vec![slow.clone()],
+            influx: None,
         };
         assert_eq!(
             params.device_poll_interval(&slow),
@@ -1213,6 +1284,7 @@ mod tests {
             parse_err: 0,
             reconnects: 0,
             identity_mismatch: 0,
+            ..SlowCounters::default()
         };
         assert_eq!(
             counter_delta(&previous, &previous),
@@ -1226,6 +1298,7 @@ mod tests {
             parse_err: 2,
             reconnects: 1,
             identity_mismatch: 0,
+            ..SlowCounters::default()
         };
         let delta = counter_delta(&now, &previous).unwrap();
         assert_eq!(delta.poll_err, 3);
