@@ -277,6 +277,9 @@ async fn a_run_start_drives_the_real_bridge_through_to_ecc_start() {
         command_timeout: Duration::from_secs(5),
         ecc_timeout: Duration::from_secs(30),
         status_timeout: Duration::from_secs(5),
+        // 124: power の経路は使わない(省略 = 503)。
+        slow_cmd: None,
+        slow_devices: Vec::new(),
     };
 
     let (bound_tx, bound_rx) = oneshot::channel();
@@ -440,6 +443,9 @@ async fn the_step_by_step_ecc_endpoints_reach_the_real_bridge() {
         command_timeout: Duration::from_secs(5),
         ecc_timeout: Duration::from_secs(30),
         status_timeout: Duration::from_secs(5),
+        // 124: power の経路は使わない(省略 = 503)。
+        slow_cmd: None,
+        slow_devices: Vec::new(),
     };
 
     let (bound_tx, bound_rx) = oneshot::channel();

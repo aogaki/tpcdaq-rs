@@ -297,6 +297,9 @@ async fn a_run_start_gives_up_when_the_ecc_stalls_past_the_ecc_timeout() {
         command_timeout: Duration::from_secs(5),
         ecc_timeout: Duration::from_secs(1),
         status_timeout: Duration::from_secs(2),
+        // 124: power の経路は使わない(省略 = 503)。
+        slow_cmd: None,
+        slow_devices: Vec::new(),
     };
 
     let (bound_tx, bound_rx) = oneshot::channel();
