@@ -285,6 +285,14 @@ fn open_driver(device: &SlowDeviceConfig) -> Result<Box<dyn Driver + Send>, Slow
                         message,
                     }
                 })?;
+            for (ch, flags) in super::hivolta::ignore_notices(&status_ignore) {
+                info!(
+                    device = %device.name,
+                    ch,
+                    flags = ?flags,
+                    "slowctl: alarm judgement ignores these STATUS flags (status_ignore)"
+                );
+            }
             // TODO/089 §1: `addr`(TCP)優先、無ければ `port`(serial 9600 8N1)。
             if let Some(addr) = device.addr.as_deref() {
                 let driver = super::hivolta_driver::open_tcp(
