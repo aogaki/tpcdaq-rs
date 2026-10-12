@@ -8,7 +8,8 @@
 //! # power ON / OFF の手順(TODO/124 §1 + Fable 7)
 //!
 //! 両 ch の `OUTP?`(before)→ `INST:NSEL n` + `INST:NSEL?` で確認 → `OUTP ON|OFF` →
-//! 両 ch の `OUTP?`(after)→ `SYST:ERR?` が 0。`OUTP ON` は選んだ ch と出力(マスタ)を同時に
+//! 両 ch の `OUTP?`(after)→ `SYST:ERR?` が 0 → after の ch n が要求どおり(違えば
+//! `channel did not switch (outp=…)`、レビュー 2026-10-12)。`OUTP ON` は選んだ ch と出力(マスタ)を同時に
 //! ON にするので、ほかの ch が変わったことを隠さないよう**両 ch**を返す。各 ch の読み出しも
 //! `INST:NSEL?` で選択を確かめてから行う。
 //!
@@ -34,7 +35,7 @@ use super::hmp::{
     parse_f64, parse_idn, parse_syst_err, syst_err, volt_query, LinkError, ScpiLink, MAX_CH,
     MIN_CH,
 };
-use super::{now_ms, Driver, DriverError, Ident, PowerOutcome, Sample};
+use super::{now_ms, Driver, DriverError, Ident, PowerOutcome, PowerRefused, Sample};
 
 /// 読み出しタイムアウト(ミリ秒)。
 pub const READ_TIMEOUT_MS: u64 = 2_000;
@@ -120,27 +121,39 @@ impl<T: Read + Write> HmpDriver<T> {
         Ok(json!({ "outp": outputs }))
     }
 
-    /// before を読んだ後の手順(選択 → `OUTP ON|OFF` → after → `SYST:ERR?`)。
-    /// `Err` は応答の `error` そのもの。
-    fn switch(&mut self, ch: u8, on: bool) -> Result<serde_json::Value, String> {
-        self.select(ch)
-            .map_err(|e| format!("cannot select ch {ch} ({e}) — nothing was switched"))?;
-        self.link
-            .send(outp_set(on))
-            .map_err(|e| format!("sending {} failed ({e})", outp_set(on)))?;
+    /// before を読んだ後の手順(選択 → `OUTP ON|OFF` → after → `SYST:ERR?` → after の検証)。
+    /// `Err` の `error` は応答の `error` そのもの。after を読めた後の失敗は after も載せる。
+    fn switch(&mut self, ch: u8, on: bool) -> Result<serde_json::Value, PowerRefused> {
+        self.select(ch).map_err(|e| {
+            PowerRefused::without_after(format!(
+                "cannot select ch {ch} ({e}) — nothing was switched"
+            ))
+        })?;
+        self.link.send(outp_set(on)).map_err(|e| {
+            PowerRefused::without_after(format!("sending {} failed ({e})", outp_set(on)))
+        })?;
         let after = self.read_outputs().map_err(|e| {
-            format!(
+            PowerRefused::without_after(format!(
                 "{} was sent but reading OUTP? back failed ({e})",
                 outp_set(on)
-            )
+            ))
         })?;
+        let refused = |error: String| PowerRefused {
+            error,
+            after: Some(after.clone()),
+        };
         let err_reply = self
             .link
             .exchange(syst_err())
-            .map_err(|e| format!("SYST:ERR? failed ({})", driver_error(e)))?;
-        let (code, message) = parse_syst_err(&err_reply).map_err(|e| e.to_string())?;
+            .map_err(|e| refused(format!("SYST:ERR? failed ({})", driver_error(e))))?;
+        let (code, message) = parse_syst_err(&err_reply).map_err(|e| refused(e.to_string()))?;
         if code != 0 {
-            return Err(format!("SYST:ERR {code}: {message}"));
+            return Err(refused(format!("SYST:ERR {code}: {message}")));
+        }
+        // レビュー 2026-10-12: HV と同じく、要求した ch が要求どおりになったかを確かめる。
+        let outp = &after["outp"][ch.to_string().as_str()];
+        if *outp != json!(u8::from(on)) {
+            return Err(refused(format!("channel did not switch (outp={outp})")));
         }
         Ok(after)
     }
@@ -515,7 +528,7 @@ mod tests {
         assert_eq!(outcome.result, Ok(json!({"outp": {"1": 0, "2": 1}})));
     }
 
-    /// 切り替え後の `SYST:ERR?` が非 0 ならエラー(before は残る)。
+    /// 切り替え後の `SYST:ERR?` が非 0 ならエラー(before と、読めた after は残る)。
     #[test]
     fn a_nonzero_syst_err_after_the_switch_is_an_error_with_the_before() {
         let mut fake = FakeHmp::new();
@@ -527,7 +540,37 @@ mod tests {
         assert_eq!(outcome.before, json!({"outp": {"1": 0, "2": 0}}));
         assert_eq!(
             outcome.result,
-            Err("SYST:ERR -221: Settings conflict".to_string())
+            Err(PowerRefused {
+                error: "SYST:ERR -221: Settings conflict".to_string(),
+                after: Some(json!({"outp": {"1": 0, "2": 1}})),
+            })
+        );
+    }
+
+    /// レビュー 2026-10-12: HV と同じく after を検証する。`OUTP ON` の後も ch2 の `OUTP?` が 0 なら
+    /// 「channel did not switch (outp=0)」(before / after は応答に載る)。
+    #[test]
+    fn an_lv_channel_that_did_not_switch_is_an_error_with_before_and_after() {
+        let mut fake = FakeHmp::new();
+        // OUTP? の 4 回(before ch1, ch2 → after ch1, ch2)を全部 0 に固定 = 出力が上がらない体。
+        for _ in 0..4 {
+            fake.push_response("OUTP?\n", "0\n");
+        }
+        fake.set_response("SYST:ERR?\n", NO_ERROR);
+        let (mut driver, sent) = tapped(fake);
+
+        let outcome = driver.set_power(2, true).unwrap();
+
+        assert!(String::from_utf8(sent.borrow().clone())
+            .unwrap()
+            .contains("INST:NSEL 2\nINST:NSEL?\nOUTP ON\n"));
+        assert_eq!(outcome.before, json!({"outp": {"1": 0, "2": 0}}));
+        assert_eq!(
+            outcome.result,
+            Err(PowerRefused {
+                error: "channel did not switch (outp=0)".to_string(),
+                after: Some(json!({"outp": {"1": 0, "2": 0}})),
+            })
         );
     }
 

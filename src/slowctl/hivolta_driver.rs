@@ -32,7 +32,7 @@ use super::hivolta::{
     mon_bd, mon_ch, parse_alarm, parse_status, set_power, BdPar, ChPar, ChStatus, HvError, HvLink,
     HvLinkError, IgnoreMasks, ALL_CH,
 };
-use super::{now_ms, Driver, DriverError, Ident, PowerOutcome, Sample};
+use super::{now_ms, Driver, DriverError, Ident, PowerOutcome, PowerRefused, Sample};
 
 /// TCP 接続タイムアウト(発注書 §1: `connect_timeout` 3 s)。
 pub const CONNECT_TIMEOUT_MS: u64 = 3_000;
@@ -176,28 +176,39 @@ impl<T: Read + Write> HiVoltaDriver<T> {
         parse_status(&value).map_err(|e| DriverError::Protocol(e.to_string()))
     }
 
-    /// before を読んだ後の手順(DIS → SET → after → 判定)。`Err` は応答の `error` そのもの。
-    fn switch(&mut self, ch: u8, on: bool, before: ChStatus) -> Result<serde_json::Value, String> {
+    /// before を読んだ後の手順(DIS → SET → after → 判定)。`Err` の `error` は応答の
+    /// `error` そのもの、読めた after は応答の `after` に載る。
+    fn switch(
+        &mut self,
+        ch: u8,
+        on: bool,
+        before: ChStatus,
+    ) -> Result<serde_json::Value, PowerRefused> {
         if before.isdis() {
-            return Err("front switch is OFF (DIS)".to_string());
+            return Err(PowerRefused::without_after("front switch is OFF (DIS)"));
         }
         match self.link.exchange(&set_power(ch, on)) {
             Ok(_) => {}
             Err(HvLinkError::Protocol(HvError::Loc)) => {
-                return Err("module is in LOCAL mode".to_string())
+                return Err(PowerRefused::without_after("module is in LOCAL mode"))
             }
             Err(e) => {
-                return Err(format!(
+                return Err(PowerRefused::without_after(format!(
                     "SET failed ({}) — state unknown, check the table",
                     driver_error(e)
-                ))
+                )))
             }
         }
-        let after = self
-            .read_status(ch)
-            .map_err(|e| format!("SET was sent but reading the STATUS back failed ({e})"))?;
+        let after = self.read_status(ch).map_err(|e| {
+            PowerRefused::without_after(format!(
+                "SET was sent but reading the STATUS back failed ({e})"
+            ))
+        })?;
         if !switched(on, after) {
-            return Err(format!("channel did not switch (status={})", after.0));
+            return Err(PowerRefused {
+                error: format!("channel did not switch (status={})", after.0),
+                after: Some(status_json(after)),
+            });
         }
         Ok(status_json(after))
     }
@@ -960,7 +971,13 @@ mod tests {
             "SET は送らない"
         );
         assert_eq!(outcome.before, json!({"status": 4096, "flags": ["DIS"]}));
-        assert_eq!(outcome.result, Err("front switch is OFF (DIS)".to_string()));
+        assert_eq!(
+            outcome.result,
+            Err(PowerRefused {
+                error: "front switch is OFF (DIS)".to_string(),
+                after: None,
+            })
+        );
     }
 
     /// `#LOC:ERR`(LOCAL モード)は「module is in LOCAL mode」。before は残る。
@@ -974,10 +991,17 @@ mod tests {
         let outcome = driver.set_power(2, false).unwrap();
 
         assert_eq!(outcome.before, json!({"status": 1, "flags": ["ON"]}));
-        assert_eq!(outcome.result, Err("module is in LOCAL mode".to_string()));
+        assert_eq!(
+            outcome.result,
+            Err(PowerRefused {
+                error: "module is in LOCAL mode".to_string(),
+                after: None,
+            })
+        );
     }
 
     /// SET は `#CMD:OK` でも after が変わっていなければエラー(status は生の値を載せる)。
+    /// 読めた after は応答に載せる(LV と揃える — レビュー 2026-10-12)。
     #[test]
     fn a_channel_that_did_not_switch_is_an_error() {
         let mut fake = FakeHv::new();
@@ -991,7 +1015,10 @@ mod tests {
         assert_eq!(outcome.before, json!({"status": 0, "flags": []}));
         assert_eq!(
             outcome.result,
-            Err("channel did not switch (status=0)".to_string())
+            Err(PowerRefused {
+                error: "channel did not switch (status=0)".to_string(),
+                after: Some(json!({"status": 0, "flags": []})),
+            })
         );
     }
 

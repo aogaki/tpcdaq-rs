@@ -149,9 +149,29 @@ pub enum DriverError {
 pub struct PowerOutcome {
     /// SET 前の状態。
     pub before: serde_json::Value,
-    /// `Ok(after)` = 切り替わった。`Err(理由)` = 機器が拒否した / 切り替わらなかった /
-    /// SET 後の読み戻しに失敗した(理由はそのまま応答の `error` になる)。
-    pub result: Result<serde_json::Value, String>,
+    /// `Ok(after)` = 切り替わった。`Err` = 機器が拒否した / 切り替わらなかった /
+    /// SET 後の読み戻しに失敗した。
+    pub result: Result<serde_json::Value, PowerRefused>,
+}
+
+/// [`PowerOutcome::result`] の失敗側(TODO/124)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PowerRefused {
+    /// そのまま応答の `error` になる理由。
+    pub error: String,
+    /// SET 後に状態を読めていれば、その状態(応答の `after` に載る —— 「切り替わらなかった」の
+    /// 中身を隠さない、レビュー 2026-10-12)。SET を送っていない・読めなかったなら `None`。
+    pub after: Option<serde_json::Value>,
+}
+
+impl PowerRefused {
+    /// SET 後の状態が無い拒否(DIS・LOCAL・送信失敗など)。
+    pub fn without_after(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            after: None,
+        }
+    }
 }
 
 /// スロー制御デバイス 1 台。**同期(ブロッキング)**——呼び出し側が専用スレッドを持つ。

@@ -55,8 +55,8 @@ use crate::logbook::{LogbookRecord, SLOW_ACTOR};
 use super::bronkhorst::open_serial;
 use super::influx::{InfluxCounters, InfluxParams, InfluxSink, InfluxWriter};
 use super::{
-    now_ms, AlarmEvent, AlarmRule, Driver, DriverError, Ident, LogPolicy, PowerOutcome, Sample,
-    SlowCounters, SlowPayload, SLOW_KIND,
+    now_ms, AlarmEvent, AlarmRule, Driver, DriverError, Ident, LogPolicy, PowerOutcome,
+    PowerRefused, Sample, SlowCounters, SlowPayload, SLOW_KIND,
 };
 
 /// status PUB の周期(SPEC §2.3「1 Hz に集約、最新値のみ」)。
@@ -388,6 +388,10 @@ fn open_driver(device: &SlowDeviceConfig) -> Result<Box<dyn Driver + Send>, Slow
 pub struct PowerCommand {
     pub ch: u8,
     pub on: bool,
+    /// これを過ぎたら**実行しない**(レビュー 2026-10-12)。REP が結果を待つ上限と同じ時刻
+    /// (受けた時刻 + [`POWER_REPLY_TIMEOUT`])。過ぎた = REP は timeout を返し、controller は
+    /// `power_inflight` を外している —— その後に SET を送ると run/start と競合する。
+    pub deadline: Instant,
     /// 結果(REP 応答の JSON そのもの)の返し先。容量 1 の oneshot。REP が timeout 済みなら
     /// 受け手はもう居ない([`deliver_power_reply`] が warn する)。
     pub reply: SyncSender<serde_json::Value>,
@@ -584,7 +588,7 @@ fn backoff_sleep(
                     on = command.on,
                     "slowctl: power command refused — device not connected (reconnect backoff)"
                 );
-                let PowerCommand { ch, on, reply } = command;
+                let PowerCommand { ch, on, reply, .. } = command;
                 deliver_power_reply(reply, power_refused("device not connected"), device, ch, on);
             }
             Wake::Elapsed | Wake::Stopped => return,
@@ -594,8 +598,23 @@ fn backoff_sleep(
 
 /// power コマンド 1 件を実行して結果を返す(TODO/124)。毎回 info に device / ch / on /
 /// before / after / 結果を残す(§1)。戻り値 = 返し先に届けられたか。
+///
+/// **実行を始める直前に期限を見る**(レビュー 2026-10-12): 長い poll や ident の間にキューで
+/// 待っていたコマンドが期限を過ぎていれば、機器には何も送らずに捨てる(返し先はもう居ない)。
 fn run_power_command(driver: &mut dyn Driver, device: &str, command: PowerCommand) -> bool {
-    let PowerCommand { ch, on, reply } = command;
+    let PowerCommand {
+        ch,
+        on,
+        deadline,
+        reply,
+    } = command;
+    if Instant::now() >= deadline {
+        warn!(
+            device,
+            ch, on, "slowctl: power command expired before execution — not sent"
+        );
+        return false;
+    }
     let response = power_reply(device, ch, on, driver.set_power(ch, on));
     info!(
         device,
@@ -648,7 +667,9 @@ fn power_refused(error: &str) -> serde_json::Value {
 /// device_loop の実行結果 → REP 応答(発注書 §1 の契約)。
 ///
 /// * 成功: `{"ok":true,"device","ch","on","before","after"}`
-/// * 機器の拒否 / 切り替わらない: `{"ok":false,"error","before":{…}}`
+/// * 機器の拒否(DIS・LOCAL 等): `{"ok":false,"error","before":{…}}`
+/// * SET 後の状態を読めた失敗(切り替わらない等): `{"ok":false,"error","before":{…},"after":{…}}`
+///   (レビュー 2026-10-12)
 /// * before を読む前の失敗: `{"ok":false,"error","before":null}`
 fn power_reply(
     device: &str,
@@ -665,8 +686,16 @@ fn power_reply(
         }),
         Ok(PowerOutcome {
             before,
-            result: Err(error),
+            result: Err(PowerRefused { error, after: None }),
         }) => json!({"ok": false, "error": error, "before": before}),
+        Ok(PowerOutcome {
+            before,
+            result:
+                Err(PowerRefused {
+                    error,
+                    after: Some(after),
+                }),
+        }) => json!({"ok": false, "error": error, "before": before, "after": after}),
         Err(e) => power_refused(&e.to_string()),
     }
 }
@@ -736,10 +765,13 @@ pub fn handle_power_request(
         }
     };
 
+    // REP が待つ上限とコマンドの期限は同じ時刻(過ぎたら device_loop は実行しない)。
+    let deadline = Instant::now() + reply_timeout;
     let (reply, reply_rx) = mpsc::sync_channel(1);
     let command = PowerCommand {
         ch,
         on: power.on,
+        deadline,
         reply,
     };
     match target.commands.try_send(command) {
@@ -747,7 +779,7 @@ pub fn handle_power_request(
         Err(TrySendError::Full(_)) => return power_refused("device busy"),
         Err(TrySendError::Disconnected(_)) => return power_refused("device thread is not running"),
     }
-    match reply_rx.recv_timeout(reply_timeout) {
+    match reply_rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(response) => response,
         Err(RecvTimeoutError::Timeout) => {
             warn!(
@@ -2059,6 +2091,7 @@ mod tests {
             .try_send(PowerCommand {
                 ch: 1,
                 on: true,
+                deadline: Instant::now() + Duration::from_secs(5),
                 reply: stale,
             })
             .unwrap();
@@ -2113,7 +2146,8 @@ mod tests {
         assert!(reply["error"].as_str().unwrap().contains("not running"));
     }
 
-    /// 応答の形(発注書 §1 の契約): 成功 / 機器の拒否(before あり)/ before 前の失敗(null)。
+    /// 応答の形(発注書 §1 の契約): 成功 / 機器の拒否(before あり)/ 切り替わらない(before と
+    /// 読めた after、レビュー 2026-10-12)/ before 前の失敗(null)。
     #[test]
     fn the_reply_shapes_follow_the_contract() {
         let before = json!({"status": 1, "flags": ["ON"]});
@@ -2138,11 +2172,31 @@ mod tests {
                 true,
                 Ok(PowerOutcome {
                     before: json!({"status": 4096, "flags": ["DIS"]}),
-                    result: Err("front switch is OFF (DIS)".to_string()),
+                    result: Err(PowerRefused {
+                        error: "front switch is OFF (DIS)".to_string(),
+                        after: None,
+                    }),
                 })
             ),
             json!({"ok": false, "error": "front switch is OFF (DIS)",
                    "before": {"status": 4096, "flags": ["DIS"]}})
+        );
+        assert_eq!(
+            power_reply(
+                "lv",
+                2,
+                true,
+                Ok(PowerOutcome {
+                    before: json!({"outp": {"1": 1, "2": 0}}),
+                    result: Err(PowerRefused {
+                        error: "channel did not switch (outp=0)".to_string(),
+                        after: Some(json!({"outp": {"1": 1, "2": 0}})),
+                    }),
+                })
+            ),
+            json!({"ok": false, "error": "channel did not switch (outp=0)",
+                   "before": {"outp": {"1": 1, "2": 0}},
+                   "after": {"outp": {"1": 1, "2": 0}}})
         );
         assert_eq!(
             power_reply("lv", 2, true, Err(DriverError::Timeout)),
@@ -2238,8 +2292,139 @@ mod tests {
         on: bool,
     ) -> Receiver<serde_json::Value> {
         let (reply, reply_rx) = mpsc::sync_channel(1);
-        commands.try_send(PowerCommand { ch, on, reply }).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        commands
+            .try_send(PowerCommand {
+                ch,
+                on,
+                deadline,
+                reply,
+            })
+            .unwrap();
         reply_rx
+    }
+
+    /// ident と poll(全 ch 一括)に答える偽 DT1415ET(STATUS は内部の値 = 全 ch 0)。
+    fn fake_dt1415et() -> crate::slowctl::fake_hv::FakeHv {
+        use crate::slowctl::hivolta::{mon_bd, mon_ch, BdPar, ChPar, ALL_CH};
+        let mut fake = crate::slowctl::fake_hv::FakeHv::new();
+        fake.set_response(mon_bd(BdPar::Name), "#CMD:OK,VAL:DT1415ET\r\n");
+        fake.set_response(mon_bd(BdPar::Nch), "#CMD:OK,VAL:8\r\n");
+        fake.set_response(mon_bd(BdPar::Frel), "#CMD:OK,VAL:1.5\r\n");
+        fake.set_response(mon_bd(BdPar::Snum), "#CMD:OK,VAL:SN-124\r\n");
+        fake.set_response(mon_bd(BdPar::Ctr), "#CMD:OK,VAL:REMOTE\r\n");
+        fake.set_response(mon_bd(BdPar::IlkMode), "#CMD:OK,VAL:DISABLE\r\n");
+        let eight = |value: &str| format!("#CMD:OK,VAL:{}\r\n", [value; 8].join(";"));
+        fake.set_response(mon_ch(ALL_CH, ChPar::Vmon), eight("0000.00"));
+        fake.set_response(mon_ch(ALL_CH, ChPar::Imon), eight("+0000.000"));
+        fake.set_response(mon_ch(ALL_CH, ChPar::Vset), eight("0350.00"));
+        fake.set_response(mon_ch(ALL_CH, ChPar::Iset), eight("0015.00"));
+        fake.set_response(mon_bd(BdPar::Alarm), "#CMD:OK,VAL:0\r\n");
+        fake.set_response(mon_bd(BdPar::Ilk), "#CMD:OK,VAL:NO\r\n");
+        fake
+    }
+
+    /// 送った行を全部記録し、poll の 1 往復目(全 ch 一括の VMON)で `stall` だけ固まる口
+    /// (長い poll = 応答の遅い機器の体)。
+    struct SlowWire {
+        inner: crate::slowctl::fake_hv::FakeHv,
+        sent: Arc<std::sync::Mutex<Vec<u8>>>,
+        polling: Arc<AtomicBool>,
+        stall: Duration,
+    }
+
+    impl std::io::Read for SlowWire {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl std::io::Write for SlowWire {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.sent.lock().unwrap().extend_from_slice(buf);
+            if buf.starts_with(b"$CMD:MON,CH:8,PAR:VMON") {
+                self.polling.store(true, Ordering::Relaxed);
+                std::thread::sleep(self.stall);
+            }
+            self.inner.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    /// レビュー 2026-10-12: 長い poll の最中に積まれたコマンドは、poll が明けた時点で期限
+    /// (REP が待つ上限と同じ)を過ぎていれば**実行しない** —— 機器には SET が 1 本も届かず、
+    /// 返し先にも何も返らない(REP は既に timeout を返している)。
+    #[test]
+    fn a_command_that_expired_during_a_long_poll_is_dropped_without_sending_set() {
+        use crate::slowctl::hivolta_driver::HiVoltaDriver;
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let polling = Arc::new(AtomicBool::new(false));
+        let wire = SlowWire {
+            inner: fake_dt1415et(),
+            sent: Arc::clone(&sent),
+            polling: Arc::clone(&polling),
+            stall: Duration::from_millis(400),
+        };
+        let driver = HiVoltaDriver::new("hv", wire, String::new());
+        let (tx, rx) = mpsc::sync_channel(EVENT_QUEUE);
+        let (cmd_tx, cmd_rx) = mpsc::sync_channel(POWER_QUEUE_DEPTH);
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = std::thread::spawn({
+            let stop = Arc::clone(&stop);
+            move || {
+                run_one_session(
+                    Box::new(driver),
+                    &device("hv", Vec::new()),
+                    Duration::from_secs(10),
+                    &tx,
+                    &Arc::new(Counters::default()),
+                    &stop,
+                    None,
+                    &cmd_rx,
+                )
+            }
+        });
+
+        // poll が固まっている最中に、期限 50 ms のコマンドを積む(poll は 400 ms 固まる)。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !polling.load(Ordering::Relaxed) {
+            assert!(Instant::now() < deadline, "poll が始まらない");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let (reply, reply_rx) = mpsc::sync_channel(1);
+        cmd_tx
+            .try_send(PowerCommand {
+                ch: 3,
+                on: true,
+                deadline: Instant::now() + Duration::from_millis(50),
+                reply,
+            })
+            .unwrap();
+
+        // poll は最後まで終わる(サンプルが出る)。コマンドは捨てられ、返し先は何も受けない。
+        assert!(next_poll(&rx, Duration::from_secs(5)), "poll が明ける");
+        assert!(matches!(
+            reply_rx.recv_timeout(Duration::from_secs(5)),
+            Err(RecvTimeoutError::Disconnected)
+        ));
+
+        stop.store(true, Ordering::Relaxed);
+        handle.join().unwrap();
+        let wire_text = String::from_utf8(sent.lock().unwrap().clone()).unwrap();
+        assert!(
+            wire_text.contains("$CMD:MON,CH:8,PAR:VMON"),
+            "poll は送っている"
+        );
+        assert!(
+            !wire_text.contains("CMD:SET"),
+            "SET は 1 本も送らない: {wire_text:?}"
+        );
+        assert!(
+            !wire_text.contains("CH:3,PAR:STATUS"),
+            "before の読み出しにも入らない"
+        );
     }
 
     /// Fable 3 / 4: poll 周期(10 s)を待たずにコマンドを実行し、実行したらすぐ poll する。
