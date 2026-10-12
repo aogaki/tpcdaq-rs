@@ -5,9 +5,11 @@
 //! `[slowctl]` が無い設定では**何もせずに終了**する(その設定では slowctl を走らせない、
 //! という意思表示。SPEC §3.1 でセクションごと省略可)。
 //!
-//! **監視・記録・アラームのみ**(SPEC §11 の安全境界)—— setpoint を書く経路は無い。
+//! **監視・記録・アラーム**が本分(SPEC §11 の安全境界)—— setpoint・電圧値・ランプを書く経路は
+//! 無い。唯一の作動は HV / LV の ch ごとの ON / OFF で、`[slowctl] cmd_bind` を書いたときだけ
+//! localhost の REP を開く(v1.42、TODO/124)。
 //! ログは `RUST_LOG`(既定 `info`)で絞れる。SIGINT でデバイススレッドと
-//! PUB / PUSH を畳んで終了する。
+//! PUB / PUSH / REP を畳んで終了する。
 
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};

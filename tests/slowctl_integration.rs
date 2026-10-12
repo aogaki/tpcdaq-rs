@@ -24,6 +24,8 @@ use std::time::{Duration, Instant};
 
 use tpcdaq::logbook::LogbookRecord;
 use tpcdaq::monitor::decode_message;
+use tpcdaq::slowctl::fake_hv::FakeHv;
+use tpcdaq::slowctl::hivolta::{mon_bd, mon_ch, BdPar, ChPar, ALL_CH};
 use tpcdaq::slowctl::SlowPayload;
 
 /// 1 本の観測にかける上限。poll は 20 Hz なのでスクリプト全体は 1 秒未満で流れる。
@@ -655,6 +657,213 @@ fn a_missing_influx_token_fails_only_the_slowctl_startup() {
         std::thread::sleep(Duration::from_millis(20));
     };
     assert!(!status.success(), "exit status = {status:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------
+// TODO/124: power ON/OFF の REP(実バイナリ + TCP で話す偽 DT1415ET)
+// ---------------------------------------------------------------------
+
+/// 偽 DT1415ET(`FakeHv`)を TCP(:1470 の代わり)で話させる。接続は 1 本ずつ順に受ける。
+/// 中身はライブラリの `FakeHv` そのもの(ON / OFF で内部の STATUS が変わる — Fable 9)。
+fn fake_hv_over_tcp(mut fake: FakeHv) -> u16 {
+    use std::io::Read;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut buf = [0u8; 256];
+            loop {
+                let n = match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                fake.write_all(&buf[..n]).unwrap();
+                let mut out = Vec::new();
+                let mut chunk = [0u8; 64];
+                while let Ok(m) = fake.read(&mut chunk) {
+                    if m == 0 {
+                        break;
+                    }
+                    out.extend_from_slice(&chunk[..m]);
+                }
+                if !out.is_empty() && stream.write_all(&out).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+    port
+}
+
+/// ident と poll(全 ch 一括)に答える偽 DT1415ET。STATUS は内部の値(ch5 は DIS = 4096)。
+fn fake_dt1415et() -> FakeHv {
+    let mut fake = FakeHv::new();
+    fake.set_response(mon_bd(BdPar::Name), "#CMD:OK,VAL:DT1415ET\r\n");
+    fake.set_response(mon_bd(BdPar::Nch), "#CMD:OK,VAL:8\r\n");
+    fake.set_response(mon_bd(BdPar::Frel), "#CMD:OK,VAL:1.5\r\n");
+    fake.set_response(mon_bd(BdPar::Snum), "#CMD:OK,VAL:SN-124\r\n");
+    fake.set_response(mon_bd(BdPar::Ctr), "#CMD:OK,VAL:REMOTE\r\n");
+    fake.set_response(mon_bd(BdPar::IlkMode), "#CMD:OK,VAL:DISABLE\r\n");
+    let eight = |value: &str| format!("#CMD:OK,VAL:{}\r\n", [value; 8].join(";"));
+    fake.set_response(mon_ch(ALL_CH, ChPar::Vmon), eight("0000.00"));
+    fake.set_response(mon_ch(ALL_CH, ChPar::Imon), eight("+0000.000"));
+    fake.set_response(mon_ch(ALL_CH, ChPar::Vset), eight("0350.00"));
+    fake.set_response(mon_ch(ALL_CH, ChPar::Iset), eight("0015.00"));
+    fake.set_response(mon_bd(BdPar::Alarm), "#CMD:OK,VAL:0\r\n");
+    fake.set_response(mon_bd(BdPar::Ilk), "#CMD:OK,VAL:NO\r\n");
+    fake.set_status(5, 4096);
+    fake
+}
+
+/// controller と同じ使い方: 1 要求ごとに REQ を作って 1 通受ける(来なければ panic)。
+fn power_request(context: &zmq::Context, cmd_port: u16, body: &str) -> serde_json::Value {
+    let req = context.socket(zmq::REQ).unwrap();
+    req.set_rcvtimeo(10_000).unwrap();
+    req.set_linger(0).unwrap();
+    req.connect(&format!("tcp://127.0.0.1:{cmd_port}")).unwrap();
+    req.send(body, 0).unwrap();
+    let raw = req
+        .recv_bytes(0)
+        .expect("the REP answers every request once");
+    serde_json::from_slice(&raw).expect("the reply is JSON")
+}
+
+/// 発注書 §1 の REP 契約を実バイナリで: ON → OFF の before / after、前面スイッチ OFF(DIS)の
+/// 拒否、不正入力(device 無し・ch 範囲外・未知 op・power の無い型・壊れた JSON)にも 1 通ずつ。
+#[test]
+fn the_power_rep_switches_a_hv_channel_and_refuses_bad_requests() {
+    let dir = scratch_dir("power-rep");
+    let script = dir.join("gas_script.txt");
+    std::fs::write(&script, b"100.0\n").unwrap();
+    let hv_port = fake_hv_over_tcp(fake_dt1415et());
+    let cmd_port = free_port();
+
+    let config = write_config(&dir, &script, free_port(), free_port());
+    let text = std::fs::read_to_string(&config).unwrap().replace(
+        "[slowctl]\n",
+        &format!("[slowctl]\ncmd_bind = \"tcp://127.0.0.1:{cmd_port}\"\n"),
+    );
+    let text = format!(
+        "{text}\n[[slowctl.device]]\ntype = \"hivolta\"\nname = \"hv\"\n\
+         addr = \"127.0.0.1:{hv_port}\"\n"
+    );
+    std::fs::write(&config, text).unwrap();
+
+    let child = Command::new(env!("CARGO_BIN_EXE_slowctl"))
+        .args(["--config", &config.to_string_lossy()])
+        .env("RUST_LOG", "warn")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn slowctl");
+    let _guard = Proc(child);
+    let context = zmq::Context::new();
+
+    // 起動直後の接続待ちの間は `device not connected` がありうる —— 識別されるまで繰り返す。
+    let on = r#"{"op":"power","device":"hv","ch":3,"on":true}"#;
+    let deadline = Instant::now() + CONDITION_DEADLINE;
+    let reply = loop {
+        let reply = power_request(&context, cmd_port, on);
+        if reply["error"] != "device not connected" || Instant::now() > deadline {
+            break reply;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(
+        reply,
+        serde_json::json!({"ok": true, "device": "hv", "ch": 3, "on": true,
+                           "before": {"status": 0, "flags": []},
+                           "after": {"status": 1, "flags": ["ON"]}})
+    );
+
+    let off = r#"{"op":"power","device":"hv","ch":3,"on":false}"#;
+    assert_eq!(
+        power_request(&context, cmd_port, off),
+        serde_json::json!({"ok": true, "device": "hv", "ch": 3, "on": false,
+                           "before": {"status": 1, "flags": ["ON"]},
+                           "after": {"status": 0, "flags": []}})
+    );
+
+    // ch5 は前面スイッチ OFF(DIS): SET を送らずに拒否、before は載る。
+    assert_eq!(
+        power_request(
+            &context,
+            cmd_port,
+            r#"{"op":"power","device":"hv","ch":5,"on":true}"#
+        ),
+        serde_json::json!({"ok": false, "error": "front switch is OFF (DIS)",
+                           "before": {"status": 4096, "flags": ["DIS"]}})
+    );
+
+    for (body, reason) in [
+        (
+            r#"{"op":"power","device":"nope","ch":3,"on":true}"#,
+            "unknown device",
+        ),
+        (
+            r#"{"op":"power","device":"hv","ch":8,"on":true}"#,
+            "out of range",
+        ),
+        (
+            r#"{"op":"reboot","device":"hv","ch":3,"on":true}"#,
+            "unknown op",
+        ),
+        (
+            r#"{"op":"power","device":"gas","ch":3,"on":true}"#,
+            "no power on/off",
+        ),
+        ("{not json", "bad request"),
+    ] {
+        let reply = power_request(&context, cmd_port, body);
+        assert_eq!(reply["ok"], false, "{body}");
+        assert_eq!(reply["before"], serde_json::Value::Null, "{body}");
+        let error = reply["error"].as_str().unwrap();
+        assert!(error.contains(reason), "{body}: error = {error:?}");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Fable 8: `cmd_bind` を書かなければ REP は開かない —— 起動済みの slowctl が既定の 47007 を
+/// 掴んでいないことを見る(起動前から 47007 が使われている環境では判定できないので飛ばす)。
+#[test]
+fn without_cmd_bind_the_power_rep_is_not_opened() {
+    let default_rep: std::net::SocketAddr = ([127, 0, 0, 1], 47007).into();
+    let listening =
+        || std::net::TcpStream::connect_timeout(&default_rep, Duration::from_millis(300)).is_ok();
+    if listening() {
+        eprintln!("skip: something already listens on 127.0.0.1:47007");
+        return;
+    }
+
+    let dir = scratch_dir("no-cmd-bind");
+    let script = dir.join("gas_script.txt");
+    std::fs::write(&script, b"100.0\n").unwrap();
+    let pub_port = free_port();
+    let log_port = free_port();
+    let config = write_config(&dir, &script, pub_port, log_port);
+    assert!(!std::fs::read_to_string(&config)
+        .unwrap()
+        .contains("cmd_bind"));
+
+    let context = zmq::Context::new();
+    let (_log_pull, sub) = open_sockets(&context, pub_port, log_port);
+    let child = Command::new(env!("CARGO_BIN_EXE_slowctl"))
+        .args(["--config", &config.to_string_lossy()])
+        .env("RUST_LOG", "warn")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn slowctl");
+    let _guard = Proc(child);
+
+    // status PUB が届いた = 起動は済んでいる(REP を開くなら PUB より前に開いている)。
+    let deadline = Instant::now() + CONDITION_DEADLINE;
+    assert!(next_slow_payload(&sub, deadline).is_some(), "slowctl is up");
+    assert!(!listening(), "cmd_bind 省略なのに 47007 が開いている");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

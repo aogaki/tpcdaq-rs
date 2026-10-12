@@ -1,11 +1,13 @@
 //! CAEN DT1415ET(8 ch Floating Reversible 1kV/1mA Desktop Power Supply for MPGD)読み出し
 //! コーデック(User Manual rev.16, 2024-11-12、TCP :1470 / USB VCP 9600 8N1、同一 ASCII)。
-//! **純関数のみ(IO 無し)**: MON コマンドの生成と応答の解析だけを持つ。
+//! **純関数のみ(IO 無し)**: MON コマンドの生成と応答の解析、それと ch の ON / OFF だけを持つ。
 //!
-//! # 監視のみ(SPEC §11 安全境界)
+//! # 書けるのは ch の ON / OFF だけ(SPEC §11 安全境界 v1.42、TODO/124)
 //!
-//! `$CMD:SET,...`(VSET/ISET/ON/OFF/RUP/RDWN/TRIP/PDWN/BDILKM/BDCLR/BDCFWR…)を生成する関数は
-//! **型として存在しない**。読み出し(`$CMD:MON,...`)のみ。
+//! SET を生成する関数は [`set_power`](`$CMD:SET,CH:X,PAR:ON|OFF`)**1 つだけ**。値の引数を
+//! 持たないので、VSET / ISET / RUP / RDWN / TRIP / PDWN / BDILKM / BDCLR / BDCFWR… は
+//! **型として作れない**(電圧値・電流上限・ランプは機器側で設定する — ユーザー裁定 2026-10-12)。
+//! それ以外は読み出し(`$CMD:MON,...`)のみ。
 //!
 //! # Command Format(User Manual rev.16 p.22)
 //!
@@ -155,6 +157,15 @@ pub fn mon_ch(ch: u8, par: ChPar) -> String {
 /// モジュール単位の MON 要求行を組み立てる(p.24: `$CMD:MON,PAR:YYY<CR,LF>`)。
 pub fn mon_bd(par: BdPar) -> String {
     format!("$CMD:MON,PAR:{}\r\n", par.token())
+}
+
+/// ch の ON / OFF(p.25 の SET 表: `$CMD:SET,CH:X,PAR:ON` / `PAR:OFF`、応答は `#CMD:OK`)。
+///
+/// **このコーデックで唯一の SET 生成関数**(SPEC §11 v1.42、TODO/124)。`ch` の範囲は呼び出し
+/// 側が守る —— `CH:8`(= [`ALL_CH`])は**全 ch まとめて**の意味になるので、ドライバは
+/// `ch < nch` を確かめてから呼ぶ。
+pub fn set_power(ch: u8, on: bool) -> String {
+    format!("$CMD:SET,CH:{ch},PAR:{}\r\n", if on { "ON" } else { "OFF" })
 }
 
 /// [`parse_reply`] の失敗要因(p.22 のエラー表 + silent failure を作らない CLAUDE.md 方針)。
@@ -326,6 +337,22 @@ impl ChStatus {
     }
     pub fn lock(self) -> bool {
         self.0 & (1 << 14) != 0
+    }
+
+    /// 立っているビットの名前を bit 順に並べる(power 応答の `flags`、TODO/124)。
+    ///
+    /// 綴りは UI の STATUS 表(`ui/src/app/slow/slow-table.ts` の `STATUS_BITS`)と同じ。
+    /// 名前の無い bit 15 は `B15` として出す(黙って捨てない)。
+    pub fn flag_names(self) -> Vec<&'static str> {
+        const NAMES: [&str; 16] = [
+            "ON", "UP", "DOWN", "OVC", "OVV", "UNV", "TRIP", "OVP", "TWN", "OVT", "KILL", "INTLK",
+            "DIS", "FAIL", "LOCK", "B15",
+        ];
+        (0u16..)
+            .zip(NAMES)
+            .filter(|(bit, _)| self.0 & (1 << bit) != 0)
+            .map(|(_, name)| name)
+            .collect()
     }
 }
 
@@ -664,6 +691,66 @@ mod tests {
         assert!(alarm.ovp());
         assert!(alarm.ovt());
         assert!(alarm.int_comm_fail());
+    }
+
+    // ---- ⑧power ON/OFF(TODO/124、SPEC §11 v1.42 の唯一の例外)。p.25 の SET 表。 ----
+
+    /// p.25: `$CMD:SET,CH:X,PAR:ON` / `$CMD:SET,CH:X,PAR:OFF`(終端は p.22 の `<CR,LF>`)。
+    #[test]
+    fn set_power_matches_the_manual_on_and_off_commands() {
+        assert_eq!(set_power(3, true), "$CMD:SET,CH:3,PAR:ON\r\n");
+        assert_eq!(set_power(0, false), "$CMD:SET,CH:0,PAR:OFF\r\n");
+        assert_eq!(set_power(7, false), "$CMD:SET,CH:7,PAR:OFF\r\n");
+    }
+
+    /// `set_power` の**定義域まるごと**(u8 × bool = 512 通り)が PAR:ON / PAR:OFF にしか
+    /// 写らない —— 値の引数が無いので VSET / ISET / RUP 等は型として作れない。
+    #[test]
+    fn set_power_can_only_ever_produce_par_on_or_par_off() {
+        for ch in 0..=u8::MAX {
+            for on in [true, false] {
+                let line = set_power(ch, on);
+                let expected =
+                    format!("$CMD:SET,CH:{ch},PAR:{}\r\n", if on { "ON" } else { "OFF" });
+                assert_eq!(line, expected);
+            }
+        }
+    }
+
+    /// 本体側(テスト節より前)のソースで `"$CMD:SET` を作る文字列リテラルは 1 個だけ
+    /// (= [`set_power`])、ドライバ側は 0 個(コーデック経由でしか SET を作らない)。
+    /// 「SET を生成する関数を足していない」ことの機械的な見張り。
+    #[test]
+    fn set_power_is_the_only_set_command_in_the_hivolta_sources() {
+        fn production_part(source: &str) -> &str {
+            let end = source.find("#[cfg(test)]").unwrap_or(source.len());
+            &source[..end]
+        }
+        let codec = production_part(include_str!("hivolta.rs"));
+        let driver = production_part(include_str!("hivolta_driver.rs"));
+        assert_eq!(codec.matches("\"$CMD:SET").count(), 1);
+        assert_eq!(driver.matches("\"$CMD:SET").count(), 0);
+        assert_eq!(driver.matches("CMD:SET").count(), 0);
+    }
+
+    /// `flags` は立っているビットの名前(UI の STATUS 表と同じ綴り)。名前の無い bit 15 は `B15`。
+    #[test]
+    fn flag_names_list_every_set_bit_in_bit_order() {
+        assert!(ChStatus(0).flag_names().is_empty());
+        // 33 = bit0 + bit5(実機 ch0、TODO/121)。
+        assert_eq!(ChStatus(33).flag_names(), vec!["ON", "UNV"]);
+        // 4096 = bit12(前面スイッチ OFF)。
+        assert_eq!(ChStatus(4096).flag_names(), vec!["DIS"]);
+        // 0x7FFF = bit0..=14 全部。
+        assert_eq!(
+            ChStatus(0x7FFF).flag_names(),
+            vec![
+                "ON", "UP", "DOWN", "OVC", "OVV", "UNV", "TRIP", "OVP", "TWN", "OVT", "KILL",
+                "INTLK", "DIS", "FAIL", "LOCK"
+            ]
+        );
+        // 0x8003 = bit15 + bit1 + bit0。黙って捨てない。
+        assert_eq!(ChStatus(0x8003).flag_names(), vec!["ON", "UP", "B15"]);
     }
 
     // ---- ⑦Link: fake を挟んで 1 往復、空応答(タイムアウト)。生の $CMD:SET は fake 側で確認。 ----

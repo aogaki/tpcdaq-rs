@@ -53,6 +53,9 @@ pub const SLOWCTL_SOURCE_ID: u32 = 200;
 /// slowctl の status PUB bind の既定(SPEC §3.2 v1.31)。
 pub const DEFAULT_SLOWCTL_STATUS_PUB: &str = "tcp://*:47006";
 
+/// `[slowctl] cmd_bind` に許す形(SPEC §3.1 v1.42「localhost 以外に bind しない」、TODO/124)。
+const SLOWCTL_CMD_BIND_PREFIX: &str = "tcp://127.0.0.1:";
+
 /// slowctl → controller の LogPost PUSH 接続先の既定
 /// ([`DEFAULT_CONTROLLER_LOG_PULL_BIND`] の connect 側表記)。
 pub const DEFAULT_CONTROLLER_LOG_PUSH_ENDPOINT: &str = "tcp://127.0.0.1:47005";
@@ -226,12 +229,16 @@ pub struct Config {
     pub slowctl: Option<SlowctlConfig>,
 }
 
-/// `[slowctl]`(SPEC §3.1 v1.31、TODO/079)。**監視・記録・アラームのみ** ——
-/// setpoint を書くキーは存在しない(SPEC §11 の安全境界)。
+/// `[slowctl]`(SPEC §3.1 v1.31、TODO/079)。**監視・記録・アラーム**が本分 ——
+/// setpoint を書くキーは存在しない(SPEC §11 の安全境界)。唯一の作動は HV / LV の ch ごとの
+/// ON / OFF で、それも `cmd_bind` を書いたときだけ口が開く(v1.42、TODO/124)。
 #[derive(Debug, Clone, PartialEq)]
 pub struct SlowctlConfig {
     /// status PUB の bind(既定 [`DEFAULT_SLOWCTL_STATUS_PUB`])。
     pub status_pub: String,
+    /// power ON/OFF の REP の bind(SPEC §3.1 / §3.2 v1.42 = `tcp://127.0.0.1:47007`)。
+    /// **opt-in**: `None`(省略)= REP を開かない(作動 API 無し)。localhost 以外は設定エラー。
+    pub cmd_bind: Option<String>,
     /// controller のログ投稿 PULL への PUSH 接続先(既定
     /// [`DEFAULT_CONTROLLER_LOG_PUSH_ENDPOINT`])。SPEC §3.1 の例には無いが、
     /// ポートを**コードに焼き込まない**ため設定で上書きできる形にしてある。
@@ -530,6 +537,7 @@ struct RawConfig {
 #[serde(deny_unknown_fields, default)]
 struct RawSlowctl {
     status_pub: Option<String>,
+    cmd_bind: Option<String>,
     log_push: Option<String>,
     poll_hz: Option<f64>,
     log_every_s: Option<u64>,
@@ -804,6 +812,7 @@ fn resolve(raw: RawConfig) -> Config {
             status_pub: raw
                 .status_pub
                 .unwrap_or_else(|| DEFAULT_SLOWCTL_STATUS_PUB.to_string()),
+            cmd_bind: raw.cmd_bind,
             log_push: raw
                 .log_push
                 .unwrap_or_else(|| DEFAULT_CONTROLLER_LOG_PUSH_ENDPOINT.to_string()),
@@ -898,6 +907,15 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
 /// 「静かに何も読まない slowctl」を作らないことが目的: 知らない `type`、口の無いデバイス、
 /// 0 以下の周期はすべて起動失敗にする(SPEC §3.2「半端な既定値で走らない」)。
 fn validate_slowctl(slowctl: &SlowctlConfig) -> Result<(), ConfigError> {
+    // SPEC §3.1 v1.42: power ON/OFF の REP は localhost 以外に bind しない(controller だけが話す)。
+    if let Some(cmd_bind) = &slowctl.cmd_bind {
+        if !cmd_bind.starts_with(SLOWCTL_CMD_BIND_PREFIX) {
+            return Err(ConfigError::InvalidSlowctl(format!(
+                "cmd_bind {cmd_bind:?} must be on localhost ({SLOWCTL_CMD_BIND_PREFIX}<port>) — \
+                 the power on/off REP is never opened beyond this host (SPEC §11 v1.42)"
+            )));
+        }
+    }
     // NaN も含めて「正の有限値でない」を弾く(黙って走らせない)。
     if !slowctl.poll_hz.is_finite() || slowctl.poll_hz <= 0.0 {
         return Err(ConfigError::InvalidSlowctl(format!(
@@ -2514,6 +2532,47 @@ alarms = [{ node = 4, param = "fmeasure", lo = 90.0, hi = 110.0 }]
         assert_eq!(device.alarms[0].param, "fmeasure");
         assert_f64_eq(device.alarms[0].lo, 90.0);
         assert_f64_eq(device.alarms[0].hi, 110.0);
+    }
+
+    /// TODO/124 Fable 8: `cmd_bind`(power ON/OFF の REP)は opt-in —— 省略 = 開かない。
+    #[test]
+    fn the_power_rep_is_closed_unless_cmd_bind_is_written() {
+        let geometry = make_temp_geometry_file();
+        let without = "[slowctl]\n[[slowctl.device]]\ntype = \"hivolta\"\nname = \"hv\"\n\
+                       addr = \"127.0.0.1:1470\"\n";
+        let config = parse(&minimal_toml(&geometry, without)).unwrap();
+        assert_eq!(config.slowctl.unwrap().cmd_bind, None);
+
+        let with = without.replace(
+            "[slowctl]\n",
+            "[slowctl]\ncmd_bind = \"tcp://127.0.0.1:47007\"\n",
+        );
+        let config = parse(&minimal_toml(&geometry, &with)).unwrap();
+        assert_eq!(
+            config.slowctl.unwrap().cmd_bind.as_deref(),
+            Some("tcp://127.0.0.1:47007"),
+            "SPEC §3.2 の 47007"
+        );
+    }
+
+    /// SPEC §3.1 v1.42: `cmd_bind` は localhost 以外に bind しない(書いたら起動失敗)。
+    #[test]
+    fn a_cmd_bind_beyond_localhost_is_a_startup_failure() {
+        let geometry = make_temp_geometry_file();
+        for endpoint in [
+            "tcp://*:47007",
+            "tcp://0.0.0.0:47007",
+            "tcp://192.168.144.220:47007",
+            "tcp://127.0.0.1.example.org:47007",
+        ] {
+            let extra = format!("[slowctl]\ncmd_bind = \"{endpoint}\"\n");
+            match parse(&minimal_toml(&geometry, &extra)) {
+                Err(ConfigError::InvalidSlowctl(message)) => {
+                    assert!(message.contains("cmd_bind"), "message = {message:?}");
+                }
+                other => panic!("{endpoint}: expected InvalidSlowctl, got {other:?}"),
+            }
+        }
     }
 
     /// `[monitor] slow_sub` は SPEC §3.2 の 47006 を指す任意キー。

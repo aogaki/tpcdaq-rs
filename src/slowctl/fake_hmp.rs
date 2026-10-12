@@ -8,6 +8,10 @@
 //! この fake は登録されていない行(例えば `VOLT 5\n` のような設定系コマンド — `hmp` モジュールは
 //! そもそもこれを生成する関数を持たない)には応答しない。生成できないコマンドが誤って流れても
 //! 黙って成功したように見えないことを、fake 自体の負性テストで確認する。
+//!
+//! TODO/124: 唯一の設定系 `OUTP ON` / `OUTP OFF`(非クエリ、応答なし)は選んだ ch の出力を
+//! 書き換え、登録の無い `OUTP?` はその出力で答える(fake_hv の Fable 9 と同じ流儀 ——
+//! 登録・積んだ応答が優先)。
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
@@ -25,6 +29,8 @@ pub struct FakeHmp {
     /// この状態を読み戻す —— 実機の「選択は効いたが SET コマンド自体には応答が無い」
     /// 挙動を模す。
     selected_channel: Option<u8>,
+    /// ch1 / ch2 の出力(TODO/124)。`OUTP ON` / `OUTP OFF` が選んだ ch を書き換える。
+    outputs: [bool; 2],
     silent: bool,
     incoming: Vec<u8>,
     outgoing: VecDeque<u8>,
@@ -42,10 +48,25 @@ impl FakeHmp {
             responses: HashMap::new(),
             sequenced: HashMap::new(),
             selected_channel: None,
+            outputs: [false; 2],
             silent: false,
             incoming: Vec::new(),
             outgoing: VecDeque::new(),
         }
+    }
+
+    /// ch(1 / 2)の出力の初期値(TODO/124)。範囲外の ch は無視する。
+    pub fn set_output(&mut self, ch: u8, on: bool) -> &mut Self {
+        if let Some(slot) = self.output_slot(Some(ch)) {
+            *slot = on;
+        }
+        self
+    }
+
+    /// ch(1 / 2)の出力の置き場。未選択・範囲外は `None`。
+    fn output_slot(&mut self, ch: Option<u8>) -> Option<&mut bool> {
+        let index = usize::from(ch?).checked_sub(1)?;
+        self.outputs.get_mut(index)
     }
 
     /// `request_line`(LF 終端込み、例 `"MEAS:VOLT?\n"`)に `reply_line`(LF または CRLF 終端込み)
@@ -111,6 +132,22 @@ impl Write for FakeHmp {
             } else if let Some(ch) = parse_nsel_set(&line) {
                 // 非クエリ(`INST:NSEL n`)。実機はここに応答を返さない —— 積まずに状態だけ持つ。
                 self.selected_channel = Some(ch);
+            } else if line == "OUTP ON\n" || line == "OUTP OFF\n" {
+                // TODO/124: 非クエリ。選んだ ch の出力だけを書き換え、応答は積まない。
+                let on = line == "OUTP ON\n";
+                match self.output_slot(self.selected_channel) {
+                    Some(slot) => *slot = on,
+                    None => eprintln!("FakeHmp: {line:?} with no channel selected"),
+                }
+            } else if line == "OUTP?\n" {
+                // TODO/124: 選んだ ch の出力で答える(未選択なら答えない = 設定漏れが表に出る)。
+                match self.output_slot(self.selected_channel) {
+                    Some(on) => {
+                        let reply = if *on { "1\n" } else { "0\n" };
+                        self.outgoing.extend(reply.as_bytes());
+                    }
+                    None => eprintln!("FakeHmp: OUTP? with no channel selected"),
+                }
             } else {
                 // テスト設定漏れ、または本来生成できないはずのコマンド(VOLT/CURR/OUTP ON 等)。
                 // silent にせず可視化する(CLAUDE.md)。
@@ -234,6 +271,48 @@ mod tests {
         let mut b = [0u8; 1];
         let err = fake.read(&mut b).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    /// TODO/124: `OUTP ON` / `OUTP OFF`(非クエリ = 応答なし)は選んだ ch の出力を書き換え、
+    /// 登録の無い `OUTP?` は選んだ ch の出力で答える。ほかの ch は変わらない。
+    #[test]
+    fn outp_on_and_off_switch_only_the_selected_channel() {
+        let mut fake = FakeHmp::new();
+        fake.set_output(1, true);
+
+        fake.write_all(b"INST:NSEL 2\n").unwrap();
+        fake.write_all(b"OUTP ON\n").unwrap();
+        let mut b = [0u8; 1];
+        assert_eq!(
+            fake.read(&mut b).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "OUTP ON に応答は無い"
+        );
+        fake.write_all(b"OUTP?\n").unwrap();
+        assert_eq!(read_line(&mut fake), b"1\n", "ch2 が ON");
+
+        fake.write_all(b"INST:NSEL 1\n").unwrap();
+        fake.write_all(b"OUTP?\n").unwrap();
+        assert_eq!(read_line(&mut fake), b"1\n", "ch1 は元のまま");
+        fake.write_all(b"OUTP OFF\n").unwrap();
+        fake.write_all(b"OUTP?\n").unwrap();
+        assert_eq!(read_line(&mut fake), b"0\n", "ch1 だけ OFF");
+
+        fake.write_all(b"INST:NSEL 2\n").unwrap();
+        fake.write_all(b"OUTP?\n").unwrap();
+        assert_eq!(read_line(&mut fake), b"1\n", "ch2 は ON のまま");
+    }
+
+    /// 積んだ `OUTP?` の応答は内部の出力より優先(既存の poll テストを壊さない)。
+    #[test]
+    fn a_pushed_outp_reply_wins_over_the_internal_output() {
+        let mut fake = FakeHmp::new();
+        fake.push_response("OUTP?\n", "1\n");
+        fake.write_all(b"INST:NSEL 1\n").unwrap();
+        fake.write_all(b"OUTP?\n").unwrap();
+        assert_eq!(read_line(&mut fake), b"1\n");
+        fake.write_all(b"OUTP?\n").unwrap();
+        assert_eq!(read_line(&mut fake), b"0\n", "キューが尽きたら内部の値");
     }
 
     /// `INST:NSEL?` は直前の `INST:NSEL n` を読み戻す(fake が状態を持つ、TODO/089 レビュー)。
