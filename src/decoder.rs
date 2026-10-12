@@ -989,6 +989,9 @@ struct Handler {
     core: Option<Arc<Mutex<RunDecoder>>>,
     abandon: Option<Arc<AtomicBool>>,
     stop_tx: Option<StdSender<()>>,
+    /// デコードスレッド。PULL ソケットはこのスレッドが握っているので、**join できたこと =
+    /// PULL ポートが空いたこと**(TODO/116)。join するのは `Reset` だけ。
+    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Handler {
@@ -1003,6 +1006,7 @@ impl Handler {
             core: None,
             abandon: None,
             stop_tx: None,
+            thread: None,
         }
     }
 
@@ -1114,16 +1118,22 @@ impl Handler {
         self.stop_tx = Some(stop_tx);
         let heartbeat_interval = Duration::from_millis(self.params.heartbeat_ms);
 
-        std::thread::Builder::new()
+        let handle = std::thread::Builder::new()
             .name("decoder".to_string())
             .spawn(move || {
                 run_decoder_thread(pull, push, core, abandon, heartbeat_interval, stop_rx)
             })
             .map_err(|e| format!("cannot spawn decoder thread: {e}"))?;
+        // 前 run の handle(Stop だけで Reset していない場合)は上書きで捨てる(= detach、
+        // 従来どおり)。本番の固定ポートでは、そのスレッドが PULL を握ったままなら Arm が
+        // 通らずここまで来ないので、捨てる時点で既に終わっている。
+        self.thread = Some(handle);
         Ok(())
     }
 
     /// `Stop` は送出を打ち切らない(EOS/残バッチの送出完了まで待つ = ロスレス)。
+    /// **スレッドも待たない**(TODO/116): 背圧の下では下流が空くまで送り続けるのが正しく、
+    /// その間コマンド REP をブロックさせない。
     fn do_stop(&mut self) -> Result<(), String> {
         self.signal_stop();
         self.bind_address = None;
@@ -1135,11 +1145,19 @@ impl Handler {
     ///
     /// **コア(= カウンタ)は捨てない**: 破棄が可視化されていることが Reset を許す条件なので、
     /// Reset 後の `GetStatus` でも実績を読めなければ意味がない。
+    ///
+    /// **スレッドの終了を待ってから返る**(TODO/116、receiver の `join_sender` と同じ形)。
+    /// 待たずに返ると、スレッドが PULL を放す前に controller の Arm が同じポートへ bind を
+    /// 試みて `Address already in use` で落ちる(実機 ELITPC 2026-10-12: 放すまで ~900 ms、
+    /// controller の Arm リトライ予算は合計 620 ms)。join 済みなので Reset の応答は最終
+    /// カウンタを載せる。
     fn do_reset(&mut self) -> Result<(), String> {
         if let Some(abandon) = &self.abandon {
             abandon.store(true, Ordering::Relaxed);
         }
         self.signal_stop();
+        // 打ち切り合図の後なので join は有限時間で返る(上限は `join_thread` のドキュメント)。
+        self.join_thread();
         self.pull_socket = None;
         self.bind_address = None;
         self.run_number = None;
@@ -1149,6 +1167,31 @@ impl Handler {
     fn signal_stop(&mut self) {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(()); // スレッドが既に居なくても構わない
+        }
+    }
+
+    /// デコードスレッドの終了を待つ。**呼ぶ前に必ず `abandon` と停止合図を済ませておくこと**
+    /// (そうでないと下流不在のとき送出待ちで永久にブロックする — だから `Stop` は呼ばない)。
+    ///
+    /// # 上限(T = `send_timeout_ms` = PUSH の sndtimeo)
+    ///
+    /// 合図の後のスレッドの待ちはすべて有限:
+    /// - PULL の poll は ≤ [`POLL_TIMEOUT_MS`]、recv は `DONTWAIT`。
+    /// - 送出([`send_lossless`])は 1 回の send が ≤ T で EAGAIN を返し、そこで `abandon` を
+    ///   見て `Abandoned` で抜ける。合図の後に走りうる送出は最大 2 本(flush 中のバッチの
+    ///   残りと自分の EOS)で、抜けた後の周回先頭で停止合図を見て脱出する(残バッチは
+    ///   打ち切り済みで空)。
+    ///
+    /// よって最悪 ≈ poll 1 回 + 2T(既定 T = 1 s で ~2.1 s、controller の command_timeout
+    /// 既定 5 s に収まる)。実機の典型(バッチ送出待ちの途中)は T 未満。
+    fn join_thread(&mut self) {
+        let Some(handle) = self.thread.take() else {
+            return;
+        };
+        if handle.join().is_err() {
+            // スレッドが panic して死んでいた。カウンタが途中で止まっている可能性がある
+            // (コアの Mutex が毒されていれば次の GetStatus で Error に落ちる)。
+            error!("decoder thread panicked — its counters may be incomplete");
         }
     }
 
