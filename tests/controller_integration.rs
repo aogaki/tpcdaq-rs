@@ -1315,7 +1315,7 @@ async fn log_posts_are_stamped_with_ts_and_seq_and_bad_ones_are_counted() {
     push.send(
         json!({
             "type": "slow", "actor": "slowctl", "device": "gas", "node": 4,
-            "event": "VALUE", "values": {"fmeasure": {"value": 130.5, "unit": "mbar"}}
+            "event": "ALARM", "values": {"fmeasure": {"value": 130.5, "unit": "mbar"}}
         })
         .to_string()
         .as_bytes(),
@@ -1396,14 +1396,34 @@ async fn the_run_records_carry_the_latest_slow_values() {
         )
         .unwrap();
     }
-    wait_until("both slow log posts to land", || {
+    // 番兵: PUSH -> PULL は同一経路で順序が保たれるので、これがログブックに現れた時点で
+    // 手前の VALUE 2 本は処理済み(TODO/121 §B: VALUE はログブックに書かない)。
+    push.send(
+        json!({
+            "type": "slow", "actor": "slowctl", "device": "gas", "node": null,
+            "event": "IDENT", "values": {"model": "MKR1000"}
+        })
+        .to_string()
+        .as_bytes(),
+        0,
+    )
+    .unwrap();
+    wait_until("the sentinel IDENT to land", || {
         harness
             .logbook()
             .iter()
-            .filter(|r| r["type"] == json!("slow"))
-            .count()
-            == 2
+            .any(|r| r["type"] == json!("slow") && r["event"] == json!("IDENT"))
     });
+    let slow_rows: Vec<Value> = harness
+        .logbook()
+        .into_iter()
+        .filter(|r| r["type"] == json!("slow"))
+        .collect();
+    assert_eq!(slow_rows.len(), 1, "VALUE は書かれない: {slow_rows:?}");
+    // 書かなかった VALUE は数える(silent にしない)。
+    let (_, body) = get(harness.rest, "/api/status");
+    assert_eq!(body["log_posts"]["slow_values_not_logged"], json!(2));
+    assert_eq!(body["log_posts"]["accepted"], json!(1));
 
     let token = harness.acquire("aogaki");
     let (status, body) = post(
