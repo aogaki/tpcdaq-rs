@@ -20,8 +20,8 @@ use std::time::Duration;
 use tracing::info;
 
 use super::hmp::{
-    idn, meas_curr, meas_volt, nsel, nsel_query, outp_query, parse_bool01, parse_f64, parse_idn,
-    parse_syst_err, syst_err, LinkError, ScpiLink, MAX_CH, MIN_CH,
+    curr_query, idn, meas_curr, meas_volt, nsel, nsel_query, outp_query, parse_bool01, parse_f64,
+    parse_idn, parse_syst_err, syst_err, volt_query, LinkError, ScpiLink, MAX_CH, MIN_CH,
 };
 use super::{now_ms, Driver, DriverError, Ident, Sample};
 
@@ -33,6 +33,8 @@ pub const BAUD_RATE: u32 = 9_600;
 pub const PARAM_VOLT: &str = "volt";
 pub const PARAM_CURR: &str = "curr";
 pub const PARAM_OUTP: &str = "outp";
+pub const PARAM_VSET: &str = "vset";
+pub const PARAM_ISET: &str = "iset";
 
 pub const UNIT_V: &str = "V";
 pub const UNIT_A: &str = "A";
@@ -104,7 +106,7 @@ impl<T: Read + Write> Driver for HmpDriver<T> {
 
     fn poll(&mut self) -> Result<Vec<Sample>, DriverError> {
         let ts_ms = now_ms();
-        let mut samples = Vec::with_capacity(6);
+        let mut samples = Vec::with_capacity(10);
 
         for ch in MIN_CH..=MAX_CH {
             let nsel_cmd = nsel(ch).map_err(|e| DriverError::Protocol(e.to_string()))?;
@@ -134,6 +136,12 @@ impl<T: Read + Write> Driver for HmpDriver<T> {
             let outp =
                 parse_bool01(&outp_reply).map_err(|e| DriverError::Protocol(e.to_string()))?;
 
+            // 設定値の読み出し(TODO/120、問い合わせのみ)。
+            let vset_reply = self.link.exchange(volt_query()).map_err(driver_error)?;
+            let vset = parse_f64(&vset_reply).map_err(|e| DriverError::Protocol(e.to_string()))?;
+            let iset_reply = self.link.exchange(curr_query()).map_err(driver_error)?;
+            let iset = parse_f64(&iset_reply).map_err(|e| DriverError::Protocol(e.to_string()))?;
+
             samples.push(Sample {
                 device: self.device.clone(),
                 node: Some(ch),
@@ -158,6 +166,24 @@ impl<T: Read + Write> Driver for HmpDriver<T> {
                 param: PARAM_OUTP.to_string(),
                 value: if outp { 1.0 } else { 0.0 },
                 unit: UNIT_ON.to_string(),
+                ts_ms,
+                alarm: false,
+            });
+            samples.push(Sample {
+                device: self.device.clone(),
+                node: Some(ch),
+                param: PARAM_VSET.to_string(),
+                value: vset,
+                unit: UNIT_V.to_string(),
+                ts_ms,
+                alarm: false,
+            });
+            samples.push(Sample {
+                device: self.device.clone(),
+                node: Some(ch),
+                param: PARAM_ISET.to_string(),
+                value: iset,
+                unit: UNIT_A.to_string(),
                 ts_ms,
                 alarm: false,
             });
@@ -214,6 +240,11 @@ mod tests {
     /// 読み戻す、TODO/089 レビュー)。`MEAS:VOLT?`/`MEAS:CURR?`/`OUTP?` は ch1 → ch2 の順で
     /// 同じ要求文字列を再利用するので [`FakeHmp::push_response`](順番に消費するキュー)へ積む。
     fn register_measurements(fake: &mut FakeHmp, volt: &str, curr: &str, outp: &str) {
+        // 設定値(TODO/120)。測定値から導いた非対称な値(実機未採取、形式は MEAS と同じと仮定)。
+        let vset = volt.parse::<f64>().unwrap() + 0.5;
+        let iset = curr.parse::<f64>().unwrap() * 2.0;
+        fake.push_response("VOLT?\n", format!("{vset}\n"));
+        fake.push_response("CURR?\n", format!("{iset}\n"));
         fake.push_response("MEAS:VOLT?\n", format!("{volt}\n"));
         fake.push_response("MEAS:CURR?\n", format!("{curr}\n"));
         fake.push_response("OUTP?\n", format!("{outp}\n"));
@@ -249,10 +280,10 @@ mod tests {
         ));
     }
 
-    /// ch1/ch2 それぞれ 3 サンプル(volt/curr/outp)、末尾に SYST:ERR = 0 を確認して通る
-    /// (6 サンプル、発注書 §1/§2)。
+    /// ch1/ch2 それぞれ 5 サンプル(volt/curr/outp/vset/iset)、末尾に SYST:ERR = 0 を確認して通る
+    /// (10 サンプル、発注書 §1/§2)。
     #[test]
-    fn poll_of_both_channels_yields_six_samples_and_checks_syst_err_zero() {
+    fn poll_of_both_channels_yields_ten_samples_and_checks_syst_err_zero() {
         let mut fake = FakeHmp::new();
         register_measurements(&mut fake, "5.000", "0.5000", "1");
         register_measurements(&mut fake, "12.000", "1.2000", "0");
@@ -261,7 +292,7 @@ mod tests {
         let mut driver = HmpDriver::new("hv_hmp", fake, String::new());
         let samples = driver.poll().unwrap();
 
-        assert_eq!(samples.len(), 6);
+        assert_eq!(samples.len(), 10);
         assert_eq!(samples[0].node, Some(1));
         assert_eq!(samples[0].param, "volt");
         assert_eq!(samples[0].value, 5.0);
@@ -273,9 +304,22 @@ mod tests {
         assert_eq!(samples[2].value, 1.0, "OUTP? 1 = ON");
         assert_eq!(samples[2].unit, "on");
 
-        assert_eq!(samples[3].node, Some(2));
-        assert_eq!(samples[3].value, 12.0);
-        assert_eq!(samples[5].value, 0.0, "OUTP? 0 = OFF");
+        // ch1 の設定値(VOLT? = 5.0 + 0.5、CURR? = 0.5 * 2)。
+        assert_eq!(samples[3].param, "vset");
+        assert_eq!(samples[3].value, 5.5);
+        assert_eq!(samples[3].unit, "V");
+        assert_eq!(samples[4].param, "iset");
+        assert_eq!(samples[4].value, 1.0);
+        assert_eq!(samples[4].unit, "A");
+
+        assert_eq!(samples[5].node, Some(2));
+        assert_eq!(samples[5].value, 12.0);
+        assert_eq!(samples[7].value, 0.0, "OUTP? 0 = OFF");
+        // ch2 の設定値(12.0 + 0.5、1.2 * 2)。
+        assert_eq!(samples[8].param, "vset");
+        assert_eq!(samples[8].value, 12.5);
+        assert_eq!(samples[9].param, "iset");
+        assert_eq!(samples[9].value, 2.4);
         assert!(
             samples.iter().all(|s| !s.alarm),
             "HMP に alarm は無い(発注書 §1)"
