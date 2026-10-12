@@ -123,6 +123,7 @@ async fn real_graw_replay_through_receiver_matches_the_source_file_byte_for_byte
         max_file_bytes: tpcdaq::config::DEFAULT_GRAW_WRITER_MAX_FILE_BYTES,
         flush_interval_ms: 200,
         expected_sources: vec![0],
+        finalize_delay_ms: 0,
     };
     let (gw_shutdown_tx, gw_shutdown_rx) = broadcast::channel(1);
     let (gw_ep_tx, gw_ep_rx) = oneshot::channel();

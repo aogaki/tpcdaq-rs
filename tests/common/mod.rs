@@ -499,6 +499,7 @@ pub async fn spawn_components_listening(
         max_file_bytes: tpcdaq::config::DEFAULT_GRAW_WRITER_MAX_FILE_BYTES,
         flush_interval_ms: tpcdaq::config::DEFAULT_GRAW_WRITER_FLUSH_INTERVAL_MS,
         expected_sources: vec![0],
+        finalize_delay_ms: 0,
     };
     let (gw_shutdown, gw_rx) = broadcast::channel(1);
     let (gw_tx, gw_ep_rx) = oneshot::channel();

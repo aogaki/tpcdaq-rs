@@ -69,6 +69,9 @@ pub struct GrawWriterParams {
     pub flush_interval_ms: u64,
     /// 期待ソース集合(設定の `[[cobo]]` 全 id、SPEC §7 の EOS 判定)。
     pub expected_sources: Vec<u32>,
+    /// テスト専用フック(本番は 0): finalize の直前に挟む遅延(ミリ秒)。遅い fsync の再現用
+    /// (TODO/117 — PULL ポートが finalize より前に空くことの検査)。
+    pub finalize_delay_ms: u64,
 }
 
 impl GrawWriterParams {
@@ -81,6 +84,7 @@ impl GrawWriterParams {
             max_file_bytes: config.graw_writer.max_file_bytes,
             flush_interval_ms: config.graw_writer.flush_interval_ms,
             expected_sources: config.cobo.iter().map(|c| c.id).collect(),
+            finalize_delay_ms: 0,
         }
     }
 }
@@ -750,6 +754,44 @@ fn run_writer_thread(
     run_number: u32,
     flush_interval: Duration,
     stop_rx: StdReceiver<()>,
+    finalize_delay: Duration,
+) {
+    // `pull` は move で渡す: 戻った時点で drop 済み = PULL ポートは finalize(fsync)より前に
+    // 空く(TODO/117。fsync が長くても次の Arm の bind を妨げない)。
+    consume_until_done(
+        pull,
+        &writer,
+        &expected_sources,
+        run_number,
+        flush_interval,
+        &stop_rx,
+    );
+
+    if !finalize_delay.is_zero() {
+        std::thread::sleep(finalize_delay);
+    }
+    match writer.lock() {
+        Ok(mut w) => {
+            if let Err(e) = w.finalize() {
+                error!(run_number, error = %e, "graw-writer: finalize failed");
+            }
+        }
+        Err(_) => error!(
+            run_number,
+            "graw-writer: RunWriter mutex poisoned at finalize"
+        ),
+    }
+    info!(run_number, "graw-writer thread stopped");
+}
+
+/// 受信ループ本体。`pull` の所有権を取り、戻る時に drop する。
+fn consume_until_done(
+    pull: zmq::Socket,
+    writer: &Mutex<RunWriter>,
+    expected_sources: &HashSet<u32>,
+    run_number: u32,
+    flush_interval: Duration,
+    stop_rx: &StdReceiver<()>,
 ) {
     if let Err(e) = pull.set_rcvtimeo(POLL_TIMEOUT_MS) {
         error!(error = %e, "graw-writer: cannot set PULL recv timeout — stop/flush polling degraded");
@@ -791,12 +833,12 @@ fn run_writer_thread(
                     // 異常な EOS は 2 種類とも**数えてから捨てる**(TODO/023-3 = R-P2-9):
                     // run 不一致も期待外ソースも、run を閉じる材料には使わない。
                     if eos_run != run_number {
-                        if !record(&writer, |w| w.record_eos_run_mismatch(source_id, eos_run)) {
+                        if !record(writer, |w| w.record_eos_run_mismatch(source_id, eos_run)) {
                             break 'consume;
                         }
                     } else if !expected_sources.contains(&source_id) {
-                        if !record(&writer, |w| {
-                            w.record_unexpected_source(source_id, &expected_sources)
+                        if !record(writer, |w| {
+                            w.record_unexpected_source(source_id, expected_sources)
                         }) {
                             break 'consume;
                         }
@@ -812,13 +854,13 @@ fn run_writer_thread(
                     }
                 }
                 Ok(Message::Heartbeat { .. }) => {
-                    if !record(&writer, RunWriter::record_heartbeat) {
+                    if !record(writer, RunWriter::record_heartbeat) {
                         break 'consume;
                     }
                 }
                 Err(e) => {
                     warn!(error = %e, "graw-writer: cannot decode message — counted and skipped");
-                    if !record(&writer, RunWriter::record_decode_error) {
+                    if !record(writer, RunWriter::record_decode_error) {
                         break 'consume;
                     }
                 }
@@ -837,19 +879,6 @@ fn run_writer_thread(
             last_flush = Instant::now();
         }
     }
-
-    match writer.lock() {
-        Ok(mut w) => {
-            if let Err(e) = w.finalize() {
-                error!(run_number, error = %e, "graw-writer: finalize failed");
-            }
-        }
-        Err(_) => error!(
-            run_number,
-            "graw-writer: RunWriter mutex poisoned at finalize"
-        ),
-    }
-    info!(run_number, "graw-writer thread stopped");
 }
 
 // ---------------------------------------------------------------------
@@ -978,6 +1007,7 @@ impl Handler {
         let (stop_tx, stop_rx) = std::sync::mpsc::channel();
         self.stop_tx = Some(stop_tx);
         let flush_interval = Duration::from_millis(self.params.flush_interval_ms);
+        let finalize_delay = Duration::from_millis(self.params.finalize_delay_ms);
 
         std::thread::Builder::new()
             .name("graw-writer".to_string())
@@ -989,6 +1019,7 @@ impl Handler {
                     run_number,
                     flush_interval,
                     stop_rx,
+                    finalize_delay,
                 )
             })
             .map_err(|e| format!("cannot spawn writer thread: {e}"))?;
@@ -1579,6 +1610,7 @@ mod tests {
             max_file_bytes: 1024,
             flush_interval_ms: 1000,
             expected_sources: vec![0],
+            finalize_delay_ms: 0,
         }
     }
 
