@@ -53,6 +53,7 @@ alarms = [{ node = 4, param = "fmeasure", lo = 90.0, hi = 110.0 }]
 # name = "hv"
 # addr = "192.168.144.50:1470"
 # poll_s = 10.0
+# status_ignore = [{ ch = 0, flags = ["UNV"] }]   # alarm から外せるのは UNV / OVV だけ(STATUS 値は変えず出す)
 
 [controller]
 rest_listen = "0.0.0.0:8080"

@@ -271,6 +271,9 @@ pub struct SlowDeviceConfig {
     /// この機器だけの読み出し周期(秒、TODO/119)。省略 = `1 / poll_hz`。
     #[serde(default)]
     pub poll_s: Option<f64>,
+    /// hivolta のみ: ch ごとに alarm から外す STATUS フラグ(`UNV` / `OVV` だけ許可、TODO/121 §D)。
+    #[serde(default)]
+    pub status_ignore: Vec<crate::slowctl::hivolta::StatusIgnore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -877,6 +880,8 @@ fn validate_slowctl(slowctl: &SlowctlConfig) -> Result<(), ConfigError> {
                 device.name, device.device_type
             )));
         }
+        crate::slowctl::hivolta::ignore_masks(&device.status_ignore)
+            .map_err(|e| ConfigError::InvalidSlowctl(format!("device {:?}: {e}", device.name)))?;
         if let Some(poll_s) = device.poll_s {
             if !poll_s.is_finite() || poll_s <= 0.0 {
                 return Err(ConfigError::InvalidSlowctl(format!(
@@ -2511,6 +2516,45 @@ name = "gas"
 "#;
         assert!(matches!(
             parse(&minimal_toml(&geometry, extra)),
+            Err(ConfigError::InvalidSlowctl(_))
+        ));
+    }
+
+    /// TODO/121 §D: `status_ignore` は UNV / OVV だけ許可。それ以外は起動失敗。
+    #[test]
+    fn status_ignore_accepts_only_unv_and_ovv() {
+        let geometry = make_temp_geometry_file();
+        let with = |flags: &str| {
+            let extra = format!(
+                r#"
+[slowctl]
+[[slowctl.device]]
+type = "hivolta"
+name = "hv"
+addr = "192.0.2.1:1470"
+status_ignore = [{{ ch = 0, flags = [{flags}] }}]
+"#
+            );
+            parse(&minimal_toml(&geometry, &extra))
+        };
+        let config = with(r#""UNV", "OVV""#).unwrap();
+        assert_eq!(config.slowctl.unwrap().device[0].status_ignore.len(), 1);
+        for bad in [r#""TRIP""#, r#""unv""#, r#""UNV", "OVC""#] {
+            assert!(
+                matches!(with(bad), Err(ConfigError::InvalidSlowctl(_))),
+                "{bad} must be rejected"
+            );
+        }
+        let bad_ch = r#"
+[slowctl]
+[[slowctl.device]]
+type = "hivolta"
+name = "hv"
+addr = "192.0.2.1:1470"
+status_ignore = [{ ch = 8, flags = ["UNV"] }]
+"#;
+        assert!(matches!(
+            parse(&minimal_toml(&geometry, bad_ch)),
             Err(ConfigError::InvalidSlowctl(_))
         ));
     }
