@@ -57,3 +57,28 @@
 
 ## SPEC(Opus 下書き → Fable 確定)
 §10 の monitor に HTTP の節(`GET /api/last-event` の形)、§11 の解析向け API 一覧に 1 行。
+
+## 進捗(2026-10-12)
+- 実装(Sonnet `e16c312` → merge `5380b43`):
+  - `src/monitor.rs`
+    - `Hub.last_event` は built_event を受けるたびに `Arc::from(Box)` で差し替える(items はコピーしない。WS 購読の有無に関係なく保持)。
+    - 純関数 `last_event_json` は `-1` で埋めたグリッドに item を置き、範囲外の item は `items_out_of_range` に数える。
+    - ルート `/api/last-event`:
+      - 応答は 200(イベントあり)/ 404(まだ無い)。
+      - どちらにも `Access-Control-Allow-Origin: *` を付ける。
+      - GET 以外は 405。
+    - カウンタ `last_event_requests` を追加。
+  - 照合(CLAUDE.md の新ルール):
+    - `git show --stat` は 2 files(monitor.rs / tests/monitor_ws.rs)。
+    - テスト 2 本・ルート・CORS・範囲外の計数が diff にある。
+    - 報告の「実行できなかった操作」は「なし」(sandbox が heredoc を 2 回拒否したが、Edit で回避)。
+- テスト:
+  - `monitor::tests::last_event_json_places_known_items_and_marks_the_rest_unread`
+  - `last_event_api_is_404_before_any_event_and_returns_the_latest_after`(統合。受信前は 404、event_idx 21 と 22 を送ると 22 が返る)
+  - red の確認は省略(Sonnet 申告)。
+- ゲート(main `5380b43`、Mac): fmt / clippy 0 / **cargo test 933 passed / 0 failed / 1 ignored**(既存)。
+- 実機(ELITPC、11:08:35Z に monitor だけ入れ替え、run なし): `GET :9000/api/last-event` → `404`、`content-type: application/json`、`access-control-allow-origin: *`、`{"error":"no event received yet"}`。
+- **残り**:
+  - 次の run での実イベントの確認(adc の形、event_idx が進むこと、応答時間と大きさ)。
+  - analysis team に、ジオメトリ(ストリップ対応)が要るかの確認(ユーザー経由)。
+  - SPEC(§10 に monitor の HTTP 節)の Fable 確定。
