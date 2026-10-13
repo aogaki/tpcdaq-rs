@@ -1,6 +1,6 @@
 # 124 — HV / LV の ch ごとの on/off を web から(SPEC §11 安全境界の改訂)
 
-**Status: IN PROGRESS**(2026-10-12 起票 Opus。ユーザー「on/off を今から実装できますか?」+ 方針 3 点の回答。設計の確定は Fable)
+**Status: COMPLETED(2026-10-13、結果は末尾)** — 旧: IN PROGRESS(2026-10-12 起票 Opus。ユーザー「on/off を今から実装できますか?」+ 方針 3 点の回答。設計の確定は Fable)
 
 ## ユーザー裁定(2026-10-12、AskUserQuestion の回答。10-09 の方針「web からは on/off と読み出しだけ、上限・ランプは機器側」の具体化)
 1. **LV(HMP2020 = AsAd 電源)も web に載せる。run が Running の間の LV OFF は拒否**(先に Stop run)。
@@ -179,13 +179,27 @@ SPEC §11 / §3.1 / §3.2 / §8.1 / §9.2 と CLAUDE.md の文案は Fable 作�
   - 最新イベント API を英語タブの付録に取り込み、claude.ai へのリンクを無くした。
   - PDF は日英とも `reference/_manual/ELITPC_DAQ_Manual_{ja,en}_2026-10-12.pdf`(11 / 14 ページ)。
 
-## 実機確認(ユーザー、2026-10-13 申告)と残る不具合
-- **全 ch で ON / OFF が動くことを確認済み**(ユーザー)。HV ON のランプアップも含む。
-- **不具合: ランプアップ中に OFF にできない**。ボタンを押すと「もう一度 ON にするか」を聞かれる。
-  - コード上は、UI のボタンの向き(`ui/src/app/slow/slow-power.ts` の `targetOn` = `row.onOff !== 'ON'`)と、サーバの成功判定(`hivolta_driver.rs` の `switched`)が、どちらも STATUS の bit 0(ON)を見ている。
-    ON の SET が成功判定を通った以上、直後の bit 0 は 1 だったはず。
-  - 仮説:
-    - ① ランプアップ中に DT1415 が bit 0 を落として RUP(bit 1)だけを立てる。
-    - ② その間 HV の読み出しが失敗し、古い(OFF の)サンプルのまま。UI は `stale` でも向きを決めている。
-  - 確かめ方: ランプアップ中の STATUS の時系列(InfluxDB)と、ログブックの audit `slow/power` の after。ELITPC につながり次第。
-  - 直し方の候補(原因が分かってから): ON / RUP / RDW のどれかが立っていれば「Turn OFF」にする(HV の OFF はいつでも可なので安全側)。stale の行はボタンを無効にする。
+## 結果(2026-10-13 クローズ、Opus)
+
+### 実装とゲート
+- 実装とマージは「進捗(2026-10-12)」のとおり(レーン A / B / C、`51e5b10` の読み直しまで)。
+- ゲート: main `ed05974`、Mac。fmt OK / clippy 0(feature 有無とも)/ cargo test 992 passed / 0 failed / 1 ignored / UI 349 passed / 5 skipped、build OK。
+- 以後の main でも green(2026-10-13 時点 cargo 1070 / 0 / 1)。
+
+### 実機(ELITPC、ユーザーが UI で操作)
+- **HV OFF**(10-12、全 ch): ランプダウン −9.55〜−9.62 V/s。初版は応答が偽陰性(502 `status=1`)だった → `51e5b10` で修正。
+- **HV ON**(10-13 07:58:59–07:59:52 EEST、ch 0–7 の 8 件):
+  - audit `slow/power` は 8 件とも ok。after は `3 [ON, UP]`(ch 4 / 6 / 7 は `1 [ON]`)。
+  - InfluxDB(bucket `slowctl`)の STATUS は、ランプアップ中ずっと 3(bit 0 = ON が立ったまま)、到達後 1。ch0 は 33(ON + UNV、`status_ignore` 済みの既知挙動)。
+  - ch7 の vmon は 3.4 V → 599.9 V。直線部で ≈ 1.75 V/s、約 5.5 分で到達。
+- **LV ch2 の ON → OFF / ch1 の OFF**(10-12): ok。HMP は before / after に両 ch。
+- **ユーザー確認(10-13)**: 全 ch で ON / OFF が動く。「ランプアップ中に OFF にできず ON を聞かれた」のは初版のコントローラでのことで、今は問題ないはず(ユーザー)。
+  - 現行版で裏も取った。ランプアップ中の STATUS bit 0 は 1 なので、UI のボタンは「Turn OFF」になる(`slow-table.ts` / `slow-power.ts` の `targetOn`)。
+- 機器を動かさない確認(10-12、curl): 不正 token → 401、hv ch 8 → 400、未登録 device → 400。3 件とも audit に残った。
+
+### 実施しなかったこと
+- 前面スイッチ OFF での DIS 拒否(任意)→ 131 B-4。
+- run 中の HV ON / LV OFF が 409 になることの実機確認。レーン B のテストで代替(`tests/controller_integration.rs::slow_power_forwards_allowed_commands_and_refuses_hv_on_and_lv_off_while_running`、`src/controller/power.rs` の `hv_on_and_lv_off_are_409_while_starting_or_stopping_and_each_is_audited`)。
+- SPEC は v1.42 で反映済み(Fable 設計確定)。
+
+**Status: COMPLETED(2026-10-13)**
