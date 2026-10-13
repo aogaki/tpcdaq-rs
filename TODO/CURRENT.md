@@ -52,7 +52,7 @@ docs: [NEW_DAQ_SETUP_ja.md](../docs/NEW_DAQ_SETUP_ja.md) v0.1 + [RUNBOOK_ja.md](
 - [124](124_hv_lv_power_onoff_from_web.md)(IN PROGRESS): HV / LV の ch ごとの ON/OFF を web から(SPEC v1.42)。ELITPC に反映済み。HV OFF のランプダウン(約 9.6 V/s)と LV ch2 の ON/OFF は実機で確認。残り = HV ON のランプアップ(ch7、2 V/s で約 5 分、ユーザーの都合のよいとき)→ 結果節 → archive。
 - ~~125~~ **完了 → archive**([archive/125](archive/125_event_display_xy_projection.md)、SPEC v1.44): Event Display の 2 段目 = XY / XZ / YZ。三面一致(TPCReco Get2D)は平らな長い飛跡でゴーストの菱形になり実機で撤回 → **ユーザーの macros(analyzeUVW.C + makeTracks.C)の移植**(1 イベント = 直線 1 本、UI 計算)。本物の macros と run70 の 201 イベントで一致、ユーザー目視「現状いい感じ」。AsAd パネルは Waveform タブへ。
 - **複数飛跡のプログラム(2026-10-13 ユーザー決定: 選択肢 B = 直線を何本でも取り出す、3α まで綺麗にフィットできれば最高)**:
-  - [126](126_split_monitor_controller.md)(IN PROGRESS): monitor.rs / controller.rs のサブモジュール分割(挙動不変、Sonnet × 2 並行)。
+  - ~~126~~ **完了 → archive**([archive/126](archive/126_split_monitor_controller.md)): `src/monitor/`(10 ファイル)と `src/controller/`(12 ファイル)に分割、テスト名・数とも不変(1018 / 0 / 1)。
   - 127(未起票): 再構成を monitor(Rust、`src/reco/`)へ移す — 単一飛跡のまま、macros オラクルで今と同じ結果。結果の WS 形式は Fable レビュー。
   - ~~128~~ **完了 → archive**([archive/128](archive/128_event_mixing_tool.md)): `tools/event_mix/`(597 CHECK)。run70 の 100 組では単一飛跡フィットが 100 / 100 ok のまま近いほうか両方の外に引かれる。元の 2 本はほぼ平行(中央値 5°)なので V 字は pairs ファイルで選ぶ。
   - 129(未起票、別リポ ~/test/gas-pressure-test の TODO として): 複数の一次粒子の反応生成(¹⁰B(γ,α)⁶Li、¹²C(γ,3α) など)と、親子関係を含む真値。ユーザー了承済み。物理条件をユーザーに確認中。
