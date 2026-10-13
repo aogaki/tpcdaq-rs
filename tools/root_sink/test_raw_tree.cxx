@@ -594,6 +594,39 @@ void test_compare_raw_detects_a_one_adc_difference() {
 
 }  // namespace
 
+// 取得の再開(TODO/110): raw ツリーは変更不要 —— ビルダが旧世代と同じ番号を除いた後の
+// ストリームをそのまま書く(重複判定を持たない)ことの確認。
+// 手計算の出典: 旧世代 2038..2056(19 件)+ 新世代 0..2060 から 2038..2056 を除いた
+// 2042 件 = 2061 エントリ(PEventTPC 側 test_recorder と同じ数)。
+void test_raw_tree_writes_the_epoch_filtered_stream_as_is() {
+  const std::string dir = scratch_dir("epoch");
+  const uint32_t kRun = 29;
+  uint64_t entries = 0;
+  {
+    rootsink::RawTreeConfig cfg;
+    cfg.output_root = dir;
+    cfg.expect = {{0, 0}};
+    rootsink::RawTreeWriter w(cfg);
+    rootsink::EventBuilder eb({{0, 0}}, 1000);
+    auto feed = [&](uint32_t idx, uint64_t time) {
+      rootsink::BuiltEvent src = make_event(kRun, idx, 0, 0);
+      src.fragments[0].event_time = time;
+      eb.feed(std::move(src.fragments[0]), 0);
+      for (rootsink::BuiltEvent& ev : eb.take_restart_flush()) w.write(ev, 1000);
+    };
+    for (uint32_t i = 2038; i <= 2056; ++i) feed(i, 406000000ULL + i * 10ULL);
+    for (uint32_t i = 0; i <= 2060; ++i) feed(i, 16000ULL + i * 10ULL);
+    for (rootsink::BuiltEvent& ev : eb.poll(0)) w.write(ev, 1001);
+    for (rootsink::BuiltEvent& ev : eb.flush()) w.write(ev, 1002);
+    CHECK_EQ(eb.restart_duplicate_events(), 19);
+    w.close_run(kRun);
+    CHECK(w.fatal_reason() == nullptr);
+    entries = w.entries_written();
+  }
+  CHECK_EQ(entries, 2061);
+  remove_tree(dir);
+}
+
 int main() {
   gROOT->SetBatch(kTRUE);
 
@@ -605,5 +638,6 @@ int main() {
   test_existing_final_file_is_not_overwritten();
   test_out_of_range_and_unexpected_are_counted_not_written();
   test_compare_raw_detects_a_one_adc_difference();
+  test_raw_tree_writes_the_epoch_filtered_stream_as_is();
   return tpccheck::report("test_raw_tree");
 }

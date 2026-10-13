@@ -58,6 +58,8 @@ struct Status {
   // build_timeout に比例するため常時可視化する(hard limit は設けない — 下の
   // kPendingWarnThreshold は warn するだけ)。
   uint64_t pending_events = 0;
+  // 取得の再開(TODO/110)。`pending_events` の次のキー(12 キー目)。
+  uint64_t acquisition_restarts = 0;
   uint64_t frames_per_cobo[kMaxCobo] = {};
   uint64_t bytes_written = 0;      // Recorder の atomic(--no-root なら 0)
   Saturation saturation[kPlaneCount] = {};
@@ -199,7 +201,7 @@ class Encoder {
 
   void status(const Status& s, uint64_t created_ns, std::vector<uint8_t>& out) {
     open_envelope(out, s.run, created_ns);
-    mpw::map_len(out, 11);
+    mpw::map_len(out, 12);
     mpw::str(out, "kind");
     mpw::str(out, "status");
     mpw::str(out, "run");
@@ -214,6 +216,8 @@ class Encoder {
     mpw::uint_(out, s.late_fragments);
     mpw::str(out, "pending_events");
     mpw::uint_(out, s.pending_events);
+    mpw::str(out, "acquisition_restarts");
+    mpw::uint_(out, s.acquisition_restarts);
     mpw::str(out, "frames_per_cobo");
     write_frames_per_cobo(out, s);
     mpw::str(out, "bytes_written");

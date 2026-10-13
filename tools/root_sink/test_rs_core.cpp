@@ -268,7 +268,8 @@ static void test_run_closed_line_reports_per_run_counts() {
   total.late_fragments += 2;
   CHECK(format_run_closed(12, total, at_open) ==
         "root_sink: run 12 closed (batches=100 events_complete=139 "
-        "events_incomplete=3 late_fragments=2)\n");
+        "events_incomplete=3 late_fragments=2 restarts=0 events_before_restart=0 "
+        "restart_duplicates=0)\n");
 
   // run 13: 通算は 239 / 8734 / 10 / 7 だが、行は run 13 分だけ
   at_open = total;
@@ -279,7 +280,26 @@ static void test_run_closed_line_reports_per_run_counts() {
   CHECK_EQ(total.events_complete, 139 + 8595);
   CHECK(format_run_closed(13, total, at_open) ==
         "root_sink: run 13 closed (batches=8534 events_complete=8595 "
-        "events_incomplete=7 late_fragments=5)\n");
+        "events_incomplete=7 late_fragments=5 restarts=0 events_before_restart=0 "
+        "restart_duplicates=0)\n");
+}
+
+static void test_run_closed_line_reports_restarts_per_run() {
+  // 出典 = 手計算(TODO/110 の run 29): 通算に前 run の再開 1 回 / 5 件 / 重複 2 件があり、
+  // run 29 は再開 1 回・旧世代 19 件・重複 19 件。行は差分だけ。
+  RunCounts total;
+  total.acquisition_restarts = 1;
+  total.events_before_restart = 5;
+  total.restart_duplicates = 2;
+  const RunCounts at_open = total;  // run 29 開始
+  total.batches += 2402;
+  total.events_complete += 2061;
+  total.acquisition_restarts += 1;
+  total.events_before_restart += 19;
+  total.restart_duplicates += 19;
+  CHECK(format_run_closed(29, total, at_open) ==
+        "root_sink: run 29 closed (batches=2402 events_complete=2061 events_incomplete=0 "
+        "late_fragments=0 restarts=1 events_before_restart=19 restart_duplicates=19)\n");
 }
 
 static void test_first_late_of_run_is_per_run() {
@@ -299,6 +319,7 @@ static void test_first_late_of_run_is_per_run() {
 }
 
 int main() {
+  test_run_closed_line_reports_restarts_per_run();
   test_first_late_of_run_is_per_run();
   test_channel_is_fifo();
   test_pop_blocks_until_a_push_arrives();

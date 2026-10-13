@@ -29,6 +29,8 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstdio>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <set>
@@ -106,6 +108,9 @@ struct BuiltEvent {
   uint32_t run_number = 0;
   uint32_t event_idx = 0;
   bool incomplete = false;  // 期待集合が揃わないまま出た(timeout / flush)
+  // 取得の再開(restart)で +1 される世代(その run 内、0 始まり)。recorder は世代が
+  // 変わったら「最後に書いた eventId」の高水位をリセットする(TODO/110)。
+  uint32_t epoch = 0;
   std::vector<OwnedFragment> fragments;
 };
 
@@ -132,15 +137,28 @@ class EventBuilder {
   }
 
   // フラグメントを 1 個食わせる。戻り値が入っていれば遅延到着(呼び手が書き出す)。
+  //
+  // **取得の再開(TODO/110)**: event_idx==0 のフレームが、同じ run でより大きい idx
+  // (> kRestartMinIdx)を見た後に、その世代で見た最小 event_time より小さい時刻で来たら、
+  // ECC 不在で走り続けた zCoBo の古いフレームの後に新しい取得が始まったと見なす。
+  // late 判定より前に見る。起きたら旧世代の pending を押し出し(take_restart_flush() で
+  // 受け取る)、世代を +1 して高水位をリセットする。
   std::optional<LateFragment> feed(OwnedFragment f, uint64_t now_ms) {
-    const auto hw = emitted_upto_.find(f.run_number);
-    if (hw != emitted_upto_.end() && f.event_idx <= hw->second) {
+    RunState& rs = runs_[f.run_number];
+    if (f.event_idx == 0 && rs.max_seen > kRestartMinIdx && rs.have_time &&
+        f.event_time < rs.time_floor) {
+      restart(f.run_number, rs);
+    }
+    if (rs.have_emitted && f.event_idx <= rs.emitted_upto) {
       ++late_fragments_;
       LateFragment late;
-      late.emitted_upto = hw->second;
+      late.emitted_upto = rs.emitted_upto;
       late.fragment = std::move(f);
       return late;
     }
+    if (!rs.have_time || f.event_time < rs.time_floor) rs.time_floor = f.event_time;
+    rs.have_time = true;
+    if (f.event_idx > rs.max_seen) rs.max_seen = f.event_idx;
 
     Pending& ev = pending_[EventKey(f.run_number, f.event_idx)];
     if (ev.fragments.empty()) ev.first_arrival_ms = now_ms;
@@ -161,9 +179,17 @@ class EventBuilder {
     while (!pending_.empty()) {
       const auto it = pending_.begin();
       if (!is_complete(it->second) && !timed_out(it->second, now_ms)) break;
-      out.push_back(emit(it));
+      emit_into(it, out);
       pending_.erase(it);
     }
+    return out;
+  }
+
+  // feed() が restart を検出したときに押し出した旧世代のイベント(昇順)を渡して空にする。
+  // 呼び手は **eb.poll() の結果より先に** 書き出すこと(旧世代 → 新世代の順)。
+  std::vector<BuiltEvent> take_restart_flush() {
+    std::vector<BuiltEvent> out;
+    out.swap(restart_flush_);
     return out;
   }
 
@@ -173,7 +199,7 @@ class EventBuilder {
     std::vector<BuiltEvent> out;
     while (!pending_.empty()) {
       const auto it = pending_.begin();
-      out.push_back(emit(it));
+      emit_into(it, out);
       pending_.erase(it);
     }
     return out;
@@ -185,6 +211,10 @@ class EventBuilder {
   uint64_t late_fragments() const { return late_fragments_; }
   uint64_t unexpected_fragments() const { return unexpected_fragments_; }
   uint64_t duplicate_fragments() const { return duplicate_fragments_; }
+  // 取得の再開(TODO/110)。累積。
+  uint64_t acquisition_restarts() const { return acquisition_restarts_; }
+  uint64_t events_before_restart() const { return events_before_restart_; }  // 旧世代で emit した数
+  uint64_t restart_duplicate_events() const { return restart_duplicate_events_; }  // 新世代で捨てた数
   size_t pending() const { return pending_.size(); }
 
  private:
@@ -202,6 +232,76 @@ class EventBuilder {
     // 巻き戻った時計(テストの注入も含む)を「即タイムアウト」にしない。
     if (now_ms <= ev.first_arrival_ms) return false;
     return (now_ms - ev.first_arrival_ms) > build_timeout_ms_;
+  }
+
+  // restart の最小 idx ゲート(decoder と同じ。隣接混在 idx 1→0 を誤検出しない)。
+  static constexpr uint32_t kRestartMinIdx = 8;
+
+  // run 毎の状態。世代(epoch)内で emit は昇順。
+  struct RunState {
+    bool have_emitted = false;
+    uint32_t emitted_upto = 0;      // 現世代の emit 済み最大 event_idx
+    uint32_t max_seen = 0;          // 現世代で見た最大 event_idx(pending 含む)
+    bool have_time = false;
+    uint64_t time_floor = 0;        // 現世代で見た最小 event_time
+    uint32_t epoch = 0;
+    bool dup_logged = false;        // restart_duplicate の stderr は run 毎に 1 回
+    std::vector<uint32_t> epoch_ids;    // 現世代で emit した event_idx(昇順)
+    std::vector<uint32_t> retired_ids;  // 旧世代で emit した event_idx(昇順、重複なし)
+  };
+
+  void restart(uint32_t run, RunState& rs) {
+    // 旧世代の pending を昇順に押し出す(complete / incomplete のまま — 捨てない)。
+    const auto first = pending_.lower_bound(EventKey(run, 0));
+    auto it = first;
+    while (it != pending_.end() && it->first.first == run) {
+      emit_into(it, restart_flush_);
+      ++it;
+    }
+    pending_.erase(first, it);
+
+    events_before_restart_ += rs.epoch_ids.size();
+    std::vector<uint32_t> merged;
+    merged.reserve(rs.retired_ids.size() + rs.epoch_ids.size());
+    std::merge(rs.retired_ids.begin(), rs.retired_ids.end(), rs.epoch_ids.begin(),
+               rs.epoch_ids.end(), std::back_inserter(merged));
+    merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+    rs.retired_ids.swap(merged);
+    rs.epoch_ids.clear();
+    rs.have_emitted = false;
+    rs.emitted_upto = 0;
+    rs.max_seen = 0;
+    rs.have_time = false;
+    rs.time_floor = 0;
+    ++rs.epoch;
+    ++acquisition_restarts_;
+  }
+
+  // emit して out に積む。新世代で、旧世代が emit 済みの番号と同じイベントは
+  // 書かずに数える(restart_duplicate_events — ユーザー裁定 2026-10-13)。
+  void emit_into(std::map<EventKey, Pending>::iterator it, std::vector<BuiltEvent>& out) {
+    RunState& rs = runs_[it->first.first];
+    const uint32_t idx = it->first.second;
+    // 世代内の昇順は保たれる(drop しても高水位は進める — 以降の late 判定のため)。
+    rs.have_emitted = true;
+    rs.emitted_upto = idx;
+    if (rs.epoch > 0 &&
+        std::binary_search(rs.retired_ids.begin(), rs.retired_ids.end(), idx)) {
+      ++restart_duplicate_events_;
+      if (!rs.dup_logged) {  // run 毎に 1 回(ホットパスで毎回整形しない)
+        rs.dup_logged = true;
+        std::fprintf(stderr,
+                     "root_sink: run %u epoch %u: event_idx=%u was already emitted before "
+                     "the acquisition restart — not written, counted (raw graw keeps the "
+                     "data)\n",
+                     it->first.first, rs.epoch, idx);
+      }
+      return;
+    }
+    rs.epoch_ids.push_back(idx);
+    BuiltEvent ev = emit(it);
+    ev.epoch = rs.epoch;
+    out.push_back(std::move(ev));
   }
 
   BuiltEvent emit(std::map<EventKey, Pending>::iterator it) {
@@ -224,22 +324,24 @@ class EventBuilder {
     } else {
       ++events_complete_;
     }
-    // emit は run 毎に昇順なので、これがその run の「emit 済み最大 event_idx」。
-    // run が閉じても消さない(EOS 後に来た迷子を pending に戻さないため)。
-    emitted_upto_[ev.run_number] = ev.event_idx;
     return ev;
   }
 
   std::set<FragmentKey> expected_;
   uint64_t build_timeout_ms_;
   std::map<EventKey, Pending> pending_;      // キー順 = (run, event_idx) 昇順
-  std::map<uint32_t, uint32_t> emitted_upto_;  // run → emit 済み最大 event_idx
+  // run → 状態。run が閉じても消さない(EOS 後に来た迷子を pending に戻さないため)。
+  std::map<uint32_t, RunState> runs_;
+  std::vector<BuiltEvent> restart_flush_;  // take_restart_flush() 待ち
 
   uint64_t events_complete_ = 0;
   uint64_t events_incomplete_ = 0;
   uint64_t late_fragments_ = 0;
   uint64_t unexpected_fragments_ = 0;
   uint64_t duplicate_fragments_ = 0;
+  uint64_t acquisition_restarts_ = 0;
+  uint64_t events_before_restart_ = 0;
+  uint64_t restart_duplicate_events_ = 0;
 };
 
 }  // namespace rootsink

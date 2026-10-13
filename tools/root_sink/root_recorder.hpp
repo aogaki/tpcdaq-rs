@@ -905,12 +905,21 @@ class Recorder {
       run_ = ev.run_number;
       run_active_ = true;
       have_last_event_id_ = false;
+      last_epoch_ = ev.epoch;
       // runId = **run 開始時刻**の %Y%m%d%H%M%S(TPCReco RunIdParser と同じ導出、
       // SPEC §6.4)。run 中は一定 —— ここで 1 回だけ決める。--run-id 指定時は
       // その値(実データ照合と P4 controller 経路の受け口、TODO/021)。
       run_id_ = cfg_.run_id_override != 0 ? cfg_.run_id_override : tpcpevent::run_id_now();
       begin_run_all();  // **in-band**(キューに残ったイベントを追い越さない)
       std::fprintf(stderr, "root_sink: run %u runId=%ld\n", run_, run_id_);
+    }
+
+    // 取得の再開(TODO/110): 新しい世代では eventId が 0 から振り直される。高水位を
+    // 持ち越すと新しい取得が全部「重複」で落ちる。旧世代と同じ番号のイベントは
+    // ビルダが既に除いてある(restart_duplicate_events)ので、ここはリセットするだけ。
+    if (ev.epoch != last_epoch_) {
+      last_epoch_ = ev.epoch;
+      have_last_event_id_ = false;
     }
 
     // eventId は一回きり(grawToEventTPC の eventIdMap と同じ意味論)。ビルダは
@@ -987,6 +996,7 @@ class Recorder {
   long run_id_ = 0;             // run 開始時刻の %Y%m%d%H%M%S(EventInfo::runId)
   uint32_t last_event_id_ = 0;  // 最後に**分配した** eventId
   bool have_last_event_id_ = false;
+  uint32_t last_epoch_ = 0;  // 最後に分配したイベントの世代(変わったら高水位をリセット)
   std::atomic<uint64_t> duplicate_event_ids_{0};
   const char* fatal_ = nullptr;  // 分配側自身の fatal(ジオメトリ無し)
   std::string fatal_detail_;
