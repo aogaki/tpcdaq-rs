@@ -392,6 +392,6 @@ describe('MonitorView — Event display の投影', () => {
     await openEventTab();
     await tick();
     expect(status()).toContain('1 points outside the plot range');
-    expect(status()).toContain('strips with a hit but no segment in stripGeometry (skipped): 3');
+    expect(status()).toContain('3 strip hits not placed on the line (view nearly parallel to the track)');
   });
 });

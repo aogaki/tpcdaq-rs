@@ -189,7 +189,7 @@ export class MonitorView {
     }
     if (result.outOfRange > 0) parts.push(`${result.outOfRange} points outside the plot range`);
     if (track.unplaced > 0) {
-      parts.push(`strips with a hit but no segment in stripGeometry (skipped): ${track.unplaced}`);
+      parts.push(`${track.unplaced} strip hits not placed on the line (view nearly parallel to the track)`);
     }
     if (track.header.incomplete) parts.push('INCOMPLETE (fragments missing — charges are short)');
     return parts.join(' · ');
