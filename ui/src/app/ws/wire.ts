@@ -37,6 +37,7 @@ export const FLAG_INCOMPLETE = 0x01;
 /** SPEC §10.2 の msgType。 */
 export const MSG_UVW = 0x02;
 export const MSG_WAVEFORMS = 0x03;
+export const MSG_TRACK = 0x04;
 export const MSG_HISTO1D = 0x10;
 export const MSG_HISTO2D = 0x11;
 
@@ -103,9 +104,43 @@ export interface Histo2dMessage {
   readonly bins: Float32Array;
 }
 
+/** `0x04 Track` の直線 1 本(SPEC §10.2、monitor の `src/reco/` が作る)。z 成分は mm。 */
+export interface TrackLine {
+  readonly phiDeg: number;
+  readonly dir: readonly [number, number, number];
+  readonly start: readonly [number, number, number];
+  readonly end: readonly [number, number, number];
+  readonly startF: readonly [number, number, number];
+  readonly endF: readonly [number, number, number];
+  readonly length: number;
+  readonly lengthF: number;
+  readonly xyLength: number;
+  readonly charge: number;
+}
+
+/** `0x04 Track` の点: `[x, y, t(time bucket), q, view(0/1/2 = U/V/W), track(何本目か)]`。 */
+export type TrackPoint = readonly [number, number, number, number, number, number];
+
+/** `0x04 Track` — 13 B ヘッダ + UTF-8 JSON 本文(TODO/127)。未知キーは許す(`unknownKeys`)。 */
+export interface TrackMessage {
+  readonly kind: 'track';
+  readonly header: WsHeader;
+  readonly ok: boolean;
+  /** `ok` でないときの理由の文(ok のときは空)。 */
+  readonly reason: string;
+  /** view(U/V/W)ごとの帯内ヒット数。 */
+  readonly hits: readonly [number, number, number];
+  /** 直線上に置けなかったヒット数。 */
+  readonly unplaced: number;
+  readonly tracks: readonly TrackLine[];
+  readonly points: readonly TrackPoint[];
+  readonly unknownKeys: readonly string[];
+}
+
 /** デコード不能の理由。UI は理由別に数えて status バーに出す(silent 禁止)。 */
 export type DecodeErrorReason =
-  'short-header' | 'bad-magic' | 'bad-version' | 'unknown-type' | 'truncated' | 'length-mismatch';
+  'short-header' | 'bad-magic' | 'bad-version' | 'unknown-type' | 'truncated' | 'length-mismatch'
+  | 'bad-json';
 
 /** **例外は投げない**。呼び手が数えられるようにエラーを値で返す。 */
 export interface DecodeError {
@@ -115,7 +150,7 @@ export interface DecodeError {
 }
 
 export type WsBinaryMessage =
-  UvwMessage | WaveformsMessage | Histo1dMessage | Histo2dMessage | DecodeError;
+  UvwMessage | WaveformsMessage | TrackMessage | Histo1dMessage | Histo2dMessage | DecodeError;
 
 export function isDecodeError(message: WsBinaryMessage): message is DecodeError {
   return message.kind === 'error';
@@ -213,6 +248,8 @@ export function decodeBinary(buffer: ArrayBuffer): WsBinaryMessage {
       return decodeUvw(buffer, view, header, total);
     case MSG_WAVEFORMS:
       return decodeWaveforms(buffer, view, header, total);
+    case MSG_TRACK:
+      return decodeTrack(buffer, header);
     case MSG_HISTO1D:
       return decodeHisto1d(buffer, view, header, total);
     case MSG_HISTO2D:
@@ -340,5 +377,80 @@ function decodeHisto2d(
     ymin,
     ymax,
     bins: readF32Array(buffer, fixed, count),
+  };
+}
+
+const TRACK_KEYS = ['ok', 'reason', 'hits', 'unplaced', 'tracks', 'points'];
+const TRACK_LINE_NUMBERS = ['phiDeg', 'length', 'lengthF', 'xyLength', 'charge'] as const;
+const TRACK_LINE_VECTORS = ['dir', 'start', 'end', 'startF', 'endF'] as const;
+
+function isNumberArray(value: unknown, length: number): value is number[] {
+  return (
+    Array.isArray(value) &&
+    value.length === length &&
+    value.every((x) => typeof x === 'number' && Number.isFinite(x))
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** 型違いの場所を返す(無ければ `null`)。 */
+function trackLineProblem(line: unknown, index: number): string | null {
+  if (!isRecord(line)) return `tracks[${index}]`;
+  for (const key of TRACK_LINE_NUMBERS) {
+    const value = line[key];
+    if (typeof value !== 'number' || !Number.isFinite(value)) return `tracks[${index}].${key}`;
+  }
+  for (const key of TRACK_LINE_VECTORS) {
+    if (!isNumberArray(line[key], 3)) return `tracks[${index}].${key}`;
+  }
+  return null;
+}
+
+/**
+ * `0x04 Track`: 13 B ヘッダ + UTF-8 JSON(`ok, reason, hits[3], unplaced, tracks[], points[[x,y,t,q,view,track]]`)。
+ * 壊れた JSON・型違いは `bad-json`(例外は投げない)。未知キーは捨てずに名前だけ `unknownKeys` へ。
+ */
+function decodeTrack(buffer: ArrayBuffer, header: WsHeader): WsBinaryMessage {
+  let raw: unknown;
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(
+      new Uint8Array(buffer, WS_HEADER_LEN),
+    );
+    raw = JSON.parse(text);
+  } catch (error) {
+    return fail('bad-json', `track body: ${String(error)}`);
+  }
+  if (!isRecord(raw)) return fail('bad-json', 'track body is not a JSON object');
+
+  const { ok, reason, hits, unplaced, tracks, points } = raw;
+  if (typeof ok !== 'boolean') return fail('bad-json', 'track.ok');
+  if (typeof reason !== 'string') return fail('bad-json', 'track.reason');
+  if (!isNumberArray(hits, 3)) return fail('bad-json', 'track.hits');
+  if (typeof unplaced !== 'number' || !Number.isFinite(unplaced)) {
+    return fail('bad-json', 'track.unplaced');
+  }
+  if (!Array.isArray(tracks)) return fail('bad-json', 'track.tracks');
+  for (let i = 0; i < tracks.length; i++) {
+    const problem = trackLineProblem(tracks[i], i);
+    if (problem !== null) return fail('bad-json', `track.${problem}`);
+  }
+  if (!Array.isArray(points)) return fail('bad-json', 'track.points');
+  for (let i = 0; i < points.length; i++) {
+    if (!isNumberArray(points[i], 6)) return fail('bad-json', `track.points[${i}]`);
+  }
+
+  return {
+    kind: 'track',
+    header,
+    ok,
+    reason,
+    hits: hits as unknown as [number, number, number],
+    unplaced,
+    tracks: tracks as TrackLine[],
+    points: points as unknown as TrackPoint[],
+    unknownKeys: Object.keys(raw).filter((key) => !TRACK_KEYS.includes(key)),
   };
 }

@@ -1,11 +1,16 @@
 /**
  * TODO/125 — XY / XZ / YZ のビン(`values[iy*nx+ix]`)と、計算しない状態の理由。
  *
- * 何を詰めるか(macros 移植の直線トラック)は `track-fit.spec.ts`。値は手計算(各ケースのコメント)。
+ * 何を詰めるか(直線トラックの再構成)は monitor 側(Rust の `src/reco/` のテスト)。値は手計算(各ケースのコメント)。
  */
 import type { StripGeometryMessage, StripPlaneGeometry } from '../ws/json';
-import { emptyEvent, layoutOf, MINI_ANGLES, syntheticGeometry } from './track-test-fixtures';
-import { type Projections, createProjections, fillPoint, projectionBlocker } from './xy-projection';
+import {
+  type Projections,
+  createProjections,
+  fillPoint,
+  fillTrackPoints,
+  projectionBlocker,
+} from './xy-projection';
 
 // ---------------------------------------------------------------------------------------------
 // ビン index の手計算(鏡像・転置を落とす)
@@ -64,36 +69,39 @@ describe('ビン index(values[iy*nx+ix])', () => {
   });
 });
 
-describe('projectionBlocker — 計算しない理由を文で', () => {
-  const layout = layoutOf(MINI_ANGLES);
-  const geometry = syntheticGeometry(layout);
-
-  it('3 面が揃っていない → 足りない面の名前', () => {
-    const uvw = emptyEvent(layout, 50);
-    expect(projectionBlocker([uvw[0], null, uvw[2]], geometry)).toBe('waiting for V (0x02)');
-    expect(projectionBlocker([null, null, null], geometry)).toBe('waiting for U/V/W (0x02)');
-    expect(projectionBlocker(uvw, geometry)).toBeNull();
+describe('fillTrackPoints — 0x04 の点をビンに詰める', () => {
+  it('非対称な 2 点: 既知のビンに q が入り、範囲外は数える', () => {
+    // 点 [x, y, t, q, view, track]。tinyGeometry: nx=9, ny=5, nBuckets=10。
+    // (5, 4, 7): ix=6, iy=3, iz=7(上のビン index の手計算と同じ)。
+    // (-9, -8, 0): ix=0, iy=0, iz=0。 (50, 0, 3): x が範囲外。
+    const { projections, outOfRange } = fillTrackPoints(tinyGeometry(), 10, [
+      [5, 4, 7, 2.5, 0, 0],
+      [-9, -8, 0, 4, 1, 0],
+      [50, 0, 3, 1, 2, 0],
+    ]);
+    expect(projections.xy.values[3 * 9 + 6]).toBe(2.5);
+    expect(projections.xz.values[7 * 9 + 6]).toBe(2.5);
+    expect(projections.yz.values[7 * 5 + 3]).toBe(2.5);
+    expect(projections.xy.values[0]).toBe(4);
+    expect(outOfRange).toBe(1);
+    expect(sum(projections.xy.values)).toBe(6.5); // 範囲外の点は XY にも詰めない
   });
 
-  it('eventNumber が違う → 3 面の番号が出る', () => {
-    const uvw = emptyEvent(layout, 50);
-    const other = { ...uvw[1], header: { ...uvw[1].header, eventNumber: 2 } };
-    expect(projectionBlocker([uvw[0], other, uvw[2]], geometry)).toBe(
-      'U/V/W are from different events (#1 / #2 / #1)',
-    );
+  it('点が無ければ空のヒスト(nBuckets は引数どおり)', () => {
+    const { projections, outOfRange } = fillTrackPoints(tinyGeometry(), 10, []);
+    expect(outOfRange).toBe(0);
+    expect(sum(projections.xy.values)).toBe(0);
+    expect(projections.xz.ny).toBe(10);
   });
+});
 
-  it('bucket 数が面で違う → 3 面の bucket 数が出る', () => {
-    const uvw = emptyEvent(layout, 50);
-    const other = { ...uvw[2], nBuckets: 40 };
-    expect(projectionBlocker([uvw[0], uvw[1], other], geometry)).toBe(
-      'U/V/W bucket counts differ (50 / 50 / 40)',
-    );
+describe('projectionBlocker — stripGeometry があり、ビンが退化していないこと', () => {
+  it('普通の rangeXY → null', () => {
+    expect(projectionBlocker(tinyGeometry())).toBeNull();
   });
 
   it('ビンが作れない rangeXY → degenerate', () => {
-    const uvw = emptyEvent(layout, 50);
-    const flat: StripGeometryMessage = { ...geometry, rangeXY: [0, 1, 0, 1] };
-    expect(projectionBlocker(uvw, flat)).toContain('degenerate projection bins');
+    const flat: StripGeometryMessage = { ...tinyGeometry(), rangeXY: [0, 1, 0, 1] };
+    expect(projectionBlocker(flat)).toContain('degenerate projection bins');
   });
 });

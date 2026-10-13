@@ -68,7 +68,7 @@ export interface PanelSpec {
 }
 
 /**
- * Event Display の XY / XZ / YZ 投影 1 枚(TODO/125、UI で計算した表示専用のヒスト)。
+ * Event Display の XY / XZ / YZ 投影 1 枚(TODO/125、0x04 の点を詰めた表示専用のヒスト)。
  * `values[iy*nx + ix]`(iy 外側 row-major — 0x11 Histo2d と同じ並び)。
  */
 export interface ProjectionMessage {
@@ -154,7 +154,7 @@ export function uvwPanelSpec(planeIndex: number): PanelSpec {
 
 /**
  * イベント表示の 2 段目(TODO/125): XY / XZ / YZ。中身は直線トラックに置いた strip ヒット
- * (`track-fit.ts` = macros/analyzeUVW.C + makeTracks.C、125 改訂 2)。Z は time bucket(mm にしない)。
+ * (monitor の `src/reco/` = macros/analyzeUVW.C + makeTracks.C の移植が計算し、0x04 で届く — TODO/127)。Z は time bucket(mm にしない)。
  */
 export const PROJECTION_SPECS: readonly PanelSpec[] = [
   { name: 'ProjectionXY', title: 'XY (top view)', xTitle: 'X [mm]', yTitle: 'Y [mm]' },

@@ -7,7 +7,7 @@
 import { vi } from 'vitest';
 import { DEFAULT_STREAMS } from './json';
 import { RECONNECT_BASE_MS } from './state';
-import { MSG_HISTO2D, MSG_UVW, WS_HEADER_LEN, WS_VERSION } from './wire';
+import { MSG_HISTO2D, MSG_TRACK, MSG_UVW, WS_HEADER_LEN, WS_VERSION } from './wire';
 import { WsClientService, type WsSocket } from './ws-client';
 
 class FakeSocket implements WsSocket {
@@ -53,6 +53,16 @@ function harness() {
   };
   service.random = () => 1; // ジッタ上端に固定(決定的にする)
   return { service, sockets, last: () => sockets[sockets.length - 1] };
+}
+
+/** 0x04 Track(13 B ヘッダ + JSON 本文)。 */
+function trackBuffer(body: unknown): ArrayBuffer {
+  const payload = new TextEncoder().encode(typeof body === 'string' ? body : JSON.stringify(body));
+  const buffer = new ArrayBuffer(WS_HEADER_LEN + payload.length);
+  const bytes = new Uint8Array(buffer);
+  bytes.set([0x54, 0x50, MSG_TRACK, WS_VERSION, 0], 0);
+  new Uint8Array(buffer, WS_HEADER_LEN).set(payload);
+  return buffer;
 }
 
 function statusText(extra: Record<string, unknown> = {}): string {
@@ -285,6 +295,26 @@ describe('受信', () => {
     expect(h.service.histos().get(3)?.kind).toBe('histo2d');
     expect(h.service.counters().uvw).toBe(1);
     expect(h.service.counters().histo2d).toBe(1);
+
+    h.service.disconnect();
+  });
+
+  it('0x04 Track は最新を保ち、数える。未知キー・壊れた JSON も数える(silent 禁止)', () => {
+    const h = harness();
+    h.service.connect('ws://x:9000/ws');
+    h.last().open();
+
+    const body = { ok: true, reason: '', hits: [1, 2, 3], unplaced: 0, tracks: [], points: [] };
+    h.last().deliver(trackBuffer({ ...body, extra: 1 }));
+    expect(h.service.track()?.hits).toEqual([1, 2, 3]);
+    expect(h.service.counters().track).toBe(1);
+    expect(h.service.counters().unknownJsonKeys).toBe(1);
+
+    h.last().deliver(trackBuffer('{broken'));
+    expect(h.service.track()?.hits).toEqual([1, 2, 3]); // 壊れたものは最新を上書きしない
+    expect(h.service.counters().track).toBe(1);
+    expect(h.service.counters().decodeErrors).toBe(1);
+    expect(h.service.lastIssue()).toContain('bad-json');
 
     h.service.disconnect();
   });

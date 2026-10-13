@@ -3,9 +3,9 @@
  *
  * - 3×3 グリッド: 行 = StripTime / Charge / ChargeMax、列 = U / V / W(028 発注書 2)。
  * - イベント表示 = 1 段目に `0x02 Uvw` の 3 面(**JSROOT の TH2**)、2 段目に XY / XZ / YZ 投影。
- *   投影は **UI で計算する表示専用の変換**(`track-fit.ts` = macros/analyzeUVW.C + makeTracks.C の
- *   移植、1 イベント = 直線 1 本 — TODO/125 改訂 2)。保存系にもワイヤにも触らない。定数は macros と同じに固定。
- *   計算は表示刻み(DisplayClock の tick)に同期し、Event display タブが開いているときだけ。
+ *   投影は monitor が計算して `0x04 Track` で配る(`src/reco/` = macros/analyzeUVW.C + makeTracks.C の
+ *   移植、TODO/127)。UI は点をビンに詰めるだけ。`shownTrack` は `shownUvw` と同じ刻みで取る。
+ *   詰める作業は Event display タブが開いているときだけ。
  *   同じ (イベント, ジオメトリ) では再計算しない(入力が変わらなければシグナルが変わらない)。
  *   イベント ID(run / eventNumber)と incomplete フラグは**タブに関係なく常時表示**。
  * - AsAd 電子回路座標パネル(077)は Waveform ビューへ移した。monitor タブは 0x03 を購読しない。
@@ -19,7 +19,7 @@ import { MatTabsModule } from '@angular/material/tabs';
 import { DisplayClock } from '../display/display-clock';
 import { DisplayControls } from '../display/display-controls';
 import { isStripGeometryUnavailable } from '../ws/json';
-import type { UvwMessage } from '../ws/wire';
+import type { TrackMessage, UvwMessage } from '../ws/wire';
 import { WsClientService } from '../ws/ws-client';
 import { JsrootPanel } from './jsroot-panel';
 import {
@@ -30,7 +30,7 @@ import {
   histoPanelSpec,
   uvwPanelSpec,
 } from './root-histo';
-import { type TrackEventResult, trackBlocker, trackEvent } from './track-fit';
+import { type Projections, fillTrackPoints, projectionBlocker } from './xy-projection';
 
 /** `mat-tab-group` 内の Event display タブの位置(Histograms = 0)。 */
 const EVENT_TAB_INDEX = 1;
@@ -72,6 +72,8 @@ export class MonitorView {
    * ラベルと絵が食い違わない(status バーは別物で、freeze 中も動き続ける)。
    */
   private readonly shownUvw = signal<readonly (UvwMessage | null)[]>([null, null, null]);
+  /** 同じ刻みで取る 0x04(ラベルと絵を揃える)。 */
+  private readonly shownTrack = signal<TrackMessage | null>(null);
   private readonly clock = inject(DisplayClock);
 
   /** 3 面のうち最新のもの(3 面は同じイベントから作られる)。 */
@@ -86,7 +88,10 @@ export class MonitorView {
 
   /** Event display タブが開いているか(閉じているときは投影を計算しない)。 */
   private readonly eventTabOpen = signal(false);
-  private readonly projection = signal<TrackEventResult | null>(null);
+  private readonly projection = signal<{
+    readonly projections: Projections;
+    readonly outOfRange: number;
+  } | null>(null);
   /** 投影を計算した回数(診断用。同じ入力で増えないことをテストで確かめる)。 */
   readonly projectionRuns = signal(0);
 
@@ -95,23 +100,27 @@ export class MonitorView {
     effect(() => {
       this.clock.tick();
       this.shownUvw.set(untracked(this.ws.uvwByPlane));
+      this.shownTrack.set(untracked(this.ws.track));
     });
 
     effect(() => {
       const open = this.eventTabOpen();
-      const uvw = this.shownUvw();
+      const track = this.shownTrack();
       const geometry = this.ws.stripGeometry();
+      const meta = this.ws.meta();
       if (!open) return;
       untracked(() => {
-        if (geometry === null || isStripGeometryUnavailable(geometry)) {
+        if (
+          track === null ||
+          meta === null ||
+          geometry === null ||
+          isStripGeometryUnavailable(geometry) ||
+          projectionBlocker(geometry) !== null
+        ) {
           this.projection.set(null);
           return;
         }
-        if (trackBlocker(uvw, geometry) !== null) {
-          this.projection.set(null);
-          return;
-        }
-        this.projection.set(trackEvent(uvw, geometry));
+        this.projection.set(fillTrackPoints(geometry, meta.nBuckets, track.points));
         this.projectionRuns.update((count) => count + 1);
       });
     });
@@ -131,16 +140,24 @@ export class MonitorView {
   readonly incomplete = computed(() => this.shownEvent()?.header.incomplete ?? false);
   readonly hasEvent = computed(() => this.shownEvent() !== null);
 
-  /** XY / XZ / YZ に渡すメッセージ(計算できていなければ 3 枚とも `null`)。 */
+  /** 0x04 の event# が表示中の 0x02 と違う(点は描く。077 と同じく `≠ UVW` を出す)。 */
+  readonly trackMismatch = computed(() => {
+    const track = this.shownTrack();
+    const uvw = this.shownEvent();
+    return track !== null && uvw !== null && track.header.eventNumber !== uvw.header.eventNumber;
+  });
+
+  /** XY / XZ / YZ に渡すメッセージ(詰められていなければ 3 枚とも `null`)。 */
   readonly projectionMessages = computed<readonly (ProjectionMessage | null)[]>(() => {
     const result = this.projection();
     if (!result) return [null, null, null];
-    return [result.xy, result.xz, result.yz].map((h) => ({ kind: 'projection' as const, ...h }));
+    const { xy, xz, yz } = result.projections;
+    return [xy, xz, yz].map((h) => ({ kind: 'projection' as const, ...h }));
   });
 
   /**
-   * 投影の状態を 1 行で(silent 禁止): 未着・unavailable・計算できない理由・トラックが無い理由・
-   * incomplete・範囲外・線分の無い strip をそれぞれ文で出す。
+   * 投影の状態を 1 行で(silent 禁止): 未着・unavailable・描けない理由・トラックが無い理由・
+   * incomplete・範囲外・置けなかったヒットをそれぞれ文で出す。
    */
   readonly projectionStatus = computed(() => {
     const geometry = this.ws.stripGeometry();
@@ -150,28 +167,31 @@ export class MonitorView {
     if (isStripGeometryUnavailable(geometry)) {
       return `strip geometry unavailable: ${geometry.unavailable}`;
     }
-    const blocker = trackBlocker(this.shownUvw(), geometry);
+    const blocker = projectionBlocker(geometry);
     if (blocker !== null) return `no projection: ${blocker}`;
+    if (this.ws.meta() === null) return 'waiting for meta (nBuckets) — no projection';
+    const track = this.shownTrack();
+    if (track === null) return 'waiting for track (0x04)';
     const result = this.projection();
     if (!result) return 'projection pending';
 
-    const { track } = result;
     const parts: string[] = [];
-    if (track.ok) {
-      const [u, v, w] = result.selected.map((hits) => hits.length);
+    const line = track.tracks[0];
+    if (track.ok && line) {
+      const [u, v, w] = track.hits;
       parts.push(
-        `straight track: φ = ${track.phiDeg.toFixed(1)}°, ` +
-          `xy length ${track.xyLength.toFixed(1)} mm (2–98 % charge), ` +
+        `straight track: φ = ${line.phiDeg.toFixed(1)}°, ` +
+          `xy length ${line.xyLength.toFixed(1)} mm (2–98 % charge), ` +
           `strip hits U/V/W = ${u}/${v}/${w}`,
       );
     } else {
-      parts.push(`no track: ${track.reason}`);
+      parts.push(`no track: ${track.reason || 'ok without a track in 0x04'}`);
     }
     if (result.outOfRange > 0) parts.push(`${result.outOfRange} points outside the plot range`);
-    if (result.unplaced > 0) {
-      parts.push(`strips with a hit but no segment in stripGeometry (skipped): ${result.unplaced}`);
+    if (track.unplaced > 0) {
+      parts.push(`strips with a hit but no segment in stripGeometry (skipped): ${track.unplaced}`);
     }
-    if (result.incomplete) parts.push('INCOMPLETE (fragments missing — charges are short)');
+    if (track.header.incomplete) parts.push('INCOMPLETE (fragments missing — charges are short)');
     return parts.join(' · ');
   });
 

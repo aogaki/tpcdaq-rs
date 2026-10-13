@@ -14,6 +14,8 @@
  *               値 = [0, 1.5, 2.25, 3.75]
  * - Histo2d   : run=7 / id=1(StripTimeU)/ nx=3 × ny=2 / x=[1,4] y=[0,2] /
  *               PUB 順(ix 外側)の [11,12,21,22,31,32] が **iy 外側へ転置**されて届く
+ * - Track     : (TODO/127)本文は発注書の JSON 例(ok=true / hits=[72,40,34] / 直線 1 本 / 点 2 つ)。
+ *               生成器が 0x04 をまだ出さない版では、この 1 本だけ skip する。
  *
  * フィクスチャは毎回再生成する(コミットしない)。走らせ方は `ui/run_ws_conformance.sh`。
  */
@@ -59,16 +61,55 @@ describe.skipIf(samplePath === '')('SPEC §10.4 適合(Rust 生成 → TS 本番
     messages = splitFrames(new Uint8Array(bytes)).map(decodeBinary);
   });
 
-  it('4 通すべてがデコードできる(0x02 / 0x03 / 0x10 / 0x11)', () => {
-    expect(messages).toHaveLength(4);
+  it('すべてがデコードできる(0x02 / 0x03 / 0x10 / 0x11、あれば 0x04 も)', () => {
     const broken = messages.filter(isDecodeError);
     expect(broken, JSON.stringify(broken)).toEqual([]);
-    expect(messages.map((m) => m.kind)).toEqual(['uvw', 'waveforms', 'histo1d', 'histo2d']);
+    // 0x04 の位置には依存しない(既存 4 種の相対順だけ見る)。
+    expect(messages.filter((m) => m.kind !== 'track').map((m) => m.kind)).toEqual([
+      'uvw',
+      'waveforms',
+      'histo1d',
+      'histo2d',
+    ]);
+  });
+
+  it('0x04 Track = 発注書の例(ok / hits / 直線 1 本 / 点 2 つ)', (ctx) => {
+    const message = messages.find((m) => m.kind === 'track');
+    if (!message) ctx.skip(); // 生成器が 0x04 をまだ出さない版
+    if (message?.kind !== 'track') return;
+    expect(message.header.msgType).toBe(0x04);
+    expect(message.ok).toBe(true);
+    expect(message.reason).toBe('');
+    expect(message.hits).toEqual([72, 40, 34]);
+    expect(message.unplaced).toBe(0);
+    expect(message.unknownKeys).toEqual([]);
+
+    expect(message.tracks).toHaveLength(1);
+    const line = message.tracks[0];
+    expectClose(line.phiDeg, 2.7, 'phiDeg');
+    [0.998, 0.047, -0.031].forEach((v, i) => expectClose(line.dir[i], v, `dir[${i}]`));
+    [-53.1, -7.9, 26.4].forEach((v, i) => expectClose(line.start[i], v, `start[${i}]`));
+    [53.0, -3.0, 23.1].forEach((v, i) => expectClose(line.end[i], v, `end[${i}]`));
+    [-53.5, -8.0, 26.4].forEach((v, i) => expectClose(line.startF[i], v, `startF[${i}]`));
+    [53.6, -3.0, 23.0].forEach((v, i) => expectClose(line.endF[i], v, `endF[${i}]`));
+    expectClose(line.length, 106.2, 'length');
+    expectClose(line.lengthF, 107.2, 'lengthF');
+    expectClose(line.xyLength, 106.1, 'xyLength');
+    expectClose(line.charge, 412345.0, 'charge');
+
+    const expected = [
+      [-52.9, -7.9, 152.0, 5480.0, 0, 0],
+      [-51.4, -7.8, 151.6, 5512.0, 0, 0],
+    ];
+    expect(message.points).toHaveLength(expected.length);
+    expected.forEach((point, i) =>
+      point.forEach((v, k) => expectClose(message.points[i][k], v, `points[${i}][${k}]`)),
+    );
   });
 
   it('0x02 Uvw = V 面 3×4、値は strip*10 + bucket', () => {
-    const message = messages[0];
-    if (message.kind !== 'uvw') throw new Error('expected uvw');
+    const message = messages.find((m) => m.kind === 'uvw');
+    if (message?.kind !== 'uvw') throw new Error('expected uvw');
     expect(message.header.runNumber).toBe(7);
     expect(message.header.eventNumber).toBe(42);
     expect(message.header.incomplete).toBe(false);
@@ -84,8 +125,8 @@ describe.skipIf(samplePath === '')('SPEC §10.4 適合(Rust 生成 → TS 本番
   });
 
   it('0x03 Waveforms = incomplete / cobo0 asad1 / aget-major', () => {
-    const message = messages[1];
-    if (message.kind !== 'waveforms') throw new Error('expected waveforms');
+    const message = messages.find((m) => m.kind === 'waveforms');
+    if (message?.kind !== 'waveforms') throw new Error('expected waveforms');
     expect(message.header.runNumber).toBe(7);
     expect(message.header.eventNumber).toBe(43);
     expect(message.header.incomplete).toBe(true); // flags bit0
@@ -106,8 +147,8 @@ describe.skipIf(samplePath === '')('SPEC §10.4 適合(Rust 生成 → TS 本番
   });
 
   it('0x10 Histo1d = id 4 / 4 ビン / x レンジ [0,4096]', () => {
-    const message = messages[2];
-    if (message.kind !== 'histo1d') throw new Error('expected histo1d');
+    const message = messages.find((m) => m.kind === 'histo1d');
+    if (message?.kind !== 'histo1d') throw new Error('expected histo1d');
     expect(message.header.runNumber).toBe(7);
     expect(message.header.eventNumber).toBe(0); // ヒストは 0
     expect(message.id).toBe(4);
@@ -121,8 +162,8 @@ describe.skipIf(samplePath === '')('SPEC §10.4 適合(Rust 生成 → TS 本番
   });
 
   it('0x11 Histo2d = id 1 / 3×2 / PUB の ix 外側が iy 外側へ転置されている', () => {
-    const message = messages[3];
-    if (message.kind !== 'histo2d') throw new Error('expected histo2d');
+    const message = messages.find((m) => m.kind === 'histo2d');
+    if (message?.kind !== 'histo2d') throw new Error('expected histo2d');
     expect(message.header.runNumber).toBe(7);
     expect(message.header.eventNumber).toBe(0);
     expect(message.id).toBe(1);

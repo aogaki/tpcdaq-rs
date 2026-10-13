@@ -2,12 +2,12 @@
  * Event Display の XY / XZ / YZ ヒスト(TODO/125、**表示専用**)— ビンと詰め方だけ。
  *
  * Angular / jsroot を import しない純ロジック。何を詰めるか(直線トラックのヒット)は
- * `track-fit.ts`(macros/analyzeUVW.C + makeTracks.C の移植 — 125 改訂 2)。
+ * monitor の `src/reco/` が計算して 0x04 Track で届く(TODO/127)。ここはビンに詰めるだけ。
  * ビン: X 幅 = stripPitch、Y 幅 = padPitch、範囲 = `stripGeometry.rangeXY`(TPCReco と同じ本数)、
  * Z = time bucket そのまま。ch 数・strip 数・ビン数は全部メッセージ由来。
  */
 import type { StripGeometryMessage } from '../ws/json';
-import type { UvwMessage } from '../ws/wire';
+import type { TrackPoint } from '../ws/wire';
 
 // ---------------------------------------------------------------------------------------------
 // 2D ヒスト
@@ -101,26 +101,25 @@ export function fillPoint(
 }
 
 /**
- * 計算できない理由(無ければ `null`)。呼び手(画面)はこれをそのまま文にする。
- * 3 面が揃い、同じイベントで、bucket 数が一致し、ヒストの本数が 1 以上であること。
+ * 0x04 の点(`[x, y, t, q, view, track]`)を 3 枚に詰める。重み = q。
+ * 戻り値の `outOfRange` = 3 枚のどれかの範囲の外に落ちた点の数(silent にしない)。
  */
-export function projectionBlocker(
-  uvw: readonly (UvwMessage | null)[],
+export function fillTrackPoints(
   geometry: StripGeometryMessage,
-): string | null {
-  const missing = ['U', 'V', 'W'].filter((_, plane) => !uvw[plane]);
-  if (missing.length > 0) return `waiting for ${missing.join('/')} (0x02)`;
-  const [u, v, w] = uvw as readonly [UvwMessage, UvwMessage, UvwMessage];
-  const events = [u, v, w].map((message) => message.header.eventNumber);
-  if (events[0] !== events[1] || events[1] !== events[2]) {
-    return `U/V/W are from different events (#${events.join(' / #')})`;
+  nBuckets: number,
+  points: readonly TrackPoint[],
+): { projections: Projections; outOfRange: number } {
+  const projections = createProjections(geometry, nBuckets);
+  let outOfRange = 0;
+  for (const [x, y, t, q] of points) {
+    if (!fillPoint(projections, x, y, t, q)) outOfRange++;
   }
-  if (u.nBuckets !== v.nBuckets || v.nBuckets !== w.nBuckets) {
-    return `U/V/W bucket counts differ (${u.nBuckets} / ${v.nBuckets} / ${w.nBuckets})`;
-  }
+  return { projections, outOfRange };
+}
+
+/** 描けない理由(無ければ `null`)。stripGeometry があり、ビンが退化していないこと。 */
+export function projectionBlocker(geometry: StripGeometryMessage): string | null {
   const { nx, ny } = projectionBins(geometry);
-  if (!(nx >= 1) || !(ny >= 1) || u.nBuckets < 1) {
-    return `degenerate projection bins (nx=${nx}, ny=${ny}, buckets=${u.nBuckets})`;
-  }
+  if (!(nx >= 1) || !(ny >= 1)) return `degenerate projection bins (nx=${nx}, ny=${ny})`;
   return null;
 }
