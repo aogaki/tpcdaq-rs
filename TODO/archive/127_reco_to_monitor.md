@@ -1,6 +1,6 @@
 # 127 — 飛跡の再構成を monitor(Rust、`src/reco/`)へ移し、結果を 0x04 Track で配る
 
-**Status: IN PROGRESS**(2026-10-13 起票 Opus。ユーザー「B(複数飛跡)で行きたいが、まずリファクタリングも」→ 範囲を絞って合意:
+**Status: COMPLETED**(2026-10-13 起票 Opus。ユーザー「B(複数飛跡)で行きたいが、まずリファクタリングも」→ 範囲を絞って合意:
 126(分割、完了)とこの 127。**挙動は変えない** — 125 改訂 2 の単一飛跡を、そのまま monitor に移す。Fable 条件付き承認 2026-10-13 — 条件は下に反映済み)
 
 ## 目的
@@ -80,5 +80,47 @@
 - ゲート: cargo fmt / clippy / test、UI ng test / ng build、適合スクリプト。
 - ELITPC に反映して、ユーザーの目視で 125 と同じ絵になること。**反映前後で status の `wsDropped` / `monitorGaps` の増え方が変わらない**こと。
 
-## 結果
-(未記入)
+## 結果(2026-10-13)
+
+### 実装とマージ
+- レーン A(Opus)e24122b → merge ac12906: `src/reco/{mod.rs, tests.rs}`(track-fit.ts の移植、f64・同じ演算順、`total_cmp` の安定ソート)、
+  `RecoGeometry`(起動時 1 回)、monitor のフック(`DisplayConverter::grids()`、0x02×3 → 0x04、stripGeometry が unavailable なら reco も 0x04 も無し)、
+  0x04 エンコーダ(13 B ヘッダ + UTF-8 JSON、live の broadcast、`uvw` 購読に含む)、サンプル(5 通目、run 7 / event 44、本文 = 発注書の例そのもの)、
+  `tests/reco_macro_oracle.rs`(env-gated、production / csv-s の 2 モード)、`tools/macro_oracle/README.md` の手順 3 を cargo に。
+- レーン B(Sonnet)d6424a0 + 8b3d045 → merge 5734eea: UI の計算(track-fit.ts と spec・フィクスチャ)を撤去、`wire.ts` に 0x04 のデコード(`bad-json`)、
+  `ws-client.track`、monitor-view は `shownTrack` を `shownUvw` と同じ刻みで、Z の bucket 数は `meta.nBuckets`、`≠ UVW`、`unplaced` の文を 127 の意味
+  (「N strip hits not placed on the line (view nearly parallel to the track)」)に。適合 spec に 0x04。
+- 照合: `git show --stat`(A は ui に、B は src / tests に触れていない)と各項目のテスト名で確認してから受け入れた。
+- 発注書からの逸脱(承認): bucket 数がペデスタル窓に足りないとき、TS は計算しない(null)だったが Rust は `ok:false` + 理由の文の 0x04 を送る
+  (monitor では N_BUCKETS = 512 固定なので起きない)。stripGeometry に線分の無い strip のヒットは `unplaced` に入れず、warn 1 回 + SUB スレッド停止時のログ
+  `track_no_segment_strips` で数える(JSON キーは足していない)。meta 未着・ok なのに飛跡なしの文は UI 側で補った。
+
+### TS → Rust のテスト対応(39 本)
+- レーン A の報告の対応表のとおり(定数・z 換算・stripHits 5 本・RecoGeometry・帯選択 2 本・3×3 の 3 本・fitTrack 6 本・既知の直線 mini / ELITPC 各 6 本・
+  halo / 帯外 / 理由の文 3 本・ドリフト方向・incomplete(sub のテスト)・bucket 不足(逸脱)・線分なし)。
+
+### オラクル(run70 の 201 イベント、`cargo test --release --test reco_macro_oracle`、主対話が main で実行 7 / 7 green、0.49 s)
+- ok / not ok 201 / 201(not ok = event 192、125 と同じ理由)、帯内ヒット集合の食い違い 0 / 20,960。
+- 最大差 production / csv-s: z 1.94e-6 mm、q 4.88e-8、端点 4.65e-4 / 3.04e-6 mm(event 90)、方向 4.81e-8、length 4.35e-6 mm、charge 4.69e-8 — 125(TS)と同じ。
+- 変異試験: QUANTILE 0.025 で 2 本が落ちる(125 と同じ)。
+
+### コスト(実データ、production)
+- release: `Reco::run` 平均 217 µs(最大 289 µs)、0x04 のエンコード込み 225 µs。最大の 0x04 は 13,233 B。debug 0.80 ms。
+
+### ゲート(main 5734eea → SPEC c7d1647、Mac)
+- cargo fmt / clippy clean、**cargo test 1069 passed / 0 failed / 1 ignored**(着手前 1018、+51)。
+- UI ng test **392 passed / 10 skipped**(env-gated)、**`ui/run_ws_conformance.sh` 402 passed / 0 skipped**(0x04 の適合を含む)、ng build OK。
+
+### ELITPC への反映(2026-10-13 08:28Z、ユーザー了承「今すぐ反映」、run 71 は継続)
+- monitor だけ入れ替え(bundle → `cargo build --release --bin monitor` → SIGINT → 再起動)、UI を差し替え(旧版 `/opt/tpcdaq/ui.prev127`)。
+- Node の WS クライアントで確認: 5 s で 0x02 52 通・0x04 17 通(全件 ok、例: hits 17/10/10、φ 0.35°、xy 長 27.1 mm、点 37、3,476 B)。
+- **反映前後の取りこぼし**: 前 08:25:05 → 08:26:06 で monitorGaps 0 → 0・wsDropped 0 → 0、後 08:28:55 → 08:29:56 で 0 → 0・0 → 0(どちらも 60 s、4.7 Hz)。
+  monitor の CPU 2.3 %、RSS 14 MB、ログに WARN / ERROR なし。
+- **ユーザーの目視: 「同じ絵ではもちろんないですが、良い絵です」(2026-10-13)**(別のイベントなので絵そのものは違う — 表示として良好)。
+
+### SPEC
+- v1.45(c7d1647): §4.4・§5.4・§5.5(アルゴリズム = macros の移植、本物の macros が正、実体 `src/reco/`)・§10.2(0x04)・§10.3(`uvw` に 0x04)・
+  live キューに 0x04・履歴。TODO/074 は superseded。
+
+### 実行できなかった操作
+- レーン A・B: worktree 隔離の権限チェックで複合コマンドが拒否 → Edit / 単純なコマンドでやり直し、未実行は残っていない。
