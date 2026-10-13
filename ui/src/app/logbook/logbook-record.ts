@@ -209,6 +209,9 @@ function shapeRunStop(raw: Raw): Shaped {
     }
     lines.push(`overflow_frames = ${counterValue(counters['overflow_frames'])}`);
     lines.push(`malformed = ${counterValue(counters['malformed'])}`);
+    // TODO/110: 取得の再開(前の取得の残りフレーム)。旧行・旧 decoder はキー無し = 取得不能。
+    lines.push(`acquisition_restarts = ${counterValue(counters['acquisition_restarts'])}`);
+    lines.push(`frames_before_restart = ${counterValue(counters['frames_before_restart'])}`);
     details.push({ label: 'counters', lines });
   }
   if (files.length > 0) {

@@ -181,6 +181,27 @@ pub struct RunDecoder {
     logged_topology: bool,
     logged_cobo_mismatch: bool,
     logged_heartbeat_abandoned: bool,
+    /// ソース毎の epoch 状態(取得の再開の判定材料 — TODO/110)。エントリはソース数ぶんだけで、
+    /// フレーム毎には確保しない。`rearm` で消す。
+    source_epochs: HashMap<u32, SourceEpoch>,
+    /// run 内でデコードできたデータフレーム数(`frames_before_restart` の材料)。
+    data_frames: u64,
+    /// 取得の再開(acquisition restart)の検出回数。フレームは落とさず数えるだけ。
+    acquisition_restarts: u64,
+    /// 最初の再開の時点の `data_frames`(前の取得の残りの本数)。2 回目以降は変えない。
+    frames_before_restart: u64,
+    logged_restart: bool,
+}
+
+/// 再開ゲート: これより大きい eventIdx を見た後の idx 0 だけを再開候補にする。
+/// 067 の「後退幅 1 の隣接混在」(run 頭の idx 1 → 0)を除くため。
+const RESTART_GATE_EVENT_IDX: u32 = 8;
+
+/// 1 ソースの現 epoch で見た eventIdx の最大値と event_time の最小値。
+#[derive(Debug, Clone, Copy)]
+struct SourceEpoch {
+    max_event_idx: u32,
+    time_floor: u64,
 }
 
 impl RunDecoder {
@@ -225,6 +246,11 @@ impl RunDecoder {
             logged_topology: false,
             logged_cobo_mismatch: false,
             logged_heartbeat_abandoned: false,
+            source_epochs: HashMap::new(),
+            data_frames: 0,
+            acquisition_restarts: 0,
+            frames_before_restart: 0,
+            logged_restart: false,
         }
     }
 
@@ -281,6 +307,11 @@ impl RunDecoder {
                             );
                         }
                     }
+                    self.track_acquisition_restart(
+                        source_id,
+                        fragment.event_idx,
+                        fragment.event_time,
+                    );
                     self.pending_bytes += fragment.items.len();
                     self.pending.push(fragment);
                     if self.batch_deadline.is_none() {
@@ -584,6 +615,8 @@ impl RunDecoder {
             "eos_abandoned": self.eos_abandoned,
             "batches_abandoned": self.batches_abandoned,
             "cobo_mismatch": self.cobo_mismatch,
+            "acquisition_restarts": self.acquisition_restarts,
+            "frames_before_restart": self.frames_before_restart,
         })
     }
 
@@ -618,6 +651,50 @@ impl RunDecoder {
         }
     }
 
+    /// 取得の再開(TODO/110 Fable 裁定)の判定。3 条件がそろったとき数える:
+    /// `event_idx == 0` / そのソースで `RESTART_GATE_EVENT_IDX` を超える idx を見た後 /
+    /// `event_time` がその epoch の最小値より小さい。フレームは落とさず Error にもしない。
+    fn track_acquisition_restart(&mut self, source_id: u32, event_idx: u32, event_time: u64) {
+        self.data_frames += 1;
+        let epoch = self.source_epochs.entry(source_id).or_insert(SourceEpoch {
+            max_event_idx: 0,
+            time_floor: u64::MAX,
+        });
+        if event_idx == 0
+            && epoch.max_event_idx > RESTART_GATE_EVENT_IDX
+            && event_time < epoch.time_floor
+        {
+            let max_before = epoch.max_event_idx;
+            let floor_before = epoch.time_floor;
+            // 新しい epoch の始まり。
+            epoch.max_event_idx = 0;
+            epoch.time_floor = event_time;
+            // このフレーム自身は新 epoch の 1 本目なので、残りの本数に含めない。
+            let before = self.data_frames - 1;
+            if self.acquisition_restarts == 0 {
+                self.frames_before_restart = before;
+            }
+            self.acquisition_restarts += 1;
+            if !self.logged_restart {
+                self.logged_restart = true;
+                info!(
+                    source_id,
+                    max_event_idx = max_before,
+                    time_floor = floor_before,
+                    event_time,
+                    frames_before_restart = self.frames_before_restart,
+                    "decoder: acquisition restart — event_idx fell back to 0 with an earlier \
+                     clock after higher indices; the head of this run is stale frames of a \
+                     previous acquisition (zCoBo kept running). Frames are kept (lossless); \
+                     further restarts are counted only"
+                );
+            }
+            return;
+        }
+        epoch.max_event_idx = epoch.max_event_idx.max(event_idx);
+        epoch.time_floor = epoch.time_floor.min(event_time);
+    }
+
     fn clear_pending(&mut self) {
         self.pending.clear(); // capacity は保つ(バッファ再利用)
         self.pending_bytes = 0;
@@ -629,6 +706,11 @@ impl RunDecoder {
         self.next_seq.clear();
         self.out_seq = 0;
         self.awaiting_run = true;
+        self.source_epochs.clear();
+        self.data_frames = 0;
+        self.acquisition_restarts = 0;
+        self.frames_before_restart = 0;
+        self.logged_restart = false;
         self.clear_pending();
     }
 }
@@ -1844,6 +1926,126 @@ mod tests {
         );
         assert_eq!(m["heartbeats_in"].as_u64(), Some(1));
         assert_eq!(m["items_out"].as_u64(), Some(8));
+    }
+
+    // -----------------------------------------------------------------
+    // 取得の再開(acquisition restart — TODO/110)
+    // -----------------------------------------------------------------
+
+    /// event_idx と event_time(48 bit、ヘッダ offset 16)を指定できる 8 item フレーム。
+    fn frame_at(cobo: u8, event_idx: u32, event_time: u64) -> ByteBuf {
+        let items: Vec<(u8, u8, u16, u16)> =
+            (0..8u16).map(|i| (0u8, i as u8, i, 100 + i * 7)).collect();
+        let mut b = make_frame(cobo, 0, event_idx, &items);
+        write_uint(&mut b, 16, event_time, 6);
+        ByteBuf::from(b)
+    }
+
+    /// 前の取得の残り 19 本(idx 2038..=2056、time 406.36 s 相当から単調増加)のあとに
+    /// idx 0(time 16e3)が来る列。実機 run 29 の姿(TODO/110 事実節)を縮めた合成。
+    fn stale_head_then_restart(cobo: u8) -> Vec<ByteBuf> {
+        let mut frames: Vec<ByteBuf> = (2038..=2056u32)
+            .map(|i| frame_at(cobo, i, 406_000_000 + u64::from(i - 2038) * 140_000))
+            .collect();
+        frames.push(frame_at(cobo, 0, 16_000));
+        frames.push(frame_at(cobo, 1, 26_000));
+        frames
+    }
+
+    /// 手計算: 古い 19 本(2038..=2056 は 2056-2038+1 = 19)→ 続く idx 0 は max=2056 > 8 かつ
+    /// time 16e3 < floor 406e6 → 再開 1 回。idx 1 は再開ではない。frames_before_restart = 19。
+    /// フレームは 1 本も落とさない(pending = 19 + 2 = 21)・Error にしない。
+    #[test]
+    fn a_stale_head_followed_by_event_idx_zero_counts_an_acquisition_restart() {
+        let mut c = core(29, &[0]);
+        c.handle_batch(0, 29, 0, &stale_head_then_restart(0), Instant::now());
+
+        let m = c.metrics_json();
+        assert_eq!(m["acquisition_restarts"].as_u64(), Some(1));
+        assert_eq!(m["frames_before_restart"].as_u64(), Some(19));
+        assert_eq!(c.pending().len(), 21, "フレームは落とさない");
+        assert!(!c.errored(), "再開は Error にしない");
+    }
+
+    /// 067 の「頭の隣接混在」: idx 1 の次に idx 0 が遅れて来る(max=1 <= 8)。再開ではない。
+    /// 時刻が小さくても(0 の方が早い)ゲートで除外される。
+    #[test]
+    fn adjacent_mixing_at_the_head_of_a_run_is_not_a_restart() {
+        let mut c = core(7, &[0]);
+        let frames = vec![
+            frame_at(0, 1, 26_000),
+            frame_at(0, 0, 16_000),
+            frame_at(0, 2, 36_000),
+        ];
+        c.handle_batch(0, 7, 0, &frames, Instant::now());
+
+        let m = c.metrics_json();
+        assert_eq!(m["acquisition_restarts"].as_u64(), Some(0));
+        assert_eq!(m["frames_before_restart"].as_u64(), Some(0));
+    }
+
+    /// ソース毎に判定する: source 0 は再開あり、source 1 は idx 0 から正常開始(再開なし)、
+    /// source 2 も再開。→ 2 回。frames_before_restart は最初の再開(source 0 の 19)で
+    /// ラッチされ、2 回目で変わらない。
+    #[test]
+    fn a_restart_is_counted_per_source_and_reported_once_per_run_start() {
+        let mut c = core(29, &[0, 1, 2]);
+        let now = Instant::now();
+        c.handle_batch(0, 29, 0, &stale_head_then_restart(0), now);
+        c.handle_batch(
+            1,
+            29,
+            0,
+            &[frame_at(1, 0, 16_000), frame_at(1, 1, 26_000)],
+            now,
+        );
+        // 2 つ目の再開は source 2 の 3 本目(frames は run 全体で 21 + 2 + 2 = 25 本目付近)。
+        c.handle_batch(
+            2,
+            29,
+            0,
+            &[
+                frame_at(2, 100, 5_000_000),
+                frame_at(2, 101, 5_010_000),
+                frame_at(2, 0, 16_000),
+            ],
+            now,
+        );
+
+        let m = c.metrics_json();
+        assert_eq!(m["acquisition_restarts"].as_u64(), Some(2));
+        assert_eq!(
+            m["frames_before_restart"].as_u64(),
+            Some(19),
+            "最初の再開でラッチ、2 回目で変えない"
+        );
+    }
+
+    /// rearm(自分の EOS 送出後)で 2 項目とも初期化される。次の run は再び最初の再開から数える。
+    #[test]
+    fn restart_counters_reset_on_rearm() {
+        let mut c = core(29, &[0]);
+        let now = Instant::now();
+        c.handle_batch(0, 29, 0, &stale_head_then_restart(0), now);
+        assert_eq!(c.metrics_json()["acquisition_restarts"].as_u64(), Some(1));
+        c.handle_eos(0, 29);
+        c.batch_sent();
+        c.eos_sent();
+
+        let m = c.metrics_json();
+        assert_eq!(m["acquisition_restarts"].as_u64(), Some(0));
+        assert_eq!(m["frames_before_restart"].as_u64(), Some(0));
+
+        // 次の run も同じ判定が働く: 古い 2 本(idx 50, 51)→ idx 0 で再開 1 回、before = 2。
+        let frames = vec![
+            frame_at(0, 50, 9_000_000),
+            frame_at(0, 51, 9_010_000),
+            frame_at(0, 0, 16_000),
+        ];
+        c.handle_batch(0, 30, 0, &frames, now);
+        let m = c.metrics_json();
+        assert_eq!(m["acquisition_restarts"].as_u64(), Some(1));
+        assert_eq!(m["frames_before_restart"].as_u64(), Some(2));
     }
 
     // -----------------------------------------------------------------

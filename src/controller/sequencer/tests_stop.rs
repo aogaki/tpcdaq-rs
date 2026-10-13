@@ -418,6 +418,34 @@ fn stop_fills_counters_and_files_from_get_status() {
     );
 }
 
+/// decoder の取得再開カウンタ(TODO/110)が `run_stop.counters` に載る。
+/// 値は非対称(restarts=1 / frames_before_restart=19)。metrics に無ければ `None`(0 と区別)。
+#[test]
+fn run_stop_counters_carry_the_decoder_restart_counters() {
+    let params = params_with(&[0]);
+    let mut mock = MockTransport::new(&params).with_eos_closed();
+    mock.metrics.insert(
+        "decoder".to_string(),
+        json!({"eos_in": 1, "eos_out": 1, "malformed": 0,
+               "acquisition_restarts": 1, "frames_before_restart": 19}),
+    );
+    let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+    assert_eq!(report.counters.acquisition_restarts, Some(1));
+    assert_eq!(report.counters.frames_before_restart, Some(19));
+
+    let json = serde_json::to_value(&report.counters).unwrap();
+    assert_eq!(json["acquisition_restarts"], json!(1));
+    assert_eq!(json["frames_before_restart"], json!(19));
+
+    // decoder が古くてキーを持たない → null(取得不能)。
+    let mut mock = MockTransport::new(&params).with_eos_closed();
+    mock.metrics
+        .insert("decoder".to_string(), json!({"eos_in": 1, "malformed": 0}));
+    let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+    assert_eq!(report.counters.acquisition_restarts, None);
+    assert_eq!(report.counters.frames_before_restart, None);
+}
+
 /// 設定にある CoBo が不達でも `frames` の鍵は出す(欠落を隠さない)。
 #[test]
 fn counters_keep_a_key_for_every_configured_cobo() {

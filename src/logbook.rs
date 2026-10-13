@@ -105,6 +105,13 @@ pub struct Counters {
     pub frames: BTreeMap<String, u64>,
     pub overflow_frames: Option<u64>,
     pub malformed: Option<u64>,
+    /// decoder が数えた取得の再開(acquisition restart)回数(TODO/110)。decoder が古くて
+    /// 持たない / 不達なら `None`。既存 JSONL(キー無し)は `#[serde(default)]` で `None`。
+    #[serde(default)]
+    pub acquisition_restarts: Option<u64>,
+    /// 最初の再開より前に受けたデータフレーム数(前の取得の残り。TODO/110)。
+    #[serde(default)]
+    pub frames_before_restart: Option<u64>,
 }
 
 /// `run_stop.files` の 1 要素(SPEC §9.2)。
@@ -602,6 +609,8 @@ mod tests {
                 frames,
                 overflow_frames: Some(3),
                 malformed: Some(4),
+                acquisition_restarts: None,
+                frames_before_restart: None,
             },
             files: vec![
                 OutputFile {
@@ -702,7 +711,7 @@ mod tests {
         let json = serde_json::to_string(&line).unwrap();
         assert_eq!(
             json,
-            r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","forced_eos":true,"eos_closed":true,"counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}"#
+            r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","forced_eos":true,"eos_closed":true,"counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4,"acquisition_restarts":null,"frames_before_restart":null},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}"#
         );
     }
 
@@ -857,11 +866,13 @@ mod tests {
             frames: BTreeMap::new(),
             overflow_frames: None,
             malformed: None,
+            acquisition_restarts: None,
+            frames_before_restart: None,
         };
         let json = serde_json::to_string(&counters).unwrap();
         assert_eq!(
             json,
-            r#"{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{},"overflow_frames":null,"malformed":null}"#
+            r#"{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{},"overflow_frames":null,"malformed":null,"acquisition_restarts":null,"frames_before_restart":null}"#
         );
         let back: Counters = serde_json::from_str(&json).unwrap();
         assert_eq!(back, counters);
@@ -878,11 +889,13 @@ mod tests {
             frames: BTreeMap::new(),
             overflow_frames: Some(44),
             malformed: Some(55),
+            acquisition_restarts: None,
+            frames_before_restart: None,
         };
         let json = serde_json::to_string(&counters).unwrap();
         assert_eq!(
             json,
-            r#"{"events_built":11,"events_incomplete":22,"late_fragments":33,"frames":{},"overflow_frames":44,"malformed":55}"#
+            r#"{"events_built":11,"events_incomplete":22,"late_fragments":33,"frames":{},"overflow_frames":44,"malformed":55,"acquisition_restarts":null,"frames_before_restart":null}"#
         );
         let back: Counters = serde_json::from_str(&json).unwrap();
         assert_eq!(back, counters);

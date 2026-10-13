@@ -741,6 +741,8 @@ mod tests {
                     frames,
                     overflow_frames: Some(3),
                     malformed: Some(4),
+                    acquisition_restarts: None,
+                    frames_before_restart: None,
                 },
                 files: vec![
                     OutputFile {
@@ -859,6 +861,8 @@ mod tests {
                         frames,
                         overflow_frames: Some(0),
                         malformed: Some(0),
+                        acquisition_restarts: None,
+                        frames_before_restart: None,
                     },
                     files: vec![
                         OutputFile {
@@ -1079,6 +1083,8 @@ mod tests {
                         frames: BTreeMap::new(),
                         overflow_frames: Some(0),
                         malformed: Some(0),
+                        acquisition_restarts: None,
+                        frames_before_restart: None,
                     },
                     // ctrl プローブ接続のみ(AsAd 区画が無い = asad_graw_ts が None)。
                     files: vec![OutputFile {
