@@ -5,8 +5,9 @@
 //! ホットパス(decoder のチャンネル解決)は稠密配列の O(1) 引きのみで済むよう、
 //! FPN リオーダ(`REORDER_FROM_GEOMETRY_TO_GRAW`)はパース時に一度だけ適用する(SPEC §4.3)。
 //!
-//! mm 変換はしない(SPEC §4.4)。ヘッダスカラ(ANGLES 等)は [`HeaderScalars`] に
-//! そのまま保持するだけ。
+//! mm 変換はしない(SPEC §4.4)。ヘッダスカラ(ANGLES 等)は [`HeaderScalars`] に、
+//! strip 行の形の列(`OFF_PAD OFF_STRIP LEN_PADS`)は [`StripRow`] にそのまま保持するだけ。
+//! mm への換算は `strip_xy`(TODO/125)だけが行う。
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -109,6 +110,22 @@ pub struct HeaderScalars {
     pub drift_cage_acceptance_mm: Option<(f64, f64)>,
 }
 
+/// strip 行の形の列(NEW 10 欄 / LEGACY 7 欄の `OFF_PAD OFF_STRIP LEN_PADS`)。
+///
+/// 値は `.dat` に書かれたまま(単位は pad / strip の個数)。mm への換算は `strip_xy` だけが行う
+/// (TODO/125、SPEC §4.4 の例外)。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StripRow {
+    pub plane: Plane,
+    pub section: u8,
+    pub strip: u16,
+    pub off_pad: f64,
+    pub off_strip: f64,
+    pub len_pads: f64,
+    /// `.dat` の行番号(1 始まり)。
+    pub line_number: usize,
+}
+
 /// 重複 `(cobo,asad,aget,raw_ch)` の警告(先勝ちで無視した側の記録)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DuplicateChannel {
@@ -155,6 +172,8 @@ pub struct Geometry {
     asad_count: Vec<u32>,
     duplicates: Vec<DuplicateChannel>,
     malformed: Vec<MalformedLine>,
+    /// strip 行の形の列(ファイル順。ch 表に採られた行だけ — [`Geometry::strip_rows`])。
+    strip_rows: Vec<StripRow>,
     /// `Unmapped` を引いた回数(ホットパスはアトミック加算のみ — ログ整形はしない)。
     unmapped_hits: AtomicU64,
 }
@@ -201,6 +220,16 @@ impl Geometry {
     /// パースできなかった行の一覧。
     pub fn malformed_lines(&self) -> &[MalformedLine] {
         &self.malformed
+    }
+
+    /// strip 行の形の列(ファイル順)。
+    ///
+    /// ch 表([`Self::lookup`])に採られた行だけを持つ —— ch キー重複で捨てた行は入らない
+    /// (TPCReco `GeometryTPC::Load` も mapByAget に既にある ch の行を丸ごと捨てる)。
+    /// 同じ `(plane, section, strip)` の行が複数あってもここでは全部残す(どれを採るかは
+    /// `strip_xy` が TPCReco の mapByStrip と同じ後勝ちで決める)。
+    pub fn strip_rows(&self) -> &[StripRow] {
+        &self.strip_rows
     }
 
     /// 登場した CoBo の数(`cobo` id の最大値 + 1)。
@@ -401,6 +430,8 @@ struct ParsedStrip {
     section: u8,
     strip: u16,
     signal_ch: u32,
+    /// `[OFF_PAD, OFF_STRIP, LEN_PADS]`。
+    shape: [f64; 3],
 }
 
 struct ParsedAux {
@@ -417,6 +448,8 @@ struct PendingChannel {
     aget: u32,
     raw_ch: u32,
     role: ChannelRole,
+    /// strip 行の `[OFF_PAD, OFF_STRIP, LEN_PADS]`(AUX 行は `None`)。
+    shape: Option<[f64; 3]>,
     line_number: usize,
 }
 
@@ -432,9 +465,9 @@ fn parse_new_strip_line(tokens: &[&str]) -> Option<ParsedStrip> {
         return None;
     }
     let signal_ch: u32 = tokens[6].parse().ok()?;
-    let _off_pad: f64 = tokens[7].parse().ok()?;
-    let _off_strip: f64 = tokens[8].parse().ok()?;
-    let _len_pads: f64 = tokens[9].parse().ok()?;
+    let off_pad: f64 = tokens[7].parse().ok()?;
+    let off_strip: f64 = tokens[8].parse().ok()?;
+    let len_pads: f64 = tokens[9].parse().ok()?;
     Some(ParsedStrip {
         cobo,
         asad,
@@ -443,6 +476,7 @@ fn parse_new_strip_line(tokens: &[&str]) -> Option<ParsedStrip> {
         section,
         strip,
         signal_ch,
+        shape: [off_pad, off_strip, len_pads],
     })
 }
 
@@ -455,9 +489,9 @@ fn parse_legacy_strip_line(tokens: &[&str]) -> Option<ParsedStrip> {
         return None;
     }
     let signal_ch: u32 = tokens[3].parse().ok()?;
-    let _off_pad: f64 = tokens[4].parse().ok()?;
-    let _off_strip: f64 = tokens[5].parse().ok()?;
-    let _len_pads: f64 = tokens[6].parse().ok()?;
+    let off_pad: f64 = tokens[4].parse().ok()?;
+    let off_strip: f64 = tokens[5].parse().ok()?;
+    let len_pads: f64 = tokens[6].parse().ok()?;
     Some(ParsedStrip {
         cobo: 0,
         asad: 0,
@@ -466,6 +500,7 @@ fn parse_legacy_strip_line(tokens: &[&str]) -> Option<ParsedStrip> {
         section: 0,
         strip,
         signal_ch,
+        shape: [off_pad, off_strip, len_pads],
     })
 }
 
@@ -522,6 +557,7 @@ fn push_strip(
             section: parsed.section,
             strip: parsed.strip,
         },
+        shape: Some(parsed.shape),
         line_number,
     });
 }
@@ -544,6 +580,7 @@ fn push_aux(
         aget: parsed.aget,
         raw_ch,
         role: ChannelRole::Aux { name: parsed.name },
+        shape: None,
         line_number,
     });
 }
@@ -645,6 +682,7 @@ fn build_geometry(
     }
 
     let mut duplicates = Vec::new();
+    let mut strip_rows = Vec::new();
     for entry in pending {
         match compute_index(
             &asad_offset,
@@ -656,6 +694,25 @@ fn build_geometry(
         ) {
             Some(idx) => {
                 if channels[idx] == ChannelRole::Unmapped {
+                    if let (
+                        ChannelRole::Strip {
+                            plane,
+                            section,
+                            strip,
+                        },
+                        Some([off_pad, off_strip, len_pads]),
+                    ) = (&entry.role, entry.shape)
+                    {
+                        strip_rows.push(StripRow {
+                            plane: *plane,
+                            section: *section,
+                            strip: *strip,
+                            off_pad,
+                            off_strip,
+                            len_pads,
+                            line_number: entry.line_number,
+                        });
+                    }
                     channels[idx] = entry.role;
                 } else {
                     duplicates.push(DuplicateChannel {
@@ -681,6 +738,7 @@ fn build_geometry(
         asad_count,
         duplicates,
         malformed,
+        strip_rows,
         unmapped_hits: AtomicU64::new(0),
     }
 }
@@ -870,6 +928,95 @@ U\t0\t1\t0\t0\t0\t0\t0.0\t0.0\t10
         // Strip の再ヒットはカウントしない。
         let _ = geometry.lookup(0, 0, 0, 0);
         assert_eq!(geometry.unmapped_hit_count(), 2);
+    }
+
+    // --- strip 行の形の列(OFF_PAD / OFF_STRIP / LEN_PADS — TODO/125) ---
+
+    #[test]
+    fn strip_rows_keep_the_shape_columns_of_new_format_lines() {
+        let text = "\
+ANGLES: 0.0 -120.0 -60.0
+DIAMOND SIZE: 1.0
+REFERENCE POINT: 0.0 0.0
+U\t0\t3\t0\t0\t0\t0\t-1.5\t2.0\t7.6
+W\t2\t9\t0\t0\t1\t5\t4.0\t-3.0\t12
+";
+        let geometry = parse(text);
+        // 手計算: 3〜4 行目の 8〜10 欄がそのまま(単位は pad / strip の個数、mm にしない)。
+        assert_eq!(
+            geometry.strip_rows(),
+            &[
+                StripRow {
+                    plane: Plane::U,
+                    section: 0,
+                    strip: 3,
+                    off_pad: -1.5,
+                    off_strip: 2.0,
+                    len_pads: 7.6,
+                    line_number: 4,
+                },
+                StripRow {
+                    plane: Plane::W,
+                    section: 2,
+                    strip: 9,
+                    off_pad: 4.0,
+                    off_strip: -3.0,
+                    len_pads: 12.0,
+                    line_number: 5,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn strip_rows_keep_the_shape_columns_of_legacy_format_lines() {
+        // LEGACY 7 欄: DIR STRIP AGET AGET_CH OFF_PAD OFF_STRIP LEN_PADS(section = 0)。
+        let text = "\
+ANGLES: 90.0 -30.0 30.0
+V\t11\t2\t7\t0.5\t-4.0\t33.2
+";
+        let geometry = parse(text);
+        assert_eq!(
+            geometry.strip_rows(),
+            &[StripRow {
+                plane: Plane::V,
+                section: 0,
+                strip: 11,
+                off_pad: 0.5,
+                off_strip: -4.0,
+                len_pads: 33.2,
+                line_number: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn strip_rows_drop_a_row_whose_channel_is_already_taken() {
+        // TPCReco `Load` も mapByAget に既にある ch の行は丸ごと捨てる(mapByStrip にも入らない)。
+        // 2 行目は 1 行目と同じ (cobo0,asad0,aget0,ch0) — ch 引きと同じく先勝ちで捨てる。
+        // 3 行目は別の ch で、AUX 行は形の列を持たない。
+        let text = "\
+U\t0\t1\t0\t0\t0\t0\t0.0\t0.0\t10
+V\t0\t9\t0\t0\t0\t0\t9.0\t9.0\t10
+W\t1\t4\t0\t0\t0\t1\t2.5\t1.0\t3
+Aux\t0\t0\t0\t2
+";
+        let geometry = parse(text);
+        let rows = geometry.strip_rows();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (rows[0].plane, rows[0].strip, rows[0].line_number),
+            (Plane::U, 1, 1)
+        );
+        assert_eq!(
+            (rows[1].plane, rows[1].strip, rows[1].line_number),
+            (Plane::W, 4, 3)
+        );
+        assert_eq!(
+            geometry.duplicate_warnings().len(),
+            1,
+            "ch 重複の警告は従来どおり"
+        );
     }
 
     #[test]
