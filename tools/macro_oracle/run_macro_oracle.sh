@@ -3,7 +3,7 @@
 # TODO/125 改訂 2 レーン D — macros オラクル。
 # **本物の** macros/analyzeUVW.C(既定 100 mbar)と makeTracks.C を一時ディレクトリにコピーして実行し、
 # dumpMacroOracle.C で raw の adc・uvw の strip ヒット・tracks の全ブランチを JSON に書き出す。
-# UI の env-gated テスト(ui/src/app/monitor/track-fit-oracle.spec.ts)がこの JSON を読む。
+# Rust の env-gated テスト(tests/reco_macro_oracle.rs — TODO/127)がこの JSON を読む。
 #
 #   tools/macro_oracle/run_macro_oracle.sh RAW.root OUT.json [MAX_EVENTS] [MACROS_DIR]
 #

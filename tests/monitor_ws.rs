@@ -707,6 +707,80 @@ async fn a_200_kb_strip_geometry_reaches_the_client_whole() {
 }
 
 // =====================================================================
+// 1c. 0x04 Track は live のバイナリで 0x02 ×3 の後に、`uvw` 購読で届く(TODO/127)
+// =====================================================================
+
+#[tokio::test]
+async fn track_0x04_follows_the_three_planes_on_the_uvw_live_stream() {
+    let mut publisher = Publisher::bind();
+    let monitor = Monitor::start(&publisher.endpoint, 64).await;
+    let mut client = Client::connect(&monitor).await;
+    client.next_json("meta", RECV_TIMEOUT).await;
+    warm_up(&mut publisher, &mut client, 7).await;
+    client.settle().await;
+
+    // U strip2 bucket5 に 300 だけ(q = 285 < 2000 の halo)→ どの面もヒット 0 本。
+    publisher.event(7, 77, true, vec![fragment(0, 0, &[(0, 1, 5, 300)])]);
+    let deadline = tokio::time::Instant::now() + RECV_TIMEOUT;
+    let mut binary_types = Vec::new();
+    let mut track = None;
+    while let Some(message) = client.next(deadline - tokio::time::Instant::now()).await {
+        match message {
+            WsMessage::Binary(bytes) => {
+                binary_types.push(bytes[2]);
+                if bytes[2] == 0x04 {
+                    track = Some(bytes.to_vec());
+                    break;
+                }
+            }
+            WsMessage::Text(text) => {
+                // JSON(reliable)経路には載らない
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_ne!(
+                    value["type"], "track",
+                    "0x04 が JSON テキストで来た: {text}"
+                );
+            }
+            _ => {}
+        }
+    }
+    let track = track.expect("no 0x04 Track within the timeout");
+    assert_eq!(binary_types, vec![0x02, 0x02, 0x02, 0x04], "0x02 ×3 → 0x04");
+    assert_eq!(track[3], 2, "version = 2");
+    assert_eq!(u32_at(&track, 5), 7, "runNumber");
+    assert_eq!(u32_at(&track, 9), 77, "eventNumber = 0x02 と同じ");
+    let body: serde_json::Value = serde_json::from_slice(&track[13..]).unwrap();
+    assert_eq!(body["ok"], false);
+    assert_eq!(
+        body["reason"],
+        "U has 0 strip hits after the halo cut (needs 4); \
+         V has 0 strip hits after the halo cut (needs 4); \
+         W has 0 strip hits after the halo cut (needs 4)"
+    );
+    assert_eq!(body["tracks"], serde_json::json!([]));
+
+    // `uvw` を外すと 0x02 も 0x04 も来ない(0x04 は uvw ストリームの一部)。
+    client.send_text(r#"{"streams":["histos","status"]}"#).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    publisher.event(7, 78, true, vec![fragment(0, 0, &[(0, 1, 5, 300)])]);
+    let types: Vec<u8> = client
+        .drain(Duration::from_millis(700))
+        .await
+        .iter()
+        .filter_map(|m| match m {
+            WsMessage::Binary(bytes) => Some(bytes[2]),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !types.contains(&0x02) && !types.contains(&0x04),
+        "uvw を外したのに来ている: {types:?}"
+    );
+
+    monitor.stop().await;
+}
+
+// =====================================================================
 // 2. waveforms は既定 OFF、subscribe で ON(SPEC §10.3 の帯域制御)
 // =====================================================================
 

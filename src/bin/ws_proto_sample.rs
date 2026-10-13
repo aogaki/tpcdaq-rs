@@ -2,7 +2,7 @@
 //!
 //! 使い方: `ws_proto_sample --out <path> [--geometry <dat> --strip-geometry-out <json>]`
 //!
-//! **本番エンコーダ**([`tpcdaq::monitor::ws`])で全メッセージ型(0x02/0x03/0x10/0x11)を
+//! **本番エンコーダ**([`tpcdaq::monitor::ws`])で全メッセージ型(0x02/0x03/0x10/0x11/0x04)を
 //! 既知値でエンコードし、`u32 LE 長さ + ペイロード` の連結ストリームをファイルへ書く。
 //! 検証器は TypeScript 側(Angular UI の**本番デコーダ**を import するテスト、027)。
 //!

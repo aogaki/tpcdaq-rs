@@ -14,6 +14,10 @@ pub mod geometry;
 /// SPEC §4.4 の例外 / §10.3 `stripGeometry`。(TODO/125 で実装)
 pub mod strip_xy;
 
+/// 飛跡の再構成(macros/analyzeUVW.C + makeTracks.C の移植、1 イベント = 直線 1 本)。純関数。
+/// monitor が 0x02 と同じ格子で呼び、0x04 Track で配る。SPEC §5.5 / §10.2。(TODO/127 で実装)
+pub mod reco;
+
 /// ZMQ メッセージ核(Message/Batch/Fragment、直列化)。SPEC §2。(003 で実装)
 pub mod msg;
 

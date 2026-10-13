@@ -1,6 +1,7 @@
 // =============================================================================
 // dumpMacroOracle.C — TODO/125 改訂 2 レーン D: macros の analyzeUVW.C + makeTracks.C の
-// 出力(本物のマクロを実行した結果)を、UI の track-fit.ts と照合するための JSON に書き出す。
+// 出力(本物のマクロを実行した結果)を、monitor の再構成(src/reco/、TODO/127)と照合するための
+// JSON に書き出す(照合は tests/reco_macro_oracle.rs)。
 //
 //   root -l -b -q 'dumpMacroOracle.C("X_raw.root", "X_uvw.root", "X_tracks.root",
 //                                    "channel_map.csv", "out.json", 200)'
