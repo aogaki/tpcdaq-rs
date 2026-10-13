@@ -1056,6 +1056,8 @@ mod tests {
                 frames,
                 overflow_frames: Some(0),
                 malformed: Some(2),
+                acquisition_restarts: None,
+                frames_before_restart: None,
             },
             files: vec![
                 OutputFile {

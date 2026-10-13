@@ -157,7 +157,22 @@ describe('run_stop(SPEC §9.2 — ok=false を目立たせる / counters の nul
       'frames cobo 1 = 3,849',
       'overflow_frames = 3',
       'malformed = 4',
+      // 旧行(キー無し)は 0 ではなく取得不能(TODO/110)。
+      'acquisition_restarts = unavailable (null)',
+      'frames_before_restart = unavailable (null)',
     ]);
+  });
+
+  it('取得の再開の 2 項目は数値なら 3 桁区切りで出る(TODO/110)', () => {
+    // 出典: TODO/110 の合成列。restarts=1 / frames_before_restart=2,056 は相異なる非対称値。
+    const base = RUN_STOP as { counters: Record<string, unknown> };
+    const withRestart = {
+      ...base,
+      counters: { ...base.counters, acquisition_restarts: 1, frames_before_restart: 2056 },
+    };
+    const lines = detail(parsed(withRestart), 'counters');
+    expect(lines).toContain('acquisition_restarts = 1');
+    expect(lines).toContain('frames_before_restart = 2,056');
   });
 
   it('files は件数つきで畳む', () => {
