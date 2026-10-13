@@ -327,7 +327,7 @@ pub(super) async fn post_run_start(
         let outcome = start_run_blocking(&controller, &operator, &request.comment);
         let mut run_state = lock(&controller.run);
         match outcome {
-            Ok((run, ts)) => {
+            Ok((run, ts, params_id, notes)) => {
                 run_state.phase = Phase::Running;
                 run_state.active = Some(ActiveRun {
                     run,
@@ -336,7 +336,13 @@ pub(super) async fn post_run_start(
                     started_ts: ts,
                     started_at: Instant::now(),
                 });
-                ok_json(json!({"run": run, "phase": "Running"}))
+                // 132: params が TOML の config_id を上書きしたかを応答でも分かるようにする。
+                ok_json(json!({
+                    "run": run,
+                    "phase": "Running",
+                    "params_id": params_id,
+                    "notes": notes,
+                }))
             }
             Err(detail) => {
                 run_state.phase = Phase::Idle;
@@ -361,12 +367,25 @@ pub(super) async fn post_run_start(
     }
 }
 
-/// run 開始の本体(ブロッキング)。成功したら (run 番号, 開始 TS)。
+/// 132: テンプレート名の stem(`configure-` / `.xcfg` を外し、生成物名の `__<hash8>` も落とす)
+/// が TOML の config_id と一致するか。
+pub(super) fn template_matches_config_id(template: &str, toml_config_id: &str) -> bool {
+    let stem = crate::params::render::template_stem(template);
+    let stem = stem
+        .split_once("__")
+        .map_or(stem.as_str(), |(head, _)| head);
+    stem == toml_config_id
+}
+
+/// [`start_run_blocking`] の成功値: (run 番号, 開始 TS, params の `<id>`, 応答の notes)。
+pub(super) type StartedRun = (u32, String, Option<String>, Vec<String>);
+
+/// run 開始の本体(ブロッキング)。
 pub(super) fn start_run_blocking(
     controller: &Controller,
     operator: &str,
     comment: &str,
-) -> Result<(u32, String), String> {
+) -> Result<StartedRun, String> {
     // ジオメトリはコンポーネントに触る前に読む(run_start レコードに必須 — SPEC §9.2)。
     let geometry = match geometry_record(&controller.params.geometry_path) {
         Ok(geometry) => geometry,
@@ -410,6 +429,27 @@ pub(super) fn start_run_blocking(
             "exceptions": current.params.exceptions.len(),
         })
     });
+
+    // 132: 上書きの通知(応答の notes + テンプレートが TOML と別物なら warn)。
+    let mut notes = Vec::new();
+    if let (Some(id), Some((current, _))) = (&params_id, &params_snapshot) {
+        let toml_ids = &controller.params.config_ids;
+        let template = &current.params.template;
+        notes.push(format!(
+            "prepare/configure config_id taken from params {id} (template {template}), \
+             not from daq.toml ({}/{})",
+            toml_ids.prepare, toml_ids.configure
+        ));
+        if template_matches_config_id(template, &toml_ids.configure) {
+            info!(params_id = %id, template = %template, "params override daq.toml config_id");
+        } else {
+            warn!(
+                params_id = %id, template = %template, toml_configure = %toml_ids.configure,
+                "params template differs from daq.toml configure config_id — \
+                 the run uses the params template, not daq.toml's"
+            );
+        }
+    }
 
     let mut params_for_run = controller.params.clone();
     if let Some(id) = &params_id {
@@ -498,7 +538,7 @@ pub(super) fn start_run_blocking(
                 None,
             );
             info!(run, ts = run_start_ts, "run started");
-            Ok((run, run_start_ts))
+            Ok((run, run_start_ts, params_id, notes))
         }
         Err(failure) => {
             let detail = failure.to_string();
@@ -977,6 +1017,28 @@ pub(super) async fn post_comment(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    // 132: テンプレート名の stem と TOML の configure config_id の比較(純関数)。
+    #[test]
+    fn template_stem_matches_toml_configure_id_ignoring_prefix_and_generated_suffix() {
+        assert!(template_matches_config_id(
+            "configure-pulser.xcfg",
+            "pulser"
+        ));
+        assert!(!template_matches_config_id(
+            "configure-pulser.xcfg",
+            "physics"
+        ));
+        // 生成物名(`<stem>__<hash8>`)が来ても stem を正しく取る。
+        assert!(template_matches_config_id(
+            "configure-pulser__ab12cd34.xcfg",
+            "pulser"
+        ));
+        assert!(!template_matches_config_id(
+            "configure-pulser__ab12cd34.xcfg",
+            "physics"
+        ));
+    }
+
     use super::*;
     use crate::controller::test_support::*;
     // -----------------------------------------------------------------
