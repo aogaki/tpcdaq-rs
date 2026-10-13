@@ -127,3 +127,22 @@
 - Q2: レーン C(status バー)を今やるか。
 - Q3: getHwServer へ直接 `daqStop` を打つ経路は今回は不採用でよいか。
 - Q4: ELITPC で実機再現をやってよいか。
+
+## ユーザー裁定(2026-10-13)と発注の修正(主対話、Opus)
+- **Q1 = 新しい同番号を捨てる**(eventId は run の中で一回きり — TPCReco の eventIdMap、`root_recorder.hpp` の `admit` と同じ意味論)。
+  - **注意(主対話がコードで確認)**: recorder の重複判定は「最後に書いた番号以下」の**高水位**(`root_recorder.hpp:918`)。そのままでは新しい取得の 0..2056 が全部落ち、いまの 2,057 件の欠損と変わらない。
+  - したがって**捨てるのは「前の epoch で emit した番号と同じ番号」の K 件だけ**にする。
+  - また raw ツリーは recorder の `admit` を通らない別経路(`root_sink.cxx` の raw スレッド)。そのため**この判定はイベントビルダ(`eb_core.hpp`)で 1 か所**で行い、PEventTPC・raw ツリー・monitor の中身をそろえる。
+- **レーン A の修正(上の発注より優先)**:
+  - `eb_core.hpp`: restart のとき、その時点までにその run で emit した event_idx を `retired_ids_`(昇順の `std::vector<uint32_t>`。epoch 内の emit は昇順なので push_back で済む。restart で併合して sort)に移す。
+  - 新しい epoch で emit しようとするイベントの idx が `retired_ids_` にあれば、**emit せずに `restart_duplicate_events` を +1**(complete / incomplete とも)。run 毎に初回だけ stderr に出す。
+  - `root_recorder.hpp` の `admit`: epoch が変わったら `have_last_event_id_ = false`(上の発注どおり。これが無いと新しい epoch の 0.. が高水位で落ちる)。
+  - `raw_tree.hpp`: 変更不要(eb で除いた後のストリームを書く)。
+  - close 行・counts JSON に `restart_duplicates=K` を足す。
+  - テスト追加: `test_new_epoch_events_with_ids_already_emitted_are_dropped_and_counted`。
+  - 受け入れの修正: 合成列(古い 2038..2056 → 新しい 0..N、N > 2056)で次がそろうこと。
+    - `late_fragments=0`、`restarts=1`、`events_before_restart=19`、`restart_duplicates=19`
+    - PEventTPC と raw ツリーの entries がどちらも `19 + (N + 1) − 19`
+    - eventId の重複 0
+- Q2 = レーン C は後回し(既定)。Q3 = getHwServer へ直接 `daqStop` は不採用(既定)。Q4 = **マージ後に ELITPC で実機再現してよい**(日時はそのとき確認)。
+- SPEC §6.3 の文案に 1 文を足す: 「新しい epoch で、前の epoch で emit した番号と同じイベントは書かずに数える(`restart_duplicates`)」。

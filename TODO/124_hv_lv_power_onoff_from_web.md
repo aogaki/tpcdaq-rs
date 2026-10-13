@@ -178,3 +178,14 @@ SPEC §11 / §3.1 / §3.2 / §8.1 / §9.2 と CLAUDE.md の文案は Fable 作�
 - マニュアル:
   - 最新イベント API を英語タブの付録に取り込み、claude.ai へのリンクを無くした。
   - PDF は日英とも `reference/_manual/ELITPC_DAQ_Manual_{ja,en}_2026-10-12.pdf`(11 / 14 ページ)。
+
+## 実機確認(ユーザー、2026-10-13 申告)と残る不具合
+- **全 ch で ON / OFF が動くことを確認済み**(ユーザー)。HV ON のランプアップも含む。
+- **不具合: ランプアップ中に OFF にできない**。ボタンを押すと「もう一度 ON にするか」を聞かれる。
+  - コード上は、UI のボタンの向き(`ui/src/app/slow/slow-power.ts` の `targetOn` = `row.onOff !== 'ON'`)と、サーバの成功判定(`hivolta_driver.rs` の `switched`)が、どちらも STATUS の bit 0(ON)を見ている。
+    ON の SET が成功判定を通った以上、直後の bit 0 は 1 だったはず。
+  - 仮説:
+    - ① ランプアップ中に DT1415 が bit 0 を落として RUP(bit 1)だけを立てる。
+    - ② その間 HV の読み出しが失敗し、古い(OFF の)サンプルのまま。UI は `stale` でも向きを決めている。
+  - 確かめ方: ランプアップ中の STATUS の時系列(InfluxDB)と、ログブックの audit `slow/power` の after。ELITPC につながり次第。
+  - 直し方の候補(原因が分かってから): ON / RUP / RDW のどれかが立っていれば「Turn OFF」にする(HV の OFF はいつでも可なので安全側)。stale の行はボタンを無効にする。
