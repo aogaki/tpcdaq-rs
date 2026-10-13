@@ -1,6 +1,6 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-10-13(棚卸し — 止まっていた 069 / 073 / 074 / 078 / 079 / 080 / 084 / 101 / 107 を処置して archive、~~092~~ を修正して archive([archive/092](archive/092_receiver_abandoned_after_eof.md) — EOS の後も Heartbeat を出し続けていた)、131・132 を起票)。**
+**最終更新: 2026-10-13(棚卸し — 止まっていた 069 / 073 / 074 / 078 / 079 / 080 / 084 / 101 / 107 を処置して archive、~~092~~ を修正して archive([archive/092](archive/092_receiver_abandoned_after_eof.md) — EOS の後も Heartbeat を出し続けていた)、131 を起票。続けて ~~124~~(全 ch の ON/OFF をユーザーが実機確認)・~~132~~(run/start 応答に params_id / notes)を完了 → archive)。**
 2026-08-18〜10-13 の作業ログ(Wave 1〜3、ELITPC 移行、125–129)は [archive/CURRENT_2026-10-13_wave_log.md](archive/CURRENT_2026-10-13_wave_log.md)、
 その前は [archive/CURRENT_2026-08-14_p2_p3wave.md](archive/CURRENT_2026-08-14_p2_p3wave.md)。
 
@@ -11,7 +11,7 @@
   - 保存先: データは ZFS `data/tpcdaq`。
   - 記録: ELOG(TPC 用)、InfluxDB(HV / LV)。
   - マニュアル: 日英 PDF が `reference/_manual/`。
-- **実装の正本 = docs/SPEC_ja.md v1.45**。ゲート(main、092 の後)は cargo 1070 passed / 0 failed / 1 ignored。UI 392、適合 402(127 時点)。
+- **実装の正本 = docs/SPEC_ja.md v1.45**。ゲート(main、132 と 110 レーン B の後)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped。適合 402(127 時点)。
 - **できること**:
   - 保存二系統: graw はロスレス、root-sink は PEventTPC と raw ツリー。
   - run/start の歩き戻し: ECC とコンポーネントの両方。前の run の run_stop も書く(113–116)。
@@ -33,10 +33,8 @@
 
 | # | 中身 | 状態 | 次の一手 |
 |---|---|---|---|
-| [110](110_stale_frames_after_unclean_stop.md) | 取得を止めずにスタックを落とすと、次の run の頭に古いフレームが混ざり root-sink が late で捨てる | **Fable 裁定済み**(2026-10-13): 混入は防げない(新しく起動した ECC から zCoBo へ stop が届かない)→ root-sink の「取得の再開 = epoch」+ decoder のカウンタ、graw は残す | ユーザーの答え(eventId 重複の扱い・実機再現)→ レーン A(C++)/ B(Rust)を Sonnet で |
-| [124](124_hv_lv_power_onoff_from_web.md) | HV / LV の ch ごとの ON/OFF を web から(SPEC v1.42) | ELITPC に反映済み。HV OFF・LV ON/OFF は実機で確認済み | **ユーザーが UI で HV ch7 を ON**(ランプアップ約 5 分)→ 結果節 → archive |
+| [110](110_stale_frames_after_unclean_stop.md) | 取得を止めずにスタックを落とすと、次の run の頭に古いフレームが混ざり root-sink が late で捨てる | Fable 裁定済み、ユーザー裁定済み(新しい同番号だけ捨てる)。**レーン B(decoder のカウンタ)はマージ済み**、レーン A(root-sink の epoch)はレビューで差し戻し中(判定条件と保持メモリ) | レーン A マージ → ELITPC で実機再現(許可済み、日時はそのとき確認)→ 結果節 |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
-| [132](132_params_override_notice.md) | params の current.json が TOML の config_id を上書きしたことを run/start の応答と log に出す | READY(Sonnet) | 着手指示で |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
 
 ## 解析バックログ(起票は着手するとき — 「詳細チケットは 1 フェーズ先まで」)
@@ -75,7 +73,7 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
      - 8 に「**実機済み(TODO/118–124)**: HiVolta は USB シリアル(by-id)で運用し、ポーリングのたびに開閉(119)。ON/OFF は REMOTE + 前面スイッチが最終許可(124)。HMP2020 は HO720(USB CDC)」。
      - 2 は「mini は 1GbE で 182 Hz まで全数」を追記。ELITPC×100 Hz の NIC 構成は Warsaw のまま。
    - (c) **§1.3 / §2.2 に 1 行(TODO/092)**: 「EOS を送った後の receiver はそのリンクに Heartbeat を出さない(下流は EOS で run を閉じ、graw-writer は PULL を放す — 117)」。
-   - (d) **§8.1 の run/start 応答に `params_id` と `notes`(TODO/132、実装後)**。
+   - (d) **§8.1 の run/start 応答に `params_id`(string | null)と `notes`(string[]、上書き時に 1 行)(TODO/132、実装済み)**。
 
 ## 保留・確認事項
 
