@@ -95,3 +95,45 @@ input[type='number'] {
   margin: 0.5rem 1rem 1rem;
   min-height: 20rem;
 }
+
+// 077(TODO/125 で monitor タブから移設): AsAd 枚数はメッセージ由来(mini = 1、ELITPC = 4)なので、
+// 列数は焼き込まず auto-fit で横並びにする(枚数が増えても折り返すだけ)。
+.asad {
+  margin: 0 1rem 1rem;
+}
+
+.asad h3 {
+  margin: 0 0 0.4rem;
+  font: var(--mat-sys-title-small);
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.grid-asad {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 0.75rem;
+}
+
+.asad-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.25rem;
+}
+
+.asad-label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.mismatch {
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  border: 1px solid #ffb74d;
+  color: #ffb74d;
+  font-weight: 600;
+}

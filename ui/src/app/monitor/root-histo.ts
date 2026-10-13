@@ -67,8 +67,24 @@ export interface PanelSpec {
   readonly yTitle: string;
 }
 
-/** 1 枚のパネルに描けるメッセージ(9 ヒスト + イベント表示の Uvw + 077 の AsAd Waveforms)。 */
-export type PanelMessage = Histo1dMessage | Histo2dMessage | UvwMessage | WaveformsMessage;
+/**
+ * Event Display の XY / XZ / YZ 投影 1 枚(TODO/125、UI で計算した表示専用のヒスト)。
+ * `values[iy*nx + ix]`(iy 外側 row-major — 0x11 Histo2d と同じ並び)。
+ */
+export interface ProjectionMessage {
+  readonly kind: 'projection';
+  readonly nx: number;
+  readonly ny: number;
+  readonly xmin: number;
+  readonly xmax: number;
+  readonly ymin: number;
+  readonly ymax: number;
+  readonly values: ArrayLike<number>;
+}
+
+/** 1 枚のパネルに描けるメッセージ(9 ヒスト + イベント表示の Uvw + AsAd Waveforms + XY/XZ/YZ 投影)。 */
+export type PanelMessage =
+  Histo1dMessage | Histo2dMessage | UvwMessage | WaveformsMessage | ProjectionMessage;
 
 /** SPEC §10.2: plane 0=U, 1=V, 2=W。 */
 export const PLANE_NAMES = ['U', 'V', 'W'] as const;
@@ -136,7 +152,14 @@ export function uvwPanelSpec(planeIndex: number): PanelSpec {
   };
 }
 
-/** イベント表示(0x02 Uvw)の下の 4 枚目 — AsAd 電子回路座標(077)。軸は共通で x = time bucket / y = AGET×nCh+ch。 */
+/** イベント表示の 2 段目(TODO/125): XY / XZ / YZ。Z は time bucket(mm にしない)。 */
+export const PROJECTION_SPECS: readonly PanelSpec[] = [
+  { name: 'ProjectionXY', title: 'XY (top view)', xTitle: 'X [mm]', yTitle: 'Y [mm]' },
+  { name: 'ProjectionXZ', title: 'XZ', xTitle: 'X [mm]', yTitle: 'time bucket' },
+  { name: 'ProjectionYZ', title: 'YZ', xTitle: 'Y [mm]', yTitle: 'time bucket' },
+];
+
+/** AsAd 電子回路座標(077、TODO/125 で Waveform ビューへ移設)。軸は共通で x = time bucket / y = AGET×nCh+ch。 */
 export function asadPanelSpec(cobo: number, asad: number): PanelSpec {
   return {
     name: `AsadCobo${cobo}Asad${asad}`,
@@ -161,6 +184,8 @@ export function buildPanelObject(
       return buildUvw(create, message, spec);
     case 'waveforms':
       return buildAsad(create, message, spec);
+    case 'projection':
+      return buildProjection(create, message, spec);
   }
 }
 
@@ -283,6 +308,33 @@ function buildUvw(create: HistFactory, message: UvwMessage, spec: PanelSpec): Ro
     for (let b = 0; b < nBuckets; b++) {
       const value = message.adc[src + b] - baseline;
       histo.fArray[dst + b] = value;
+      sum += value;
+    }
+  }
+  histo.fEntries = sum;
+  return histo;
+}
+
+/** XY / XZ / YZ 投影 → TH2D。軸範囲はそのまま、`values[iy*nx+ix]` → `fArray[(iy+1)*(nx+2)+ix+1]`。 */
+function buildProjection(
+  create: HistFactory,
+  message: ProjectionMessage,
+  spec: PanelSpec,
+): RootHisto {
+  const { nx, ny } = message;
+  const histo = create('TH2D', nx, ny);
+  applySpec(histo, spec);
+  histo.fXaxis.fXmin = message.xmin;
+  histo.fXaxis.fXmax = message.xmax;
+  histo.fYaxis.fXmin = message.ymin;
+  histo.fYaxis.fXmax = message.ymax;
+
+  const stride = nx + 2;
+  let sum = 0;
+  for (let iy = 0; iy < ny; iy++) {
+    for (let ix = 0; ix < nx; ix++) {
+      const value = message.values[iy * nx + ix];
+      histo.fArray[(iy + 1) * stride + (ix + 1)] = value;
       sum += value;
     }
   }

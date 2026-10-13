@@ -9,7 +9,7 @@
     }
   </app-display-controls>
 
-  <mat-tab-group class="tabs" [preserveContent]="false">
+  <mat-tab-group class="tabs" [preserveContent]="false" (selectedIndexChange)="onTabChange($event)">
     <mat-tab label="Histograms (9)">
       <ng-template matTabContent>
         <p class="hint">
@@ -50,33 +50,29 @@
         </section>
 
         <section class="row">
-          <h3>
-            AsAd raw electronics view (077) — per AsAd, AGET×68 + ch vertically / time bucket
-            horizontally, baseline-subtracted raw ADC. No geometry applied, so FPN and unmapped ch
-            are visible too.
-          </h3>
-          @if (asadPanels().length === 0) {
-            <p class="hint">waiting for AsAd waveforms (0x03)…</p>
-          } @else {
-            <div class="grid grid-asad">
-              @for (panel of asadPanels(); track panel.key) {
-                <div class="asad-panel">
-                  <div class="asad-label">
-                    <span>{{ panel.eventLabel }}</span>
-                    @if (panel.mismatch) {
-                      <span
-                        class="mismatch"
-                        title="0x03 fell behind the shown UVW event (drop-oldest)"
-                      >
-                        ≠ UVW
-                      </span>
-                    }
-                  </div>
-                  <app-jsroot-panel [spec]="panel.spec" [message]="asadMessage(panel.key)" />
-                </div>
-              }
-            </div>
-          }
+          <div class="grid">
+            @for (panel of projectionPanels; track panel.index) {
+              <app-jsroot-panel [spec]="panel.spec" [message]="projectionMessages()[panel.index]" />
+            }
+          </div>
+          <div class="projection-bar">
+            <label class="threshold">
+              hit threshold (ADC above baseline)
+              <input
+                type="number"
+                min="0"
+                step="1"
+                [value]="threshold()"
+                (change)="onThreshold($event)"
+              />
+            </label>
+            <span class="status" data-testid="projection-status">{{ projectionStatus() }}</span>
+          </div>
+          <p class="hint">
+            <strong>Display only.</strong> Each point is a U/V/W three-plane coincidence in the same
+            time bucket (TPCReco MatchCrossPoint, radius 2 mm); Z is the time bucket, not mm. The
+            threshold is per browser; the radius is fixed.
+          </p>
         </section>
       </ng-template>
     </mat-tab>

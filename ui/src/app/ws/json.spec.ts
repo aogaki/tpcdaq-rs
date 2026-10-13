@@ -5,7 +5,13 @@
  * snake_case、monitor が足す 3 つだけ camelCase(`monitorGaps` / `clients` /
  * `wsDropped`)。ここを取り違えると「0 が表示され続ける」silent failure になる。
  */
-import { DEFAULT_STREAMS, encodeSubscribe, parseJsonMessage, saturationPercent } from './json';
+import {
+  DEFAULT_STREAMS,
+  encodeSubscribe,
+  isStripGeometryUnavailable,
+  parseJsonMessage,
+  saturationPercent,
+} from './json';
 
 /** monitor(src/monitor.rs `status_json`)が出す形の status を組む。 */
 function statusText(overrides: Record<string, unknown> = {}): string {
@@ -273,6 +279,100 @@ describe('SPEC §10.3 meta', () => {
     const parsed = parseJsonMessage(JSON.stringify({ ...JSON.parse(metaText), anglesDeg: null }));
     if (parsed.kind !== 'meta') throw new Error('expected meta');
     expect(parsed.meta.anglesDeg).toBeNull();
+  });
+});
+
+describe('SPEC §10.3 stripGeometry(TODO/125)', () => {
+  // 非対称な小さい例: U は 2 strip(strip 2 は section 0/1)、V・W は 1 本。
+  const geometryObject = {
+    type: 'stripGeometry',
+    padPitch: 1.7320508,
+    stripPitch: 1.5,
+    rangeXY: [-3, 5, -2, 7],
+    planes: {
+      U: {
+        unit: [1, 0],
+        pitchUnit: [0, 1],
+        segments: [
+          [1, 0, -10, 0.5, 20],
+          [2, 0, -10, 2, 20],
+          [2, 1, 4, 2.25, 8],
+        ],
+      },
+      V: { unit: [-0.5, -0.8660254], pitchUnit: [0.8660254, -0.5], segments: [[1, 0, 0, 1, 12]] },
+      W: { unit: [0.5, -0.8660254], pitchUnit: [0.8660254, 0.5], segments: [[3, 0, 1, 2, 9]] },
+    },
+  };
+
+  it('通常形: 線分 [strip, section, x0, y0, length] をそのまま読む', () => {
+    const parsed = parseJsonMessage(JSON.stringify(geometryObject));
+    if (parsed.kind !== 'stripGeometry') throw new Error('expected stripGeometry');
+    const geometry = parsed.geometry;
+    if (isStripGeometryUnavailable(geometry)) throw new Error('expected the full form');
+    expect(geometry.padPitch).toBe(1.7320508);
+    expect(geometry.stripPitch).toBe(1.5);
+    expect(geometry.rangeXY).toEqual([-3, 5, -2, 7]);
+    expect(geometry.planes.U.unit).toEqual([1, 0]);
+    expect(geometry.planes.U.segments).toHaveLength(3);
+    expect(geometry.planes.U.segments[2]).toEqual([2, 1, 4, 2.25, 8]);
+    expect(geometry.planes.V.pitchUnit).toEqual([0.8660254, -0.5]);
+    expect(geometry.planes.W.segments[0]).toEqual([3, 0, 1, 2, 9]);
+    expect(parsed.unknownKeys).toEqual([]);
+  });
+
+  it('unavailable 形: 理由をそのまま持つ', () => {
+    const parsed = parseJsonMessage(
+      JSON.stringify({ type: 'stripGeometry', unavailable: 'no ANGLES header in the geometry' }),
+    );
+    if (parsed.kind !== 'stripGeometry') throw new Error('expected stripGeometry');
+    expect(isStripGeometryUnavailable(parsed.geometry)).toBe(true);
+    if (!isStripGeometryUnavailable(parsed.geometry)) return;
+    expect(parsed.geometry.unavailable).toBe('no ANGLES header in the geometry');
+  });
+
+  it('未知キーは許し、数えて返す(meta と同じ)', () => {
+    const parsed = parseJsonMessage(JSON.stringify({ ...geometryObject, future: 1 }));
+    if (parsed.kind !== 'stripGeometry') throw new Error('expected stripGeometry');
+    expect(parsed.unknownKeys).toEqual(['future']);
+  });
+
+  it('型違いは bad-field(どこが悪いかを detail に入れる)', () => {
+    type Obj = Record<string, unknown>;
+    const planesOf = (o: Obj) => o['planes'] as Record<string, Obj>;
+    const cases: [string, (o: Obj) => void, string][] = [
+      ['padPitch が文字列', (o) => (o['padPitch'] = '1.7'), 'padPitch'],
+      ['stripPitch 欠落', (o) => (o['stripPitch'] = undefined), 'stripPitch'],
+      ['rangeXY が 3 要素', (o) => (o['rangeXY'] = [1, 2, 3]), 'rangeXY'],
+      ['planes 欠落', (o) => (o['planes'] = undefined), 'planes'],
+      ['W 面欠落', (o) => (planesOf(o)['W'] = undefined as unknown as Obj), 'planes.W'],
+      ['unit が 3 要素', (o) => (planesOf(o)['U']['unit'] = [1, 0, 0]), 'planes.U.unit'],
+      ['pitchUnit が文字列', (o) => (planesOf(o)['V']['pitchUnit'] = 'x'), 'planes.V.pitchUnit'],
+      ['segments が配列でない', (o) => (planesOf(o)['W']['segments'] = {}), 'planes.W.segments'],
+      [
+        '線分が 4 要素',
+        (o) =>
+          (planesOf(o)['U']['segments'] = [
+            [1, 0, 0, 1, 2],
+            [2, 0, 1, 1],
+          ]),
+        'planes.U.segments[1]',
+      ],
+      [
+        '線分に文字列',
+        (o) => (planesOf(o)['V']['segments'] = [[1, 0, 'a', 1, 2]]),
+        'planes.V.segments[0]',
+      ],
+      ['unavailable が数値', (o) => (o['unavailable'] = 3), 'unavailable'],
+    ];
+    for (const [name, mutate, where] of cases) {
+      const copy = JSON.parse(JSON.stringify(geometryObject)) as Obj;
+      mutate(copy);
+      const result = parseJsonMessage(JSON.stringify(copy));
+      expect(result.kind, name).toBe('error');
+      if (result.kind !== 'error') continue;
+      expect(result.reason, name).toBe('bad-field');
+      expect(result.detail, name).toContain(where);
+    }
   });
 });
 

@@ -201,6 +201,44 @@ describe('受信', () => {
     h.service.disconnect();
   });
 
+  it('stripGeometry(TODO/125)を保持し、数える。unavailable 形もそのまま保持する', () => {
+    const h = harness();
+    h.service.connect('ws://x:9000/ws');
+    h.last().open();
+    expect(h.service.stripGeometry()).toBeNull(); // 未着 = null
+
+    h.last().deliver(
+      JSON.stringify({
+        type: 'stripGeometry',
+        padPitch: 1.7,
+        stripPitch: 1.5,
+        rangeXY: [-3, 5, -2, 7],
+        planes: {
+          U: { unit: [1, 0], pitchUnit: [0, 1], segments: [[1, 0, 0, 0, 5]] },
+          V: { unit: [0, 1], pitchUnit: [1, 0], segments: [] },
+          W: { unit: [1, 1], pitchUnit: [1, 0], segments: [] },
+        },
+      }),
+    );
+    const geometry = h.service.stripGeometry();
+    expect(geometry && 'padPitch' in geometry ? geometry.padPitch : null).toBe(1.7);
+    expect(h.service.counters().stripGeometry).toBe(1);
+
+    h.last().deliver(JSON.stringify({ type: 'stripGeometry', unavailable: 'no ANGLES header' }));
+    const latest = h.service.stripGeometry();
+    expect(latest && 'unavailable' in latest ? latest.unavailable : null).toBe('no ANGLES header');
+    expect(h.service.counters().stripGeometry).toBe(2);
+    expect(h.service.counters().jsonErrors).toBe(0);
+
+    // 壊れた stripGeometry は数えて理由を残し、前の値は壊さない(silent にしない)
+    h.last().deliver(JSON.stringify({ type: 'stripGeometry', padPitch: 'x' }));
+    expect(h.service.counters().jsonErrors).toBe(1);
+    expect(h.service.lastIssue()).toContain('stripGeometry');
+    expect(h.service.stripGeometry()).toBe(latest);
+
+    h.service.disconnect();
+  });
+
   it('status.slow(v1.31)を保持し、unknownJsonKeys には数えない', () => {
     const h = harness();
     h.service.connect('ws://x:9000/ws');

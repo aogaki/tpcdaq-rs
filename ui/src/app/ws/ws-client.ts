@@ -14,6 +14,8 @@ import { Injectable, computed, signal } from '@angular/core';
 import {
   DEFAULT_STREAMS,
   type MetaMessage,
+  type StripGeometryMessage,
+  type StripGeometryUnavailable,
   type RunMessage,
   type StatusMessage,
   type StreamSet,
@@ -47,6 +49,7 @@ export type HistoMessage = Histo1dMessage | Histo2dMessage;
 /** 受けたもの・落としたものの内訳(status バーに出す)。 */
 export interface WsCounters {
   readonly meta: number;
+  readonly stripGeometry: number;
   readonly status: number;
   readonly run: number;
   readonly uvw: number;
@@ -67,6 +70,7 @@ export interface WsCounters {
 
 const ZERO_COUNTERS: WsCounters = {
   meta: 0,
+  stripGeometry: 0,
   status: 0,
   run: 0,
   uvw: 0,
@@ -96,6 +100,8 @@ export class WsClientService {
   readonly link = signal<LinkState>('disconnected');
 
   readonly meta = signal<MetaMessage | null>(null);
+  /** 最新の `stripGeometry`(接続時 1 回、TODO/125)。未着は `null`。`unavailable` 形もそのまま持つ。 */
+  readonly stripGeometry = signal<StripGeometryMessage | StripGeometryUnavailable | null>(null);
   readonly status = signal<StatusMessage | null>(null);
   readonly run = signal<RunMessage | null>(null);
 
@@ -275,6 +281,11 @@ export class WsClientService {
         this.meta.set(parsed.meta);
         this.bump({ meta: 1, unknownJsonKeys: parsed.unknownKeys.length });
         this.noteUnknownKeys('meta', parsed.unknownKeys);
+        return;
+      case 'stripGeometry':
+        this.stripGeometry.set(parsed.geometry);
+        this.bump({ stripGeometry: 1, unknownJsonKeys: parsed.unknownKeys.length });
+        this.noteUnknownKeys('stripGeometry', parsed.unknownKeys);
         return;
       case 'status':
         this.status.set(parsed.status);

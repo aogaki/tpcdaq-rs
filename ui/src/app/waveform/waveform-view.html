@@ -108,4 +108,31 @@
   }
 
   <div class="chart" #chart [style.height.px]="chartHeightPx()"></div>
+
+  <section class="asad">
+    <h3>
+      AsAd raw electronics view (077) — per AsAd, AGET×68 + ch vertically / time bucket
+      horizontally, baseline-subtracted raw ADC. No geometry applied, so FPN and unmapped ch are
+      visible too.
+    </h3>
+    @if (asadPanels().length === 0) {
+      <p class="dim">waiting for AsAd waveforms (0x03)…</p>
+    } @else {
+      <div class="grid-asad">
+        @for (panel of asadPanels(); track panel.key) {
+          <div class="asad-panel">
+            <div class="asad-label">
+              <span>{{ panel.eventLabel }}</span>
+              @if (panel.mismatch) {
+                <span class="mismatch" title="0x03 fell behind the shown UVW event (drop-oldest)">
+                  ≠ UVW
+                </span>
+              }
+            </div>
+            <app-jsroot-panel [spec]="panel.spec" [message]="asadMessage(panel.key)" />
+          </div>
+        }
+      </div>
+    }
+  </section>
 </div>
