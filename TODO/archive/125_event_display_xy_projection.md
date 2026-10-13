@@ -1,6 +1,6 @@
 # 125 — Event Display に XY / XZ / YZ 投影(U/V/W 三面一致)を出す
 
-**Status: IN PROGRESS — 改訂 2(下の「改訂 2」節が正。三面一致の投影は実機で失格)**(2026-10-13 起票 Opus。ユーザー「AsadCobo0Asad0 はあまり意味がない、2D トラック?」→
+**Status: COMPLETED**(改訂 2 で完了。下の「改訂 2」節が正。三面一致の投影は実機で失格)(2026-10-13 起票 Opus。ユーザー「AsadCobo0Asad0 はあまり意味がない、2D トラック?」→
 「閾値は固定でいい・XZ / YZ もあれば便利」。設計の確定は Fable)
 
 ## ユーザー裁定(2026-10-13)
@@ -282,3 +282,35 @@ W 候補は W の法線距離で絞る(pitch 座標は六角配置でしか使�
 - レーン A・B・C: worktree 隔離の権限チェックで複合コマンドが数回拒否 → 単純なコマンドに分けて実行し直した(未実行の操作は残っていない)。
   レーン C は一度 spec の書き込みが拒否されたのに気づかず green に見えた → 書き直して再実行(主対話が main で適合スクリプトを回し、新 spec が走ることを確認)。
 - 主対話: Chrome 拡張が未接続でブラウザの目視ができなかった。
+
+## 結果(改訂 2 — macros の移植、2026-10-13)
+
+### 実装とマージ
+- レーン D(Opus)d14e068 → main に fast-forward。新規 `ui/src/app/monitor/track-fit.ts`(analyzeUVW 0〜4 + makeTracks 1〜5 の移植)、
+  `track-fit.spec.ts`(39 本)、`track-fit-oracle.spec.ts`(env-gated 7 本)、`tools/macro_oracle/`(本物の macros を一時ディレクトリで走らせて JSON に書く)。
+  撤去: 三面一致の計算・閾値欄(event-display-settings.ts)・match_cases.json とオラクルの match case 出力。stripGeometry の照合(パーサ・rangeXY・線分)は残した。
+- 照合: `git show --stat` と発注書の各項目のテスト名で確認してから受け入れた。
+
+### macros オラクル(run70 の先頭 201 イベント、mini eTPC、本物の analyzeUVW.C(100 mbar)+ makeTracks.C、主対話が main で再実行して 7 本 green)
+- ok / not ok の一致 201 / 201(ok 200、not ok 1 = event 192「W has 2 strip hits after the halo cut (needs 4)」)。帯内ヒットの (view, strip) 集合の食い違い 0(20,960 本)。
+- 最大差(s を stripGeometry から取る本番どおりの比較): ヒット z 1.94e-6 mm、q(相対)4.9e-8、端点 4.65e-4 mm、方向 4.8e-8、length 4.4e-6 mm。
+  s を channel_map.csv に置き換えた比較では端点 3.0e-6 mm(差は CSV の小数 3 桁の丸め)。変異試験: QUANTILE を 0.025 にすると 2 本が落ちる。
+- 1 イベントの所要 ≈ 0.4 ms(Node、0x02 の組み立て込み)。
+
+### ゲート(main d14e068、Mac)
+- cargo fmt / clippy clean、cargo test 1018 passed / 0 failed / 1 ignored。UI ng test 422 passed / 16 skipped(env-gated 16)。
+  `ui/run_ws_conformance.sh` 431 passed / 7 skipped(macros オラクルのみ skip)。ng build OK。
+
+### ELITPC への反映と目視
+- 2026-10-13 07:17Z ごろ UI だけ差し替え(run 71 は継続、monitor は前回のまま)。旧版は `/opt/tpcdaq/ui.prev125`。
+- **ユーザーの目視: 「現状いい感じです」(2026-10-13)** — 長い飛跡が XY で直線 1 本になることを確認。
+
+### 既知の制限と後続
+- **複数飛跡は未対応**: 1 strip 1 パルスと帯選択のため、2 本以上あると間違った直線 1 本になる(run70 の 201 イベントには複数飛跡が無い —
+  帯から外れた電荷は全イベントで 3 % 以下)。→ 後続チケット(複数飛跡の再構成 = 選択肢 B、ユーザー決定 2026-10-13)。
+- 寝た面のヒットを直線上に置くとパッド面の外に出ることがある(event 0 で 94 点中 4 点)— 状態表示に件数を出す。
+- ELITPC の section が複数ある strip は 0x02 で合算されて 1 ヒットになる(macros は ch ごと)。mini は 1 section で影響なし。
+- 照合用データ `reference/exp_data/2026/elitpc_run70/run0070_raw_head200.root`(ローカルのみ)。オラクル JSON は `tools/macro_oracle/run_macro_oracle.sh` で作り直せる。
+
+### 実行できなかった操作
+- レーン D: worktree 隔離の権限チェックで複合コマンドが数回拒否 → 単純なコマンド / Write・Edit でやり直し、未実行の操作は残っていない。

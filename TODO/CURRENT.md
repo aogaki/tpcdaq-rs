@@ -54,7 +54,7 @@ docs: [NEW_DAQ_SETUP_ja.md](../docs/NEW_DAQ_SETUP_ja.md) v0.1 + [RUNBOOK_ja.md](
 - **複数飛跡のプログラム(2026-10-13 ユーザー決定: 選択肢 B = 直線を何本でも取り出す、3α まで綺麗にフィットできれば最高)**:
   - [126](126_split_monitor_controller.md)(IN PROGRESS): monitor.rs / controller.rs のサブモジュール分割(挙動不変、Sonnet × 2 並行)。
   - 127(未起票): 再構成を monitor(Rust、`src/reco/`)へ移す — 単一飛跡のまま、macros オラクルで今と同じ結果。結果の WS 形式は Fable レビュー。
-  - [128](128_event_mixing_tool.md)(IN PROGRESS): 実データの重ね合わせで複数飛跡イベントを作る(`tools/event_mix/`、Sonnet)。主力のデータ。
+  - ~~128~~ **完了 → archive**([archive/128](archive/128_event_mixing_tool.md)): `tools/event_mix/`(597 CHECK)。run70 の 100 組では単一飛跡フィットが 100 / 100 ok のまま近いほうか両方の外に引かれる。元の 2 本はほぼ平行(中央値 5°)なので V 字は pairs ファイルで選ぶ。
   - 129(未起票、別リポ ~/test/gas-pressure-test の TODO として): 複数の一次粒子の反応生成(¹⁰B(γ,α)⁶Li、¹²C(γ,3α) など)と、親子関係を含む真値。ユーザー了承済み。物理条件をユーザーに確認中。
   - 130(未起票): 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット)。127 と 128 の後。
 - ユーザーの質問への回答(記録): run 開始のたびに AsAd は電源を入れ直している(walk-back の `reset` で unprepare = `asadEnable=0`、prepare の asadInit で OFF 10 ms → ON、ADC / AGET コントローラのリセットと較正、start でタイムスタンプとイベントカウンタをリセット)。Stop は `stop` だけで AsAd は電源も設定もそのまま。出典 = GET の CoBoNode.cpp / BackEnd.cpp、ELITPC の ecc_server.log(VDD 0 V → 3.218 V)。
