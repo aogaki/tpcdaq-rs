@@ -8,6 +8,9 @@
  * - クライアント側で間引く(系列数の上限 + サンプルの stride)。
  *   **間引いた件数は必ず画面に出す**(モニタ系は落としてよいが silent にしない)。
  * - 描画の刻みは `DisplayClock`(freeze / interval)。購読は止めない。
+ * - 下段に AsAd 電子回路座標パネル(077。TODO/125 で monitor タブから移設): (cobo,asad) 毎の
+ *   AGET×68+ch × time bucket の JSROOT TH2。dead / noisy ch や FPN を見るためのもの。
+ *   UVW(0x02)の event# と食い違えば `≠ UVW` を出す(0x03 は drop-oldest — silent にしない)。
  */
 import {
   Component,
@@ -23,6 +26,8 @@ import {
 import type { EChartsOption } from 'echarts';
 
 import { DisplayControls } from '../display/display-controls';
+import { JsrootPanel } from '../monitor/jsroot-panel';
+import { asadEventMismatch, asadPanelSpec } from '../monitor/root-histo';
 import type { WaveformsMessage } from '../ws/wire';
 import { WsClientService } from '../ws/ws-client';
 import { DisplayClock } from '../display/display-clock';
@@ -34,6 +39,7 @@ import {
   type WaveformSelection,
   selectWaveforms,
   updateWaveformCache,
+  waveformKey,
 } from './waveform-select';
 
 /**
@@ -48,7 +54,7 @@ type PlotMode = 'overlay' | 'grid';
 
 @Component({
   selector: 'app-waveform-view',
-  imports: [DisplayControls],
+  imports: [DisplayControls, JsrootPanel],
   templateUrl: './waveform-view.html',
   styleUrl: './waveform-view.scss',
 })
@@ -108,6 +114,27 @@ export class WaveformView implements OnDestroy {
 
   readonly incomplete = computed(() => this.shownMessage()?.header.incomplete ?? false);
 
+  /** 077: 下段の AsAd パネル。ラベル(event# / ≠ UVW)は freeze の刻みでだけ進める。 */
+  private readonly shownAsad = signal<ReadonlyMap<string, WaveformsMessage>>(new Map());
+  private readonly shownUvwEvent = signal<number | null>(null);
+
+  readonly asadPanels = computed(() => {
+    const uvwEventNumber = this.shownUvwEvent();
+    return [...this.shownAsad().values()]
+      .sort((a, b) => a.cobo - b.cobo || a.asad - b.asad)
+      .map((message) => ({
+        key: waveformKey(message.cobo, message.asad),
+        spec: asadPanelSpec(message.cobo, message.asad),
+        eventLabel: `event #${message.header.eventNumber}`,
+        mismatch: asadEventMismatch(message.header.eventNumber, uvwEventNumber),
+      }));
+  });
+
+  /** JsrootPanel には常に最新を渡す(再描画そのものは JsrootPanel 内の clock tick が司る)。 */
+  asadMessage(key: string): WaveformsMessage | null {
+    return this.cache().get(key) ?? null;
+  }
+
   private readonly host = viewChild<ElementRef<HTMLElement>>('chart');
   private chart: EChartsInstance | null = null;
   private busy = false;
@@ -122,6 +149,18 @@ export class WaveformView implements OnDestroy {
       if (!message) return;
       this.cache.set(updateWaveformCache(untracked(this.cache), message));
       this.applyDefaults(message);
+    });
+
+    effect(() => {
+      this.clock.tick();
+      this.shownAsad.set(untracked(this.cache));
+      let latest: number | null = null;
+      for (const message of untracked(this.ws.uvwByPlane)) {
+        if (message && (latest === null || message.header.eventNumber >= latest)) {
+          latest = message.header.eventNumber;
+        }
+      }
+      this.shownUvwEvent.set(latest);
     });
 
     effect(() => {

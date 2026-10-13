@@ -91,6 +91,53 @@ export interface MetaMessage {
   readonly run: number;
 }
 
+/** `stripGeometry` の線分 1 本: `[strip(1 始まり), section, x0, y0, length]`(mm)。 */
+export type SegmentRow = readonly [
+  strip: number,
+  section: number,
+  x0: number,
+  y0: number,
+  length: number,
+];
+
+/** `stripGeometry` の 1 面(U/V/W)。 */
+export interface StripPlaneGeometry {
+  /** strip 方向の単位ベクトル。 */
+  readonly unit: readonly [number, number];
+  /** pitch 方向の単位ベクトル(strip 番号が増える向き)。strip 方向とは六角配置でしか直交しない。 */
+  readonly pitchUnit: readonly [number, number];
+  readonly segments: readonly SegmentRow[];
+}
+
+/**
+ * SPEC §10.3 `stripGeometry`(接続時 1 回、`meta` の次。TODO/125)。単位は mm。
+ * 線分の有効範囲は (x0,y0) から `unit` 方向に `[-0.5*padPitch, length]`。
+ */
+export interface StripGeometryMessage {
+  readonly type: 'stripGeometry';
+  readonly padPitch: number;
+  readonly stripPitch: number;
+  /** `[xmin, xmax, ymin, ymax]` */
+  readonly rangeXY: readonly [number, number, number, number];
+  readonly planes: {
+    readonly U: StripPlaneGeometry;
+    readonly V: StripPlaneGeometry;
+    readonly W: StripPlaneGeometry;
+  };
+}
+
+/** ジオメトリが作れなかったときの形(理由は UI がそのまま表示する)。 */
+export interface StripGeometryUnavailable {
+  readonly type: 'stripGeometry';
+  readonly unavailable: string;
+}
+
+export function isStripGeometryUnavailable(
+  message: StripGeometryMessage | StripGeometryUnavailable,
+): message is StripGeometryUnavailable {
+  return 'unavailable' in message;
+}
+
 /** SPEC §10.3 `run`(state 遷移時)。 */
 export interface RunMessage {
   readonly type: 'run';
@@ -109,6 +156,11 @@ export type JsonParseResult =
       readonly unknownKeys: readonly string[];
     }
   | { readonly kind: 'run'; readonly run: RunMessage; readonly unknownKeys: readonly string[] }
+  | {
+      readonly kind: 'stripGeometry';
+      readonly geometry: StripGeometryMessage | StripGeometryUnavailable;
+      readonly unknownKeys: readonly string[];
+    }
   | { readonly kind: 'unknown-type'; readonly type: string }
   | { readonly kind: 'error'; readonly reason: JsonParseErrorReason; readonly detail: string };
 
@@ -341,6 +393,15 @@ const STATUS_KEYS = [
 
 const RUN_KEYS = ['type', 'state', 'run', 'ts'] as const;
 
+const STRIP_GEOMETRY_KEYS = [
+  'type',
+  'padPitch',
+  'stripPitch',
+  'rangeXY',
+  'planes',
+  'unavailable',
+] as const;
+
 /**
  * WS のテキストフレーム 1 通を解釈する。**例外は投げない**。
  */
@@ -365,6 +426,8 @@ export function parseJsonMessage(text: string): JsonParseResult {
       return parseStatus(object);
     case 'run':
       return parseRun(object);
+    case 'stripGeometry':
+      return parseStripGeometry(object);
     default:
       return { kind: 'unknown-type', type };
   }
@@ -479,6 +542,82 @@ function parseRun(object: Record<string, unknown>): JsonParseResult {
     kind: 'run',
     run: { type: 'run', state, run, ts },
     unknownKeys: unknownKeysOf(object, RUN_KEYS),
+  };
+}
+
+/** 数値ちょうど 2 個の配列。 */
+function pairAt(object: Record<string, unknown>, key: string): [number, number] | null {
+  const values = numberArrayAt(object, key);
+  return values !== null && values.length === 2 ? [values[0], values[1]] : null;
+}
+
+function segmentRowAt(value: unknown): SegmentRow | null {
+  if (!Array.isArray(value) || value.length !== 5) return null;
+  for (const item of value) {
+    if (typeof item !== 'number' || !Number.isFinite(item)) return null;
+  }
+  return [value[0], value[1], value[2], value[3], value[4]];
+}
+
+/** 失敗したら `detail` に場所を入れた文字列を返す。 */
+function stripPlaneAt(object: Record<string, unknown>, name: string): StripPlaneGeometry | string {
+  const plane = objectAt(object, name);
+  if (plane === null) return `stripGeometry.planes.${name}`;
+  const unit = pairAt(plane, 'unit');
+  if (unit === null) return `stripGeometry.planes.${name}.unit`;
+  const pitchUnit = pairAt(plane, 'pitchUnit');
+  if (pitchUnit === null) return `stripGeometry.planes.${name}.pitchUnit`;
+  const rows = plane['segments'];
+  if (!Array.isArray(rows)) return `stripGeometry.planes.${name}.segments`;
+  const segments: SegmentRow[] = [];
+  for (const row of rows) {
+    const parsed = segmentRowAt(row);
+    if (parsed === null) return `stripGeometry.planes.${name}.segments[${segments.length}]`;
+    segments.push(parsed);
+  }
+  return { unit, pitchUnit, segments };
+}
+
+function parseStripGeometry(object: Record<string, unknown>): JsonParseResult {
+  const unknownKeys = unknownKeysOf(object, STRIP_GEOMETRY_KEYS);
+
+  // `unavailable` 形(ヘッダ不足・strip 行 0 本など)。理由はそのまま表示する。
+  if (object['unavailable'] !== undefined) {
+    const reason = stringAt(object, 'unavailable');
+    if (reason === null) return fail('bad-field', 'stripGeometry.unavailable');
+    return {
+      kind: 'stripGeometry',
+      geometry: { type: 'stripGeometry', unavailable: reason },
+      unknownKeys,
+    };
+  }
+
+  const padPitch = numberAt(object, 'padPitch');
+  const stripPitch = numberAt(object, 'stripPitch');
+  const range = numberArrayAt(object, 'rangeXY');
+  const planesRaw = objectAt(object, 'planes');
+  if (padPitch === null) return fail('bad-field', 'stripGeometry.padPitch');
+  if (stripPitch === null) return fail('bad-field', 'stripGeometry.stripPitch');
+  if (range === null || range.length !== 4) return fail('bad-field', 'stripGeometry.rangeXY');
+  if (planesRaw === null) return fail('bad-field', 'stripGeometry.planes');
+
+  const u = stripPlaneAt(planesRaw, 'U');
+  if (typeof u === 'string') return fail('bad-field', u);
+  const v = stripPlaneAt(planesRaw, 'V');
+  if (typeof v === 'string') return fail('bad-field', v);
+  const w = stripPlaneAt(planesRaw, 'W');
+  if (typeof w === 'string') return fail('bad-field', w);
+
+  return {
+    kind: 'stripGeometry',
+    geometry: {
+      type: 'stripGeometry',
+      padPitch,
+      stripPitch,
+      rangeXY: [range[0], range[1], range[2], range[3]],
+      planes: { U: u, V: v, W: w },
+    },
+    unknownKeys,
   };
 }
 

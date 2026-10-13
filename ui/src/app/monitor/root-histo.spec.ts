@@ -18,6 +18,7 @@ import type {
 import {
   HISTO_ROWS,
   PLANE_NAMES,
+  PROJECTION_SPECS,
   asadEventMismatch,
   asadPanelSpec,
   buildPanelObject,
@@ -441,5 +442,63 @@ describe('077 (c): AsAd の event# が UVW の表示中 event# と食い違う�
 
   it('UVW 側がまだ何も表示していない(null)ときは不一致と判定しない', () => {
     expect(asadEventMismatch(41, null)).toBe(false);
+  });
+});
+
+describe('TODO/125: XY / XZ / YZ 投影 → TH2D', () => {
+  // 非対称: nx=3, ny=2。values[iy*nx+ix] に全部違う値(手で置く)。
+  //   iy=0: 1 2 3
+  //   iy=1: 4 5 6
+  const message = {
+    kind: 'projection' as const,
+    nx: 3,
+    ny: 2,
+    xmin: -6,
+    xmax: 3,
+    ymin: 10,
+    ymax: 14,
+    values: Float64Array.from([1, 2, 3, 4, 5, 6]),
+  };
+
+  it('values[iy*nx+ix] は fArray[(iy+1)*(nx+2)+(ix+1)](転置しない)', () => {
+    const histo = buildPanelObject(createHistogram, message, PROJECTION_SPECS[0]);
+    expect(histo.fNcells).toBe((3 + 2) * (2 + 2));
+    for (let iy = 0; iy < 2; iy++) {
+      for (let ix = 0; ix < 3; ix++) {
+        expect(histo.fArray[(iy + 1) * 5 + (ix + 1)]).toBe(iy * 3 + ix + 1);
+      }
+    }
+    // under/overflow は 0 のまま
+    expect(histo.fArray[0]).toBe(0);
+    expect(histo.fEntries).toBe(21);
+  });
+
+  it('軸範囲はそのまま(横 = xmin..xmax、縦 = ymin..ymax)', () => {
+    const histo = buildPanelObject(createHistogram, message, PROJECTION_SPECS[1]);
+    expect([histo.fXaxis.fXmin, histo.fXaxis.fXmax]).toEqual([-6, 3]);
+    expect([histo.fYaxis.fXmin, histo.fYaxis.fXmax]).toEqual([10, 14]);
+    expect(histo.fXaxis.fNbins).toBe(3);
+    expect(histo.fYaxis.fNbins).toBe(2);
+  });
+
+  it('3 枚の名前と軸タイトル: XY = X/Y [mm]、XZ = X [mm]/time bucket、YZ = Y [mm]/time bucket', () => {
+    expect(PROJECTION_SPECS.map((spec) => [spec.xTitle, spec.yTitle])).toEqual([
+      ['X [mm]', 'Y [mm]'],
+      ['X [mm]', 'time bucket'],
+      ['Y [mm]', 'time bucket'],
+    ]);
+    expect(PROJECTION_SPECS.map((spec) => spec.name)).toEqual([
+      'ProjectionXY',
+      'ProjectionXZ',
+      'ProjectionYZ',
+    ]);
+    const histo = buildPanelObject(createHistogram, message, PROJECTION_SPECS[2]);
+    expect(histo.fXaxis.fTitle).toBe('Y [mm]');
+    expect(histo.fYaxis.fTitle).toBe('time bucket');
+  });
+
+  it('draw option は colz;nostat(log 時は logz)', () => {
+    expect(panelDrawOption(message, false)).toBe('colz;nostat');
+    expect(panelDrawOption(message, true)).toBe('colz;logz;nostat');
   });
 });
