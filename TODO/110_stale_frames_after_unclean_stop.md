@@ -219,3 +219,29 @@
 - root_sink 本体のビルド: 警告・エラーなし。
 - cargo: `fmt --check` OK / clippy 警告 0 / `cargo test` **1078 passed / 0 failed / 1 ignored**(既存のベンチ)。
 - 照合(主対話): 各レーンの `git show --stat` と、発注書のテスト名が diff にあることを確認。両レーンとも「実行できなかった操作」はなし(worktree 保護で複合コマンドを分割したのみ)。
+
+### 実機再現(ELITPC、2026-10-13 12:49–12:53 EEST、ユーザー許可「マージ後にやってよい」。run 71 はユーザーが停止)
+- 反映:
+  - main `7326d9b` を bundle → ELITPC で ff → `cargo build --release` → root_sink を `make TPCDAQ_TPCRECO_DIR=/opt/tpcdaq/assets/TPCReco-HIGS2026_online -j`。gcc 15 で警告 0、C++ テストは ELITPC 上でも全 passed。
+  - UI を差し替えた(旧版 `/opt/tpcdaq/ui.prev110`)。
+  - 注意: 最初の daq_down / up は古い `~/deploy_test/` 版を使ってしまった(slowctl を止めも起こしもしない版)。slowctl は前のプロセスのまま動き続けたので実害なし。再現試験はリポ版 `tools/deploy/` で行った。
+- 手順(`~/repro110.sh a|b|c`、操作者 `claude`、params `elinp__dcdaf9ca` = 25 MHz / triggerDelay 1500、α 線源・外部トリガ):
+  - **A = run 72**: 60 s 走らせ、**stop せずに** `daq_down.sh`(12:50:14)。
+  - **B = run 73**: 20 s 後に `daq_up.sh` → run/start → 60 s → 正規 stop。
+  - **C = run 74**: 正規の stop → start → 30 s → stop。
+- 結果:
+
+| 項目 | run 72(A) | run 73(B) | run 74(C) |
+|---|---|---|---|
+| graw | 259 frames(idx 0–258、t 0.14–60.2 s)、ROOT は `run_inprogress_*` のまま(EOS が来ない — 110 の原事故と同じ) | **389 frames、先頭 91 本が run 72 の続き**(idx 259–349、t 60.8–79.6 s)、frame #91 で idx 349 → 0、t 79.6 → 0.28 s。後退は 1 回、frameType 1 のみ | 混入なし |
+| root_sink close 行 | — | `events_complete=350 events_incomplete=0 late_fragments=0 restarts=1 events_before_restart=91 restart_duplicates=39`(= 91 + 新 298 − 重複 39) | `late_fragments=0 restarts=0 events_before_restart=0 restart_duplicates=0` |
+| decoder | — | run 中の metrics: `acquisition_restarts=1 / frames_before_restart=91 / topology_frames=0`(**Fable の予測どおり daqStart は no-op で topology frame なし**)、`malformed=0` | — |
+| `run_stop.counters` | (run_stop なし) | **`acquisition_restarts=0 / frames_before_restart=0` ← 不具合** | — |
+| run/start の応答 | 132 の notes が実機で出た(`config_id taken from params elinp__dcdaf9ca …`) | 同 | 同 |
+
+- **見つけた不具合**:
+  - decoder の `rearm()`(自分の EOS 送出後)が再開カウンタを 0 に戻していた。controller が run_stop の counters を集めるのは EOS 伝播の後なので、0 になる。
+  - RunDecoder は Start ごとに作り直されるので、malformed と同じく `rearm` で戻さないのが正しい。
+  - レーン B の `restart_counters_reset_on_rearm` が誤った仕様を固定していた → 修正を Sonnet に発注(2026-10-13)。
+- 比較: 110 の原事故(run 29)では 2,057 件を late で捨てていた。今回、root-sink の欠損は同番号の 39 件だけで、数えて見える(ユーザー裁定 Q1)。
+- ログブック: run 72 に run_stop が無い経緯を comment で記録した(author `claude`)。
