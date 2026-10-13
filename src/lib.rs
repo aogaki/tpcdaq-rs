@@ -10,6 +10,10 @@ pub mod config;
 /// ジオメトリ抽象(TPCReco `.dat` パーサ、ChannelRole 解決)。SPEC §4。(002 で実装)
 pub mod geometry;
 
+/// strip 線分の mm(TPCReco 規約、Event Display の XY 投影用 — mm を扱う唯一のモジュール)。
+/// SPEC §4.4 の例外 / §10.3 `stripGeometry`。(TODO/125 で実装)
+pub mod strip_xy;
+
 /// ZMQ メッセージ核(Message/Batch/Fragment、直列化)。SPEC §2。(003 で実装)
 pub mod msg;
 

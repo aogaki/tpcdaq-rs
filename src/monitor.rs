@@ -54,6 +54,7 @@ use tracing::{error, info, warn};
 use crate::config::Config;
 use crate::geometry::{self, ChannelRole, Geometry, AGET_CHIPS_PER_ASAD, RAW_CH_PER_AGET};
 use crate::msg::Fragment;
+use crate::strip_xy::{self, StripGeometry, StripXyError};
 
 /// 1 チャンネルの time bucket 数(GET ハードウェア定数。SPEC §2.4 の bucket 0–511)。
 pub const N_BUCKETS: u16 = 512;
@@ -828,6 +829,29 @@ pub fn meta_json(meta: &Meta) -> Result<String, serde_json::Error> {
     serde_json::to_string(&value)
 }
 
+/// `stripGeometry`(S→C、接続時 1 回・`meta` の次 — TODO/125 の WS 契約)を JSON 文字列にする。
+///
+/// 作れたときは [`StripGeometry`] の中身 + `type`、作れなかったときは
+/// `{"type":"stripGeometry","unavailable":"<理由>"}`(UI は理由をそのまま表示する)。
+pub fn strip_geometry_json(
+    geometry: &Result<StripGeometry, StripXyError>,
+) -> Result<String, serde_json::Error> {
+    let value = match geometry {
+        Ok(geometry) => {
+            let mut value = serde_json::to_value(geometry)?;
+            if let Some(map) = value.as_object_mut() {
+                map.insert("type".to_string(), serde_json::json!("stripGeometry"));
+            }
+            value
+        }
+        Err(reason) => serde_json::json!({
+            "type": "stripGeometry",
+            "unavailable": reason.to_string(),
+        }),
+    };
+    serde_json::to_string(&value)
+}
+
 /// monitor 自身の可視化値(SPEC §10.3 の `status` に足す 3 つ)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonitorStats {
@@ -1193,6 +1217,9 @@ pub struct Hub {
     meta: Mutex<Meta>,
     /// `meta` の run(直近の status 由来)。
     meta_run: AtomicU32,
+    /// `stripGeometry` JSON(起動時に 1 回作る。接続時に `meta` の次に送る — TODO/125)。
+    /// JSON 化に失敗したときだけ `None`(起動時に error ログ済み)。
+    strip_geometry: Option<String>,
     /// 直近に見た `(run, state)`(遷移検知用)。
     last_run_state: Mutex<Option<(u32, String)>>,
     /// slowctl の最新 `slow` ペイロード(SPEC §10.3 v1.31)。購読していなければ `None` の
@@ -1211,7 +1238,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Hub {
-    fn new(meta: Meta, live_queue: usize, counters: Arc<MonitorCounters>) -> Arc<Hub> {
+    fn new(
+        meta: Meta,
+        strip_geometry: Option<String>,
+        live_queue: usize,
+        counters: Arc<MonitorCounters>,
+    ) -> Arc<Hub> {
         let (live, _) = broadcast::channel(live_queue.max(1));
         Arc::new(Hub {
             live,
@@ -1221,6 +1253,7 @@ impl Hub {
             waveform_demand: AtomicUsize::new(0),
             meta: Mutex::new(meta),
             meta_run: AtomicU32::new(0),
+            strip_geometry,
             last_run_state: Mutex::new(None),
             last_slow: Mutex::new(None),
             last_event: Mutex::new(None),
@@ -1745,10 +1778,11 @@ async fn serve_client(socket: WebSocket, hub: Arc<Hub>) {
     let (id, streams, mut json_rx, mut live_rx) = hub.register();
     let counters = Arc::clone(&hub.counters);
     let meta = hub.meta_json();
+    let strip_geometry = hub.strip_geometry.clone();
 
     let writer = tokio::spawn(async move {
-        // 接続時の 1 通目は meta(SPEC §10.3)。
-        if let Some(text) = meta {
+        // 接続時の 1 通目は meta(SPEC §10.3)、2 通目は stripGeometry(TODO/125)。
+        for text in [meta, strip_geometry].into_iter().flatten() {
             if sink.send(WsMessage::Text(text.into())).await.is_err() {
                 return;
             }
@@ -1794,6 +1828,49 @@ async fn serve_client(socket: WebSocket, hub: Arc<Hub>) {
     hub.remove_client(id);
 }
 
+/// 起動時に 1 回: strip 線分の mm を作って `stripGeometry` JSON にする(TODO/125)。
+///
+/// 線分にしなかった行・差し替えた行・作れなかった理由は**ここで warn を 1 回ずつ**出す
+/// (silent 禁止)。作れなくても monitor は止めない(UI に `unavailable` を見せる)。
+fn strip_geometry_at_startup(geometry: &Geometry) -> Option<String> {
+    let built = match strip_xy::strip_geometry(geometry) {
+        Ok((built, notes)) => {
+            if !notes.short_rows.is_empty() {
+                warn!(
+                    rows = notes.short_rows.len(),
+                    lines = ?notes.short_rows,
+                    "monitor: geometry rows with LEN_PADS < 1 are not strip segments (TPCReco drops them too)"
+                );
+            }
+            if !notes.replaced_rows.is_empty() {
+                warn!(
+                    rows = notes.replaced_rows.len(),
+                    lines = ?notes.replaced_rows,
+                    "monitor: repeated (plane, section, strip) rows — the later row wins (TPCReco mapByStrip)"
+                );
+            }
+            info!(
+                u = built.planes.u.segments.len(),
+                v = built.planes.v.segments.len(),
+                w = built.planes.w.segments.len(),
+                "monitor: strip segments ready for the XY projection (stripGeometry)"
+            );
+            Ok(built)
+        }
+        Err(reason) => {
+            warn!(%reason, "monitor: stripGeometry unavailable — the UI shows the reason");
+            Err(reason)
+        }
+    };
+    match strip_geometry_json(&built) {
+        Ok(text) => Some(text),
+        Err(e) => {
+            error!(error = %e, "monitor: cannot encode the stripGeometry message");
+            None
+        }
+    }
+}
+
 /// monitor を起動し、`shutdown` が来るまで WS を提供する(SPEC §5.4 / §10)。
 ///
 /// `bound` は実 bind 先を 1 度だけ通知する(ポート 0 を使うテスト用。production は `None`)。
@@ -1830,8 +1907,14 @@ pub async fn run_monitor(
         cobos: params.cobos.clone(),
         run: 0,
     };
+    let strip_geometry = strip_geometry_at_startup(&geometry);
     let counters = Arc::new(MonitorCounters::default());
-    let hub = Hub::new(meta, params.live_queue, Arc::clone(&counters));
+    let hub = Hub::new(
+        meta,
+        strip_geometry,
+        params.live_queue,
+        Arc::clone(&counters),
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     let sub_thread = spawn_sub_thread(
@@ -2713,6 +2796,7 @@ TestAux0\t0\t0\t0\t4
                 cobos: vec![0],
                 run: 7,
             },
+            None,
             4,
             Arc::clone(&counters),
         );
@@ -2803,6 +2887,51 @@ TestAux0\t0\t0\t0\t4
         without.angles_deg = None;
         let value: serde_json::Value = serde_json::from_str(&meta_json(&without).unwrap()).unwrap();
         assert!(value["anglesDeg"].is_null());
+    }
+
+    /// `stripGeometry`(TODO/125 の WS 契約): `type` + strip_xy の中身そのまま。
+    #[test]
+    fn strip_geometry_json_is_the_strip_xy_contents_plus_its_type() {
+        let geometry = geometry::parse(
+            "ANGLES: 0.0 -120.0 -60.0\nDIAMOND SIZE: 1.0\nREFERENCE POINT: 3.0 2.0\n\
+             W\t1\t2\t0\t0\t0\t2\t-0.5\t1.0\t2\n",
+        );
+        let built = crate::strip_xy::strip_geometry(&geometry).map(|(g, _)| g);
+        let value: serde_json::Value =
+            serde_json::from_str(&strip_geometry_json(&built).unwrap()).unwrap();
+        assert_eq!(value["type"], "stripGeometry");
+        assert!(value.get("unavailable").is_none());
+        // 手計算(strip_xy の 0/−120/−60 ケースと同じ行): pad_pitch = √3、strip_pitch = 1.5、
+        // W(section 1)2 は x0 = (3 − √3, 2)、length = 2√3。
+        let sqrt3 = 3.0_f64.sqrt();
+        assert!((value["padPitch"].as_f64().unwrap() - sqrt3).abs() < 1e-12);
+        assert_eq!(value["stripPitch"], 1.5);
+        assert_eq!(value["rangeXY"].as_array().unwrap().len(), 4);
+        assert!(value["planes"]["U"]["segments"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        let w = &value["planes"]["W"]["segments"][0];
+        assert_eq!((w[0].as_u64(), w[1].as_u64()), (Some(2), Some(1)));
+        assert!((w[2].as_f64().unwrap() - (3.0 - sqrt3)).abs() < 1e-12);
+        assert!((w[3].as_f64().unwrap() - 2.0).abs() < 1e-12);
+        assert!((w[4].as_f64().unwrap() - 2.0 * sqrt3).abs() < 1e-12);
+    }
+
+    /// 作れないときは `{"type":"stripGeometry","unavailable":"<理由>"}` だけ(UI は理由をそのまま出す)。
+    #[test]
+    fn strip_geometry_json_says_unavailable_with_the_reason() {
+        let geometry = geometry::parse("ANGLES: 0.0 -120.0 -60.0\nREFERENCE POINT: 0.0 0.0\n");
+        let built = crate::strip_xy::strip_geometry(&geometry).map(|(g, _)| g);
+        let value: serde_json::Value =
+            serde_json::from_str(&strip_geometry_json(&built).unwrap()).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "type": "stripGeometry",
+                "unavailable": "the geometry header has no DIAMOND SIZE",
+            })
+        );
     }
 
     #[test]

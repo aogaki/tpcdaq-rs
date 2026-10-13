@@ -248,10 +248,24 @@ impl Monitor {
         live_queue: usize,
         slow_sub: Option<&str>,
     ) -> Monitor {
+        Monitor::launch(sub_endpoint, live_queue, slow_sub, PathBuf::from(GEOMETRY)).await
+    }
+
+    /// 別のジオメトリで起動する(`stripGeometry` の試験 — TODO/125)。
+    async fn start_with_geometry(sub_endpoint: &str, geometry: PathBuf) -> Monitor {
+        Monitor::launch(sub_endpoint, 64, None, geometry).await
+    }
+
+    async fn launch(
+        sub_endpoint: &str,
+        live_queue: usize,
+        slow_sub: Option<&str>,
+        geometry: PathBuf,
+    ) -> Monitor {
         let params = MonitorParams {
             sub_endpoint: sub_endpoint.to_string(),
             ws_listen: "127.0.0.1:0".to_string(), // 動的ポート
-            geometry: PathBuf::from(GEOMETRY),
+            geometry,
             live_queue,
             detector: "mini_eTPC_test".to_string(),
             cobos: vec![0],
@@ -542,6 +556,152 @@ async fn meta_status_uvw_and_histos_reach_a_client() {
     assert_eq!(f32_at(&h1, 23), 4096.0, "xmax は 4096 固定");
     let body: Vec<f32> = h1[27..].chunks_exact(4).map(|c| f32_at(c, 0)).collect();
     assert_eq!(body, vec![0.0, 1.5, 2.25, 3.75]);
+
+    monitor.stop().await;
+}
+
+// =====================================================================
+// 1b. 接続時は meta → stripGeometry の順(TODO/125 の WS 契約、SPEC §10.3)
+// =====================================================================
+
+/// テスト専用のジオメトリファイル(実 .dat ではない合成物)。Drop で消す。
+struct ScratchGeometry {
+    path: PathBuf,
+}
+
+impl ScratchGeometry {
+    fn write(tag: &str, text: &str) -> ScratchGeometry {
+        let path = std::env::temp_dir().join(format!(
+            "tpcdaq-125-{tag}-{}-{}.dat",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, text).unwrap();
+        ScratchGeometry { path }
+    }
+}
+
+impl Drop for ScratchGeometry {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// 接続直後の 2 通を読む(publisher は何も流していないので、割り込むものはない)。
+async fn first_two_texts(client: &mut Client) -> (serde_json::Value, serde_json::Value, usize) {
+    let mut texts = Vec::new();
+    while texts.len() < 2 {
+        match client.next(RECV_TIMEOUT).await {
+            Some(WsMessage::Text(text)) => texts.push(text.to_string()),
+            Some(other) => panic!("expected JSON text on connect, got {other:?}"),
+            None => panic!("connection gave fewer than 2 messages"),
+        }
+    }
+    let second_len = texts[1].len();
+    (
+        serde_json::from_str(&texts[0]).unwrap(),
+        serde_json::from_str(&texts[1]).unwrap(),
+        second_len,
+    )
+}
+
+#[tokio::test]
+async fn meta_then_strip_geometry_arrive_first_on_connect() {
+    let publisher = Publisher::bind();
+    let monitor = Monitor::start(&publisher.endpoint, 64).await;
+    let mut client = Client::connect(&monitor).await;
+
+    let (first, second, _) = first_two_texts(&mut client).await;
+    assert_eq!(first["type"], "meta", "1 通目は meta(SPEC §10.3)");
+    assert_eq!(
+        second["type"], "stripGeometry",
+        "2 通目は stripGeometry(TODO/125)"
+    );
+    assert!(second.get("unavailable").is_none(), "{second}");
+
+    // フィクスチャ geometry_mini_reduced.dat: DIAMOND SIZE 2.5 → pad_pitch 2.5√3、strip_pitch 3.75。
+    // strip 行は U 1–4 / V 1–3 / W 1–4(section 0、LEN_PADS 10)。
+    let pad_pitch = 2.5 * 3.0_f64.sqrt();
+    assert!((second["padPitch"].as_f64().unwrap() - pad_pitch).abs() < 1e-12);
+    assert_eq!(second["stripPitch"], 3.75);
+    for (plane, n) in [("U", 4), ("V", 3), ("W", 4)] {
+        let segments = second["planes"][plane]["segments"].as_array().unwrap();
+        assert_eq!(segments.len(), n, "{plane}");
+        for (i, segment) in segments.iter().enumerate() {
+            assert_eq!(
+                segment[0].as_u64(),
+                Some(i as u64 + 1),
+                "{plane} の strip 昇順"
+            );
+            assert!((segment[4].as_f64().unwrap() - 10.0 * pad_pitch).abs() < 1e-9);
+        }
+    }
+
+    monitor.stop().await;
+}
+
+#[tokio::test]
+async fn a_geometry_without_diamond_size_sends_strip_geometry_unavailable() {
+    // DIAMOND SIZE が無い合成ジオメトリ(ch 引きには要らないので monitor 自体は動く)。
+    let geometry = ScratchGeometry::write(
+        "no-diamond",
+        "ANGLES: 0.0 -120.0 -60.0\nREFERENCE POINT: 1.0 2.0\n\
+         U\t0\t1\t0\t0\t0\t0\t0.0\t0.0\t3\n",
+    );
+    let publisher = Publisher::bind();
+    let monitor = Monitor::start_with_geometry(&publisher.endpoint, geometry.path.clone()).await;
+    let mut client = Client::connect(&monitor).await;
+
+    let (first, second, _) = first_two_texts(&mut client).await;
+    assert_eq!(first["type"], "meta");
+    assert_eq!(
+        second,
+        serde_json::json!({
+            "type": "stripGeometry",
+            "unavailable": "the geometry header has no DIAMOND SIZE",
+        })
+    );
+
+    monitor.stop().await;
+}
+
+#[tokio::test]
+async fn a_200_kb_strip_geometry_reaches_the_client_whole() {
+    // 発注書の見積もり(≈ 3,300 本 ≈ 200 KB)を上回る合成ジオメトリ: 各面 1,200 本 = 3,600 本、
+    // 15 AsAd ぶんの ch(1 本 ≈ 59 バイトで 3,300 本だと 195 KB — 実測 — なので 200 KB を跨がせる)。
+    const PER_PLANE: usize = 1_200;
+    let mut text = String::from(
+        "ANGLES: 0.0 -120.0 -60.0\nDIAMOND SIZE: 1.0\nREFERENCE POINT: -0.125 0.375\n",
+    );
+    let mut index = 0usize;
+    for plane in ["U", "V", "W"] {
+        for strip in 1..=PER_PLANE {
+            let (asad, aget, ch) = (index / 256, (index / 64) % 4, index % 64);
+            let off_strip = strip as f64 - 600.5;
+            text.push_str(&format!(
+                "{plane}\t0\t{strip}\t0\t{asad}\t{aget}\t{ch}\t-37.25\t{off_strip}\t75\n"
+            ));
+            index += 1;
+        }
+    }
+    let geometry = ScratchGeometry::write("big", &text);
+    let publisher = Publisher::bind();
+    let monitor = Monitor::start_with_geometry(&publisher.endpoint, geometry.path.clone()).await;
+    let mut client = Client::connect(&monitor).await;
+
+    let (first, second, bytes) = first_two_texts(&mut client).await;
+    assert_eq!(first["type"], "meta");
+    assert_eq!(second["type"], "stripGeometry");
+    assert!(bytes >= 200_000, "200 KB 級であること: {bytes} bytes");
+    for plane in ["U", "V", "W"] {
+        let segments = second["planes"][plane]["segments"].as_array().unwrap();
+        assert_eq!(segments.len(), PER_PLANE, "{plane}: 欠けずに全部");
+        assert_eq!(segments[PER_PLANE - 1][0].as_u64(), Some(PER_PLANE as u64));
+    }
+    eprintln!("stripGeometry: {bytes} bytes, {} segments", 3 * PER_PLANE);
 
     monitor.stop().await;
 }
