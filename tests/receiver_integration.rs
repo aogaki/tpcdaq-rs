@@ -612,3 +612,87 @@ async fn an_idle_running_receiver_emits_heartbeats_on_both_links() {
         .expect("receiver did not stop within 5 s")
         .unwrap();
 }
+
+// ---------------------------------------------------------------------
+// (g) EOS 後の静止(TODO/092 — 069 #13 run 27 の「teardown で 1 通 abandoned」)
+// ---------------------------------------------------------------------
+
+/// 自然 EOF → EOS の後、receiver はそのリンクに**何も送らない**(Heartbeat も送らない)。
+/// よって EOS から時間を置いた `Reset` でも打ち切るものが無い = `messages_abandoned` は 0。
+///
+/// 再現条件は実機と同じ: graw-writer は期待ソース全部の EOS を受けると PULL を閉じる
+/// (`src/graw_writer.rs` の `consume_until_done` が抜けて socket を drop — TODO/117)。
+/// receiver の PUSH は `ZMQ_IMMEDIATE` なので、閉じた相手への send は「下流不在」として
+/// ブロックする。修正前は EOS の 1 周期(1 s)後に Heartbeat を graw-writer リンクへ送ろうとして
+/// SNDTIMEO(1 s)で `downstream is full or absent` を出し(= 実機の「EOS の 2 s 後」)、
+/// `Reset` でその 1 通を abandoned として数えていた。decoder は EOS 後も PULL を開けたまま
+/// (次の run へ再武装)なので、こちらは「開いているリンクにも何も来ない」を見る。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn after_a_natural_eos_the_receiver_stays_silent_and_reset_abandons_nothing() {
+    let ctx = zmq::Context::new();
+    let (graw_pull, graw_ep) = bind_pull(&ctx);
+    let (decoder_pull, decoder_ep) = bind_pull(&ctx);
+
+    // heartbeat_ms は test_params の 1000 ms(= 実機既定 DEFAULT_HEARTBEAT_MS)のまま:
+    // 下の 3 s 待ちの間に Heartbeat の周期が 2 回以上来る。
+    let (cmd_ep, shutdown_tx, task) =
+        start_receiver(test_params(4, "127.0.0.1:0", &graw_ep, &decoder_ep)).await;
+
+    rpc(
+        &cmd_ep,
+        &Command::Configure(RunConfig {
+            run_number: 27,
+            comment: "quiet after EOS".to_string(),
+            config: serde_json::Value::Null,
+        }),
+    )
+    .await;
+    let data_addr = bind_address(&rpc(&cmd_ep, &Command::Arm).await);
+    let started = rpc(&cmd_ep, &Command::Start { run_number: 27 }).await;
+    assert!(started.success, "{}", started.message);
+
+    // getHwServer 停止 = CoBo 側からの close(EOF)。非対称な 2 フレーム。
+    let frames = vec![make_frame(200, true, 0x27), make_frame(52, false, 0x92)];
+    replay_frames(&data_addr, &frames).await;
+    for (sock, link) in [(&graw_pull, "graw-writer"), (&decoder_pull, "decoder")] {
+        let got = collect_until_eos(sock, link);
+        assert_eq!(got.frames, frames, "{link}: EOS より前に全フレームが届く");
+        assert_eq!(got.eos_run_number, Some(27), "{link}: EOF → EOS");
+    }
+
+    // graw-writer の実挙動: 全 EOS を受けたら PULL を閉じる。
+    drop(graw_pull);
+
+    // EOS から 3 s 待つ。開いたままの decoder リンクにも何も来ないこと。
+    let readable = decoder_pull.poll(zmq::POLLIN, 3_000).unwrap();
+    if readable > 0 {
+        let bytes = decoder_pull.recv_bytes(0).unwrap();
+        panic!(
+            "decoder: EOS の後に receiver が送ってきた: {:?}",
+            Message::<RawFrames>::from_msgpack(&bytes)
+        );
+    }
+
+    // controller の後始末(実機では ECC stop の 60 s timeout 後)の Reset。
+    let reset = rpc(&cmd_ep, &Command::Reset).await;
+    assert!(reset.success, "{}", reset.message);
+    assert_eq!(reset.state, ComponentState::Idle);
+    assert_eq!(
+        metric_u64(&reset, "messages_abandoned"),
+        0,
+        "EOS 後に送ろうとして打ち切られたメッセージがある(TODO/092): {:?}",
+        reset.metrics
+    );
+    assert_eq!(metric_u64(&reset, "send_errors"), 0, "{:?}", reset.metrics);
+    assert_eq!(
+        metric_u64(&reset, "frames"),
+        2,
+        "Reset はカウンタを消さない"
+    );
+
+    shutdown_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("receiver did not stop within 5 s")
+        .unwrap();
+}
