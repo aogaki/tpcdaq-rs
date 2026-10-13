@@ -577,7 +577,8 @@ enum SendOutcome {
 }
 
 /// 有界キューからフレームを取り、「`batch_max_bytes` 到達 or `batch_max` 経過」の早い方で
-/// バッチを閉じて両リンクへ送る(SPEC §2.3)。アイドル時は Heartbeat を出す(SPEC §2.2)。
+/// バッチを閉じて両リンクへ送る(SPEC §2.3)。アイドル時は Heartbeat を出す(SPEC §2.2)が、
+/// **EOS を送り終えた後は出さない**(下流はもう run を閉じている — TODO/092)。
 ///
 /// 専用 OS スレッドで走る前提。ZMQ 送信のブロック(= 背圧)はここで受け止める。
 ///
@@ -603,6 +604,10 @@ fn sender_loop(
     let mut batch_deadline: Option<Instant> = None;
     let mut heartbeat_counter = 0u64;
     let mut last_send = Instant::now();
+    // EOS を送り終えたら以後 Heartbeat は出さない(TODO/092)。下流は EOS で run を閉じる
+    // (graw-writer は PULL ごと閉じる)ので、EOS 後の Heartbeat は IMMEDIATE の PUSH で
+    // 「下流不在」にブロックし、後の Reset で abandoned になるだけだった。
+    let mut eos_sent = false;
 
     loop {
         if abandon.load(Ordering::Relaxed) {
@@ -611,7 +616,13 @@ fn sender_loop(
         }
 
         let now = Instant::now();
-        let wake = batch_deadline.unwrap_or(last_send + cfg.heartbeat);
+        let wake = match (batch_deadline, eos_sent) {
+            (Some(deadline), _) => deadline,
+            (None, false) => last_send + cfg.heartbeat,
+            // EOS 後は Heartbeat の期限が無い。打ち切り合図の確認間隔でだけ目覚める
+            // (過去の期限を wake にすると recv_timeout(0) の空回りになる)。
+            (None, true) => now + SENDER_POLL_INTERVAL,
+        };
         let wait = wake
             .saturating_duration_since(now)
             .min(SENDER_POLL_INTERVAL);
@@ -662,6 +673,7 @@ fn sender_loop(
                     "EndOfStream sent to both links"
                 );
                 last_send = Instant::now();
+                eos_sent = true;
                 alive
             }
             // 待ちを頭打ちにしたので、タイムアウト = 期限到達とは限らない。期限は自分で見る。
@@ -679,7 +691,7 @@ fn sender_loop(
                     batch_deadline = None;
                     last_send = Instant::now();
                     alive
-                } else if batch.is_empty() && now >= last_send + cfg.heartbeat {
+                } else if !eos_sent && batch.is_empty() && now >= last_send + cfg.heartbeat {
                     let heartbeat = Message::<RawFrames>::Heartbeat {
                         source_id: cfg.source_id,
                         run_number: cfg.run_number,
