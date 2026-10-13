@@ -43,7 +43,16 @@ struct Compared {
     max_abs_diff: f64,
 }
 
+/// Get2D のビン数(TPCReco v0.09 `EventTPC::Get2D`: `(int)((max − min)/pitch − 1)`、
+/// X は strip_pitch、Y は pad_pitch)。
+fn get2d_bins(g: &StripGeometry) -> (i32, i32) {
+    let nx = ((g.range_xy[1] - g.range_xy[0]) / g.strip_pitch - 1.0) as i32;
+    let ny = ((g.range_xy[3] - g.range_xy[2]) / g.pad_pitch - 1.0) as i32;
+    (nx, ny)
+}
+
 /// `ours` と TPCReco オラクルの全線分・pitch・rangeXY を突き合わせる(許容 1e-9)。
+/// オラクルの `rangeXY` は `GeometryTPC::rangeXY()`(TH2Poly の軸 = Get2D のビン範囲)。
 fn compare_with_oracle(ours: &StripGeometry, oracle: &Value) -> Compared {
     let mut max_abs_diff = 0.0_f64;
     let mut check = |what: &str, actual: f64, expected: f64| {
@@ -126,6 +135,32 @@ fn synthetic_geometry_matches_tpcreco_segment_by_segment() {
     eprintln!(
         "synthetic: {} segments, max |ours − TPCReco| = {:e} mm",
         compared.segments, compared.max_abs_diff
+    );
+}
+
+/// このフィクスチャでは TH2Poly の軸(菱形 pad の頂点まで)が線分の外接矩形より本当に広い
+/// —— rangeXY の照合が「線分の箱」と「TH2Poly の軸」を取り違えたら落ちることの裏づけ。
+#[test]
+fn synthetic_range_xy_is_the_th2poly_range_not_the_centre_line_box() {
+    let (ours, _) = build(Path::new(SYNTH_DAT));
+    let oracle = read_oracle(Path::new(SYNTH_ORACLE));
+    // U は水平(0°)で、菱形は strip に直交する y 向きに DIAMOND SIZE / 2 = 0.625 mm はみ出す:
+    // 線分の箱 y ∈ [0, 22.5] に対し TH2Poly は [−0.625, 23.125]。
+    assert_eq!(f(&oracle["rangeXYCentreLines"][2]), 0.0);
+    assert!((f(&oracle["rangeXY"][2]) - -0.625).abs() < 1e-9);
+    assert!((f(&oracle["rangeXY"][3]) - 23.125).abs() < 1e-9);
+    for i in 0..4 {
+        assert!(
+            (ours.range_xy[i] - f(&oracle["rangeXY"][i])).abs() <= TOL,
+            "rangeXY[{i}]: ours {} vs TPCReco {}",
+            ours.range_xy[i],
+            f(&oracle["rangeXY"][i])
+        );
+    }
+    let (nx, ny) = get2d_bins(&ours);
+    eprintln!(
+        "synthetic rangeXY {:?}, Get2D nx {nx} ny {ny}",
+        ours.range_xy
     );
 }
 
@@ -220,14 +255,17 @@ fn real_geometry_matches_tpcreco_when_paths_are_given() {
     let (ours, notes) = build(Path::new(&dat));
     let compared = compare_with_oracle(&ours, &read_oracle(Path::new(&oracle)));
     let json = serde_json::to_string(&ours).unwrap();
+    let (nx, ny) = get2d_bins(&ours);
     eprintln!(
-        "{dat}: {} segments (U {} / V {} / W {}), max |ours − TPCReco| = {:e} mm, \
-         stripGeometry JSON {} bytes, short rows {:?}, replaced rows {:?}",
+        "{dat}: {} segments (U {} / V {} / W {}), max |ours − TPCReco| = {:e} mm \
+         (rangeXY 込み), rangeXY {:?}, Get2D nx {nx} ny {ny}, stripGeometry JSON {} bytes, \
+         short rows {:?}, replaced rows {:?}",
         compared.segments,
         ours.planes.u.segments.len(),
         ours.planes.v.segments.len(),
         ours.planes.w.segments.len(),
         compared.max_abs_diff,
+        ours.range_xy,
         json.len(),
         notes.short_rows,
         notes.replaced_rows,

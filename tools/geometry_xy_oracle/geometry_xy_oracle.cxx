@@ -9,9 +9,10 @@
 // SEGMENTS.json:
 //   {"padSize", "padPitch", "stripPitch", "referencePoint":[x,y],
 //    "planes":{"U":{"unit":[x,y],"pitchUnit":[x,y]}, "V":..., "W":...},
-//    "rangeXY":[xmin,xmax,ymin,ymax],          // 全線分の Start()/End() の外接矩形
-//                                               //  (InitTH2Poly が TH2Poly を作る前に求める矩形)
-//    "rangeXYTh2Poly":[xmin,xmax,ymin,ymax],   // GeometryTPC::rangeXY()(TH2Poly の軸 — 参考値)
+//    "rangeXY":[xmin,xmax,ymin,ymax],          // GeometryTPC::rangeXY() = TH2Poly の軸(Get2D の
+//                                               //  ビン範囲)。SetFloat(true) で菱形 pad の頂点まで広がる
+//    "rangeXYCentreLines":[xmin,xmax,ymin,ymax], // 参考: 全線分の Start()/End() の外接矩形
+//                                               //  (InitTH2Poly が TH2Poly を作るときの初期値)
 //    "segments":[[plane, section, strip, x0, y0, ux, uy, length], ...]}
 //   segments は mapByStrip の順(plane → section → strip)。x0,y0 = reference point + Offset()、
 //   length = StripTPC::Length()(= pad_pitch × int(LEN_PADS))。
@@ -134,14 +135,6 @@ bool write_segments(const GeometryTPC &geo, const std::vector<Segment> &segs,
     std::fputc('}', f);
   }
   std::fprintf(f, "},\n\"rangeXY\":[");
-  print_double(f, xmin);
-  std::fputc(',', f);
-  print_double(f, xmax);
-  std::fputc(',', f);
-  print_double(f, ymin);
-  std::fputc(',', f);
-  print_double(f, ymax);
-  std::fprintf(f, "],\n\"rangeXYTh2Poly\":[");
   print_double(f, txmin);
   std::fputc(',', f);
   print_double(f, txmax);
@@ -149,6 +142,14 @@ bool write_segments(const GeometryTPC &geo, const std::vector<Segment> &segs,
   print_double(f, tymin);
   std::fputc(',', f);
   print_double(f, tymax);
+  std::fprintf(f, "],\n\"rangeXYCentreLines\":[");
+  print_double(f, xmin);
+  std::fputc(',', f);
+  print_double(f, xmax);
+  std::fputc(',', f);
+  print_double(f, ymin);
+  std::fputc(',', f);
+  print_double(f, ymax);
   std::fprintf(f, "],\n\"segments\":[");
   for (size_t i = 0; i < segs.size(); ++i) {
     const Segment &s = segs[i];

@@ -15,8 +15,11 @@
 //!   offset = OFF_STRIP × strip_pitch × pitchUnit + OFF_PAD × pad_pitch × unit。
 //!   `LEN_PADS < 1.0` の行は捨てる。同じ `(plane, section, strip)` は mapByStrip の後勝ち。
 //! * `StripTPC` — 長さ = pad_pitch × (int)LEN_PADS(pad 数は `int` で持つ = 切り捨て)。
-//! * `InitTH2Poly` — rangeXY = 全線分の始点 `x0 − 0.5·pad_pitch·unit` と終点
-//!   `始点 + length·unit` の外接矩形。
+//! * `InitTH2Poly` + ROOT `TH2Poly::AddBin`(`SetFloat(true)`)— rangeXY = `GeometryTPC::rangeXY()`
+//!   (Get2D のビン範囲)。TH2Poly の軸は全線分の始点・終点の外接矩形で作られ、strip ごとの
+//!   菱形 pad の多角形(bin)を足すたびにその頂点まで広がる。頂点は
+//!   `p0 + ipad·pad_pitch·unit + {0, d·R(+30°)unit, pad_pitch·unit, d·R(−30°)unit}`
+//!   (`p0` = 線分の始点 `x0 − 0.5·pad_pitch·unit`、`d` = DIAMOND SIZE、`ipad` = 0..npads)。
 
 use std::collections::BTreeMap;
 
@@ -30,7 +33,7 @@ use crate::geometry::{Geometry, Plane, StripRow};
 pub struct StripGeometry {
     pub pad_pitch: f64,
     pub strip_pitch: f64,
-    /// `[xmin, xmax, ymin, ymax]` [mm]。
+    /// `[xmin, xmax, ymin, ymax]` [mm] = TPCReco `GeometryTPC::rangeXY()`(TH2Poly の軸)。
     #[serde(rename = "rangeXY")]
     pub range_xy: [f64; 4],
     pub planes: Planes,
@@ -182,22 +185,9 @@ pub fn strip_geometry(geometry: &Geometry) -> Result<(StripGeometry, StripXyNote
         let b = row.off_pad * pad_pitch;
         let x0 = reference.0 + (a * pitch[plane][0] + b * unit[plane][0]);
         let y0 = reference.1 + (a * pitch[plane][1] + b * unit[plane][1]);
-        let length = pad_pitch * row.len_pads.trunc(); // StripTPC: int npads
-                                                       // InitTH2Poly: point1 = ref + offset − unit·0.5·pad_pitch、point2 = point1 + unit·length。
-        let start = [
-            x0 - unit[plane][0] * 0.5 * pad_pitch,
-            y0 - unit[plane][1] * 0.5 * pad_pitch,
-        ];
-        let end = [
-            start[0] + unit[plane][0] * length,
-            start[1] + unit[plane][1] * length,
-        ];
-        for point in [start, end] {
-            range[0] = range[0].min(point[0]);
-            range[1] = range[1].max(point[0]);
-            range[2] = range[2].min(point[1]);
-            range[3] = range[3].max(point[1]);
-        }
+        let npads = row.len_pads.trunc(); // StripTPC: int npads
+        let length = pad_pitch * npads;
+        grow_by_strip_polygon(&mut range, [x0, y0], unit[plane], npads, pad_pitch, diamond);
         segments[plane].push(Segment {
             strip,
             section,
@@ -231,6 +221,64 @@ pub fn strip_geometry(geometry: &Geometry) -> Result<(StripGeometry, StripXyNote
         },
     };
     Ok((geometry, notes))
+}
+
+/// TPCReco `InitTH2Poly` が 1 本の strip について TH2Poly の軸に足す点を `range` に足す。
+///
+/// 1. 軸の初期値 = 線分の始点 `point1 = x0 − unit·0.5·pad_pitch` と終点 `point1 + unit·length`
+///    の外接矩形(TPCReco の else-if の癖は 2. の頂点が覆うので結果に効かない)。
+/// 2. `SetFloat(true)` の `TH2Poly::AddBin` が軸を広げる先 = 菱形 pad の多角形の頂点:
+///    `point0 + unit·ipad·pad_pitch + {0, unit.Rotate(π/6)·d, unit·pad_pitch, unit.Rotate(−π/6)·d}`。
+///    演算の順も TPCReco(TVector2)に合わせる。
+fn grow_by_strip_polygon(
+    range: &mut [f64; 4],
+    x0: [f64; 2],
+    unit: [f64; 2],
+    npads: f64,
+    pad_pitch: f64,
+    diamond: f64,
+) {
+    let mut include = |p: [f64; 2]| {
+        range[0] = range[0].min(p[0]);
+        range[1] = range[1].max(p[0]);
+        range[2] = range[2].min(p[1]);
+        range[3] = range[3].max(p[1]);
+    };
+    let point0 = [
+        x0[0] - unit[0] * 0.5 * pad_pitch,
+        x0[1] - unit[1] * 0.5 * pad_pitch,
+    ];
+    include(point0);
+    include([
+        point0[0] + unit[0] * (pad_pitch * npads),
+        point0[1] + unit[1] * (pad_pitch * npads),
+    ]);
+    let rotate = |phi: f64| {
+        // TVector2::Rotate(phi)
+        [
+            unit[0] * phi.cos() - unit[1] * phi.sin(),
+            unit[0] * phi.sin() + unit[1] * phi.cos(),
+        ]
+    };
+    let up = rotate(std::f64::consts::PI / 6.0);
+    let down = rotate(-std::f64::consts::PI / 6.0);
+    let corners = [
+        [0.0, 0.0],
+        [up[0] * diamond, up[1] * diamond],
+        [unit[0] * pad_pitch, unit[1] * pad_pitch],
+        [down[0] * diamond, down[1] * diamond],
+    ];
+    let mut ipad = 0.0;
+    while ipad < npads {
+        let base = [
+            point0[0] + unit[0] * ipad * pad_pitch,
+            point0[1] + unit[1] * ipad * pad_pitch,
+        ];
+        for corner in corners {
+            include([base[0] + corner[0], base[1] + corner[1]]);
+        }
+        ipad += 1.0;
+    }
 }
 
 fn add(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
@@ -345,17 +393,47 @@ W\t0\t1\t0\t0\t0\t2\t0.0\t-1.0\t1
     }
 
     #[test]
-    fn range_xy_is_the_bounding_box_of_segment_starts_and_ends() {
+    fn range_xy_is_the_bounding_box_of_the_tpcreco_strip_polygons() {
         let (g, _) = build(HEX_90);
-        // 始点 = x0 − 0.5·pad_pitch·unit(= x0 − √3·unit)、終点 = 始点 + length·unit:
-        //   U3: (4, −4 + 2√3) → (4, −4 + 10√3)
-        //   V1: (8.5 − 1.5, −4 + 2.5√3 + 0.5√3) = (7, −4 + 3√3) → (7 + 6, −4 + 3√3 − 2√3) = (13, −4 + √3)
-        //   W1: (8.5 − 1.5, −4 + 1.5√3 − 0.5√3) = (7, −4 + √3) → (7 + 3, −4 + 2√3) = (10, −4 + 2√3)
-        // → x ∈ [4, 13]、y ∈ [−4 + √3, −4 + 10√3]。
-        close(g.range_xy[0], 4.0, "xmin");
+        // TPCReco InitTH2Poly は strip ごとに菱形 pad を並べた多角形を TH2Poly の bin にし、
+        // SetFloat(true) の軸はその頂点まで広がる。頂点 = p0 + ipad·pad_pitch·unit +
+        // {0, d·R(+30°)unit, pad_pitch·unit, d·R(−30°)unit}(d = DIAMOND SIZE = 2、
+        // p0 = x0 − 0.5·pad_pitch·unit = 線分の始点)。
+        //   U3(unit (0,1)、4 pad): p0 = (4, −4 + 2√3)。d·R(±30°)unit = (∓1, √3) → x は 4 ± 1、
+        //       y は p0.y 〜 p0.y + 4·2√3 → [3, 5] × [−4 + 2√3, −4 + 10√3]
+        //   V1(unit (√3/2, −1/2)、2 pad): p0 = (7, −4 + 3√3)。pad_pitch·unit = (3, −√3)、
+        //       d·R(+30°)unit = (2, 0)、d·R(−30°)unit = (1, −√3)。頂点 (7, −4+3√3) (9, −4+3√3)
+        //       (10, −4+2√3) (8, −4+2√3) (12, −4+2√3) (13, −4+√3) (11, −4+√3)
+        //       → [7, 13] × [−4 + √3, −4 + 3√3]
+        //   W1(unit (√3/2, 1/2)、1 pad): p0 = (7, −4 + √3)。頂点 (7, −4+√3) (8, −4+2√3)
+        //       (10, −4+2√3) (9, −4+√3) → [7, 10] × [−4 + √3, −4 + 2√3]
+        // → x ∈ [3, 13]、y ∈ [−4 + √3, −4 + 10√3]。線分の外接矩形なら xmin は 4(U3 の菱形が
+        //   strip に直交する向きに d/2 = 1 はみ出す分だけ広い)。
+        close(g.range_xy[0], 3.0, "xmin");
         close(g.range_xy[1], 13.0, "xmax");
         close(g.range_xy[2], -4.0 + SQRT3, "ymin");
         close(g.range_xy[3], -4.0 + 10.0 * SQRT3, "ymax");
+    }
+
+    #[test]
+    fn range_xy_follows_the_diamond_corners_for_a_non_hexagonal_angle() {
+        // U(11°)の 1 pad だけ。DIAMOND SIZE 2.5 → pad_pitch = 2.5√3。REFERENCE POINT (0, 0)、
+        // OFF_PAD 0.5 なので p0 = 0.5·pad_pitch·unit − 0.5·pad_pitch·unit = (0, 0)。
+        // 頂点 = (0,0)、2.5·unit(41°)、2.5√3·unit(11°)、2.5·unit(−19°):
+        //   xmin = 0、xmax = 2.5√3·cos 11° = 4.25057…、ymin = −2.5·sin 19° = −0.81392…、
+        //   ymax = 2.5·sin 41° = 1.64014…
+        // (「線分の箱 ± pad_size/2」なら y は [−1.25, 0.826 + 1.25] になって合わない。)
+        let text = "\
+ANGLES: 11.0 22.0 33.0
+DIAMOND SIZE: 2.5
+REFERENCE POINT: 0.0 0.0
+U\t0\t1\t0\t0\t0\t0\t0.5\t0.0\t1
+";
+        let (g, _) = build(text);
+        close(g.range_xy[0], 0.0, "xmin");
+        close(g.range_xy[1], 4.250_570_389_555_222, "xmax");
+        close(g.range_xy[2], -0.813_920_386_142_891_7, "ymin");
+        close(g.range_xy[3], 1.640_147_572_476_268_2, "ymax");
     }
 
     // --- 角度 0 / −120 / −60(ELITPC と同じ配置)------------------------------
