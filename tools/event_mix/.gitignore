@@ -1,0 +1,4 @@
+# C++ ビルド生成物(コミットしない)
+event_mix
+test_event_mix
+*.dSYM/
