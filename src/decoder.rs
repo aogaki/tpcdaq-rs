@@ -708,8 +708,7 @@ impl RunDecoder {
         self.awaiting_run = true;
         self.source_epochs.clear();
         self.data_frames = 0;
-        self.acquisition_restarts = 0;
-        self.frames_before_restart = 0;
+        // acquisition_restarts / frames_before_restart は戻さない(malformed と同じ run カウンタ)。
         self.logged_restart = false;
         self.clear_pending();
     }
@@ -2021,31 +2020,27 @@ mod tests {
         );
     }
 
-    /// rearm(自分の EOS 送出後)で 2 項目とも初期化される。次の run は再び最初の再開から数える。
+    /// 自分の EOS 送出(rearm)後も 2 項目は残る: controller は EOS が伝わった後に run_stop の
+    /// counters を集めるので、ここで 0 に戻すと logbook が常に 0 になる(run 73 の不具合)。
+    /// 次の Start では RunDecoder が新規生成され、0 から数え直す。
     #[test]
-    fn restart_counters_reset_on_rearm() {
+    fn restart_counters_survive_the_own_eos_until_the_next_start() {
         let mut c = core(29, &[0]);
         let now = Instant::now();
         c.handle_batch(0, 29, 0, &stale_head_then_restart(0), now);
-        assert_eq!(c.metrics_json()["acquisition_restarts"].as_u64(), Some(1));
         c.handle_eos(0, 29);
         c.batch_sent();
         c.eos_sent();
 
         let m = c.metrics_json();
+        assert_eq!(m["acquisition_restarts"].as_u64(), Some(1));
+        assert_eq!(m["frames_before_restart"].as_u64(), Some(19));
+
+        // 次の Start = 新しい RunDecoder: 0 から始まる。
+        let next = core(30, &[0]);
+        let m = next.metrics_json();
         assert_eq!(m["acquisition_restarts"].as_u64(), Some(0));
         assert_eq!(m["frames_before_restart"].as_u64(), Some(0));
-
-        // 次の run も同じ判定が働く: 古い 2 本(idx 50, 51)→ idx 0 で再開 1 回、before = 2。
-        let frames = vec![
-            frame_at(0, 50, 9_000_000),
-            frame_at(0, 51, 9_010_000),
-            frame_at(0, 0, 16_000),
-        ];
-        c.handle_batch(0, 30, 0, &frames, now);
-        let m = c.metrics_json();
-        assert_eq!(m["acquisition_restarts"].as_u64(), Some(1));
-        assert_eq!(m["frames_before_restart"].as_u64(), Some(2));
     }
 
     // -----------------------------------------------------------------
