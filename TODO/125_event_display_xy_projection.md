@@ -34,7 +34,10 @@
   - **同じ (plane, section, strip) の重複は後勝ち**(`mapByStrip[...] = strip`、:352。ch 引きの mapByAget の先勝ちとは別)+ warn 1 回。
   - `GetCrossPoint`(:1556-1578)/ `MatchCrossPoint`(:1618-1632)。reference point は交点に最後に足す(平行移動なので先に足しても同じ)。
     線分上の有効範囲は `[−0.5·pad_pitch − tol, Length + tol]`、tol = `Utils::NUMERICAL_TOLERANCE` = 1e-5(UtilsMath.h:11)。
-  - **rangeXY = `InitTH2Poly` の外接矩形**: 各線分の始点 `ref + offset − 0.5·pad_pitch·unit`、終点 = 始点 + `Length·unit`(:552-560)。
+  - **rangeXY = TPCReco `rangeXY()` = TH2Poly の軸**(Get2D が使う値)。`InitTH2Poly` は線分の始点 `ref + offset − 0.5·pad_pitch·unit`・
+    終点 = 始点 + `Length·unit` の外接矩形で TH2Poly を作るが(:552-560)、`SetFloat(true)` のため strip の多角形(菱形 pad の角)を
+    足すと軸が広がる(:578 以降、SetTH2PolyStrip :636-680)。**最終的な軸の範囲に合わせる**(2026-10-13、レーン A の指摘で修正。
+    mini の X は中心線の外接矩形 ±53.25 → TH2Poly ±53.75、ELITPC の Y は ny 112 → 113)。
 - 投影: `tpcreco-v0.09_01_04_2022/DataFormats/src/EventTPC.cpp` `EventTPC::Get2D`(:1239 から)。
   time bucket ごとに U×V×W の全組(各 strip の全 section)で `MatchCrossPoint`、同じ (u,v,w) は最初の一致だけ採る。
   電荷の配分は **method 0(各 strip の電荷をその strip の一致数で等分)**。**TPCReco GUI の既定は method 1**
@@ -64,7 +67,9 @@ S→C の JSON `stripGeometry`。**接続時に 1 回**(`meta` の直後、relia
 ## レーン A — Rust(ジオメトリの mm と WS 送出 + TPCReco オラクル)— Opus
 **作業ブランチ**: worktree で `git merge --ff-only main` してから着手。
 1. `src/geometry.rs`: NEW(10 欄)と LEGACY(7 欄)の strip 行で、今捨てている `off_pad` / `off_strip` / `len_pads` を保持する
-   (`(plane, section, strip)` → 3 値。先勝ち)。**lookup・dump_tsv(§4.5 の C++ 照合)の出力は変えない**。
+   (ch 表に採られた行をファイル順に全部残し、`strip_xy` が `(plane, section, strip)` ごとに**後勝ち**で選ぶ —
+   TPCReco の mapByAget(ch 重複は丸ごと捨てる)→ mapByStrip(後勝ち)と同じ。2026-10-13 主対話承認)。
+   **lookup・dump_tsv(§4.5 の C++ 照合)の出力は変えない**。
 2. 新モジュール `src/strip_xy.rs`(純関数、IO なし。**mm を扱うのはこのモジュールだけ** — SPEC §4.4 の例外の範囲):
    `Geometry` → 上の `stripGeometry` の中身(serde)/ 足りなければ `Err(理由)`。式は「移植元」のとおり。
 3. monitor: 起動時に 2 を 1 回計算し、各クライアントの接続時に `meta` の直後に送る(既存の meta 送出と同じ経路)。
