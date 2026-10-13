@@ -2022,6 +2022,58 @@ async fn params_id_drives_prepare_and_configure_config_id_at_run_start() {
     harness.shutdown();
 }
 
+/// 132: current.json が TOML の config_id を上書きしたことを run/start の応答に出す。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_start_reports_params_override_in_response() {
+    let (harness, ecc_config_dir) = params_harness("params-override-notice").await;
+    let token = harness.acquire("aogaki");
+    let (status, put_body) = put(
+        harness.rest,
+        "/api/params",
+        json!({"token": token, "params": roundtrip_params_json()}),
+    );
+    assert_eq!(status, 200, "{put_body}");
+    let id = put_body["id"].as_str().unwrap().to_string();
+
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": "override"}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["params_id"], json!(id));
+    let notes = body["notes"].as_array().expect("notes is an array");
+    assert_eq!(notes.len(), 1, "{body}");
+    let note = notes[0].as_str().unwrap();
+    assert!(note.contains("taken from params"), "{note}");
+    assert!(note.contains(&id), "{note}");
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
+/// 132: current.json が無ければ `params_id: null`、`notes: []`。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn run_start_without_params_has_null_params_id_and_no_notes() {
+    let (harness, ecc_config_dir) = params_harness("params-no-override-notice").await;
+    let token = harness.acquire("aogaki");
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["params_id"], json!(null));
+    assert_eq!(body["notes"], json!([]));
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+    let _ = std::fs::remove_dir_all(&ecc_config_dir);
+    harness.shutdown();
+}
+
 /// ⑥ run 実行中(phase ≠ Idle)の PUT は 409(次 run から効くという半端を作らない)。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn params_put_is_refused_with_409_while_a_run_is_active() {

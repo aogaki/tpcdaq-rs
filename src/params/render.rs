@@ -107,7 +107,7 @@ pub fn render(params: &Params, template_xml: &str) -> Result<Rendered, ParamsErr
 /// 相のプレフィクス(`configure-` / `prepare-`)は落とす。ECC は
 /// `<相>-<configId>.xcfg` という名前でファイルを読むので、残すと
 /// `configure-configure-…` になってしまう。
-fn template_stem(template: &str) -> String {
+pub fn template_stem(template: &str) -> String {
     let name = template.rsplit('/').next().unwrap_or(template);
     let stem = name.strip_suffix(".xcfg").unwrap_or(name);
     for prefix in ["configure-", "prepare-", "describe-"] {
