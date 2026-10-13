@@ -540,25 +540,24 @@ static void test_an_event_idx_zero_with_an_earlier_clock_after_emission_starts_a
 
 static void test_a_restart_flushes_the_pending_events_of_the_old_epoch() {
   EventBuilder eb({{0, 0}, {0, 1}}, 1000);
-  // 旧世代: idx 5..13 は両 asad 揃い、idx 14 は asad 0 だけ。poll しない = 全部 pending。
+  // 旧世代: idx 5..13 は両 asad 揃い(poll で emit 済み)、idx 14 は asad 0 だけ(pending)。
   for (uint32_t i = 5; i <= 13; ++i) {
     eb.feed(frag_at(7, i, 1000000 + i * 10ull, 0), 0);
     eb.feed(frag_at(7, i, 1000000 + i * 10ull, 1), 0);
   }
   eb.feed(frag_at(7, 14, 1000140, 0), 0);
-  CHECK_EQ(eb.pending(), 10);
+  CHECK_EQ(eb.poll(0).size(), 9);
+  CHECK_EQ(eb.pending(), 1);
 
   eb.feed(frag_at(7, 0, 50, 0), 0);  // restart
   CHECK_EQ(eb.acquisition_restarts(), 1);
   CHECK_EQ(eb.pending(), 1);  // 新世代の idx 0 だけ残る
 
   const std::vector<BuiltEvent> flushed = eb.take_restart_flush();
-  CHECK_EQ(flushed.size(), 10);  // 旧世代 5..14 を昇順に、捨てずに
-  CHECK(flushed.size() == 10 && flushed.front().event_idx == 5);
-  CHECK(flushed.size() == 10 && flushed.back().event_idx == 14);
-  CHECK(flushed.size() == 10 && flushed.back().incomplete);  // 片肺のまま出る
-  CHECK(flushed.size() == 10 && !flushed[0].incomplete);
-  CHECK(flushed.size() == 10 && flushed[0].epoch == 0 && flushed[9].epoch == 0);
+  CHECK_EQ(flushed.size(), 1);  // 旧世代の pending(idx 14)を捨てずに
+  CHECK(flushed.size() == 1 && flushed[0].event_idx == 14);
+  CHECK(flushed.size() == 1 && flushed[0].incomplete);  // 片肺のまま出る
+  CHECK(flushed.size() == 1 && flushed[0].epoch == 0);
   CHECK_EQ(eb.events_before_restart(), 10);
   CHECK_EQ(eb.events_complete(), 9);
   CHECK_EQ(eb.events_incomplete(), 1);
@@ -637,13 +636,11 @@ static void test_synthetic_stale_head_acceptance() {
   std::set<uint32_t> new_epoch_ids;
   uint64_t old_epoch_events = 0;
   for (uint32_t i = 2038; i <= 2056; ++i) eb.feed(frag_at(29, i, 406000000ull + i * 10ull), 0);
+  emitted += eb.poll(0).size();  // 旧世代は emit 済み(restart は emit 済みを条件にする)
+  old_epoch_events = emitted;
   for (uint32_t i = 0; i <= 2060; ++i) {
     eb.feed(frag_at(29, i, 16000ull + i * 10ull), 0);
-    for (const BuiltEvent& ev : eb.take_restart_flush()) {
-      ++emitted;
-      ++old_epoch_events;
-      CHECK_EQ(ev.epoch, 0);
-    }
+    CHECK_EQ(eb.take_restart_flush().size(), 0);  // 旧世代は emit 済みで pending 無し
   }
   for (const BuiltEvent& ev : eb.poll(0)) {  // タイムアウト前でも complete は出る
     ++emitted;
@@ -663,6 +660,46 @@ static void test_synthetic_stale_head_acceptance() {
   CHECK_EQ(new_epoch_ids.size(), 2061 - 19);
   CHECK(new_epoch_ids.count(2038) == 0 && new_epoch_ids.count(2056) == 0);
   CHECK(new_epoch_ids.count(2057) == 1 && new_epoch_ids.count(0) == 1);
+}
+
+// 4 AsAd 想定(ELITPC の 2 枚の zCoBo)。板の間で event_time が僅かにずれても、event 0 が
+// pending の間(この世代でまだ何も emit していない)は restart と誤判定しない。
+static void test_a_late_event_zero_fragment_from_another_board_with_an_earlier_clock_is_not_a_restart() {
+  EventBuilder eb({{0, 0}, {0, 1}, {1, 0}, {1, 1}}, 1000);
+  // 板 A(AsAd 0..2 相当)の event 0..9 が先に着く。AsAd 3 はまだ。
+  for (uint32_t i = 0; i < 10; ++i) {
+    for (uint8_t k = 0; k < 3; ++k) {
+      OwnedFragment f = frag(7, i, k / 2, k % 2);
+      f.event_time = 1000000 + i * 10ull + k;
+      eb.feed(std::move(f), 0);
+    }
+  }
+  CHECK_EQ(eb.poll(0).size(), 0);  // どれも 3/4 で head-of-line が止まる
+  // 板 B の event 0 が、板 A の最小(1000000)より僅かに小さい時刻で後から来る。
+  OwnedFragment late = frag(7, 0, 1, 1);
+  late.event_time = 999990;
+  eb.feed(std::move(late), 0);
+  CHECK_EQ(eb.acquisition_restarts(), 0);
+  CHECK_EQ(eb.late_fragments(), 0);
+  const std::vector<BuiltEvent> out = eb.poll(0);
+  CHECK_EQ(out.size(), 1);
+  CHECK(out.size() == 1 && out[0].event_idx == 0 && !out[0].incomplete);
+  CHECK(out.size() == 1 && out[0].fragments.size() == 4);
+}
+
+// emit 済み番号は区間リストで持つ: 連続なら 1 区間、欠番 1 つで 2、run を閉じたら 0。
+static void test_emitted_ids_are_kept_as_ranges_and_released_on_close() {
+  EventBuilder eb({{0, 0}}, 1000);
+  feed_range(eb, 7, 0, 99999, 1000000);
+  CHECK_EQ(eb.poll(0).size(), 100000);
+  CHECK_EQ(eb.emitted_id_ranges(7), 1);
+  eb.feed(frag_at(7, 100001, 3000000), 0);  // 100000 が欠番
+  CHECK_EQ(eb.poll(0).size(), 1);
+  CHECK_EQ(eb.emitted_id_ranges(7), 2);
+  eb.close_run(7);
+  CHECK_EQ(eb.emitted_id_ranges(7), 0);
+  // 小さな状態は残る: EOS 後の迷子は late のまま。
+  CHECK(eb.feed(frag_at(7, 5, 1000050), 0).has_value());
 }
 
 int main() {
@@ -695,6 +732,8 @@ int main() {
   test_two_restarts_in_one_run_are_both_counted();
   test_new_epoch_events_with_ids_already_emitted_are_dropped_and_counted();
   test_synthetic_stale_head_acceptance();
+  test_a_late_event_zero_fragment_from_another_board_with_an_earlier_clock_is_not_a_restart();
+  test_emitted_ids_are_kept_as_ranges_and_released_on_close();
 
   test_strict_seqcheck_accepts_zero_as_the_first();
   test_strict_seqcheck_treats_a_nonzero_first_as_a_gap();

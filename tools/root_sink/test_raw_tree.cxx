@@ -615,6 +615,7 @@ void test_raw_tree_writes_the_epoch_filtered_stream_as_is() {
       for (rootsink::BuiltEvent& ev : eb.take_restart_flush()) w.write(ev, 1000);
     };
     for (uint32_t i = 2038; i <= 2056; ++i) feed(i, 406000000ULL + i * 10ULL);
+    for (rootsink::BuiltEvent& ev : eb.poll(0)) w.write(ev, 1000);  // 旧世代を emit 済みに
     for (uint32_t i = 0; i <= 2060; ++i) feed(i, 16000ULL + i * 10ULL);
     for (rootsink::BuiltEvent& ev : eb.poll(0)) w.write(ev, 1001);
     for (rootsink::BuiltEvent& ev : eb.flush()) w.write(ev, 1002);

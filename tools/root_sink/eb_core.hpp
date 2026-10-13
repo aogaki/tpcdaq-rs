@@ -138,14 +138,15 @@ class EventBuilder {
 
   // フラグメントを 1 個食わせる。戻り値が入っていれば遅延到着(呼び手が書き出す)。
   //
-  // **取得の再開(TODO/110)**: event_idx==0 のフレームが、同じ run でより大きい idx
+  // **取得の再開(TODO/110)**: event_idx==0 のフレームが、同じ run・同じ世代で emit 済みの
+  // イベントがあり(2 枚目の板の event 0 が pending の間は誤検出しない)、より大きい idx
   // (> kRestartMinIdx)を見た後に、その世代で見た最小 event_time より小さい時刻で来たら、
   // ECC 不在で走り続けた zCoBo の古いフレームの後に新しい取得が始まったと見なす。
   // late 判定より前に見る。起きたら旧世代の pending を押し出し(take_restart_flush() で
   // 受け取る)、世代を +1 して高水位をリセットする。
   std::optional<LateFragment> feed(OwnedFragment f, uint64_t now_ms) {
     RunState& rs = runs_[f.run_number];
-    if (f.event_idx == 0 && rs.max_seen > kRestartMinIdx && rs.have_time &&
+    if (f.event_idx == 0 && rs.have_emitted && rs.max_seen > kRestartMinIdx && rs.have_time &&
         f.event_time < rs.time_floor) {
       restart(f.run_number, rs);
     }
@@ -215,6 +216,19 @@ class EventBuilder {
   uint64_t acquisition_restarts() const { return acquisition_restarts_; }
   uint64_t events_before_restart() const { return events_before_restart_; }  // 旧世代で emit した数
   uint64_t restart_duplicate_events() const { return restart_duplicate_events_; }  // 新世代で捨てた数
+  // run を閉じたら emit 済み番号の区間リストを解放する(EOS の flush 後に呼ぶ)。
+  // 小さな状態(emitted_upto 等)は、EOS 後の迷子を late と判定するために残す。
+  void close_run(uint32_t run) {
+    const auto it = runs_.find(run);
+    if (it == runs_.end()) return;
+    it->second.epoch_ids.release();
+    it->second.retired_ids.release();
+  }
+  // テスト・可視化用: その run が保持している区間数(現世代 + 旧世代)。
+  size_t emitted_id_ranges(uint32_t run) const {
+    const auto it = runs_.find(run);
+    return it == runs_.end() ? 0 : it->second.epoch_ids.v.size() + it->second.retired_ids.v.size();
+  }
   size_t pending() const { return pending_.size(); }
 
  private:
@@ -237,6 +251,40 @@ class EventBuilder {
   // restart の最小 idx ゲート(decoder と同じ。隣接混在 idx 1→0 を誤検出しない)。
   static constexpr uint32_t kRestartMinIdx = 8;
 
+  // emit 済み event_idx の区間 [lo, hi] リスト(昇順)。世代内の emit は昇順なので
+  // 末尾の延長か追加だけで済み、欠番が無ければ 1 区間(常駐プロセスで RSS を伸ばさない)。
+  struct IdRanges {
+    std::vector<std::pair<uint32_t, uint32_t>> v;
+    void add(uint32_t idx) {
+      if (!v.empty() && idx <= v.back().second + 1ull && idx >= v.back().first) {
+        if (idx > v.back().second) v.back().second = idx;
+      } else {
+        v.emplace_back(idx, idx);
+      }
+    }
+    bool contains(uint32_t idx) const {
+      auto it = std::upper_bound(v.begin(), v.end(), idx,
+                                 [](uint32_t x, const std::pair<uint32_t, uint32_t>& r) {
+                                   return x < r.first;
+                                 });
+      return it != v.begin() && idx <= std::prev(it)->second;
+    }
+    void absorb(const IdRanges& o) {  // 併合(昇順に整え、隣接・重複を結ぶ)
+      v.insert(v.end(), o.v.begin(), o.v.end());
+      std::sort(v.begin(), v.end());
+      std::vector<std::pair<uint32_t, uint32_t>> m;
+      for (const auto& r : v) {
+        if (!m.empty() && r.first <= m.back().second + 1ull) {
+          if (r.second > m.back().second) m.back().second = r.second;
+        } else {
+          m.push_back(r);
+        }
+      }
+      v.swap(m);
+    }
+    void release() { std::vector<std::pair<uint32_t, uint32_t>>().swap(v); }
+  };
+
   // run 毎の状態。世代(epoch)内で emit は昇順。
   struct RunState {
     bool have_emitted = false;
@@ -246,8 +294,9 @@ class EventBuilder {
     uint64_t time_floor = 0;        // 現世代で見た最小 event_time
     uint32_t epoch = 0;
     bool dup_logged = false;        // restart_duplicate の stderr は run 毎に 1 回
-    std::vector<uint32_t> epoch_ids;    // 現世代で emit した event_idx(昇順)
-    std::vector<uint32_t> retired_ids;  // 旧世代で emit した event_idx(昇順、重複なし)
+    uint64_t epoch_count = 0;       // 現世代で emit した数
+    IdRanges epoch_ids;             // 現世代で emit した event_idx
+    IdRanges retired_ids;           // 旧世代で emit した event_idx
   };
 
   void restart(uint32_t run, RunState& rs) {
@@ -260,14 +309,10 @@ class EventBuilder {
     }
     pending_.erase(first, it);
 
-    events_before_restart_ += rs.epoch_ids.size();
-    std::vector<uint32_t> merged;
-    merged.reserve(rs.retired_ids.size() + rs.epoch_ids.size());
-    std::merge(rs.retired_ids.begin(), rs.retired_ids.end(), rs.epoch_ids.begin(),
-               rs.epoch_ids.end(), std::back_inserter(merged));
-    merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
-    rs.retired_ids.swap(merged);
-    rs.epoch_ids.clear();
+    events_before_restart_ += rs.epoch_count;
+    rs.retired_ids.absorb(rs.epoch_ids);
+    rs.epoch_ids.release();
+    rs.epoch_count = 0;
     rs.have_emitted = false;
     rs.emitted_upto = 0;
     rs.max_seen = 0;
@@ -286,7 +331,7 @@ class EventBuilder {
     rs.have_emitted = true;
     rs.emitted_upto = idx;
     if (rs.epoch > 0 &&
-        std::binary_search(rs.retired_ids.begin(), rs.retired_ids.end(), idx)) {
+        rs.retired_ids.contains(idx)) {
       ++restart_duplicate_events_;
       if (!rs.dup_logged) {  // run 毎に 1 回(ホットパスで毎回整形しない)
         rs.dup_logged = true;
@@ -298,7 +343,8 @@ class EventBuilder {
       }
       return;
     }
-    rs.epoch_ids.push_back(idx);
+    rs.epoch_ids.add(idx);
+    ++rs.epoch_count;
     BuiltEvent ev = emit(it);
     ev.epoch = rs.epoch;
     out.push_back(std::move(ev));

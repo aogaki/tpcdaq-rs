@@ -879,6 +879,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
         c.runs = run.runs_closed();
         // 組み上げ中の残りを全部出す(揃わなかったものは incomplete で —— 捨てない)。
         absorb(eb.flush(), eb, c, rec, raw);
+        eb.close_run(run.run_number());  // emit 済み番号の区間リストを解放(RSS 平坦)
         // 残りを流し切った**あとに** finalize マーカーを流す(in-band = 追い越さない)。
         if (rec != nullptr) {
           RecordItem item;
