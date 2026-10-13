@@ -146,3 +146,76 @@
     - eventId の重複 0
 - Q2 = レーン C は後回し(既定)。Q3 = getHwServer へ直接 `daqStop` は不採用(既定)。Q4 = **マージ後に ELITPC で実機再現してよい**(日時はそのとき確認)。
 - SPEC §6.3 の文案に 1 文を足す: 「新しい epoch で、前の epoch で emit した番号と同じイベントは書かずに数える(`restart_duplicates`)」。
+
+## 結果(2026-10-13、レーン A / B マージ済み — 実機再現は未実施)
+
+### レーン B(decoder + controller + logbook UI、Sonnet `cd82b97` → merge `ab82b42`)
+- `src/decoder.rs` の `RunDecoder`:
+  - ソース毎に `max_event_idx` と `time_floor` を持つ(`HashMap` はソース数ぶんだけ)。
+  - 判定は `event_idx == 0 && max > 8 && event_time < floor`。
+  - 発火すると次のように扱う:
+    - そのソースを新 epoch にする。
+    - `acquisition_restarts` を +1 する。
+    - `frames_before_restart` は最初の 1 回だけラッチする(run 全体の data frame 数)。
+    - `info!` は run 毎に 1 回。
+  - フレームは落とさず、Error にもしない。`rearm` で初期化する。
+- `src/logbook.rs` の `Counters` に、nullable の 2 項目を足した(`#[serde(default)]`)。
+  - `src/controller/status.rs` で、decoder の metrics を合算して `run_stop.counters` に載せる。
+  - `/api/status` は `components[].metrics` 経由で見える。`/api/status.counters` という項目は元から無い — 逸脱 1、承認。
+- UI: logbook の counters 行に 2 項目を足した(3 桁区切り)。
+- テスト:
+  - `decoder::tests::a_stale_head_followed_by_event_idx_zero_counts_an_acquisition_restart`(19 本 + idx 0 → restarts 1 / before 19、21 fragments、Error なし)
+  - `adjacent_mixing_at_the_head_of_a_run_is_not_a_restart`
+  - `a_restart_is_counted_per_source_and_reported_once_per_run_start`
+  - `restart_counters_reset_on_rearm`
+  - `sequencer::tests_stop::run_stop_counters_carry_the_decoder_restart_counters`
+  - UI spec 1 本
+- red: decoder の 4 本は assert で落ちた。controller の 1 本はコンパイルエラーだった。
+
+### レーン A(root-sink、Sonnet `a2b7607` + レビュー差し戻し 2 回 `f0594ce` / `5a7c3ed` → merge `2fb7efb`)
+- `eb_core.hpp`:
+  - run 毎の `RunState` に epoch、高水位、`max_seen`、`time_floor`、emit 済み番号の**区間リスト**(`IdRanges`)を持たせた。
+  - **restart の判定** = `event_idx == 0 && (この epoch に complete になったイベントがある || emit 済み) && max_seen > 8 && event_time < time_floor`。
+  - restart のときに行うこと:
+    - 旧 epoch の pending を `take_restart_flush()` で先に押し出す。
+    - 番号を `retired` へ併合する。
+    - epoch を +1 する。
+  - 新 epoch で `retired` にある番号のイベントは emit せず、`restart_duplicate_events` に数える(ユーザー裁定 Q1)。
+  - `close_run` で区間リストを解放する。
+- `root_recorder.hpp`: epoch が変わったら eventId の高水位をリセットする。
+- `raw_tree.hpp`: 変更なし(eb で除いた後を書く)。
+- `rs_core.hpp`: close 行に、常に `restarts=N events_before_restart=K restart_duplicates=D` を出す。
+- `root_sink.cxx`: counts JSON に 3 キーを足した。run 毎 1 回の stderr。status PUB に `acquisition_restarts`(12 キー目)。
+- **レビューで直したこと**(主対話):
+  1. 判定に「complete か emit 済み」を必須にした。Warsaw ELITPC は 2 枚の zCoBo なので、板の時刻のずれで遅れて届く event 0 を誤判定しないため。遅れた板のフラグメントはまだどのイベントにも来ていないので、complete のイベントは無い。
+  2. 「emit 済み」だけでは、古い頭と新しい idx 0 が**同じバッチ**に入ったとき見落とす(root_sink はバッチの feed の後で 1 回だけ poll する)。一次資料の機序ではこれが一番ありそうな形なので、complete も含めた。
+  3. emit 済み番号を 1 イベント 4 B で run を閉じても保持していた → 常駐で RSS が伸びるので、区間リストにして close で解放するよう直した。
+- テスト(`test_eb_core.cpp` ほか):
+  - `test_an_event_idx_zero_with_an_earlier_clock_after_emission_starts_a_new_epoch`
+  - `test_a_restart_flushes_the_pending_events_of_the_old_epoch`
+  - `test_a_late_fragment_of_event_zero_is_still_late_not_a_restart`
+  - `test_adjacent_mixing_at_the_head_is_not_a_restart`
+  - `test_two_restarts_in_one_run_are_both_counted`
+  - `test_new_epoch_events_with_ids_already_emitted_are_dropped_and_counted`
+  - `test_synthetic_stale_head_acceptance`
+  - `test_a_late_event_zero_fragment_from_another_board_with_an_earlier_clock_is_not_a_restart`
+  - `test_emitted_ids_are_kept_as_ranges_and_released_on_close`
+  - `test_a_stale_head_and_the_new_event_zero_in_the_same_batch_is_a_restart`
+  - `test_a_stale_head_with_four_asads_in_the_same_batch_is_a_restart`
+  - `test_rs_core::test_run_closed_line_reports_restarts_per_run`
+  - `test_recorder::test_recorder_accepts_a_lower_event_id_after_an_epoch_change`
+  - `test_raw_tree::test_raw_tree_writes_the_epoch_filtered_stream_as_is`
+- red の実測:
+  - recorder の epoch リセットを無効化すると dups 2038 / entries 23 で FAIL。
+  - 判定を `have_emitted` だけに戻すと 26 件 FAIL(同じバッチの 2 本、flush、受け入れ)。
+  - `have_emitted` を外すと、板のずれのテストが FAIL。
+- **受け入れ値(合成列)**: 古い 2038..2056(19 件)→ 新しい 0..2060 で、次のとおり。
+  - `late_fragments=0`、`restarts=1`、`events_before_restart=19`、`restart_duplicates=19`
+  - PEventTPC と raw ツリーの entries はどちらも 2061、`duplicate_event_ids=0`
+
+### ゲート(main `2fb7efb`、Mac、2026-10-13、ROOT 6.40.04 + SDKROOT=MacOSX27.sdk)
+- `make -j test`: tpc_wire 68 / rs_core 79 / eb_core 272 / geo 426 / monitor_hist 202 / monitor_pub 92、全 passed、failed 0。conformance は golden 未指定で SKIP(従来どおり)。
+- `make -j test-root`: recorder 174 / pevent 99 / raw_tree 91、全 passed、failed 0(実機 PEventTPC の比較は `TPCDAQ_REAL_PEVENT` 未設定で SKIP — 従来どおり)。
+- root_sink 本体のビルド: 警告・エラーなし。
+- cargo: `fmt --check` OK / clippy 警告 0 / `cargo test` **1078 passed / 0 failed / 1 ignored**(既存のベンチ)。
+- 照合(主対話): 各レーンの `git show --stat` と、発注書のテスト名が diff にあることを確認。両レーンとも「実行できなかった操作」はなし(worktree 保護で複合コマンドを分割したのみ)。
