@@ -153,6 +153,10 @@ struct Counts {
   uint64_t unexpected_fragments = 0; // 期待 (cobo,asad) 集合の外から来た
   uint64_t duplicate_fragments = 0;  // 同一イベントに同じ (cobo,asad) が 2 回
   uint64_t pending_events = 0;       // 終了時点で組み上げ中だったイベント(瞬間値)
+  // 取得の再開(TODO/110)。ECC 不在で走り続けた zCoBo の古いフレームの後に新しい取得。
+  uint64_t acquisition_restarts = 0;
+  uint64_t events_before_restart = 0;  // 旧世代で emit した数(累積)
+  uint64_t restart_duplicates = 0;     // 新世代で、旧世代と同じ番号のため書かずに数えた数
   // 以下は「黙って通さない」ための可視化カウンタ(CLAUDE.md)
   uint64_t heartbeats = 0;
   uint64_t unknown = 0;              // 知らない variant 名(前方互換で無視するが数える)
@@ -285,7 +289,9 @@ void print_counts_json(const Counts& c, const char* fatal) {
       ",\"eos\":%" PRIu64 ",\"runs\":%" PRIu64 ",\"events_complete\":%" PRIu64
       ",\"events_incomplete\":%" PRIu64 ",\"late_fragments\":%" PRIu64
       ",\"unexpected_fragments\":%" PRIu64 ",\"duplicate_fragments\":%" PRIu64
-      ",\"pending_events\":%" PRIu64 ",\"heartbeats\":%" PRIu64
+      ",\"pending_events\":%" PRIu64 ",\"acquisition_restarts\":%" PRIu64
+      ",\"events_before_restart\":%" PRIu64 ",\"restart_duplicates\":%" PRIu64
+      ",\"heartbeats\":%" PRIu64
       ",\"unknown\":%" PRIu64 ",\"stale_eos\":%" PRIu64 ",\"unexpected_sources\":%" PRIu64
       ",\"run_number_mismatch\":%" PRIu64 ",\"entries_written\":%" PRIu64
       ",\"items_out_of_range\":%" PRIu64 ",\"recorder_queue\":%" PRIu64
@@ -299,7 +305,8 @@ void print_counts_json(const Counts& c, const char* fatal) {
       ",\"root_files\":%s,\"fatal\":\"%s\"}\n",
       c.batches, c.fragments, c.items, c.eos, c.runs, c.events_complete,
       c.events_incomplete, c.late_fragments, c.unexpected_fragments,
-      c.duplicate_fragments, c.pending_events, c.heartbeats, c.unknown, c.stale_eos,
+      c.duplicate_fragments, c.pending_events, c.acquisition_restarts,
+      c.events_before_restart, c.restart_duplicates, c.heartbeats, c.unknown, c.stale_eos,
       c.unexpected_sources, c.run_number_mismatch, entries_written, items_out_of_range,
       c.recorder_queue, duplicate_event_ids, channels_without_strip,
       charge_keys_out_of_range, frames_outside_geometry, recorder_workers,
@@ -643,6 +650,19 @@ struct RawItem {
 
 using RawChannel = rootsink::Channel<RawItem>;
 
+// close 行用の通算スナップショット(TODO/108, 110)。
+rootsink::RunCounts run_counts(const Counts& c) {
+  rootsink::RunCounts r;
+  r.batches = c.batches;
+  r.events_complete = c.events_complete;
+  r.events_incomplete = c.events_incomplete;
+  r.late_fragments = c.late_fragments;
+  r.acquisition_restarts = c.acquisition_restarts;
+  r.events_before_restart = c.events_before_restart;
+  r.restart_duplicates = c.restart_duplicates;
+  return r;
+}
+
 // 組み上がったイベントを Recorder / raw ライタへ渡す(どちらも nullptr なら数えるだけ)。
 // **push は満杯なら待つ** = 背圧。ここで捨てたらロスレス契約が崩れる(CLAUDE.md)。
 void absorb(std::vector<rootsink::BuiltEvent>&& built, const rootsink::EventBuilder& eb,
@@ -698,6 +718,9 @@ void absorb(std::vector<rootsink::BuiltEvent>&& built, const rootsink::EventBuil
   c.unexpected_fragments = eb.unexpected_fragments();
   c.duplicate_fragments = eb.duplicate_fragments();
   c.pending_events = eb.pending();
+  c.acquisition_restarts = eb.acquisition_restarts();
+  c.events_before_restart = eb.events_before_restart();
+  c.restart_duplicates = eb.restart_duplicate_events();
 
   // pending の警告閾値(SPEC §5.3 v1.10、R-P2-5)。判定は monitor_pub.hpp の純関数、
   // 「一度だけ」のラッチはここ(集計スレッドのローカル static —— absorb() の呼び手は
@@ -774,7 +797,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
         }
         std::memset(c.frames_per_cobo, 0, sizeof(c.frames_per_cobo));
         // close 行は run 単位の件数(TODO/108)—— 開始時点の通算を覚えておく。
-        c.run_at_open = {c.batches, c.events_complete, c.events_incomplete, c.late_fragments};
+        c.run_at_open = run_counts(c);
         std::fprintf(stderr, "root_sink: run %u opened (source_id=%u)\n", h.run_number,
                      h.source_id);
       }
@@ -803,9 +826,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
         std::optional<rootsink::LateFragment> late =
             eb.feed(rootsink::OwnedFragment::from_view(f, h.run_number), tick);
         if (late.has_value()) {
-          if (rootsink::first_late_of_run(
-                  {c.batches, c.events_complete, c.events_incomplete, c.late_fragments},
-                  c.run_at_open)) {
+          if (rootsink::first_late_of_run(run_counts(c), c.run_at_open)) {
             // ログは run 毎に 1 回だけ —— ホットパスで per-frame のログ整形をしない
             // (CLAUDE.md)。以降は late_fragments カウンタが可視化を担う。
             std::fprintf(stderr,
@@ -819,6 +840,19 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
           // だけ(データ自体は生 graw に必ず在る)。
         }
         c.late_fragments = eb.late_fragments();
+        if (eb.acquisition_restarts() > c.acquisition_restarts) {
+          // 取得の再開(TODO/110)。旧世代の pending を**新世代より先に**書き出す。
+          // ログは run 毎に 1 回(2 回目以降は close 行と JSON のカウンタが担う)。
+          if (c.acquisition_restarts == c.run_at_open.acquisition_restarts) {
+            std::fprintf(stderr,
+                         "root_sink: ACQUISITION RESTART run=%u at event_idx=0 time=%" PRIu64
+                         " (stale frames of a previous acquisition came first) — old "
+                         "pending flushed, eventId high-water reset; same-numbered new "
+                         "events are dropped and counted (restart_duplicates)\n",
+                         h.run_number, f.event_time);
+          }
+          absorb(eb.take_restart_flush(), eb, c, rec, raw);
+        }
       }
       absorb(eb.poll(tick), eb, c, rec, raw);
       c.run_number_mismatch = run.run_number_mismatch();
@@ -845,6 +879,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
         c.runs = run.runs_closed();
         // 組み上げ中の残りを全部出す(揃わなかったものは incomplete で —— 捨てない)。
         absorb(eb.flush(), eb, c, rec, raw);
+        eb.close_run(run.run_number());  // emit 済み番号の区間リストを解放(RSS 平坦)
         // 残りを流し切った**あとに** finalize マーカーを流す(in-band = 追い越さない)。
         if (rec != nullptr) {
           RecordItem item;
@@ -873,7 +908,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
         }
         const std::string line = rootsink::format_run_closed(
             env.run_number,
-            {c.batches, c.events_complete, c.events_incomplete, c.late_fragments}, c.run_at_open);
+            run_counts(c), c.run_at_open);
         std::fputs(line.c_str(), stderr);
       } else if (ea == EosAction::Ignored) {
         std::fprintf(stderr,
@@ -918,6 +953,7 @@ void update_status_material(const rootsink::RunState& run, const Counts& c) {
   g_mon.status.events_incomplete = c.events_incomplete;
   g_mon.status.late_fragments = c.late_fragments;
   g_mon.status.pending_events = c.pending_events;
+  g_mon.status.acquisition_restarts = c.acquisition_restarts;
   std::memcpy(g_mon.status.frames_per_cobo, c.frames_per_cobo,
               sizeof(g_mon.status.frames_per_cobo));
 }

@@ -280,18 +280,26 @@ struct RunCounts {
   uint64_t events_complete = 0;
   uint64_t events_incomplete = 0;
   uint64_t late_fragments = 0;
+  // 取得の再開(TODO/110)。run 開始時の初期化 {a,b,c,d} に影響しないよう末尾に置く。
+  uint64_t acquisition_restarts = 0;
+  uint64_t events_before_restart = 0;
+  uint64_t restart_duplicates = 0;
 };
 
 inline std::string format_run_closed(uint32_t run_number, const RunCounts& now,
                                      const RunCounts& at_open) {
-  char buf[256];
+  char buf[384];
   std::snprintf(buf, sizeof(buf),
                 "root_sink: run %u closed (batches=%" PRIu64 " events_complete=%" PRIu64
-                " events_incomplete=%" PRIu64 " late_fragments=%" PRIu64 ")\n",
+                " events_incomplete=%" PRIu64 " late_fragments=%" PRIu64 " restarts=%" PRIu64
+                " events_before_restart=%" PRIu64 " restart_duplicates=%" PRIu64 ")\n",
                 run_number, now.batches - at_open.batches,
                 now.events_complete - at_open.events_complete,
                 now.events_incomplete - at_open.events_incomplete,
-                now.late_fragments - at_open.late_fragments);
+                now.late_fragments - at_open.late_fragments,
+                now.acquisition_restarts - at_open.acquisition_restarts,
+                now.events_before_restart - at_open.events_before_restart,
+                now.restart_duplicates - at_open.restart_duplicates);
   return buf;
 }
 

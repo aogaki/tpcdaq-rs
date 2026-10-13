@@ -870,6 +870,46 @@ void test_duplicate_event_id_is_rejected_before_distribution() {
   remove_tree(dir);
 }
 
+// 10f. 取得の再開(TODO/110): 世代が変わったら eventId の高水位をリセットする
+//
+// ビルダが旧世代と同じ番号のイベントを除いた後の列を Recorder に流す。
+// 手計算の出典: 旧世代 2038..2056(19 件)→ 新世代 0..2060 のうち 2038..2056 を除く
+// 2061 - 19 = 2042 件 → 書く総数 19 + 2042 = 2061、重複 0。
+// 世代リセットが無いと新世代の 0.. は高水位 2056 以下として全部「重複」で落ちる(2061-19=2042 件の欠損)。
+void test_recorder_accepts_a_lower_event_id_after_an_epoch_change() {
+  const std::string dir = scratch_dir("epoch");
+  const uint32_t kRun = 29;
+  uint64_t dups = 0;
+  uint64_t entries = 0;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.geometry = &fixture_geometry();
+    cfg.workers = 1;
+    rootsink::Recorder rec(cfg);
+    rootsink::EventBuilder eb({{0, 0}}, 1000);
+    auto feed = [&](uint32_t idx, uint64_t time) {
+      rootsink::OwnedFragment f = make_fragment(kRun, idx, 0, 0);
+      f.event_time = time;
+      push_item(f.items, pack_item(0, 1, kSignalBucket, 3 + idx % 100));
+      eb.feed(std::move(f), 0);
+      for (rootsink::BuiltEvent& ev : eb.take_restart_flush()) rec.write(ev, 1000);
+    };
+    for (uint32_t i = 2038; i <= 2056; ++i) feed(i, 406000000ULL + i * 10ULL);
+    for (uint32_t i = 0; i <= 2060; ++i) feed(i, 16000ULL + i * 10ULL);
+    for (rootsink::BuiltEvent& ev : eb.poll(0)) rec.write(ev, 1001);
+    for (rootsink::BuiltEvent& ev : eb.flush()) rec.write(ev, 1002);
+    CHECK_EQ(eb.acquisition_restarts(), 1);
+    CHECK_EQ(eb.restart_duplicate_events(), 19);
+    rec.close_run(kRun, 2000);
+    dups = rec.duplicate_event_ids();
+    entries = rec.entries_written();
+  }
+  CHECK_EQ(dups, 0);
+  CHECK_EQ(entries, 2061);
+  remove_tree(dir);
+}
+
 // 10e. EOS 無しの停止でも**キュー在庫は書き切る**、ただし finalize しない(骨子 §6)
 //
 // 保存系はロスレス —— worker のキューに積んだイベントを停止で捨てない。
@@ -1090,6 +1130,7 @@ int main(int argc, char** argv) {
   test_rollover_numbers_parts_per_worker();
   test_counters_are_summed_across_workers();
   test_duplicate_event_id_is_rejected_before_distribution();
+  test_recorder_accepts_a_lower_event_id_after_an_epoch_change();
   test_stop_without_eos_flushes_workers_but_keeps_inprogress();
   test_monitor_root_is_single_with_parallel_workers();
   test_new_run_resets_part_numbering_in_every_worker();
