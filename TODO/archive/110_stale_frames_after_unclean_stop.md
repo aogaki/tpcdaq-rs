@@ -258,6 +258,13 @@
 - ログブック: run 75 / 72 の経緯を comment で記録した。
 - ELITPC は Idle で終えた(新しい α run は始めていない — ユーザーが UI から)。
 
+### 反映ミス(2026-10-13 午後、ユーザー「web UI にアクセスできなくなった」で発覚)
+- 12:46 の UI 差し替えで、`ui/dist/ui` ごと `/opt/tpcdaq/ui` に置いてしまった。正しくは `ui/dist/ui/browser` の**中身**(daq.toml の `ui_dir` の注記どおり、127 まではそうしていた)。
+  - その結果 `index.html` が `/opt/tpcdaq/ui/browser/` の下になり、`GET /` が 404。API と WS は無事。
+- 直し方: `mv /opt/tpcdaq/ui /opt/tpcdaq/ui.bad110 && cp -a /opt/tpcdaq/ui.bad110/browser /opt/tpcdaq/ui`。静的ファイルなので再起動は不要。
+- 確認: `GET /` 200(9,407 B)、`/slow`(深いリンク)200、`main-*.js` 200。
+- 教訓: 反映の後は `curl -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/` で UI の 200 まで確かめる(今回は API だけ見ていた)。
+
 ### 受け入れ
 - 合成列(両レーンのテスト)と実機(run 73 / 76)の両方で、次を確認した:
   - 前の取得の残りフレームは graw にそのまま残る。
