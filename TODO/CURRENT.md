@@ -55,7 +55,7 @@ docs: [NEW_DAQ_SETUP_ja.md](../docs/NEW_DAQ_SETUP_ja.md) v0.1 + [RUNBOOK_ja.md](
   - ~~126~~ **完了 → archive**([archive/126](archive/126_split_monitor_controller.md)): `src/monitor/`(10 ファイル)と `src/controller/`(12 ファイル)に分割、テスト名・数とも不変(1018 / 0 / 1)。
   - ~~127~~ **完了 → archive**([archive/127](archive/127_reco_to_monitor.md)、SPEC v1.45): 再構成は monitor の `src/reco/`(1 イベント 0.22 ms)、0x04 Track(ヘッダ + JSON、live 経路)。macros オラクル 201 / 201、ELITPC 反映済み(取りこぼし 0 のまま)、ユーザー目視「良い絵」。
   - ~~128~~ **完了 → archive**([archive/128](archive/128_event_mixing_tool.md)): `tools/event_mix/`(597 CHECK)。run70 の 100 組では単一飛跡フィットが 100 / 100 ok のまま近いほうか両方の外に引かれる。元の 2 本はほぼ平行(中央値 5°)なので V 字は pairs ファイルで選ぶ。
-  - 129(未起票、別リポ ~/test/gas-pressure-test の TODO として): 複数の一次粒子の反応生成(¹⁰B(γ,α)⁶Li、¹²C(γ,3α) など)と、親子関係を含む真値。ユーザー了承済み。物理条件をユーザーに確認中。
+  - ~~129~~ **完了**(別リポ ~/test/gas-pressure-test の **TODO/12**、main f63cd9c): `/tpc/generator reaction` で ¹⁰B(γ,α)⁶Li・¹²C(γ,3α)(⁸Be 基底経由)・¹⁶O(γ,α)¹²C、GPS の multiplevertex で α 2 本の重なり(2 本目 2000 ns)。真値 = `particles`(親子、仮想の複合核・⁸Be も)・`reactions`(反応ラベル・Eγ・頂点)を `_raw.root` まで運ぶ。ctest 177 / 177。**Garfield++ を ROOT 6.40 で作り直した**(ユーザー指示、旧版 `~/opt-backup/Garfield.root6.36`)。
   - 130(未起票): 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット)。127 と 128 の後。
 - ユーザーの質問への回答(記録): run 開始のたびに AsAd は電源を入れ直している(walk-back の `reset` で unprepare = `asadEnable=0`、prepare の asadInit で OFF 10 ms → ON、ADC / AGET コントローラのリセットと較正、start でタイムスタンプとイベントカウンタをリセット)。Stop は `stop` だけで AsAd は電源も設定もそのまま。出典 = GET の CoBoNode.cpp / BackEnd.cpp、ELITPC の ecc_server.log(VDD 0 V → 3.218 V)。
 
