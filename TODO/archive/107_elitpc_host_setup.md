@@ -1,6 +1,6 @@
 # 107 — ELITPC(旧 puppex)を本番 DAQ 機に立てる(NEW_DAQ_SETUP v0.4 の実施)
 
-**Status: IN PROGRESS**(2026-10-08 開始、Opus)
+**Status: COMPLETED(2026-10-13、処置は末尾)** — 旧: IN PROGRESS(2026-10-08 開始、Opus)
 
 **位置づけ**: 080 A-1 の実施。102 の裁定(puppex を OS 新規インストールして tpcdaq 機に、ZFS は触らない)を受け、
 ユーザーが Ubuntu 26.04 を導入し `ssh ELITPC`(ユーザー `daq`)で入れるようにした。手順の正本 = docs/NEW_DAQ_SETUP_ja.md。
@@ -290,3 +290,20 @@ run 14(α、10:21–11:21)を停止 → `elinp` のトリガを `periodically` �
 5. §10 疎通: DF ping 8972 → パルサー run → `/srv/tpcdaq/run0001/` の graw + ROOT → UI → stop/reset の walk-back。
 6. 不感時間の比較: 移行後の線源 run で 106 の VM 律速(≈ 0.4 Hz 上限)が消えるか。
 7. 後回し: slowctl(§9)、systemd ユニット、ufw。
+
+## 処置(2026-10-13 archive、Opus)
+
+ELITPC は 2026-10-08 から本番機として稼働している(run 1〜70 台、α 線源・パルサー・periodic、ZFS `data/tpcdaq`、ELOG、InfluxDB)。「残り」の行き先:
+
+| # | 項目 | 状態 |
+|---|---|---|
+| 1–4 | chrony / 線の付け替え・MTU / describe / ECC 設定 | ✅(上記) |
+| 5 | §10 疎通(パルサー run → graw + ROOT → UI → stop / reset の walk-back) | ✅ run 3–6(パルサー)以降。walk-back は 112 の ELITPC 10 周と 113–116 の実機試験 |
+| 6 | 不感時間の比較 | ✅「レートは上がったか」の節 + 104 / 106 の訂正節(1 s の壁は CAEN の NIM→TTL 変換器) |
+| 7 | slowctl | ✅ 118–122(HV / LV 常時読み出し、InfluxDB)、124(ON / OFF) |
+| 7 | systemd ユニット・ufw | 移動 → [131](../131_onsite_and_hardware.md) A-4 |
+| 別件メモ | Parameters の既定値が 25 MHz | ✅ 111 で解消(テンプレートから抽出) |
+
+テスト結果は各節(`## 結果` ほか)と、派生チケット 108–124 の結果節が正。
+
+**Status: COMPLETED(2026-10-13 archive。systemd / ufw は 131)**

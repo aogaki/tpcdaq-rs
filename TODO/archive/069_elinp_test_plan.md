@@ -1,6 +1,6 @@
 # 069 — ELI-NP 実機テスト計画(mini eTPC、1 CoBo、徹底実施)
 
-**Status: DRAFT**(起草 Fable 2026-08-18。ユーザーレビュー待ち。
+**Status: CLOSED(2026-10-13、処置は末尾)** — 旧: DRAFT(起草 Fable 2026-08-18。ユーザーレビュー待ち。
 解禁条件「デモ改良が一段落してから」は 2026-08-15 のトラック完了で成立)
 
 ## 目的と枠
@@ -286,3 +286,37 @@ topology frame なし、16,727,040 B = 60 × 278,784 B ぴったり)。
   のどこか 1 バイトでもずれれば digest が変わる)。frame0 は個別に header/first10/last5 を平文でも
   固定してあるので、可読性(CLAUDE.md「テストは仕様書」)は損なっていない。
 
+
+## 処置(2026-10-13 クローズ、Opus — ユーザー「スタックしているのを確認して解決していきたい」)
+
+現地出張の計画として書いたが、実際は **GDED 遠隔ベンチ(09-14 / 09-23)と ELITPC 本番機(10-08 以降、107)で実施**した。
+項目ごとの所在は下の表のとおり。残りは [131](../131_onsite_and_hardware.md)(現地・機器・ELITPC 実機)と、CURRENT の「解析バックログ」へ移した。
+
+| 項目 | 状態 | 所在・実測 |
+|---|---|---|
+| 0-1 067 実ストリーム対応 | ✅ | archive/067 COMPLETED |
+| 0-2 一晩 @224 Mbps soak | 不要(実機で代替) | 064 の 30 分 @224 + 031 の一晩 @45 Mbps。実機では 182 Hz(≈ 102 MB/s)の全数取得(109)と 13.5 h の α run(107 run 2)。サンプリング付き 24 h は 131 A-3 |
+| 0-3 現地手順のリハーサル / 0-4 持ち込み物 | 不要 | 出張せず遠隔で実施したため |
+| 0-5 066 ハーネスの mini .dat スモーク | 移動 | 解析バックログ(較正解析と一緒に) |
+| #1–#5 接続・疎通 | ✅ | 結果 第 1 弾(Q1: TCP に topology frame は来ない、Q3: 261 s は再現せず) |
+| #6 / #7 歩き戻し・連続 ×10 | ✅ | 第 1 弾 / 第 2 弾(run 15–24) |
+| #8 Arm の bind 競合リトライ | 移動 | 131 A-1(ELITPC の audit `arm_retries` を集計するだけ) |
+| #9 start 失敗時の `next_run` 巻き戻し | 移動 | 統合テスト `a_failed_start_rolls_back_and_leaves_no_half_started_run`(034)は済み。実機確認は 131 A-2 |
+| #10 `ecc_error` の可視性 | ✅ | 第 2 弾 #14: breakup 失敗で ECC が `Off`(WHEN_BREAKUP、Ice UnknownException)、ECC 再起動で復旧を演習 |
+| #11 start / stop 所要 | ✅ | run/start 7.5–8 s、run/stop 3–3.6 s |
+| #12–#15 リンク・異常系・復旧・本数 | ✅ | 第 2 弾。#13 の副産物 = 092(EOS 後の Heartbeat、2026-10-13 修正) |
+| #16 compact の MFM オラクル照合 | ✅ | 本書 #16 結果(2 run × 60 frames、sha256 一致) |
+| Phase 2.5 C-1 pedestal(mini) | 移動 | 081 の `calib` で随時取れる。解析バックログ |
+| C-2 pulser | ✅ | archive/091(GDED、振幅スキャン) |
+| C-3〜C-5 トラック・ドリフト端・絶対スケール | 一部 | データは 09-25 以降の α run(093–100、107)。α 線(²¹²Bi / ²²⁰Rn / ²¹⁶Po)の同定まで済み(101 追記 3)。σ_T・σ_L・PRF・イオンテール・ドリフト端の v_drift は未解析 → 解析バックログ。ドリフト端は 100 MHz の窓(≈ 24 mm)では見えない → 131 C-1(25 MHz に戻すか)と連動 |
+| C-6 ガス条件 | ✅ | 机上で確定済み(本書の表) |
+| #17 デッドタイム | ✅ | ELITPC: zCoBo の読み出し **2.931 ms / イベントで一定**(periodic、557 kB の frameType 1)= 上限 ≈ 340 Hz。約 1 s の不感時間は CAEN の NIM→TTL 変換器が原因(104 / 106 の訂正節) |
+| #18 ディスク持続書き込み | ✅ | 182.5 Hz × 557,312 B = 101.7 MB/s を全数・連番で graw に(109)。ZFS の素の書き込み 226–328 MB/s |
+| #19 recorder worker 数 | ✅ | workers 8 で root_sink ≈ 122 events/s(109 追記) |
+| #20 root-sink RSS とキュー単位 | ✅(据え置き) | ELITPC はメモリ 123 GiB、182 Hz × 30 s の RSS 最大 3.1 GB(109)→ `--queue` は個数建てのままでよい |
+| #21 24 h soak | 移動 | 131 A-3 |
+| Q1–Q4 | ✅ | Q1 / Q3 は上記。Q2 = 第 1・2 弾(CoBo は stop で close しない、receiver の Stop が閉じる)。Q4 = ELITPC(20 スレッド / 123 GiB / ZFS)で workers 8 |
+
+**出口の SPEC §13**: 3(デッドタイム)・6(ディスク)・8(HiVolta)を「実測済み」にする文案を CURRENT の Fable キューに積んだ(確定は Fable)。
+
+**Status: CLOSED(2026-10-13)** — 実施分は上表、残りは 131 と解析バックログ。

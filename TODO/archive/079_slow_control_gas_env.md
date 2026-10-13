@@ -1,6 +1,6 @@
 # 079 — スローコントロール: ガス系(Bronkhorst FLOW-BUS: EL-FLOW MFC + EL-PRESS ×2)+ 環境(Arduino MKR1000 + ENV shield)
 
-**Status: READY**(2026-09-15 起票、Fable。同日 写真 5 枚(reference/Bronkhorst/IMG_3204–3208)で
+**Status: COMPLETED(Phase 1–4、処置は末尾)** — 旧: READY(2026-09-15 起票、Fable。同日 写真 5 枚(reference/Bronkhorst/IMG_3204–3208)で
 機種系列・接続形態が判明、Arduino は「温度を取るだけなので自前で書く」とユーザー裁定 → 着手条件
 「機種名などが判明してから」を満たしたので READY。**着手はユーザー指示待ち**。残る確認(§3)は
 着手を止めない — デフォルトで進めて現地 Phase 0 で確定する)
@@ -682,3 +682,16 @@ UI のみ、`cargo test` 等は対象外)。
   (archive/089 の実機受け入れ節)。by-id 命名と名乗り照合(BDSNUM = 165)の方針が実機で成立。
 - 残る Phase 0: Bronkhorst(USB-RS232 の相手 PC が GDED か要確認 — GDED には ttyUSB 無し)、Arduino、HMP2020。
 
+
+## 処置(2026-10-13 archive、Opus)
+
+- Phase 1–4 は完了(上の各結果節、Fable レビュー済み)。HV / LV は同じ slowctl に後乗せし、085 / 089 / 118–122 で ELITPC に常駐、124 で ch ごとの ON / OFF まで。
+- 残りは Phase 0(現地)だけ:
+  - Bronkhorst の実機接続。Windows 側が RS-232 を握っている(FlowSuite / FlowPlot + LabVIEW)。
+  - Arduino の設置。
+  - HMP2020 は 118 で済。
+  
+  どちらも [131](../131_onsite_and_hardware.md) B-1 / B-2 に移した。
+- §3 の確認事項: 3(ALARM で run を止めない)と 4(ガス先・HV 後乗せ)は既定どおりで実装済み。1・2 は 131 へ。
+
+**Status: COMPLETED(Phase 1–4、2026-10-13 archive。Phase 0 の残りは 131)**

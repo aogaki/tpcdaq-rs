@@ -1,6 +1,6 @@
 # 078 — パラメータ設定 UI(JSON が正 → xcfg を生成)
 
-**Status: READY**(2026-09-14 起票、Fable。**着手はユーザー指示待ち**。
+**Status: COMPLETED(2026-09-23 受け入れ完了、処置は末尾)** — 旧: READY(2026-09-14 起票、Fable。着手はユーザー指示待ち。
 ユーザー裁定(同日): **JSON を正とする** / **078 として起票** / ノブは「結局ほとんど全チップ同一」—
 **普段はユーザーから隠れているが、あるチップだけ変えられる**形にする)
 
@@ -634,3 +634,12 @@ npx prettier --check "src/app/**/*.{ts,html,scss}"
 - 対処: current.json を退避してやり直し。**改善案(要検討 → 小チケット)**: run/start の応答と audit に「config_id は params で上書き」を明示する notes を出す、
   もしくは TOML の config_id と current.json の template stem が食い違うとき(pulser vs physics)は warn。UI では status バーの `params <id>` が見えるので人は気づける。
 
+
+## 処置(2026-10-13 archive、Opus)
+
+- 受け入れは 2026-09-23 に全部済んでいた(§5-3 / §5-5 は上の実機節、§5-4 はレーン B / C の結果節)。Status の更新と archive が漏れていた。
+- §8「残り」のノブ集合の確定: SPEC v1.32 §3.3 で 11 ノブ、v1.36(TODO/111)で 12 ノブ(葉 15、`fpnRead` を分離)に固定済み。
+- その後の拡張: 111(初期値をテンプレートから抽出 — UI の 25 MHz 直書きを廃止。107「別件メモ」の件はこれで解消)、112(Apply & restart)、113(current.json のアトミック書き込み)。
+- 「運用上の罠」(current.json が TOML の config_id を上書きしたことが応答から分からない)は [132](../132_params_override_notice.md) に切り出した。
+
+**Status: COMPLETED(2026-09-23 受け入れ完了、2026-10-13 archive)**

@@ -1,6 +1,6 @@
 # 080 — 次の mini TPC 実験に向けた「自前で詰め切る」プログラム(Mikolaj 非依存)
 
-**Status: READY**(2026-09-15 起票 Fable。発端 = ユーザー方針「Mikolaj は mini TPC にかかりっきり、
+**Status: CLOSED(2026-10-13、処置は末尾)** — 旧: READY(2026-09-15 起票 Fable。発端 = ユーザー方針「Mikolaj は mini TPC にかかりっきり、
 次の実験でも mini を使う → 逆にこちらでやれることをやりまくる TODO を作りたい」。
 **同日ユーザー裁定 5 点(§3)で READY**。本票はプログラム(束)であり、実行は既存チケット
 (074/076/077/078/079)と本票から切り出す新規ユニットで行う — 連番ユニットの粒度ルールは変えない。
@@ -149,3 +149,32 @@ Wave 1 ≈ 1.5 週(並列なら 3〜4 日)/ Wave 2 ≈ 2.5 週(078 支配)/ Wave
 069(Phase 0/2.5/4、問い Q1–Q4)、073(残骸)、074/076/077/078/079、archive 059/061/062/064/066/068/071/072/075、
 docs/WARSAW_PLAN_ja.md §6–7、docs/XCFG_TUNING_GUIDE_ja.md、reference/logbook/_survey/SURVEY.md、
 メモリ minitpc-analysis-pipeline / elitpc-100hz-deprioritized / geteccserver-native-gded。
+
+## 処置(2026-10-13 クローズ、Opus — プログラム票の締め)
+
+Wave 1〜3 はほぼ消化した。実行は個別チケットで行い、結果はそれぞれの結果節が正。未着手の項目は CURRENT の「解析バックログ」と [131](../131_onsite_and_hardware.md) に移した。
+
+| # | 状態 | 所在 |
+|---|---|---|
+| A-1 新 DAQ 機 | ✅ | 102 → 107(ELITPC = 旧 puppex、Ubuntu 26.04、10-08 から本番) |
+| A-2 Rust Ice client | ✅ | archive/076(SPEC v1.35) |
+| A-3 069 の残り | ✅ / 移動 | archive/069 の処置表。残りは 131 A |
+| A-4 復旧リハーサル | ✅ | 069 #14(09-23)、113–116(controller の kill -9 / SIGSTOP 試験) |
+| B-1 パラメータ UI | ✅ | archive/078、111、112 |
+| B-2 AsAd 2D | ✅ | archive/077(10-13 に Waveform タブへ移設、125) |
+| B-3 QA 再構成 | ✅(形を変えて) | 125 / 127(macros の移植、0x04 Track)。QA ヒストは 130 の後 |
+| B-4 run 条件 → v_drift・窓の深さ・窓端クリップ率 | **未着手** | 解析バックログ。131 C-1(サンプリングを戻すか)と同時に決めるのがよい |
+| B-5 RUNBOOK | ✅ | docs/RUNBOOK_ja.md + 運用マニュアル(日英 PDF、107 / 124) |
+| C-1 / C-3 / C-4 スローコントロール | ✅ | archive/079、085、089、118–122、124 |
+| C-2 Arduino | 移動 | ドライバは済み、設置は 131 B-2 |
+| D-1 較正表ツール | ✅ | archive/081 |
+| D-2 較正表の適用(閾値の個別化・ゲイン正規化) | **未着手** | 解析バックログ |
+| D-3 パルサースキャン | ✅ | archive/091 |
+| D-4 較正メニュー C-3〜C-5 | 一部 | データはある(α run)。解析は解析バックログ(069 処置表) |
+| D-5 イオンテール + Unfolding | **未着手** | 解析バックログ(D-4 の後) |
+| D-6 runs.yaml | ✅ | archive/082 |
+| D-7 macros 配布準備 | **未着手** | 解析バックログ(macros はユーザーのもの — LICENSE / channel_map.csv の扱いはユーザー判断) |
+| D-8 シミュとの契約共有 | ✅ | SPEC v1.30 §6.7、gas-pressure-test TODO/12(反応生成と真値、129) |
+| E 073 の残骸 | ✅ | archive/073 の処置表 |
+
+**Status: CLOSED(2026-10-13)**

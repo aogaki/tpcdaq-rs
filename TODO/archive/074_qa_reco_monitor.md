@@ -39,3 +39,9 @@ run 中にライブ表示する。mini eTPC の条件出しを「翌日の解析
 
 コア移植(②)= 発注書とフィクスチャで縛れる → Sonnet 可。
 monitor 統合(③)= tokio タスク・背圧の工学判断が残る → Opus。
+
+## 処置(2026-10-13 archive、Opus)
+
+- 実装は 074 ではなく 125(Event Display の投影)と 127(monitor の `src/reco/`、0x04 Track)で行った。アルゴリズムは simplefit ではなく
+  ユーザーの macros(analyzeUVW.C + makeTracks.C)の移植。テスト結果はそれぞれの結果節が正(macros オラクル 201 / 201、cargo 1069、UI 392、適合 402、SPEC v1.45)。
+- 074 にあって 125 / 127 に無いのは QA ヒスト(id 20 番台、「sampled」明示)だけ。複数飛跡(130)の後に、130 のチケットで扱う。
