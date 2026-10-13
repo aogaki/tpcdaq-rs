@@ -3,6 +3,7 @@
 # SPEC §10.4 — WS プロトコルのクロス言語適合性テスト。
 #
 #   ① Rust の本番エンコーダでサンプルストリームを生成(ws_proto_sample、026)
+#      (+ 合成ジオメトリの stripGeometry JSON、TODO/125 レーン C)
 #   ② TS の本番デコーダを import する vitest で分解・デコードし既知値と照合
 #   ③ 一時ファイルを掃除
 #
@@ -18,11 +19,14 @@ cleanup() { rm -rf "${tmp_dir}"; }
 trap cleanup EXIT
 
 sample="${tmp_dir}/ws_sample.bin"
+strip_geometry="${tmp_dir}/strip_geometry.json"
 
 echo "[1/2] generating the sample stream with the Rust production encoder"
-cargo run --quiet --manifest-path "${repo_root}/Cargo.toml" --bin ws_proto_sample -- --out "${sample}"
+cargo run --quiet --manifest-path "${repo_root}/Cargo.toml" --bin ws_proto_sample -- --out "${sample}" \
+  --geometry "${repo_root}/tests/fixtures/geometry_xy_synth.dat" --strip-geometry-out "${strip_geometry}"
 ls -l "${sample}"
 
 echo "[2/2] decoding it with the TypeScript production decoder"
 cd "${ui_dir}"
-TPCDAQ_WS_SAMPLE="${sample}" npx ng test
+TPCDAQ_WS_SAMPLE="${sample}" TPCDAQ_STRIP_GEOMETRY="${strip_geometry}" \
+  TPCDAQ_XY_ORACLE_DIR="${repo_root}/tests/fixtures/geometry_xy_oracle" npx ng test
