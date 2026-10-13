@@ -1,7 +1,7 @@
 # 127 — 飛跡の再構成を monitor(Rust、`src/reco/`)へ移し、結果を 0x04 Track で配る
 
-**Status: DRAFT**(2026-10-13 起票 Opus。ユーザー「B(複数飛跡)で行きたいが、まずリファクタリングも」→ 範囲を絞って合意:
-126(分割、完了)とこの 127。**挙動は変えない** — 125 改訂 2 の単一飛跡を、そのまま monitor に移す。設計の確定は Fable)
+**Status: IN PROGRESS**(2026-10-13 起票 Opus。ユーザー「B(複数飛跡)で行きたいが、まずリファクタリングも」→ 範囲を絞って合意:
+126(分割、完了)とこの 127。**挙動は変えない** — 125 改訂 2 の単一飛跡を、そのまま monitor に移す。Fable 条件付き承認 2026-10-13 — 条件は下に反映済み)
 
 ## 目的
 - 125 は再構成(macros の analyzeUVW.C + makeTracks.C の移植)を UI(TypeScript)に置いた。理由は「閾値をブラウザごとに変えたい」
@@ -10,48 +10,75 @@
   **1 イベント 1 回の計算・全画面で同じ結果・cargo のテストと macros オラクル・run 全体の統計(SPEC §5.5 の QA 集計)**のために、
   再構成は monitor の純関数モジュールに置く。SPEC §5.5 が元々予定していた形(QA 再構成は monitor 内、トラック重畳は 0x04)。
 
-## 設計(Fable 確認待ち)
+## 設計(Fable 条件付き承認、2026-10-13 — 条件反映済み)
+
 ### `src/reco/`(純関数、IO なし)
-- 入力: 面ごとの strip × bucket の生 ADC(**0x02 Uvw を作るのと同じ格子** — `DisplayConverter` の `grids`、section 合算済み)、
-  strip 位置 s と pitch ベクトル(`strip_xy` から — 125 と同じ `s = pitchUnit·(x0, y0)`、section 番号が最小の線分)。
-- 処理: `ui/src/app/monitor/track-fit.ts` を Rust に移す(**式・順序・定数は同じ** — 125 改訂 2 の節のとおり)。
-- 出力 `RecoResult`: `status`(ok / 理由コード + 理由の文)、`tracks: Vec<Track>`(127 では 0 本か 1 本)、`points: Vec<Point>`
-  (帯内ヒットを直線上に置いた点 — `x, y`(mm)、`z`(time bucket)、`q`、`view`、`track`(何本目か))、view ごとのヒット数など、
-  UI の状態表示に要る数。`Track` = anchor・方向・φ・tanθ・端点(2–98 % と最外)・xy の長さ・電荷。
+- 入力: 面ごとの strip × bucket の生 ADC(**0x02 Uvw を作るのと同じ格子** — section 合算済み)と、`RecoGeometry`(strip 位置 s と pitch ベクトル)。
+- 処理: `ui/src/app/monitor/track-fit.ts` を Rust に移す。**f64・同じ演算順・同じ定数**(125 改訂 2 の節のとおり)。端点のための並べ替えは
+  `l` → `q` の安定ソート(TS と同じ)。
+- 作業バッファ(ヒット・点)は `Reco` 構造体に持って使い回す(`DisplayConverter` と同じ流儀、イベントごとの heap 確保をしない)。
+- `RecoGeometry` は**起動時に 1 回** `strip_xy::StripGeometry` から作る(s = `pitchUnit·(x0, y0)`、section 番号が最小の線分)。
+  今の Hub は stripGeometry の JSON 文字列しか持たないので、`strip_geometry_at_startup` で構造体も保持する。
+  **stripGeometry が unavailable のときは reco を呼ばず 0x04 も送らない**(UI は既存の unavailable 表示で足りる)。
 
-### monitor
-- built event ごとに 0x02 を作るところ(`monitor/sub.rs` の Ingest → `DisplayConverter::uvw`)で、**同じ格子**から `reco` を呼び、
-  0x04 を live 側(drop-oldest + カウント)に流す。0x02 を作らないイベントでは呼ばない(コストは 1 イベント 0.1 ms 程度の見込み — 実測を結果節に)。
-- 0x04 は `subscribe` の `uvw` ストリームに含める(新しいストリーム名は作らない)。
+### monitor のフック
+- Ingest スレッドで、0x02 を作った直後に**同じ格子**で reco を呼ぶ(`DisplayConverter` に格子の読み取り口 `grids()` を足す)。
+  0x02 を作らないイベントでは呼ばない。順序は単一スレッドなので 0x02×3 → 0x04。
+- 0x04 は **live の broadcast(バイナリ枠、drop-oldest + カウント)**で運ぶ。**JSON テキスト経路(reliable、詰まると切断)には載せない**。
+  `subscribe` の `uvw` ストリームに含める(新しいストリーム名は作らない)。
 
-### WS 0x04 `Track`(SPEC §10.2 に追加 — §10.1 の 13 バイトヘッダ、イベント系 = run・event・incomplete)
-- 本文(すべて LE):
-  `u8 status`(0 = ok、1 以上 = 理由コード)、`u16 reasonLen` + UTF-8 の理由の文、
-  `u8 nTracks`、各 track に `f32 × N`(anchorX, anchorY, dirX, dirY, tanTheta, phiDeg, lStart, lEnd, lStartF, lEndF, lengthXY, charge)、
-  `u16 nViewHits[3]`、`u32 nPoints`、各点に `f32 x, f32 y, f32 z, f32 q, u8 view, u8 track`。
-  **最初から飛跡のリスト**にする(130 で形式を変えないため)。
-- エンコーダは `monitor/ws.rs`、§10.4 の適合(`ws_proto_sample` に 0x04 のサンプルを足し、UI の本番デコーダで読む)。
+### WS 0x04 `Track`(SPEC §10.2)
+- §10.1 の 13 バイトヘッダ(イベント系 = run・event・incomplete)+ **本文 = UTF-8 JSON**(§10.2 で唯一。130 で形が増えるため —
+  N 本・頂点・親子が増えても版上げ・オフセット試験・適合の作り直しが要らない。f64 のまま届く)。
+- 本文の例(1 本見つかったとき。数値は例):
+```json
+{"ok":true,"reason":"","hits":[72,40,34],"unplaced":0,
+ "tracks":[{"phiDeg":2.7,"dir":[0.998,0.047,-0.031],"start":[-53.1,-7.9,26.4],"end":[53.0,-3.0,23.1],
+            "startF":[-53.5,-8.0,26.4],"endF":[53.6,-3.0,23.0],"length":106.2,"lengthF":107.2,"xyLength":106.1,"charge":412345.0}],
+ "points":[[-52.9,-7.9,152.0,5480.0,0,0],[-51.4,-7.8,151.6,5512.0,0,0]]}
+```
+  - `start` / `end` などの z と `dir` の z 成分は **mm(macros 既定の換算 0.173592 mm/cell)**、`points` の 3 つ目 `t` は **time bucket**。
+    `points` = `[x, y, t, q, view, track]`(view 0/1/2 = U/V/W、track = 何本目か)。`hits` = view ごとの帯内ヒット数。
+    `unplaced` = 直線上に置けなかった(|pitch·dir| < MIN_PROJ の view の)ヒット数。
+  - 直線が引けないとき: `{"ok":false,"reason":"W has 2 strip hits after the halo cut (needs 4)","hits":[..],"unplaced":0,"tracks":[],"points":[]}`
+    (理由の文は 125 と同じ)。
+  - UI は未知キーを許す(`meta` と同じ)。壊れた JSON は DecodeError の理由 `bad-json` で数える。
 
 ### UI
-- `track-fit.ts`(計算)を撤去し、0x04 を `ws/wire.ts` でデコードして XY / XZ / YZ に詰める(ビン・範囲・状態表示の文は今と同じ)。
-  stripGeometry は軸の範囲(rangeXY)とビン幅に引き続き使う。
-- 0x02 と 0x04 は同じイベントから作るが、live キューは drop-oldest なので**イベント番号が違うことがある** → 0x04 の event# が
-  表示中の 0x02 と違えば `≠ UVW` を出す(077 の AsAd パネルと同じ流儀)。
+- `track-fit.ts`(計算)を撤去し、0x04 を `ws/wire.ts` でデコードして `ws-client` の `track` signal に入れる。
+- monitor-view は **`shownUvw` と同じ tick で `shownTrack` を取る**(ラベルと絵を揃える)。
+- XZ / YZ の Z 軸の bucket 数は **`meta.nBuckets`** から取る(0x04 だけで描けるように)。stripGeometry は rangeXY とビン幅に引き続き使う。
+- 0x04 の event# が表示中の 0x02 と違えば **`≠ UVW` の印を出す。点は描く**(077 と同じ)。
+- `projectionBlocker` は「stripGeometry がある・ビンが退化していない」だけに縮める。状態表示の文は 125 と同じ + `waiting for track (0x04)`。
+  ヒント文を「computed by monitor」に。
 
-### オラクル
-- 125 の macros オラクル(`tools/macro_oracle/` の JSON、env-gated)を **Rust のテストに移す**(`TPCDAQ_MACRO_ORACLE` /
-  `TPCDAQ_MACRO_ORACLE_GEOMETRY`)。許容は 125 と同じ。TS 側のオラクル spec は撤去。
-- 合成テスト(既知の直線、mini と ELITPC の角度、鏡像対策の非対称直線、halo・帯・ok でない理由、3×3 と macros の閉じた式)も Rust に移す。
+### オラクルとテスト(1 実装 — TS の計算とオラクルは撤去)
+- 125 の macros オラクル(env-gated、`TPCDAQ_MACRO_ORACLE` / `TPCDAQ_MACRO_ORACLE_GEOMETRY`)を Rust のテストに移す。
+  **production(s を stripGeometry から)と csv-s(channel_map.csv の s)の 2 モードと許容(TOL)をそのまま写す**。
+  オラクル JSON は 100 MB 級なので `cargo test --release` を推奨と書く。`tools/macro_oracle/README.md` の手順 3 を cargo に書き換える。
+- 合成テスト(`track-fit.spec.ts` の 39 本)を Rust に移し、**結果節に TS の `it` 名 ↔ Rust のテスト名の対応表**を付ける。
+- 鏡像対策は分ける: Rust = 点の座標と象限(非対称な直線)、UI = 既知の 1 点が正しいビンに入る(`xy-projection.spec.ts` に残す)。
+- 0x04 のエンコード(ヘッダ + JSON)の単体テストと、§10.4 の適合(`ws_proto_sample` に 0x04 のサンプル → UI の本番デコーダ)。
 
-### SPEC
-- §5.4(投影は monitor が計算して 0x04 で配る)、§5.5(QA 再構成モジュール = `src/reco/` が実体)、§10.2(0x04)、§10.3(`uvw` に 0x04 を含む)。
+### SPEC(マージ後に主対話が入れる — v1.45)
+- §4.4: v1.43 の「UI の Event Display 投影」→「`src/reco/`(monitor)。UI は 0x04 の点をビンに詰めるだけ」。
+- §5.4: 投影は monitor が計算して 0x04 で配る。
+- §5.5: アルゴリズム項を「simplefit 移植、Python が正」→「**macros/analyzeUVW.C + makeTracks.C の移植、本物の macros が正**
+  (§4.5 の二重実装 = C++/ROOT 側が macros)」に差し替え。1 トラック仮説の設定値化は足さない(0x04 をリストにすることで構造的に満たす)。
+  **TODO/074 は superseded**(QA ヒスト id 20 番台の部分だけ 130 以降に残す)。
+- §10.2: 0x04 Track(ヘッダ + JSON 本文)、「0x04 を起票する」注記を解消。§10.3: `uvw` ストリームに 0x04 を含む。§10.4: サンプルに 0x04。履歴 v1.45。
+
+## レーン
+- **A(Opus)**: `src/reco/` + Rust のオラクル・合成テスト + monitor のフック + 0x04 エンコーダ + `ws_proto_sample` のサンプル。
+- **B(Sonnet)**: UI のデコード・描画・テスト + 適合 spec。**上の JSON 例を契約として A と並行**。
+- 各レーンの報告に必須: 変更ファイル、発注書の各項目に対応するテスト名、ゲート結果、**実行できなかった操作**(無ければ「なし」)。
 
 ## 受け入れ
-- Rust: macros オラクル(run70 の 201 イベント)で 125 と同じ一致(ok / not ok・ヒット集合・端点・方向)。合成テスト一式。0x04 のエンコーダのオフセット固定テスト。
+- Rust: macros オラクル(run70 の 201 イベント、2 モード)で 125 と同じ一致。合成テスト一式(対応表つき)。0x04 エンコードの単体テスト。
 - 適合: `ui/run_ws_conformance.sh` で 0x04 が UI の本番デコーダで読める。
-- UI: 表示は 125 と同じ(状態表示の文・パネル)。`≠ UVW`。
+- UI: 表示は 125 と同じ(状態表示の文・パネル)、`≠ UVW`、`meta.nBuckets`。
 - ゲート: cargo fmt / clippy / test、UI ng test / ng build、適合スクリプト。
-- ELITPC に反映して、ユーザーの目視で 125 と同じ絵になること。
+- ELITPC に反映して、ユーザーの目視で 125 と同じ絵になること。**反映前後で status の `wsDropped` / `monitorGaps` の増え方が変わらない**こと。
 
 ## 結果
 (未記入)
