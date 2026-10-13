@@ -58,7 +58,7 @@ S→C の JSON `stripGeometry`。**接続時に 1 回**(`meta` の直後、relia
 - `x0,y0` = reference point + offset(mm)。線分の有効範囲は (x0,y0) から `unit` 方向に `[−0.5·padPitch, length]`(上の tol 込み)。
   `length` = padPitch × (int)len_pads。`strip` は 1 始まり(0x02 Uvw の strip 番号と同じ)。
 - 同じ (plane, section, strip) に複数行があっても線分は 1 本(**後勝ち** — TPCReco mapByStrip と同じ)。並びは plane → strip → section の昇順。
-- `rangeXY` = 上の「InitTH2Poly の外接矩形」。
+- `rangeXY` = TPCReco `rangeXY()` = TH2Poly の軸(上の「移植元」)。
 - 大きさ: ELITPC で線分 ≈ 3,300 本 ≈ 200 KB。reliable 側の JSON キューが 1 通 200 KB を通せること(容量・1 通の上限)をテストで確かめる。
 - JSON と live(0x02)は別キューで**順序の保証はない**。UI は 0x02 が先に来ても「stripGeometry 未着」を出すだけで壊れないこと。
 - ヘッダの ANGLES / DIAMOND SIZE / REFERENCE POINT のどれかが無い・strip 行が 0 本 →
@@ -174,4 +174,54 @@ W 候補は W の法線距離で絞る(pitch 座標は六角配置でしか使�
 実データの目視 / 0x02 先着の順序テスト。UI 側で計算する案・method 0・n_match の癖の維持・section 合流の扱い・オラクルの分量は OK。
 
 ## 結果
-(未記入)
+
+### 実装とマージ(2026-10-13、Mac、main = 3697c68)
+- レーン B(Sonnet)51f4be8 → merge 8507a12。レーン A(Opus)2650aba + 追補 d74a843(rangeXY を TH2Poly の軸に)→ merge 526ed17。
+  レーン C(Sonnet)296d52e(fast-forward)。発注書の修正 cb78d75、SPEC v1.43 3697c68。
+- 各レーンの報告は `git show --stat` と発注書の各項目に対応するテスト名で照合してから受け入れた(CLAUDE.md)。
+
+### ゲート(main 3697c68、Mac、2026-10-13)
+- `cargo fmt --check` / `cargo clippy --tests -- -D warnings`: clean。`cargo test`: **1018 passed / 0 failed / 1 ignored**(着手前 992)。
+- UI `npx ng test --watch=false`: **413 passed / 9 skipped**(skip = 生成器が要る適合 spec。従来の 5 + 新規 4)。
+- `ui/run_ws_conformance.sh`: **422 passed / 0 skipped**(新規 `strip-geometry-conformance.spec.ts` の 4 本が実際に走ることを主対話で確認)。
+- `npx ng build`: OK。
+
+### オラクル照合(TPCReco HIGS2026_online の GeometryTPC を直コンパイル、ROOT 6.40.04)
+| ジオメトリ | 線分 | 最大差 [mm] | rangeXY(X / Y) | nx / ny |
+|---|---|---|---|---|
+| 合成 `geometry_xy_synth.dat`(コミット済み) | 57 | 3.55e-15 | TH2Poly 範囲と 1e-9 一致 | — |
+| mini `new_geometry_mini_eTPC.dat`(env-gated、ローカル) | 256(U72/V92/W92) | 1.42e-14 | ±53.75 / −57.591〜48.930 | 70 / 60 |
+| ELITPC `geometry_ELITPC.dat`(env-gated、ローカル) | 1,018(U264/V376/W378) | 2.84e-14 | ±164.978 / ±98.75 | 218 / 113 |
+- `MatchCrossPoint`(radius 2.0、tol 1e-5): **3,706 件(true 176 / false 3,530)すべてで、Rust が作った stripGeometry を TS 本番パーサで読み、
+  TS 本番 `matchCrossPoint` が TPCReco と true/false・点(1e-9 mm)で一致**(レーン C)。乱数 2,095 件 + 境界集合 1,611 件(許容誤差の探針 W15–W18 は狙いどおり)。
+- stripGeometry の大きさ: mini 15,364 B、ELITPC 59,831 B(見積もりの約 200 KB より小さい。200 KB 級の到達はテストで確認)。
+- オラクルの当て物: TPCReco `GeometryTPC::LoadAnalog`(GeometryTPC.cpp:508)の sscanf が 1 要素の配列に書いてスタックを溢れさせる
+  (ASan で確認)→ `sscanf_guard.h` を `-include` してその書式だけ幅を守って読み直す。線分・一致判定の結果は変わらない(Fable 確認)。
+
+### 性能(レーン B、vitest / Node、Mac)
+- ELITPC 規模の合成イベント(各面 1,001 strip、V・W 2 section、3 本の飛跡): 細い飛跡 1,230 点・評価 19,760 回で **2–3 ms**、
+  太い飛跡(±3 strip)144,107 点・評価 1.99×10⁶ 回(上限ぎりぎり)で **100–145 ms**。上限 2×10⁶ の打ち切りで画面が止まるのは 0.1 s 程度。
+
+### ELITPC への反映(2026-10-13 06:34Z、ユーザー了承「今すぐ反映」)
+- run 71 は走らせたまま。bundle → `cargo build --release --bin monitor` → monitor だけ SIGINT → 再起動。
+  起動ログ `strip segments ready for the XY projection (stripGeometry) u=72 v=92 w=92`。run 71 は継続(elapsed 4,988 s 時点で確認)。
+- UI は Mac の `ng build` を `/opt/tpcdaq/ui` に差し替え(旧版は `/opt/tpcdaq/ui.prev`)。HTTP 200。
+- Node の WS クライアントで確認: 接続直後に `meta` → `stripGeometry`(15,387 B、rangeXY = オラクルの mini 値と一致、unavailable なし)→ `status`、live のバイナリも流れている(4 s で 85 通)。
+
+### 既知の差(承認済み・実 .dat では起きない)
+- `LEN_PADS < 1` の行も geometry.rs では ch を占有する(TPCReco は ch 表にも入れない)。strip 番号 0 の行を受理する。aget=4 は我々では malformed(TPCReco は `aget <= AGET_Nchips` のバグで受理)。ANGLES 行が複数あると TPCReco は最初、geometry.rs は最後を採る。
+- 同じ strip の section の走査順: TPCReco はファイル出現順、こちらは section 昇順。section 境界で両方が一致するときの「最初の一致」が入れ替わりうるが、同じ直線上の同じ交点なので位置差は丸め程度(Fable)。
+- ビン index の浮動小数の演算順が ROOT と違い、境界ちょうどで 1 ビンずれうる(表示専用、無視)。
+- 評価回数 = U×V の `crossPoint` + `matchCrossPoint` 内の 3 回(発注書の「crossPoint の呼び出し回数」どおり)。閾値欄は 0 以上の有限値だけ受け付け、不正値は元に戻す。
+
+### Fable 完了レビュー(2026-10-13、スポット Fable、読み取りのみ、e94846d..3697c68)
+**承認(archive 可、残りは目視のみ)**。must-fix なし。should-fix = 本節の「WS 契約」の rangeXY 文言(直した)。
+
+### 残り(archive の前に)
+- **目視(ユーザー)**: Event Display で XY / XZ / YZ に点が出ること(radius 2.0 mm で mini でも点が出るか)、線源の位置が期待どおりの象限に出ること。
+- 主対話のブラウザでの目視はできなかった(Chrome 拡張が未接続)。
+
+### 実行できなかった操作
+- レーン A・B・C: worktree 隔離の権限チェックで複合コマンドが数回拒否 → 単純なコマンドに分けて実行し直した(未実行の操作は残っていない)。
+  レーン C は一度 spec の書き込みが拒否されたのに気づかず green に見えた → 書き直して再実行(主対話が main で適合スクリプトを回し、新 spec が走ることを確認)。
+- 主対話: Chrome 拡張が未接続でブラウザの目視ができなかった。
