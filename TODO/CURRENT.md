@@ -11,7 +11,7 @@
   - 保存先: データは ZFS `data/tpcdaq`。
   - 記録: ELOG(TPC 用)、InfluxDB(HV / LV)。
   - マニュアル: 日英 PDF が `reference/_manual/`。
-- **実装の正本 = docs/SPEC_ja.md v1.45**。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `22e9284` で稼働。
+- **実装の正本 = docs/SPEC_ja.md v1.46**。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `22e9284` で稼働。
 - **できること**:
   - 保存二系統: graw はロスレス、root-sink は PEventTPC と raw ツリー。
   - 取得の再開: 未停止で落とした後の古いフレームを epoch として扱う(110)。
@@ -34,6 +34,7 @@
 
 | # | 中身 | 状態 | 次の一手 |
 |---|---|---|---|
+| [133](133_restart_detection_multi_asad.md) | 取得の再開の判定の端(4 AsAd で古い頭が全部 incomplete、多 CoBo のカウンタ) | READY(Warsaw ELITPC 向け、mini では起きない) | 一次資料で AsAd のリングを流す順を確かめ → Fable 設計 |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
 
@@ -58,21 +59,10 @@
 
 Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をここに積み、Fable で**まとめて**確定する(運用ルールの正は CLAUDE.md「モデル使い分け」)。
 
-1. ~~110~~ 実装・実機確認済み(archive/110)。SPEC の文案(§1.3 / §5.3 / §6.3 / §7 / §9.2、decoder の節 — archive/110 の「Fable 裁定」節と「ユーザー裁定」節)を 2 と同じ回で確定する。
-2. **SPEC 文案の確定(まとめて 1 回 = v1.46)**:
-   - (a) **§10.5 `GET /api/last-event`(TODO/123、実装・実機済み)** — §10 の末尾に「### 10.5 解析向け HTTP(v1.42)」:
-     monitor(`ws_listen` のポート)は WS に加えて **`GET /api/last-event`** を持つ。応答は、root-sink から最後に受けた built event(`event_publish_hz` で間引き済み)を JSON にしたもの:
-     `{run, event_idx, complete, received_unix_ms, age_ms, fragments: [{cobo, asad, event_idx, event_time, frame_type, revision, read_offset, status, mult, window_out, last_cell, n_aget, n_ch, n_buckets, items_out_of_range, adc}]}`。
-     - `adc[aget][ch][bucket]` は生 ADC(FPN 込み・減算なし、0x03 と同じ並び)、読まれていない位置は `-1`。範囲外の item は捨てて数える。
-     - 受信前は 404 `{"error": "no event received yet"}`。`Access-Control-Allow-Origin: *`。GET のみ。JSON への変換は要求時だけ(モニタ系、取得系に影響しない)。
-     - 実測は ≈ 545 kB / 40 ms(123 結果節)。
-   - (b) **§13 を実測済みに(069 の出口)**:
-     - 3 に「**実測済み(ELITPC 2026-10-09、TODO/107・109)**: periodic トリガでイベント間隔が『周期 + 2.931 ms』で一定 = zCoBo の 1 イベントの読み出し 2.931 ms(frameType 1、557,312 B、全 ch)、上限 ≈ 340 Hz。外部トリガで見えた約 1 s の不感時間は CAEN の NIM→TTL 変換器によるもので、GET ではない(104 / 106 の訂正節)。1 GbE では 182.5 Hz(101.7 MB/s)で TCP の背圧が先に効く」。
-     - 6 に「**実測済み(ELITPC、TODO/109)**: ZFS に 182.5 Hz × 557,312 B = 101.7 MB/s を 60 s、全数・連番で書いた。素の書き込みは ZFS 226–328 MB/s / NVMe 809 MB/s。root_sink の持続処理は CPU 律速(workers 8 で ≈ 122 events/s)」。
-     - 8 に「**実機済み(TODO/118–124)**: HiVolta は USB シリアル(by-id)で運用し、ポーリングのたびに開閉(119)。ON/OFF は REMOTE + 前面スイッチが最終許可(124)。HMP2020 は HO720(USB CDC)」。
-     - 2 は「mini は 1GbE で 182 Hz まで全数」を追記。ELITPC×100 Hz の NIC 構成は Warsaw のまま。
-   - (c) **§1.3 / §2.2 に 1 行(TODO/092)**: 「EOS を送った後の receiver はそのリンクに Heartbeat を出さない(下流は EOS で run を閉じ、graw-writer は PULL を放す — 117)」。
-   - (d) **§8.1 の run/start 応答に `params_id`(string | null)と `notes`(string[]、上書き時に 1 行)(TODO/132、実装済み)**。
+- ~~SPEC v1.46~~ **確定(2026-10-13、スポット Fable、`61d88d4`)**:
+  - 対象: 110(取得の再開)、123(`/api/last-event`)、092(EOS 後の Heartbeat なし)、132(run/start の `params_id` / `notes`)、069 の出口(§13-2/3/6/8 を実測済みに)。
+  - Fable が文案から直した点: HMP2020 は HO720 = FTDI VCP(ttyUSB0)、§6.3 の判定は実装の 4 条件、§10.5 の 404 の条件 など。
+- [133](133_restart_detection_multi_asad.md): 取得の再開の判定。4 AsAd で古い頭が全部 incomplete のときの見落とし、多 CoBo での `frames_before_restart`(v1.46 確定時に Fable が挙げた疑義。mini では起きない)。
 
 ## 保留・確認事項
 
