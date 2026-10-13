@@ -33,7 +33,7 @@
 
 | # | 中身 | 状態 | 次の一手 |
 |---|---|---|---|
-| [110](110_stale_frames_after_unclean_stop.md) | 取得を止めずにスタックを落とすと、次の run の頭に古いフレームが混ざり root-sink が late で捨てる | Fable が設計中(スポット) | 設計 → 実装レーン |
+| [110](110_stale_frames_after_unclean_stop.md) | 取得を止めずにスタックを落とすと、次の run の頭に古いフレームが混ざり root-sink が late で捨てる | **Fable 裁定済み**(2026-10-13): 混入は防げない(新しく起動した ECC から zCoBo へ stop が届かない)→ root-sink の「取得の再開 = epoch」+ decoder のカウンタ、graw は残す | ユーザーの答え(eventId 重複の扱い・実機再現)→ レーン A(C++)/ B(Rust)を Sonnet で |
 | [124](124_hv_lv_power_onoff_from_web.md) | HV / LV の ch ごとの ON/OFF を web から(SPEC v1.42) | ELITPC に反映済み。HV OFF・LV ON/OFF は実機で確認済み | **ユーザーが UI で HV ch7 を ON**(ランプアップ約 5 分)→ 結果節 → archive |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | [132](132_params_override_notice.md) | params の current.json が TOML の config_id を上書きしたことを run/start の応答と log に出す | READY(Sonnet) | 着手指示で |
@@ -61,7 +61,7 @@
 
 Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をここに積み、Fable で**まとめて**確定する(運用ルールの正は CLAUDE.md「モデル使い分け」)。
 
-1. **110 の設計**(2026-10-13、スポット Fable で進行中)。
+1. ~~110 の設計~~ 裁定済み(2026-10-13、スポット Fable — 110 の md)。SPEC の文案(§1.3 / §5.3 / §6.3 / §7 / §9.2)は 110 の md にあり、2 と同じ回で確定する。
 2. **SPEC 文案の確定(まとめて 1 回 = v1.46)**:
    - (a) **§10.5 `GET /api/last-event`(TODO/123、実装・実機済み)** — §10 の末尾に「### 10.5 解析向け HTTP(v1.42)」:
      monitor(`ws_listen` のポート)は WS に加えて **`GET /api/last-event`** を持つ。応答は、root-sink から最後に受けた built event(`event_publish_hz` で間引き済み)を JSON にしたもの:
