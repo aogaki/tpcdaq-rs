@@ -486,7 +486,7 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
   ③頭尻は実装しない ④Rust 移植は Python simplefit 正のフィクスチャ一致テスト(§4.5 型)。
   **反映完了(2026-09-02 同日)**: SPEC v1.25(§5.5 新設 + §4.4 mm 例外 + §10.2 0x01
   非復活 + 履歴)/ CLAUDE.md「やらないこと」R5 行 /
-  [074_qa_reco_monitor.md](074_qa_reco_monitor.md)(**DRAFT** — 着手はユーザー指示待ち)。
+  [074_qa_reco_monitor.md](074_qa_reco_monitor.md)(~~DRAFT~~ **superseded 2026-10-13** — アルゴリズムは macros の移植で `src/reco/` に実装済み(125 / 127、SPEC v1.45)。残るのは QA ヒスト id 20 番台だけで、複数飛跡(130)の後に扱う)。
 
 - ~~**[2026-09-03 裁定済み] macros/ 解析チェーンの DAQ 直結(SPEC v1.26 §6.7)**~~ **完了
   (2026-09-14、075 → archive、SPEC v1.28)**。監査結果(記録として保持): graw 側は無変更で互換 /

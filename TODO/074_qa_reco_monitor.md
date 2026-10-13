@@ -1,6 +1,8 @@
 # 074 — QA 再構成(simplefit)の monitor 組み込み
 
-**Status: DRAFT**(裁定 = SPEC v1.25 §5.5(2026-09-02 Fable)。着手時に発注書へ精度上げ +
+**Status: SUPERSEDED(2026-10-13)** — アルゴリズムは simplefit ではなく macros(analyzeUVW.C + makeTracks.C)の移植で `src/reco/` に実装済み(TODO/125・127、SPEC v1.45)。残るのは QA ヒスト id 20 番台だけ(複数飛跡 130 の後)。以下は当時の覚え書き。
+
+旧 Status: DRAFT(裁定 = SPEC v1.25 §5.5(2026-09-02 Fable)。着手時に発注書へ精度上げ +
 分割判断。**着手はユーザー指示待ち** — 「実装はまだ」2026-09-02)
 
 **正 = SPEC §5.5。** この md は入口の覚え書きであり、§5.5 と齟齬があれば §5.5 が勝つ。
