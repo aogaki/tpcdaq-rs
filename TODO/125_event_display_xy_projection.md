@@ -1,6 +1,6 @@
 # 125 — Event Display に XY / XZ / YZ 投影(U/V/W 三面一致)を出す
 
-**Status: IN PROGRESS**(2026-10-13 起票 Opus。ユーザー「AsadCobo0Asad0 はあまり意味がない、2D トラック?」→
+**Status: IN PROGRESS — 改訂 2(下の「改訂 2」節が正。三面一致の投影は実機で失格)**(2026-10-13 起票 Opus。ユーザー「AsadCobo0Asad0 はあまり意味がない、2D トラック?」→
 「閾値は固定でいい・XZ / YZ もあれば便利」。設計の確定は Fable)
 
 ## ユーザー裁定(2026-10-13)
@@ -172,6 +172,63 @@ S→C の JSON `stripGeometry`。**接続時に 1 回**(`meta` の直後、relia
 条件(すべて本発注書に反映済み): 長さの切り捨てと len_pads < 1.0 の除外 / 重複の後勝ち / rangeXY = InitTH2Poly の外接矩形 /
 W 候補は W の法線距離で絞る(pitch 座標は六角配置でしか使えない)/ 打ち切り上限 2×10⁶ / 鏡像を落とすテスト(ビン index・非対称直線)/
 実データの目視 / 0x02 先着の順序テスト。UI 側で計算する案・method 0・n_match の癖の維持・section 合流の扱い・オラクルの分量は OK。
+
+## 改訂 2(2026-10-13 ユーザー指示「シンプルに macros にあるファイルでやってるアルゴリズムでお願いします」)— **こちらが正**
+
+### 何が起きたか(実機の目視、run 71)
+- 三面一致(TPCReco Get2D 方式)の XY は、**ドリフト方向にほぼ垂直な長い飛跡(この検出器の典型)で菱形のゴーストの塊**になった
+  (スクリーンショット event 23618: 275,415 点)。飛跡全体が同じ time bucket に来るので、U・V・W の帯の交わり全体が
+  「三面一致」を満たしてしまう。閾値を 300 に上げても消えない(手元で同じ計算を再現 — 原因は閾値ではなく方式)。
+  加えて、ほぼ全 strip に飛跡の時刻で 35〜200 ADC の小さな山(halo)が乗る(analyzeUVW.C の STRIP_Q_MIN の注記と同じ現象)。
+- macros の方式(下)を Python で同じイベントに当てると、ゴーストの菱形だった event 24857 / 24871 も直線 1 本になった。
+
+### 新しい方式 = macros/analyzeUVW.C + macros/makeTracks.C の移植(**1 イベント = 直線 1 本**、UI で計算、表示専用)
+- **macros/ は読むだけ**(ユーザーのファイル。書き換えない)。定数は macros と同じ値を TS の定数にする:
+  ADC_THRESHOLD 35 / ペデスタル = cell 1〜20 の平均 / PEAK_HALF_CELLS 5 / STRIP_Q_MIN 2000 / BAND_MM 10 /
+  MIN_VIEW_HITS 4(analyzeUVW の帯フィット)と 3(makeTracks)/ QUANTILE 0.02 / MIN_EIGEN_GAP_MM2 1.0 / MIN_PROJ 0.3。
+- **z の mm 換算は macros の既定値**(1200 V / 20 cm / 100 mbar → v = 0.7233 × E/p = 0.43398 cm/µs、25 MHz → 0.173592 mm/cell)。
+  帯選択と z フィットの内部だけで使い、**画面の Z は time bucket のまま**。
+- **strip 位置 s**: macros は channel_map.csv の s_mm(mini 専用)を使うが、こちらは `stripGeometry` から
+  `s = pitchUnit·(x0, y0)`(その strip の section 番号が最小の線分。TPCReco Strip2posUVW と同じ)。
+  mini の 256 本で channel_map.csv と 0.0004 mm 以内で一致(CSV の丸め分)、pitchUnit も macros の PITCH 定数と一致(主対話で確認済み)。
+- **makeTracks 手順 2 の一般化**: macros の閉じた式(Sxx = var_U …)は mini の pitch 専用。こちらは
+  `var_v = p_vᵀ S p_v` の 3×3 連立を解く(mini の pitch では macros の式と同じになることをテストで確かめる)。ELITPC の角度でも動く。
+- **1 strip 1 ヒット**: 0x02 は section を合算した strip × bucket の生 ADC なので、そのまま analyzeUVW の「1 ch」に当たる
+  (mini は 1 section)。ピークは最初の最大(analyzeUVW のループと同じ同値の扱い)。
+- **表示**: XY / XZ / YZ に、帯選択を通ったヒットのうち |pitch_v·d_xy| ≥ MIN_PROJ の view のものを、
+  `(x, y) = anchor + l·d_xy`、z = そのヒットの z(time bucket)で詰める(重み = q)。ビンは従来どおり
+  (rangeXY、X 幅 stripPitch、Y 幅 padPitch、Z = 512 bucket)。
+- **状態表示**: ok なら `straight track: φ = …°, xy length … mm (2–98 % charge), strip hits U/V/W = a/b/c`。
+  ok でなければ理由を文で(例「no track: V has 2 strip hits after the halo cut (needs 3)」「no xy elongation (track along the drift)」)。
+  未着・unavailable・3 面が揃わない・INCOMPLETE は従来どおり。頭尻は決めない(macros の WARNING と同じ)。
+- **閾値欄と localStorage は撤去**(定数は macros と同じに固定 — オフライン解析と同じ絵になることを優先)。
+- **撤去するもの**: 三面一致の計算(xy-projection.ts の crossPoint / matchCrossPoint / projectEvent と W 絞り込み)、
+  閾値欄(event-display-settings.ts)、レーン C の matchCrossPoint 照合部分と `tests/fixtures/geometry_xy_oracle/match_cases.json`、
+  オラクルの match case 出力。**残すもの**: Rust の strip_xy / `stripGeometry`(s と rangeXY に使う)、
+  オラクルの線分・rangeXY 照合、stripGeometry の言語をまたぐ照合(パーサ・rangeXY・線分)。
+
+### レーン D — UI(macros 移植)— Opus
+1. 純ロジック `ui/src/app/monitor/track-fit.ts`(Angular / jsroot を import しない): analyzeUVW の 0 / 1〜4 と makeTracks の 1〜5 の移植 + 表示用の点。
+2. monitor-view: 上の表示・状態表示・ヒント文(「Display only. Same algorithm as macros/analyzeUVW.C + makeTracks.C: one hit per strip
+   (peak ±5 cells, halo cut q ≥ 2000 ADC), one straight track per event; Z is the time bucket; head/tail not determined.」の趣旨)。
+3. テスト(vitest):
+   - 合成ジオメトリ(mini の角度 90/−30/30 と ELITPC の角度 0/−120/−60 の両方)に既知の直線の 0x02 を作り、φ が 0.5° 以内、
+     2–98 % の端点が 2 mm 以内、z の傾きの向きが合う。**原点を通らない非対称な直線**で XY のビン位置と象限を assert(鏡像対策)。
+   - halo(q < 2000)の strip が落ちる、帯から 10 mm 超離れた strip が落ちる、ok = 0 の各理由、ピークの同値は最初の最大。
+   - 一般化した 3×3 の解が mini の pitch で macros の閉じた式と一致する。
+   - **env-gated の macros オラクル**(下の 4)。
+4. **macros オラクル**(env-gated、出力はコミットしない): `tools/macro_oracle/`(ROOT マクロか小さな C++。コミットする)で、
+   `reference/exp_data/2026/elitpc_run70/run0070_raw_head200.root`(主対話が ELITPC の run70 から先頭 200 イベントを切り出したもの。
+   mini eTPC、ローカルのみ)に**本物の macros/analyzeUVW.C(既定 100 mbar)と makeTracks.C を実行**し(macros/ を一時ディレクトリに
+   コピーして、そこで実行。macros/ は書き換えない)、イベントごとの (a) adc[4][68][512]、(b) uvw の slView/slZ/slS/slQ、
+   (c) tracks の全ブランチを JSON に書き出す。TS 側の env-gated テスト(`TPCDAQ_MACRO_ORACLE` = その JSON)が、adc から 0x02 を
+   組み(macros/channel_map.csv の (aget, ch) → (view, strip))、mini の stripGeometry(`ws_proto_sample --geometry
+   /Users/aogaki/TPC/miniTPC_UVW_pcb_info/new_geometry_mini_eTPC.dat --strip-geometry-out …`)を使って track-fit.ts を回し、
+   ヒットの集合(view, s)・z・q と、ok・方向(符号は問わない)・端点(2–98 % と F、順序は問わない)・length を macros と比べる
+   (許容は float32 で書かれた値に合わせて決め、結果節に書く)。一致件数(ok / not ok)を報告。
+5. 撤去(上の「撤去するもの」)。Rust 側は match case の出力とフィクスチャの削除だけ(strip_xy・monitor は触らない)。
+6. ゲート: cargo fmt / clippy -D warnings / cargo test、UI の ng test と ng build、`ui/run_ws_conformance.sh`。
+7. 報告: 変更ファイル、各項目に対応するテスト名、オラクルの一致件数と許容、ゲート結果、**実行できなかった操作**(無ければ「なし」)。
 
 ## 結果
 
