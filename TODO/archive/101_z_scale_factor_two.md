@@ -75,4 +75,6 @@
 - tpcdaq-rs の表示(Event Display / 0x04 Track)は z を time bucket で出す。ただし `src/reco/` の中の帯選択と z フィットは macros と同じ 25 MHz 前提の `MM_PER_CELL`(`src/reco/mod.rs:43–48`、macros が正 — 127)を使う。100 MHz のデータでは z 方向の帯が実寸で 4 倍広い。macros 側を変えたら追随する(130 で扱う)。
 - コードの変更は無い(解析のみ、テスト結果なし)。
 
+- **追記(同日)**: 取得はすでに 25 MHz / triggerDelay 1500 に戻っていた(ユーザーが 2026-10-11 の run 57 から、params `elinp__dcdaf9ca`)。`src/reco/` の `MM_PER_CELL`(25 MHz 前提)は現用データと合っている。
+
 **Status: COMPLETED(原因の特定、2026-10-13 archive)**

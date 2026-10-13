@@ -28,7 +28,7 @@
 
 | # | 項目 | 中身 | 元 |
 |---|---|---|---|
-| C-1 | **取得を 25 MHz に戻すか** | 今の mini は 100 MHz(`delay_test.xcfg`)で、時間窓 5.12 µs ≈ ドリフト 24 mm。|θ| > 10° の飛跡は窓からはみ出て電荷が欠ける(101 追記 3)。25 MHz なら窓 20.48 µs ≈ 98 mm。戻すときは triggerDelay も窓の位置に合わせて決め直す(080 §0 の式 c = (窓 − delay − L) / cell 幅)。手段は Parameters の Apply & restart(111 / 112)。macros 側の samplingMHz はユーザーの macros の話 | 101 |
+| C-1 | ~~取得を 25 MHz に戻すか~~ **済**(2026-10-13 に判明) | ユーザーが 2026-10-11 の run 57 から Parameters で **25 MHz / triggerDelay 1500**(params `elinp__dcdaf9ca`)に切り替え済みだった(archive/113 の反映節、ELITPC の current.json で確認)。macros 側の samplingMHz はユーザーの macros の話 | 101 |
 
 ## D. 人に頼むもの(任意、あれば嬉しい)
 

@@ -1,6 +1,6 @@
 # 110 — 前の取得を止めずにスタックを落とすと、次の run の頭に古いフレームが混ざり、root-sink がほぼ全イベントを late で落とす
 
-**Status: READY**(2026-10-09 起票 Opus。109 の workers-8 試験で発見。graw は無傷。設計判断あり → Fable キュー)
+**Status: COMPLETED(2026-10-13、結果は末尾)** — 旧: READY(2026-10-09 起票 Opus。109 の workers-8 試験で発見。graw は無傷。設計判断あり → Fable キュー)
 
 ## 事実(ELITPC、2026-10-09 12:05–12:13)
 
@@ -245,3 +245,26 @@
   - レーン B の `restart_counters_reset_on_rearm` が誤った仕様を固定していた → 修正を Sonnet に発注(2026-10-13)。
 - 比較: 110 の原事故(run 29)では 2,057 件を late で捨てていた。今回、root-sink の欠損は同番号の 39 件だけで、数えて見える(ユーザー裁定 Q1)。
 - ログブック: run 72 に run_stop が無い経緯を comment で記録した(author `claude`)。
+
+### 不具合の修正と再確認(2026-10-13 12:59–13:01 EEST)
+- 修正: Sonnet `fc3bfb5` → merge `22e9284`。`src/decoder.rs` の `rearm()` で再開カウンタを戻さない(malformed と同じ run カウンタ)。判定用の状態は従来どおり消す。
+  - テストは `restart_counters_reset_on_rearm`(誤った仕様)を `decoder::tests::restart_counters_survive_the_own_eos_until_the_next_start` に置き換えた。
+  - 赤: 修正前は `left: Some(0), right: Some(1)`。
+- ゲート(main `22e9284`、Mac): fmt OK / clippy 警告 0 / cargo **1078 passed / 0 failed / 1 ignored**。
+- ELITPC に反映(bundle → ff → `cargo build --release`)し、A / B を各 30 s で再実行した(`SEC=30 ~/repro110.sh a` / `b`):
+  - **run 75**: stop せずに落とした(12:59:16)。ROOT は `run_inprogress_*`、graw は無傷。
+  - **run 76**: root_sink `events_complete=136 late_fragments=0 restarts=1 events_before_restart=17 restart_duplicates=0`(新しい run が古い頭の番号まで届かなかったので重複 0)。
+    **logbook `run_stop.counters` = `acquisition_restarts=1 / frames_before_restart=17`**(root-sink と一致)。reason normal。
+- ログブック: run 75 / 72 の経緯を comment で記録した。
+- ELITPC は Idle で終えた(新しい α run は始めていない — ユーザーが UI から)。
+
+### 受け入れ
+- 合成列(両レーンのテスト)と実機(run 73 / 76)の両方で、次を確認した:
+  - 前の取得の残りフレームは graw にそのまま残る。
+  - root-sink は late で捨てず、epoch として扱う。
+  - 新しい同番号だけを数えて捨てる(Q1)。
+  - 本数は close 行・counts JSON・status PUB・`run_stop.counters` で見える。
+- 正規の stop → start では混入しない(run 74)。
+- 残り: SPEC の文案(§1.3 / §5.3 / §6.3 / §7 / §9.2、decoder の節)は CURRENT の Fable キューで v1.46 として確定する。レーン C(status バーの `restarts N`)は後回し(ユーザー既定)。
+
+**Status: COMPLETED(2026-10-13)**

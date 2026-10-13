@@ -1,6 +1,6 @@
 # CURRENT — tpcdaq-rs 現在地
 
-**最終更新: 2026-10-13(棚卸し — 止まっていた 069 / 073 / 074 / 078 / 079 / 080 / 084 / 101 / 107 を処置して archive、~~092~~ を修正して archive([archive/092](archive/092_receiver_abandoned_after_eof.md) — EOS の後も Heartbeat を出し続けていた)、131 を起票。続けて ~~124~~(全 ch の ON/OFF をユーザーが実機確認)・~~132~~(run/start 応答に params_id / notes)を完了 → archive)。**
+**最終更新: 2026-10-13(棚卸し — 止まっていた 069 / 073 / 074 / 078 / 079 / 080 / 084 / 101 / 107 を処置して archive、~~092~~ を修正して archive([archive/092](archive/092_receiver_abandoned_after_eof.md) — EOS の後も Heartbeat を出し続けていた)、131 を起票。続けて ~~124~~(全 ch の ON/OFF をユーザーが実機確認)・~~132~~(run/start 応答に params_id / notes)・~~110~~(未停止で落とした後の古いフレーム = 取得の再開 epoch、ELITPC で再現・確認)を完了 → archive)。**
 2026-08-18〜10-13 の作業ログ(Wave 1〜3、ELITPC 移行、125–129)は [archive/CURRENT_2026-10-13_wave_log.md](archive/CURRENT_2026-10-13_wave_log.md)、
 その前は [archive/CURRENT_2026-08-14_p2_p3wave.md](archive/CURRENT_2026-08-14_p2_p3wave.md)。
 
@@ -11,9 +11,10 @@
   - 保存先: データは ZFS `data/tpcdaq`。
   - 記録: ELOG(TPC 用)、InfluxDB(HV / LV)。
   - マニュアル: 日英 PDF が `reference/_manual/`。
-- **実装の正本 = docs/SPEC_ja.md v1.45**。ゲート(main、132 と 110 レーン B の後)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped。適合 402(127 時点)。
+- **実装の正本 = docs/SPEC_ja.md v1.45**。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `22e9284` で稼働。
 - **できること**:
   - 保存二系統: graw はロスレス、root-sink は PEventTPC と raw ツリー。
+  - 取得の再開: 未停止で落とした後の古いフレームを epoch として扱う(110)。
   - run/start の歩き戻し: ECC とコンポーネントの両方。前の run の run_stop も書く(113–116)。
   - Web UI:
     - Monitor
@@ -27,13 +28,12 @@
   - zCoBo の読み出しは 2.931 ms / イベント。
   - 1 GbE では 182 Hz で頭打ち(101.7 MB/s、全数・連番)。
   - root_sink は workers 8 で ≈ 122 events/s。
-- **注意**: mini の現用の取得は **100 MHz**(時間窓 ≈ 24 mm、|θ| > 10° の飛跡は欠ける)。25 MHz に戻すかは 131 C-1。
+- **取得条件**: mini の現用は **25 MHz / triggerDelay 1500**(params `elinp__dcdaf9ca`、2026-10-11 の run 57 から — ユーザーが Parameters で切り替え。それ以前の α run は 100 MHz で、時間窓 ≈ 24 mm)。
 
 ## 開いているチケット
 
 | # | 中身 | 状態 | 次の一手 |
 |---|---|---|---|
-| [110](110_stale_frames_after_unclean_stop.md) | 取得を止めずにスタックを落とすと、次の run の頭に古いフレームが混ざり root-sink が late で捨てる | Fable 裁定済み、ユーザー裁定済み(新しい同番号だけ捨てる)。**レーン B(decoder のカウンタ)はマージ済み**、レーン A(root-sink の epoch)はレビューで差し戻し中(判定条件と保持メモリ) | レーン A マージ → ELITPC で実機再現(許可済み、日時はそのとき確認)→ 結果節 |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
 
@@ -41,15 +41,14 @@
 
 元は 080(プログラム票、archive)と 069 Phase 2.5。
 
-- **run 条件 → v_drift、窓の深さ、窓端クリップ率**(080 B-4):
+- **run 条件 → v_drift、窓の深さ、窓端クリップ率**(080 B-4)— 25 MHz に戻ったので急ぎではない:
   - 圧力と HV から `v_drift = 0.7233 × E/p` を出し、run_start に書く。
   - f_sample と triggerDelay から、窓の深さ [mm] とトリガ前後の配分を出す。
   - monitor に窓端クリップ率のカウンタを出す。
-  - 131 C-1(サンプリングを戻すか)と同時に決めるのがよい。
 - **較正解析**(069 Phase 2.5 C-3〜C-5 / 080 D-4):
   - α run のデータから σ_T・σ_L・strip PRF・イオンテール平均波形・ドリフト端の v_drift・ADC/keV を出す。
   - 066 ハーネスの mini .dat 切替(069 0-5)を含む。
-  - ドリフト端は 100 MHz の窓では見えない。
+  - ドリフト端は 100 MHz の窓では見えなかった。25 MHz(2026-10-11〜)のデータなら使える。
 - **較正表の適用**(080 D-2): onMultiplicity 閾値の個別化を 078 の例外リストへ流す。ゲイン正規化は ROOT プロダクト側(生 graw は不変)。
 - **イオンテール + Unfolding**(080 D-5): 較正解析の後。
 - **macros 配布準備**(080 D-7): LICENSE、channel_map.csv の扱い、ビルド産物の .gitignore。macros はユーザーのもの — 判断はユーザー。
@@ -59,7 +58,7 @@
 
 Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をここに積み、Fable で**まとめて**確定する(運用ルールの正は CLAUDE.md「モデル使い分け」)。
 
-1. ~~110 の設計~~ 裁定済み(2026-10-13、スポット Fable — 110 の md)。SPEC の文案(§1.3 / §5.3 / §6.3 / §7 / §9.2)は 110 の md にあり、2 と同じ回で確定する。
+1. ~~110~~ 実装・実機確認済み(archive/110)。SPEC の文案(§1.3 / §5.3 / §6.3 / §7 / §9.2、decoder の節 — archive/110 の「Fable 裁定」節と「ユーザー裁定」節)を 2 と同じ回で確定する。
 2. **SPEC 文案の確定(まとめて 1 回 = v1.46)**:
    - (a) **§10.5 `GET /api/last-event`(TODO/123、実装・実機済み)** — §10 の末尾に「### 10.5 解析向け HTTP(v1.42)」:
      monitor(`ws_listen` のポート)は WS に加えて **`GET /api/last-event`** を持つ。応答は、root-sink から最後に受けた built event(`event_publish_hz` で間引き済み)を JSON にしたもの:
