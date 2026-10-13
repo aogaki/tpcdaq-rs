@@ -53,7 +53,7 @@ fn the_sample_stream_decodes_to_the_known_values() {
     let path = scratch("decode");
     let bytes = generate(&path);
     let frames = msg::split_length_prefixed(&bytes).expect("u32 長さ前置で分解できる");
-    assert_eq!(frames.len(), 4, "0x02 / 0x03 / 0x10 / 0x11 の 4 通");
+    assert_eq!(frames.len(), 5, "0x02 / 0x03 / 0x10 / 0x11 / 0x04 の 5 通");
 
     for frame in &frames {
         // SPEC §10.1 の共通ヘッダ
@@ -128,6 +128,21 @@ fn the_sample_stream_decodes_to_the_known_values() {
     let body: Vec<f32> = h2[35..].chunks_exact(4).map(|c| f32_at(c, 0)).collect();
     // 入力(PUB 順・ix 外側)= [11,12, 21,22, 31,32] → 転置して iy 外側。
     assert_eq!(body, vec![11.0, 21.0, 31.0, 12.0, 22.0, 32.0]);
+
+    // --- 0x04 Track(TODO/127): event 44、complete、本文 = 発注書の JSON 例(UI との契約)---
+    let track = frames[4];
+    assert_eq!(track[2], 0x04);
+    assert_eq!(track[4], 0, "complete");
+    assert_eq!(u32_at(track, 9), 44, "eventNumber");
+    let body: serde_json::Value = serde_json::from_slice(&track[13..]).expect("UTF-8 JSON 本文");
+    let contract: serde_json::Value = serde_json::from_str(
+        r#"{"ok":true,"reason":"","hits":[72,40,34],"unplaced":0,
+            "tracks":[{"phiDeg":2.7,"dir":[0.998,0.047,-0.031],"start":[-53.1,-7.9,26.4],"end":[53.0,-3.0,23.1],
+                       "startF":[-53.5,-8.0,26.4],"endF":[53.6,-3.0,23.0],"length":106.2,"lengthF":107.2,"xyLength":106.1,"charge":412345.0}],
+            "points":[[-52.9,-7.9,152.0,5480.0,0,0],[-51.4,-7.8,151.6,5512.0,0,0]]}"#,
+    )
+    .unwrap();
+    assert_eq!(body, contract);
 
     let _ = std::fs::remove_file(&path);
 }

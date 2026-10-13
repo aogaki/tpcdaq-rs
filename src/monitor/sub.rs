@@ -5,6 +5,7 @@ use tracing::{error, info, warn};
 
 use super::*;
 use crate::geometry::Geometry;
+use crate::reco::{Reco, RecoGeometry};
 
 // ---------------------------------------------------------------------
 // SUB 側(専用 OS スレッド)
@@ -17,6 +18,10 @@ use crate::geometry::Geometry;
 struct Ingest {
     hub: Arc<Hub>,
     converter: DisplayConverter,
+    /// 飛跡の再構成(TODO/127)。stripGeometry が作れなかったときは `None` = reco も 0x04 も無し。
+    reco: Option<Reco>,
+    /// 再構成で、ヒットがあったのに stripGeometry に線分の無い strip の累計(終了ログに出す)。
+    reco_no_segment: u64,
     /// **送り手ごと**の seq 追跡(SPEC §2.2 の seq はソース毎の系列)。
     /// v1.31 で SUB に slowctl(source_id 200)が加わり、root-sink(101)と seq が
     /// 交互に来るようになったため、1 本の `GapTracker` では飛びも巻き戻りも意味を失う。
@@ -25,17 +30,54 @@ struct Ingest {
     frames: Vec<Vec<u8>>,
     logged_decode_error: bool,
     logged_unknown_kind: bool,
+    logged_no_segment: bool,
+    logged_track_encode: bool,
 }
 
 impl Ingest {
-    fn new(hub: Arc<Hub>, geometry: Arc<Geometry>) -> Self {
+    fn new(hub: Arc<Hub>, geometry: Arc<Geometry>, reco: Option<RecoGeometry>) -> Self {
         Self {
             hub,
             converter: DisplayConverter::new(geometry),
+            reco: reco.map(Reco::new),
+            reco_no_segment: 0,
             gaps: std::collections::BTreeMap::new(),
             frames: Vec::new(),
             logged_decode_error: false,
             logged_unknown_kind: false,
+            logged_no_segment: false,
+            logged_track_encode: false,
+        }
+    }
+
+    /// 0x02 を作った直後に、**同じ格子**で再構成して 0x04 を `frames` に足す(TODO/127)。
+    /// 単一スレッドなので live の並びは 0x02 ×3 → 0x04。
+    fn push_track(&mut self, event: &BuiltEventPayload) {
+        let Some(reco) = &mut self.reco else {
+            return; // stripGeometry 無し(起動時に warn 済み)
+        };
+        reco.run(self.converter.grids(), N_BUCKETS as usize);
+        let result = reco.event();
+        if result.no_segment > 0 {
+            self.reco_no_segment += result.no_segment as u64;
+            if !self.logged_no_segment {
+                self.logged_no_segment = true;
+                warn!(
+                    strips = result.no_segment,
+                    "monitor: track reco skipped strips with a hit but no stripGeometry segment \
+                     (counted; total in the stop log)"
+                );
+            }
+        }
+        let header = ws::Header::event(ws::TYPE_TRACK, event.run, event.event_idx, !event.complete);
+        match ws::track(header, &result) {
+            Ok(bytes) => self.frames.push(bytes),
+            Err(e) => {
+                if !self.logged_track_encode {
+                    self.logged_track_encode = true;
+                    error!(error = %e, "monitor: cannot encode the 0x04 Track message");
+                }
+            }
         }
     }
 
@@ -81,6 +123,8 @@ impl Ingest {
                 self.hub.on_event(Arc::clone(&event));
                 self.frames.clear();
                 self.converter.uvw(&event, &mut self.frames);
+                // 0x04 は `uvw` ストリームに含める(SPEC §10.3 — 新しいストリーム名は作らない)。
+                self.push_track(&event);
                 self.hub.publish_live(Stream::Uvw, &mut self.frames);
                 // 0x03 は**購読しているクライアントが居るときだけ**作る(SPEC §10.3 の帯域制御)。
                 if self.hub.waveforms_wanted() {
@@ -115,6 +159,7 @@ pub(super) fn spawn_sub_thread(
     slow_endpoint: Option<String>,
     hub: Arc<Hub>,
     geometry: Arc<Geometry>,
+    reco: Option<RecoGeometry>,
     stop: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<()>, MonitorError> {
     std::thread::Builder::new()
@@ -160,7 +205,7 @@ pub(super) fn spawn_sub_thread(
                 );
             }
 
-            let mut ingest = Ingest::new(hub, geometry);
+            let mut ingest = Ingest::new(hub, geometry, reco);
             while !stop.load(Ordering::Relaxed) {
                 // **recv の前に必ず poll する**(TODO/013 の fair-queue 飢餓)。libzmq は
                 // `recv` が成功し続ける間 `process_commands()` を 100 通に 1 度しか走らせず、
@@ -193,7 +238,10 @@ pub(super) fn spawn_sub_thread(
                     }
                 }
             }
-            info!("monitor: SUB thread stopped");
+            info!(
+                track_no_segment_strips = ingest.reco_no_segment,
+                "monitor: SUB thread stopped"
+            );
         })
         .map_err(MonitorError::Spawn)
 }
@@ -227,7 +275,7 @@ mod tests {
             4,
             Arc::clone(&counters),
         );
-        let mut ingest = Ingest::new(hub, geometry);
+        let mut ingest = Ingest::new(hub, geometry, None);
 
         let slow = crate::slowctl::SlowPayload {
             kind: crate::slowctl::SLOW_KIND.to_string(),
@@ -283,5 +331,138 @@ mod tests {
             &rmp_serde::to_vec_named(&status).unwrap(),
         ));
         assert_eq!(counters.monitor_gaps.load(Ordering::Relaxed), 2);
+    }
+
+    // -----------------------------------------------------------------
+    // 飛跡の再構成のフック(TODO/127)
+    // -----------------------------------------------------------------
+
+    const MINI_REDUCED: &str = "tests/fixtures/geometry_mini_reduced.dat";
+
+    /// `geometry_mini_reduced.dat`(合成)で Ingest を作り、live の受け口も返す。
+    /// stripGeometry は起動時と同じ [`strip_geometry_at_startup`] で作る。
+    fn ingest_with(
+        text: Option<&str>,
+    ) -> (
+        Ingest,
+        tokio::sync::broadcast::Receiver<Arc<LiveFrame>>,
+        bool,
+    ) {
+        let geometry = Arc::new(match text {
+            Some(text) => geometry::parse(text),
+            None => geometry::load(Path::new(MINI_REDUCED)).expect("fixture geometry"),
+        });
+        let (_json, reco) = strip_geometry_at_startup(&geometry);
+        let has_reco = reco.is_some();
+        let hub = Hub::new(
+            Meta {
+                n_buckets: 512,
+                planes: geometry.max_strip,
+                geometry: MINI_REDUCED.to_string(),
+                angles_deg: None,
+                detector: "mini_eTPC".to_string(),
+                cobos: vec![0],
+                run: 0,
+            },
+            None,
+            16,
+            Arc::new(MonitorCounters::default()),
+        );
+        let (_id, _streams, _json_rx, live_rx) = hub.register();
+        (Ingest::new(hub, geometry, reco), live_rx, has_reco)
+    }
+
+    /// U 1–4 / V 1–3 / W 1–4 の全 strip に bucket 200 の山(1000/1500/1000 → q = 3500 ≥ 2000)。
+    /// フィクスチャの ch: U strip k = (aget0, raw k−1)、V strip k = (aget1, raw k−1)、
+    /// W strip k = (aget1, raw k+2)(信号 0–10 は raw == 信号番号)。
+    fn every_strip_pulsed(run: u32, event_idx: u32, complete: bool) -> Vec<u8> {
+        let mut samples: Vec<Sample> = Vec::new();
+        let strips: [(u8, u8, u8); 3] = [(0, 0, 4), (1, 0, 3), (1, 3, 4)]; // (aget, 最初の raw, 本数)
+        for (aget, first, n) in strips {
+            for raw in first..first + n {
+                for (bucket, adc) in [(199, 1000), (200, 1500), (201, 1000)] {
+                    samples.push((aget, raw, bucket, adc));
+                }
+            }
+        }
+        let event = built_event(run, event_idx, complete, vec![fragment(0, 0, &samples)]);
+        envelope(101, run, 0, 0, &rmp_serde::to_vec_named(&event).unwrap())
+    }
+
+    fn drain(rx: &mut tokio::sync::broadcast::Receiver<Arc<LiveFrame>>) -> Vec<Arc<LiveFrame>> {
+        let mut frames = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            frames.push(frame);
+        }
+        frames
+    }
+
+    fn u32_at(bytes: &[u8], at: usize) -> u32 {
+        u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+    }
+
+    #[test]
+    fn built_event_sends_three_uvw_then_one_track_from_the_same_grids() {
+        let (mut ingest, mut live, has_reco) = ingest_with(None);
+        assert!(
+            has_reco,
+            "フィクスチャには ANGLES / DIAMOND SIZE / REFERENCE POINT がある"
+        );
+        ingest.handle(&every_strip_pulsed(70, 1234, true));
+
+        let frames = drain(&mut live);
+        let types: Vec<u8> = frames.iter().map(|f| f.bytes[2]).collect();
+        assert_eq!(types, vec![0x02, 0x02, 0x02, 0x04], "0x02 ×3 → 0x04");
+        assert!(
+            frames.iter().all(|f| f.stream == Stream::Uvw),
+            "uvw ストリーム"
+        );
+        let track = &frames[3].bytes;
+        assert_eq!(u32_at(track, 5), 70, "runNumber = イベントの run");
+        assert_eq!(u32_at(track, 9), 1234, "eventNumber = 0x02 と同じ");
+        assert_eq!(track[4], 0, "complete");
+        // 同じ格子を見ている: halo cut 後 U 4 / V 3 / W 4 本 → V で足りない。
+        // 帯内は U 4(同じ時刻 = 帯の中)、V 0(帯フィットをしない)、W 4。
+        let body: serde_json::Value = serde_json::from_slice(&track[ws::HEADER_LEN..]).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "ok": false,
+                "reason": "V has 3 strip hits after the halo cut (needs 4)",
+                "hits": [4, 0, 4],
+                "unplaced": 0,
+                "tracks": [],
+                "points": [],
+            })
+        );
+    }
+
+    /// TS「incomplete はヘッダから引き継ぐ」の Rust 版: 0x04 の flags は 0x02 と同じくイベントから。
+    #[test]
+    fn track_message_carries_the_incomplete_flag_of_the_event() {
+        let (mut ingest, mut live, _) = ingest_with(None);
+        ingest.handle(&every_strip_pulsed(70, 1235, false));
+        let frames = drain(&mut live);
+        assert_eq!(frames.len(), 4);
+        for frame in &frames {
+            assert_eq!(
+                frame.bytes[4],
+                ws::FLAG_INCOMPLETE,
+                "{:#04x}",
+                frame.bytes[2]
+            );
+        }
+    }
+
+    /// stripGeometry が作れない(DIAMOND SIZE 無し)→ reco を呼ばず 0x04 も送らない。
+    #[test]
+    fn without_strip_geometry_there_is_no_reco_and_no_track_message() {
+        let text = "ANGLES: 0.0 -120.0 -60.0\nREFERENCE POINT: 1.0 2.0\n\
+                    U\t0\t1\t0\t0\t0\t0\t0.0\t0.0\t3\n";
+        let (mut ingest, mut live, has_reco) = ingest_with(Some(text));
+        assert!(!has_reco);
+        ingest.handle(&every_strip_pulsed(70, 1236, true));
+        let types: Vec<u8> = drain(&mut live).iter().map(|f| f.bytes[2]).collect();
+        assert_eq!(types, vec![0x02, 0x02, 0x02], "0x04 は無い");
     }
 }

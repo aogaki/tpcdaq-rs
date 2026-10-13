@@ -83,6 +83,12 @@ impl DisplayConverter {
         self.counts
     }
 
+    /// 直近の [`DisplayConverter::uvw`] が作った面毎の格子(U, V, W。strip-major の
+    /// `nStrips × N_BUCKETS`、section 合算済み)= 0x02 の中身そのもの。再構成(TODO/127)が同じ格子を読む。
+    pub fn grids(&self) -> [&[u16]; N_PLANES] {
+        self.grids.each_ref().map(Vec::as_slice)
+    }
+
     /// built event → `0x02 Uvw` ×3(SPEC §10.2)。面毎 `nStrips×512` の u16 グリッド。
     ///
     /// - 同一ビンへの複数チャンネル(セクション合流)は **saturating add**(u16 天井で clamp。

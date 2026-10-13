@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use super::*;
+use crate::reco::{Track, TrackEvent, TrackPoint};
 
 // =====================================================================
 // SPEC §10.4-1 — 適合性テスト用のサンプルストリーム(既知値)
@@ -10,7 +11,10 @@ use super::*;
 ///
 /// 値は非対称に選んである(取り違えが目に見えるように)。TS 側(027)の本番デコーダが
 /// これを分解して同じ値を復元できることが適合性の定義。**同一入力 → 同一バイト**。
-pub fn ws_sample_messages() -> Vec<Vec<u8>> {
+///
+/// 並びは 0x02 / 0x03 / 0x10 / 0x11 / 0x04(0x04 は TODO/127 で末尾に足した)。
+/// Err は 0x04 の JSON 化の失敗だけ(`Vec` への書き込みなので実際には起きない)。
+pub fn ws_sample_messages() -> Result<Vec<Vec<u8>>, serde_json::Error> {
     // Uvw: 3 ストリップ × 4 バケット。値は strip*10 + bucket(全ビン相異なる)。
     let n_strips: u16 = 3;
     let n_buckets: u16 = 4;
@@ -72,7 +76,48 @@ pub fn ws_sample_messages() -> Vec<Vec<u8>> {
         &f64_bytes(&h2),
     );
 
-    vec![uvw, waveforms, histo1d, histo2d]
+    // Track: run=7 / event=44 / complete。本文は TODO/127 の発注書の JSON 例そのもの
+    // (UI レーンとの契約 — 値を変えるときは UI の適合 spec と同時に)。
+    let points = [
+        TrackPoint {
+            x: -52.9,
+            y: -7.9,
+            t: 152.0,
+            q: 5480.0,
+            view: 0,
+        },
+        TrackPoint {
+            x: -51.4,
+            y: -7.8,
+            t: 151.6,
+            q: 5512.0,
+            view: 0,
+        },
+    ];
+    let track = ws::track(
+        ws::Header::event(ws::TYPE_TRACK, 7, 44, false),
+        &TrackEvent {
+            hits: [72, 40, 34],
+            halo_hits: [72, 40, 34],
+            unplaced: 0,
+            no_segment: 0,
+            fit: Ok(Track {
+                phi_deg: 2.7,
+                dir: [0.998, 0.047, -0.031],
+                start: [-53.1, -7.9, 26.4],
+                end: [53.0, -3.0, 23.1],
+                start_f: [-53.5, -8.0, 26.4],
+                end_f: [53.6, -3.0, 23.0],
+                length: 106.2,
+                length_f: 107.2,
+                xy_length: 106.1,
+                charge: 412345.0,
+            }),
+            points: &points,
+        },
+    )?;
+
+    Ok(vec![uvw, waveforms, histo1d, histo2d, track])
 }
 
 /// f64 列を SPEC §5.3 の生バイト列(f64 LE)にする。
@@ -90,7 +135,7 @@ pub fn write_ws_sample_stream(path: &Path) -> Result<(), std::io::Error> {
     use std::io::Write as _;
     let file = std::fs::File::create(path)?;
     let mut out = std::io::BufWriter::new(file);
-    for frame in ws_sample_messages() {
+    for frame in ws_sample_messages()? {
         let len = u32::try_from(frame.len()).unwrap_or(u32::MAX);
         out.write_all(&len.to_le_bytes())?;
         out.write_all(&frame)?;
@@ -105,8 +150,8 @@ mod tests {
 
     #[test]
     fn ws_sample_messages_are_deterministic_and_cover_every_type() {
-        let first = ws_sample_messages();
-        let second = ws_sample_messages();
+        let first = ws_sample_messages().unwrap();
+        let second = ws_sample_messages().unwrap();
         assert_eq!(first, second, "同一入力 → 同一バイト");
 
         let types: Vec<u8> = first.iter().map(|m| m[2]).collect();
@@ -116,7 +161,8 @@ mod tests {
                 ws::TYPE_UVW,
                 ws::TYPE_WAVEFORMS,
                 ws::TYPE_HISTO1D,
-                ws::TYPE_HISTO2D
+                ws::TYPE_HISTO2D,
+                ws::TYPE_TRACK
             ],
             "全メッセージ型が 1 通ずつ"
         );

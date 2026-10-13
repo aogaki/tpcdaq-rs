@@ -6,6 +6,7 @@
 //! ```text
 //!   root-sink ──PUB(47004)──▶ [SUB 専用 OS スレッド]
 //!                                 │  decode(§5.3)→ ギャップ計数 → 表示変換(§5.4)
+//!                                 │  → 同じ格子で飛跡の再構成(`crate::reco`、0x04 — TODO/127)
 //!                                 ▼
 //!                              [Hub]  live = broadcast(有界・drop-oldest)
 //!                                 │   JSON = クライアント毎 mpsc(reliable)
@@ -40,6 +41,7 @@ use tracing::{error, info, warn};
 
 use crate::config::Config;
 use crate::geometry::{self, Geometry};
+use crate::reco::RecoGeometry;
 use crate::strip_xy;
 
 /// 1 チャンネルの time bucket 数(GET ハードウェア定数。SPEC §2.4 の bucket 0–511)。
@@ -140,11 +142,13 @@ pub enum MonitorError {
     Serve(#[source] std::io::Error),
 }
 
-/// 起動時に 1 回: strip 線分の mm を作って `stripGeometry` JSON にする(TODO/125)。
+/// 起動時に 1 回: strip 線分の mm を作って `stripGeometry` JSON(TODO/125)と、
+/// 飛跡の再構成に使う [`RecoGeometry`](TODO/127)にする。
 ///
 /// 線分にしなかった行・差し替えた行・作れなかった理由は**ここで warn を 1 回ずつ**出す
 /// (silent 禁止)。作れなくても monitor は止めない(UI に `unavailable` を見せる)。
-fn strip_geometry_at_startup(geometry: &Geometry) -> Option<String> {
+/// そのときは再構成もしない(`RecoGeometry` が `None` = 0x04 を送らない)。
+fn strip_geometry_at_startup(geometry: &Geometry) -> (Option<String>, Option<RecoGeometry>) {
     let built = match strip_xy::strip_geometry(geometry) {
         Ok((built, notes)) => {
             if !notes.short_rows.is_empty() {
@@ -170,17 +174,23 @@ fn strip_geometry_at_startup(geometry: &Geometry) -> Option<String> {
             Ok(built)
         }
         Err(reason) => {
-            warn!(%reason, "monitor: stripGeometry unavailable — the UI shows the reason");
+            warn!(
+                %reason,
+                "monitor: stripGeometry unavailable — the UI shows the reason; \
+                 track reconstruction (0x04) is off"
+            );
             Err(reason)
         }
     };
-    match strip_geometry_json(&built) {
+    let reco = built.as_ref().ok().map(RecoGeometry::new);
+    let json = match strip_geometry_json(&built) {
         Ok(text) => Some(text),
         Err(e) => {
             error!(error = %e, "monitor: cannot encode the stripGeometry message");
             None
         }
-    }
+    };
+    (json, reco)
 }
 
 /// monitor を起動し、`shutdown` が来るまで WS を提供する(SPEC §5.4 / §10)。
@@ -219,7 +229,7 @@ pub async fn run_monitor(
         cobos: params.cobos.clone(),
         run: 0,
     };
-    let strip_geometry = strip_geometry_at_startup(&geometry);
+    let (strip_geometry, reco_geometry) = strip_geometry_at_startup(&geometry);
     let counters = Arc::new(MonitorCounters::default());
     let hub = Hub::new(
         meta,
@@ -234,6 +244,7 @@ pub async fn run_monitor(
         params.slow_sub.clone(),
         Arc::clone(&hub),
         Arc::clone(&geometry),
+        reco_geometry,
         Arc::clone(&stop),
     )?;
 
