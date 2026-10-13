@@ -22,7 +22,9 @@ Layout (TPCReco GeometryTPC conventions, angles as in ELITPC: 0 / -120 / -60):
   lies on that W line and ends next to P: P sits at len = -0.5*pad_pitch - 0.5e-5 / - 2e-5 (start
   side) or len = length + 0.5e-5 / + 2e-5 (far side) along the probe. TPCReco accepts a crossing
   inside [-0.5*pad_pitch - tol, length + tol], tol = 1e-5 mm, so the first probe of each pair
-  matches and the second does not -- the oracle's MatchCrossPoint cases pin the tolerance.
+  matches and the second does not. They pinned that tolerance in the oracle's MatchCrossPoint
+  cases, which TODO/125 revision 2 removed together with the U/V/W coincidence projection; the
+  rows stay so that this .dat and segments.json do not change.
 """
 
 import math

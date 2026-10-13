@@ -56,22 +56,13 @@
             }
           </div>
           <div class="projection-bar">
-            <label class="threshold">
-              hit threshold (ADC above baseline)
-              <input
-                type="number"
-                min="0"
-                step="1"
-                [value]="threshold()"
-                (change)="onThreshold($event)"
-              />
-            </label>
             <span class="status" data-testid="projection-status">{{ projectionStatus() }}</span>
           </div>
           <p class="hint">
-            <strong>Display only.</strong> Each point is a U/V/W three-plane coincidence in the same
-            time bucket (TPCReco MatchCrossPoint, radius 2 mm); Z is the time bucket, not mm. The
-            threshold is per browser; the radius is fixed.
+            <strong>Display only.</strong> Same algorithm as <code>macros/analyzeUVW.C</code> +
+            <code>makeTracks.C</code>: one hit per strip (peak ±5 cells, halo cut q ≥ 2000 ADC), one
+            straight track per event; the points are the strip hits placed on that track. Z is the
+            time bucket, not mm. Head/tail not determined.
           </p>
         </section>
       </ng-template>

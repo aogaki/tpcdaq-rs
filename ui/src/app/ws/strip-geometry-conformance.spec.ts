@@ -3,9 +3,9 @@
  *
  * Rust の `ws_proto_sample --geometry … --strip-geometry-out …` が、monitor が配るのと同じ
  * `stripGeometry` JSON を合成ジオメトリ `tests/fixtures/geometry_xy_synth.dat` から書く。
- * それを本番パーサ(`./json`)で読み、TPCReco `GeometryTPC::MatchCrossPoint(radius = 2.0)` の結果
- * (`match_cases.json`、コミット済み)の全件を、本番の `matchCrossPoint`(`../monitor/xy-projection`)で
- * 再現できるかを確かめる(true/false 一致、true なら点が 1e-9 mm 以内)。
+ * それを本番パーサ(`./json`)で読み、TPCReco `GeometryTPC` の線分・rangeXY(`segments.json`、
+ * コミット済み)と 1e-9 mm で一致することを確かめる。
+ * (MatchCrossPoint の照合は 125 改訂 2 で三面一致の投影ごと撤去 — 投影は macros の移植になった。)
  *
  * 入力は環境変数(`ui/run_ws_conformance.sh` が与える。無ければ skip — 通常の `ng test` は落とさない):
  * - TPCDAQ_STRIP_GEOMETRY   : 生成された stripGeometry JSON
@@ -14,7 +14,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { matchCrossPoint, type SegmentLike, type Vec2 } from '../monitor/xy-projection';
 import { isStripGeometryUnavailable, parseJsonMessage, type StripGeometryMessage } from './json';
 
 const geometryPath = process.env['TPCDAQ_STRIP_GEOMETRY'] ?? '';
@@ -23,22 +22,25 @@ const oracleDir = process.env['TPCDAQ_XY_ORACLE_DIR'] ?? '';
 /** 発注書の許容(mm)。 */
 const TOL = 1e-9;
 
-/** `[set, uStrip, uSection, vStrip, vSection, wStrip, wSection, match, x, y]` */
-type CaseRow = [string, number, number, number, number, number, number, boolean, number?, number?];
+/** 線分の最小形(照合に使う分だけ)。 */
+interface Segment {
+  readonly x0: number;
+  readonly y0: number;
+  readonly length: number;
+}
 
 describe.skipIf(geometryPath === '' || oracleDir === '')(
-  'TODO/125 stripGeometry 適合(Rust 生成 → TS 本番パーサ → TPCReco MatchCrossPoint)',
+  'TODO/125 stripGeometry 適合(Rust 生成 → TS 本番パーサ → TPCReco GeometryTPC)',
   () => {
     let geometry: StripGeometryMessage;
     let unknownKeys: readonly string[] = [];
-    let matchCases: { radius: number; cases: CaseRow[] };
     let segmentsOracle: {
       rangeXY: number[];
+      planes: Record<string, { unit: number[]; pitchUnit: number[] }>;
       segments: [string, number, number, number, number, number, number, number][];
     };
     /** plane(U,V,W の順)→ "strip/section" → 線分。 */
-    let lookup: Map<string, SegmentLike>[];
-    let units: Vec2[];
+    let lookup: Map<string, Segment>[];
 
     beforeAll(() => {
       const parsed = parseJsonMessage(readFileSync(geometryPath, 'utf8'));
@@ -48,12 +50,10 @@ describe.skipIf(geometryPath === '' || oracleDir === '')(
       }
       geometry = parsed.geometry;
       unknownKeys = parsed.unknownKeys;
-      matchCases = JSON.parse(readFileSync(join(oracleDir, 'match_cases.json'), 'utf8'));
       segmentsOracle = JSON.parse(readFileSync(join(oracleDir, 'segments.json'), 'utf8'));
       const planes = [geometry.planes.U, geometry.planes.V, geometry.planes.W];
-      units = planes.map((p) => [p.unit[0], p.unit[1]] as Vec2);
       lookup = planes.map((plane) => {
-        const map = new Map<string, SegmentLike>();
+        const map = new Map<string, Segment>();
         for (const [strip, section, x0, y0, length] of plane.segments) {
           map.set(`${strip}/${section}`, { x0, y0, length });
         }
@@ -75,6 +75,23 @@ describe.skipIf(geometryPath === '' || oracleDir === '')(
       });
     });
 
+    it('unit / pitchUnit が TPCReco と 1e-9 で一致する(track-fit の s = pitchUnit·(x0, y0))', () => {
+      for (const name of ['U', 'V', 'W'] as const) {
+        const plane = geometry.planes[name];
+        const oracle = segmentsOracle.planes[name];
+        for (let i = 0; i < 2; i++) {
+          expect(
+            Math.abs(plane.unit[i] - oracle.unit[i]),
+            `${name} unit[${i}]`,
+          ).toBeLessThanOrEqual(TOL);
+          expect(
+            Math.abs(plane.pitchUnit[i] - oracle.pitchUnit[i]),
+            `${name} pitchUnit[${i}]`,
+          ).toBeLessThanOrEqual(TOL);
+        }
+      }
+    });
+
     it('全線分(x0, y0, length)が TPCReco の segments.json と 1e-9 で一致する', () => {
       const names = ['U', 'V', 'W'];
       for (const [plane, section, strip, x0, y0, , , length] of segmentsOracle.segments) {
@@ -89,47 +106,6 @@ describe.skipIf(geometryPath === '' || oracleDir === '')(
         ).toBeLessThanOrEqual(TOL);
       }
       expect(segmentsOracle.segments.length).toBe(lookup.reduce((n, m) => n + m.size, 0));
-    });
-
-    it('MatchCrossPoint の全件(true/false と点)が TPCReco と一致する', () => {
-      expect(matchCases.radius).toBe(2.0);
-      let nTrue = 0;
-      let nFalse = 0;
-      let maxDiff = 0;
-      for (const [set, u, su, v, sv, w, sw, match, x, y] of matchCases.cases) {
-        const label = `${set} U${u}/${su} V${v}/${sv} W${w}/${sw}`;
-        const sU = lookup[0].get(`${u}/${su}`);
-        const sV = lookup[1].get(`${v}/${sv}`);
-        const sW = lookup[2].get(`${w}/${sw}`);
-        if (!sU || !sV || !sW) throw new Error(`${label}: segment missing in stripGeometry`);
-        const point = matchCrossPoint(
-          sU,
-          sV,
-          sW,
-          units[0],
-          units[1],
-          units[2],
-          geometry.padPitch,
-          matchCases.radius,
-        );
-        expect(point !== null, `${label}: TPCReco match=${match}`).toBe(match);
-        if (match && point !== null) {
-          nTrue++;
-          const dx = Math.abs(point[0] - (x as number));
-          const dy = Math.abs(point[1] - (y as number));
-          maxDiff = Math.max(maxDiff, dx, dy);
-          expect(dx, `${label}: x`).toBeLessThanOrEqual(TOL);
-          expect(dy, `${label}: y`).toBeLessThanOrEqual(TOL);
-        } else {
-          nFalse++;
-        }
-      }
-      console.log(
-        `[TODO/125 conformance] compared ${matchCases.cases.length} cases: true=${nTrue} false=${nFalse} max|diff|=${maxDiff}`,
-      );
-      expect(nTrue + nFalse).toBe(matchCases.cases.length);
-      expect(nTrue).toBeGreaterThan(0);
-      expect(nFalse).toBeGreaterThan(0);
     });
   },
 );

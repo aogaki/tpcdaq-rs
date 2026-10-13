@@ -1,11 +1,11 @@
-# tools/geometry_xy_oracle/Makefile — TPCReco GeometryTPC を正とする strip 線分 / MatchCrossPoint
+# tools/geometry_xy_oracle/Makefile — TPCReco GeometryTPC を正とする strip 線分・rangeXY
 # のオラクル(TODO/125 レーン A-4)。流儀は tools/root_sink/Makefile と同じ:
 # TPCReco のソースは**コピーしない**(ライセンス無指定)—— TPCDAQ_TPCRECO_DIR から直コンパイル。
 #
 #   make -j                          # 既定の TPCDAQ_TPCRECO_DIR を使う
 #   make -j TPCDAQ_TPCRECO_DIR=/abs/path/to/TPCReco-HIGS2026_online
 #   make fixtures                    # 合成ジオメトリの出力をリポのフィクスチャへ書き直す
-#   ./geometry_xy_oracle GEOMETRY.dat SEGMENTS.json [MATCH_CASES.json]
+#   ./geometry_xy_oracle GEOMETRY.dat SEGMENTS.json
 #
 # **~/Workspace/Higs/TPCReco/build のライブラリは使わない**(GeometryTPC.cpp が reference と
 # 違うローカル版 — TODO/125)。ROOT 辞書は要らない(GeometryTPC は TObject ではない)。
@@ -65,7 +65,7 @@ geometry_xy_oracle: geometry_xy_oracle.cxx sscanf_guard.h | tpcreco-check
 # 合成ジオメトリ(make_synth_geometry.py の出力)のオラクル JSON をフィクスチャへ書く。
 fixtures: geometry_xy_oracle
 	python3 make_synth_geometry.py > $(SYNTH_DAT)
-	./geometry_xy_oracle $(SYNTH_DAT) $(FIXTURE_DIR)/segments.json $(FIXTURE_DIR)/match_cases.json
+	./geometry_xy_oracle $(SYNTH_DAT) $(FIXTURE_DIR)/segments.json
 
 clean:
 	rm -f geometry_xy_oracle

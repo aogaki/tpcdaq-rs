@@ -152,7 +152,10 @@ export function uvwPanelSpec(planeIndex: number): PanelSpec {
   };
 }
 
-/** イベント表示の 2 段目(TODO/125): XY / XZ / YZ。Z は time bucket(mm にしない)。 */
+/**
+ * イベント表示の 2 段目(TODO/125): XY / XZ / YZ。中身は直線トラックに置いた strip ヒット
+ * (`track-fit.ts` = macros/analyzeUVW.C + makeTracks.C、125 改訂 2)。Z は time bucket(mm にしない)。
+ */
 export const PROJECTION_SPECS: readonly PanelSpec[] = [
   { name: 'ProjectionXY', title: 'XY (top view)', xTitle: 'X [mm]', yTitle: 'Y [mm]' },
   { name: 'ProjectionXZ', title: 'XZ', xTitle: 'X [mm]', yTitle: 'time bucket' },

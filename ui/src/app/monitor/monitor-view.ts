@@ -3,9 +3,10 @@
  *
  * - 3×3 グリッド: 行 = StripTime / Charge / ChargeMax、列 = U / V / W(028 発注書 2)。
  * - イベント表示 = 1 段目に `0x02 Uvw` の 3 面(**JSROOT の TH2**)、2 段目に XY / XZ / YZ 投影。
- *   投影は **UI で計算する表示専用の変換**(`xy-projection.ts`)。保存系にもワイヤにも触らない。
+ *   投影は **UI で計算する表示専用の変換**(`track-fit.ts` = macros/analyzeUVW.C + makeTracks.C の
+ *   移植、1 イベント = 直線 1 本 — TODO/125 改訂 2)。保存系にもワイヤにも触らない。定数は macros と同じに固定。
  *   計算は表示刻み(DisplayClock の tick)に同期し、Event display タブが開いているときだけ。
- *   同じ (イベント, 閾値, ジオメトリ) では再計算しない(入力が変わらなければシグナルが変わらない)。
+ *   同じ (イベント, ジオメトリ) では再計算しない(入力が変わらなければシグナルが変わらない)。
  *   イベント ID(run / eventNumber)と incomplete フラグは**タブに関係なく常時表示**。
  * - AsAd 電子回路座標パネル(077)は Waveform ビューへ移した。monitor タブは 0x03 を購読しない。
  * - freeze / interval はクライアント側だけ(§5.4)。WS の購読は止めない。
@@ -20,7 +21,6 @@ import { DisplayControls } from '../display/display-controls';
 import { isStripGeometryUnavailable } from '../ws/json';
 import type { UvwMessage } from '../ws/wire';
 import { WsClientService } from '../ws/ws-client';
-import { isValidThreshold, loadThreshold, saveThreshold } from './event-display-settings';
 import { JsrootPanel } from './jsroot-panel';
 import {
   HISTO_ROWS,
@@ -30,13 +30,7 @@ import {
   histoPanelSpec,
   uvwPanelSpec,
 } from './root-histo';
-import {
-  MAX_CROSS_EVALUATIONS,
-  PROJECTION_RADIUS_MM,
-  type ProjectionResult,
-  projectEvent,
-  projectionBlocker,
-} from './xy-projection';
+import { type TrackEventResult, trackBlocker, trackEvent } from './track-fit';
 
 /** `mat-tab-group` 内の Event display タブの位置(Histograms = 0)。 */
 const EVENT_TAB_INDEX = 1;
@@ -90,13 +84,9 @@ export class MonitorView {
     return latest;
   });
 
-  /** TODO/125: 投影の閾値 [ADC](ブラウザごとに localStorage へ記憶。使えなくても既定値で動く)。 */
-  readonly threshold = signal(loadThreshold());
-  readonly radiusMm = PROJECTION_RADIUS_MM;
-
   /** Event display タブが開いているか(閉じているときは投影を計算しない)。 */
   private readonly eventTabOpen = signal(false);
-  private readonly projection = signal<ProjectionResult | null>(null);
+  private readonly projection = signal<TrackEventResult | null>(null);
   /** 投影を計算した回数(診断用。同じ入力で増えないことをテストで確かめる)。 */
   readonly projectionRuns = signal(0);
 
@@ -111,20 +101,17 @@ export class MonitorView {
       const open = this.eventTabOpen();
       const uvw = this.shownUvw();
       const geometry = this.ws.stripGeometry();
-      const threshold = this.threshold();
       if (!open) return;
       untracked(() => {
         if (geometry === null || isStripGeometryUnavailable(geometry)) {
           this.projection.set(null);
           return;
         }
-        if (projectionBlocker(uvw, geometry) !== null) {
+        if (trackBlocker(uvw, geometry) !== null) {
           this.projection.set(null);
           return;
         }
-        this.projection.set(
-          projectEvent(uvw, geometry, { threshold, radius: PROJECTION_RADIUS_MM }),
-        );
+        this.projection.set(trackEvent(uvw, geometry));
         this.projectionRuns.update((count) => count + 1);
       });
     });
@@ -132,18 +119,6 @@ export class MonitorView {
 
   onTabChange(index: number): void {
     this.eventTabOpen.set(index === EVENT_TAB_INDEX);
-  }
-
-  /** 閾値欄の確定。不正値(空・負・非数)は受け付けず、欄を今の値へ戻す。 */
-  onThreshold(event: Event): void {
-    const input = event.target as HTMLInputElement;
-    const value = input.value.trim() === '' ? Number.NaN : Number(input.value);
-    if (!isValidThreshold(value)) {
-      input.value = String(this.threshold());
-      return;
-    }
-    this.threshold.set(value);
-    saveThreshold(value);
   }
 
   /** R9: イベント ID は常時表示。 */
@@ -164,8 +139,8 @@ export class MonitorView {
   });
 
   /**
-   * 投影の状態を 1 行で(silent 禁止): 未着・unavailable・計算できない理由・0 点・capped・incomplete を
-   * それぞれ文で出す。
+   * 投影の状態を 1 行で(silent 禁止): 未着・unavailable・計算できない理由・トラックが無い理由・
+   * incomplete・範囲外・線分の無い strip をそれぞれ文で出す。
    */
   readonly projectionStatus = computed(() => {
     const geometry = this.ws.stripGeometry();
@@ -175,27 +150,27 @@ export class MonitorView {
     if (isStripGeometryUnavailable(geometry)) {
       return `strip geometry unavailable: ${geometry.unavailable}`;
     }
-    const blocker = projectionBlocker(this.shownUvw(), geometry);
+    const blocker = trackBlocker(this.shownUvw(), geometry);
     if (blocker !== null) return `no projection: ${blocker}`;
     const result = this.projection();
     if (!result) return 'projection pending';
 
-    const threshold = this.threshold();
-    const parts: string[] = [
-      result.points === 0
-        ? `0 points (no U/V/W coincidence in any time bucket)`
-        : `${result.points} points (U/V/W coincidences)`,
-      `threshold ${threshold} ADC`,
-      `radius ${this.radiusMm} mm`,
-    ];
-    if (result.points === 0 && !result.capped) parts.push('try a lower threshold');
-    if (result.capped) {
+    const { track } = result;
+    const parts: string[] = [];
+    if (track.ok) {
+      const [u, v, w] = result.selected.map((hits) => hits.length);
       parts.push(
-        `CAPPED after ${MAX_CROSS_EVALUATIONS.toLocaleString('en-US')} crossPoint evaluations ` +
-          '(partial result) — raise the threshold',
+        `straight track: φ = ${track.phiDeg.toFixed(1)}°, ` +
+          `xy length ${track.xyLength.toFixed(1)} mm (2–98 % charge), ` +
+          `strip hits U/V/W = ${u}/${v}/${w}`,
       );
+    } else {
+      parts.push(`no track: ${track.reason}`);
     }
     if (result.outOfRange > 0) parts.push(`${result.outOfRange} points outside the plot range`);
+    if (result.unplaced > 0) {
+      parts.push(`strips with a hit but no segment in stripGeometry (skipped): ${result.unplaced}`);
+    }
     if (result.incomplete) parts.push('INCOMPLETE (fragments missing — charges are short)');
     return parts.join(' · ');
   });

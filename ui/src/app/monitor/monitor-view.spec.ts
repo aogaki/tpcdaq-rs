@@ -1,5 +1,6 @@
 /**
- * TODO/125 レーン B 項目 3/5 — monitor-view の Event display タブ(投影 3 枚・閾値欄・状態表示)。
+ * TODO/125 — monitor-view の Event display タブ(投影 3 枚・状態表示)。
+ * 改訂 2(レーン D): 投影は macros/analyzeUVW.C + makeTracks.C の移植(直線 1 本)、閾値欄は撤去。
  *
  * WS は最小の fake(シグナルだけ)。JsrootPanel は描画せず名前と受け取ったメッセージだけ見える
  * スタブに差し替える(jsroot の描画は別のテストの担当)。
@@ -16,11 +17,19 @@ import type { StripGeometryMessage, StripGeometryUnavailable } from '../ws/json'
 import type { HistoMessage } from '../ws/ws-client';
 import type { UvwMessage } from '../ws/wire';
 import { WsClientService } from '../ws/ws-client';
-import { THRESHOLD_STORAGE_KEY } from './event-display-settings';
 import { JsrootPanel } from './jsroot-panel';
 import { MonitorView } from './monitor-view';
 import type { PanelMessage, PanelSpec } from './root-histo';
-import { HEX, addTrack, emptyUvw, geometryOf, memoryStorage, setHit } from './xy-test-fixtures';
+import { type TrackOk, trackEvent } from './track-fit';
+import {
+  MINI_ANGLES,
+  type Track,
+  addHalo,
+  addTrack,
+  emptyEvent,
+  layoutOf,
+  syntheticGeometry,
+} from './track-test-fixtures';
 
 @Component({
   selector: 'app-jsroot-panel',
@@ -51,12 +60,15 @@ function fakeWs(): FakeWs {
   };
 }
 
-const GEOMETRY = geometryOf(HEX);
+const LAYOUT = layoutOf(MINI_ANGLES);
+const GEOMETRY = syntheticGeometry(LAYOUT);
+/** 第 1 象限の非対称な直線: (10, 4) mm → (90, 26) mm、bucket 150 → 250(φ = 15.38°、xy 83 mm)。 */
+const TRACK: Track = { a: [10, 4, 150], b: [90, 26, 250] };
 
-/** 第 1 象限の直線トラックを持つ 1 イベント。 */
-function trackEvent(eventNumber = 1, incomplete = false): UvwMessage[] {
-  const uvw = emptyUvw(HEX, 300, eventNumber, incomplete);
-  addTrack(uvw, GEOMETRY, HEX, (b) => [20 + 0.4 * (b - 100), 5 + 0.25 * (b - 100)], 100, 200);
+/** 直線トラックを 1 本持つ 1 イベント。 */
+function lineEvent(eventNumber = 1, incomplete = false): UvwMessage[] {
+  const uvw = emptyEvent(LAYOUT, 512, eventNumber, incomplete);
+  addTrack(uvw, LAYOUT, TRACK);
   return uvw;
 }
 
@@ -107,25 +119,11 @@ describe('MonitorView — Event display の投影', () => {
   const root = (): HTMLElement => fixture.nativeElement as HTMLElement;
   const status = (): string =>
     root().querySelector('[data-testid="projection-status"]')?.textContent?.trim() ?? '';
-  const thresholdInput = (): HTMLInputElement =>
-    root().querySelector<HTMLInputElement>('.threshold input')!;
   const panelNames = (): string[] =>
     [...root().querySelectorAll<HTMLElement>('.stub')].map((el) => el.dataset['name'] ?? '');
 
-  function commitThreshold(value: string): void {
-    const input = thresholdInput();
-    input.value = value;
-    input.dispatchEvent(new Event('change'));
-  }
-
-  let storage: Storage;
-  beforeEach(() => {
-    storage = memoryStorage();
-    vi.stubGlobal('localStorage', storage);
-  });
   afterEach(() => {
     vi.restoreAllMocks();
-    vi.unstubAllGlobals();
   });
 
   it('monitor タブは 0x03 を購読しない(setWaveforms を呼ばない)・AsAd パネルが無い', async () => {
@@ -150,27 +148,28 @@ describe('MonitorView — Event display の投影', () => {
     ]);
   });
 
-  it('ヒント文: 表示専用・三面一致・Z は time bucket', async () => {
+  it('ヒント文: 表示専用・macros と同じアルゴリズム・Z は time bucket・頭尻は決めない', async () => {
     build();
     await openEventTab();
-    const text = root().textContent ?? '';
-    expect(text).toContain('Display only');
-    expect(text).toContain('MatchCrossPoint');
-    expect(text).toContain('radius 2 mm');
-    expect(text).toContain('time bucket');
+    const text = (root().textContent ?? '').replace(/\s+/g, ' ');
+    expect(text).toContain('Display only.');
+    expect(text).toContain('Same algorithm as macros/analyzeUVW.C + makeTracks.C');
+    expect(text).toContain('one hit per strip (peak ±5 cells, halo cut q ≥ 2000 ADC)');
+    expect(text).toContain('one straight track per event');
+    expect(text).toContain('Z is the time bucket');
+    expect(text).toContain('Head/tail not determined');
   });
 
-  it('閾値欄の既定値は 50(ラベルは hit threshold (ADC above baseline))', async () => {
+  it('閾値欄は無い(定数は macros と同じに固定)', async () => {
     build();
     await openEventTab();
-    expect(root().textContent).toContain('hit threshold (ADC above baseline)');
-    expect(thresholdInput().value).toBe('50');
-    expect(fixture.componentInstance.threshold()).toBe(50);
+    expect(root().querySelector('input')).toBeNull();
+    expect(root().textContent).not.toContain('hit threshold');
   });
 
   it('stripGeometry より先に 0x02 が届いても壊れず「未着」を出す', async () => {
     build();
-    ws.uvwByPlane.set(trackEvent());
+    ws.uvwByPlane.set(lineEvent());
     await openEventTab();
     await tick();
     expect(status()).toContain('strip geometry not received yet');
@@ -178,38 +177,59 @@ describe('MonitorView — Event display の投影', () => {
     // あとからジオメトリが届けば計算される
     ws.stripGeometry.set(GEOMETRY);
     await settle();
-    expect(status()).toMatch(/^\d+ points \(U\/V\/W coincidences\)/);
+    expect(status()).toMatch(/^straight track: /);
     expect(fixture.componentInstance.projectionRuns()).toBe(1);
   });
 
   it('unavailable は理由をそのまま出す', async () => {
     build();
     ws.stripGeometry.set({ type: 'stripGeometry', unavailable: 'no ANGLES header in the .dat' });
-    ws.uvwByPlane.set(trackEvent());
+    ws.uvwByPlane.set(lineEvent());
     await openEventTab();
     await tick();
     expect(status()).toBe('strip geometry unavailable: no ANGLES header in the .dat');
   });
 
-  it('通常: 「N points (U/V/W coincidences) · threshold T ADC · radius 2 mm」と 3 枚のメッセージ', async () => {
+  it('ok: 「straight track: φ = …°, xy length … mm (2–98 % charge), strip hits U/V/W = a/b/c」と 3 枚', async () => {
     build();
     ws.stripGeometry.set(GEOMETRY);
-    ws.uvwByPlane.set(trackEvent());
+    ws.uvwByPlane.set(lineEvent());
     await openEventTab();
     await tick();
-    expect(status()).toMatch(
-      /^[1-9]\d* points \(U\/V\/W coincidences\) · threshold 50 ADC · radius 2 mm$/,
+    const expected = trackEvent(lineEvent(), GEOMETRY)!;
+    const track = expected.track as TrackOk;
+    const [u, v, w] = expected.selected.map((hits) => hits.length);
+    expect(status()).toBe(
+      `straight track: φ = ${track.phiDeg.toFixed(1)}°, ` +
+        `xy length ${track.xyLength.toFixed(1)} mm (2–98 % charge), strip hits U/V/W = ${u}/${v}/${w}`,
     );
+    // 真の直線: φ = atan2(22, 80) = 15.4°、xy の長さ √(80² + 22²) = 83.0 mm(2–98 % で 96 % ≈ 79.7)
+    expect(status()).toMatch(/^straight track: φ = 15\.\d°, xy length [78]\d\.\d mm/);
     const kinds = [...root().querySelectorAll<HTMLElement>('.stub')]
       .filter((el) => el.dataset['name']?.startsWith('Projection'))
       .map((el) => el.dataset['kind']);
     expect(kinds).toEqual(['projection', 'projection', 'projection']);
   });
 
-  it('同じ (event, 閾値) なら再計算しない。新しい 0x02 は次の刻みで反映される', async () => {
+  it('トラックが無いときは理由を文で出す(halo だけのイベント)', async () => {
     build();
     ws.stripGeometry.set(GEOMETRY);
-    ws.uvwByPlane.set(trackEvent(1));
+    const uvw = emptyEvent(LAYOUT, 512, 3);
+    addHalo(uvw, 200);
+    ws.uvwByPlane.set(uvw);
+    await openEventTab();
+    await tick();
+    expect(status()).toBe(
+      'no track: U has 0 strip hits after the halo cut (needs 4); ' +
+        'V has 0 strip hits after the halo cut (needs 4); ' +
+        'W has 0 strip hits after the halo cut (needs 4)',
+    );
+  });
+
+  it('同じイベントなら再計算しない。新しい 0x02 は次の刻みで反映される', async () => {
+    build();
+    ws.stripGeometry.set(GEOMETRY);
+    ws.uvwByPlane.set(lineEvent(1));
     await openEventTab();
     await tick();
     const runs = fixture.componentInstance.projectionRuns();
@@ -219,7 +239,7 @@ describe('MonitorView — Event display の投影', () => {
     await settle();
     expect(fixture.componentInstance.projectionRuns()).toBe(runs);
 
-    ws.uvwByPlane.set(trackEvent(2)); // 新イベントは刻みを待つ(画面のラベルと絵を揃える)
+    ws.uvwByPlane.set(lineEvent(2)); // 新イベントは刻みを待つ(画面のラベルと絵を揃える)
     await settle();
     expect(fixture.componentInstance.projectionRuns()).toBe(runs);
     expect(root().textContent).toContain('event #1');
@@ -231,118 +251,59 @@ describe('MonitorView — Event display の投影', () => {
   it('タブが閉じている(Histograms)間は計算しない。開くと 1 回計算する', async () => {
     build();
     ws.stripGeometry.set(GEOMETRY);
-    ws.uvwByPlane.set(trackEvent(1));
+    ws.uvwByPlane.set(lineEvent(1));
     await tick();
-    ws.uvwByPlane.set(trackEvent(2));
+    ws.uvwByPlane.set(lineEvent(2));
     await tick();
     expect(fixture.componentInstance.projectionRuns()).toBe(0);
     await openEventTab();
     expect(fixture.componentInstance.projectionRuns()).toBe(1);
   });
 
-  it('閾値を変えると再計算し、localStorage に記憶する。不正値は受け付けず欄を戻す', async () => {
-    build();
-    ws.stripGeometry.set(GEOMETRY);
-    ws.uvwByPlane.set(trackEvent());
-    await openEventTab();
-    await tick();
-    const runs = fixture.componentInstance.projectionRuns();
-
-    commitThreshold('120');
-    await settle();
-    expect(fixture.componentInstance.threshold()).toBe(120);
-    expect(storage.getItem(THRESHOLD_STORAGE_KEY)).toBe('120');
-    expect(fixture.componentInstance.projectionRuns()).toBe(runs + 1);
-    expect(status()).toContain('threshold 120 ADC');
-
-    commitThreshold('-3');
-    await settle();
-    expect(fixture.componentInstance.threshold()).toBe(120);
-    expect(thresholdInput().value).toBe('120');
-    commitThreshold('');
-    await settle();
-    expect(thresholdInput().value).toBe('120');
-    expect(fixture.componentInstance.projectionRuns()).toBe(runs + 1);
-  });
-
-  it('保存済みの閾値で起動する(次のセッションで復元)', async () => {
-    storage.setItem(THRESHOLD_STORAGE_KEY, '230');
-    build();
-    await openEventTab();
-    expect(thresholdInput().value).toBe('230');
-  });
-
-  it('localStorage が throw しても既定値で動き、閾値欄も使える', async () => {
-    vi.spyOn(storage, 'getItem').mockImplementation(() => {
-      throw new Error('SecurityError');
-    });
-    vi.spyOn(storage, 'setItem').mockImplementation(() => {
-      throw new Error('QuotaExceededError');
-    });
-    build();
-    ws.stripGeometry.set(GEOMETRY);
-    ws.uvwByPlane.set(trackEvent());
-    await openEventTab();
-    await tick();
-    expect(thresholdInput().value).toBe('50');
-    expect(status()).toContain('threshold 50 ADC');
-    commitThreshold('90');
-    await settle();
-    expect(status()).toContain('threshold 90 ADC');
-  });
-
-  it('0 点: 文で出す(閾値を下げる案内つき)', async () => {
-    build();
-    ws.stripGeometry.set(GEOMETRY);
-    const uvw = emptyUvw(HEX, 300, 3);
-    for (const message of uvw) setHit(message, 101, 120, 130); // baseline 100 + 30 < 閾値 50
-    ws.uvwByPlane.set(uvw);
-    await openEventTab();
-    await tick();
-    expect(status()).toContain('0 points');
-    expect(status()).toContain('threshold 50 ADC');
-    expect(status()).toContain('try a lower threshold');
-  });
-
   it('INCOMPLETE のイベントは投影の状態表示にも INCOMPLETE を出す', async () => {
     build();
     ws.stripGeometry.set(GEOMETRY);
-    ws.uvwByPlane.set(trackEvent(1, true));
+    ws.uvwByPlane.set(lineEvent(1, true));
     await openEventTab();
     await tick();
-    expect(status()).toContain('INCOMPLETE');
-    expect(status()).toMatch(/points \(U\/V\/W coincidences\)/);
+    expect(status()).toMatch(/^straight track: /);
+    expect(status()).toContain('INCOMPLETE (fragments missing — charges are short)');
+  });
+
+  it('stripGeometry に線分の無い strip のヒットは数を文で出す(silent にしない)', async () => {
+    build();
+    // V strip 90(s = 33 mm)はトラックが横切る。その線分だけ抜いたジオメトリ。
+    const trimmed: StripGeometryMessage = {
+      ...GEOMETRY,
+      planes: {
+        ...GEOMETRY.planes,
+        V: {
+          ...GEOMETRY.planes.V,
+          segments: GEOMETRY.planes.V.segments.filter(([strip]) => strip !== 90),
+        },
+      },
+    };
+    ws.stripGeometry.set(trimmed);
+    ws.uvwByPlane.set(lineEvent());
+    await openEventTab();
+    await tick();
+    expect(status()).toMatch(/^straight track: /);
+    expect(status()).toContain('strips with a hit but no segment in stripGeometry (skipped): 1');
   });
 
   it('3 面が揃っていない / 別イベント → 計算しない理由を文で出す', async () => {
     build();
     ws.stripGeometry.set(GEOMETRY);
-    const uvw = trackEvent(1);
+    const uvw = lineEvent(1);
     ws.uvwByPlane.set([uvw[0], uvw[1], null]);
     await openEventTab();
     await tick();
-    expect(status()).toContain('no projection: waiting for W');
+    expect(status()).toBe('no projection: waiting for W (0x02)');
     expect(fixture.componentInstance.projectionRuns()).toBe(0);
 
-    const other = trackEvent(2);
+    const other = lineEvent(2);
     ws.uvwByPlane.set([uvw[0], uvw[1], other[2]]);
     await tick();
     expect(status()).toContain('different events');
-  });
-
-  it('評価回数が上限(2×10⁶)を超えると CAPPED を文で出す(「閾値を上げて」)', async () => {
-    build();
-    ws.stripGeometry.set(GEOMETRY);
-    const uvw = emptyUvw(HEX, 100, 4);
-    for (const message of uvw) {
-      for (let strip = 1; strip <= HEX.n; strip++) {
-        for (let b = 25; b < 100; b++) setHit(message, strip, b, 1000);
-      }
-    }
-    ws.uvwByPlane.set(uvw);
-    await openEventTab();
-    await tick();
-    expect(status()).toContain('CAPPED after 2,000,000 crossPoint evaluations');
-    expect(status()).toContain('raise the threshold');
   });
 });
