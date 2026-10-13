@@ -138,15 +138,16 @@ class EventBuilder {
 
   // フラグメントを 1 個食わせる。戻り値が入っていれば遅延到着(呼び手が書き出す)。
   //
-  // **取得の再開(TODO/110)**: event_idx==0 のフレームが、同じ run・同じ世代で emit 済みの
-  // イベントがあり(2 枚目の板の event 0 が pending の間は誤検出しない)、より大きい idx
+  // **取得の再開(TODO/110)**: event_idx==0 のフレームが、同じ run・同じ世代で complete または
+  // emit 済みのイベントがあり(2 枚目の板の event 0 が未着の間は誤検出しない。poll 前の
+  // 同一バッチ内でも検出できるよう、emit だけでなく complete でも立てる)、より大きい idx
   // (> kRestartMinIdx)を見た後に、その世代で見た最小 event_time より小さい時刻で来たら、
   // ECC 不在で走り続けた zCoBo の古いフレームの後に新しい取得が始まったと見なす。
   // late 判定より前に見る。起きたら旧世代の pending を押し出し(take_restart_flush() で
   // 受け取る)、世代を +1 して高水位をリセットする。
   std::optional<LateFragment> feed(OwnedFragment f, uint64_t now_ms) {
     RunState& rs = runs_[f.run_number];
-    if (f.event_idx == 0 && rs.have_emitted && rs.max_seen > kRestartMinIdx && rs.have_time &&
+    if (f.event_idx == 0 && (rs.have_emitted || rs.have_complete) && rs.max_seen > kRestartMinIdx && rs.have_time &&
         f.event_time < rs.time_floor) {
       restart(f.run_number, rs);
     }
@@ -170,6 +171,7 @@ class EventBuilder {
       ++duplicate_fragments_;  // 同じソースから 2 回 = 片肺での早出しを防ぐ
     }
     ev.fragments.push_back(std::move(f));
+    if (is_complete(ev)) rs.have_complete = true;
     return std::nullopt;
   }
 
@@ -288,6 +290,7 @@ class EventBuilder {
   // run 毎の状態。世代(epoch)内で emit は昇順。
   struct RunState {
     bool have_emitted = false;
+    bool have_complete = false;     // 現世代に期待フラグメントが揃ったイベントがある
     uint32_t emitted_upto = 0;      // 現世代の emit 済み最大 event_idx
     uint32_t max_seen = 0;          // 現世代で見た最大 event_idx(pending 含む)
     bool have_time = false;
@@ -314,6 +317,7 @@ class EventBuilder {
     rs.epoch_ids.release();
     rs.epoch_count = 0;
     rs.have_emitted = false;
+    rs.have_complete = false;
     rs.emitted_upto = 0;
     rs.max_seen = 0;
     rs.have_time = false;

@@ -540,24 +540,25 @@ static void test_an_event_idx_zero_with_an_earlier_clock_after_emission_starts_a
 
 static void test_a_restart_flushes_the_pending_events_of_the_old_epoch() {
   EventBuilder eb({{0, 0}, {0, 1}}, 1000);
-  // 旧世代: idx 5..13 は両 asad 揃い(poll で emit 済み)、idx 14 は asad 0 だけ(pending)。
+  // 旧世代: idx 5..13 は両 asad 揃い。poll しない = 全部 pending。
   for (uint32_t i = 5; i <= 13; ++i) {
     eb.feed(frag_at(7, i, 1000000 + i * 10ull, 0), 0);
     eb.feed(frag_at(7, i, 1000000 + i * 10ull, 1), 0);
   }
   eb.feed(frag_at(7, 14, 1000140, 0), 0);
-  CHECK_EQ(eb.poll(0).size(), 9);
-  CHECK_EQ(eb.pending(), 1);
+  CHECK_EQ(eb.pending(), 10);
 
   eb.feed(frag_at(7, 0, 50, 0), 0);  // restart
   CHECK_EQ(eb.acquisition_restarts(), 1);
   CHECK_EQ(eb.pending(), 1);  // 新世代の idx 0 だけ残る
 
   const std::vector<BuiltEvent> flushed = eb.take_restart_flush();
-  CHECK_EQ(flushed.size(), 1);  // 旧世代の pending(idx 14)を捨てずに
-  CHECK(flushed.size() == 1 && flushed[0].event_idx == 14);
-  CHECK(flushed.size() == 1 && flushed[0].incomplete);  // 片肺のまま出る
-  CHECK(flushed.size() == 1 && flushed[0].epoch == 0);
+  CHECK_EQ(flushed.size(), 10);  // 旧世代 5..14 を昇順に、捨てずに
+  CHECK(flushed.size() == 10 && flushed.front().event_idx == 5);
+  CHECK(flushed.size() == 10 && flushed.back().event_idx == 14);
+  CHECK(flushed.size() == 10 && flushed.back().incomplete);  // 片肺のまま出る
+  CHECK(flushed.size() == 10 && !flushed[0].incomplete);
+  CHECK(flushed.size() == 10 && flushed[0].epoch == 0 && flushed[9].epoch == 0);
   CHECK_EQ(eb.events_before_restart(), 10);
   CHECK_EQ(eb.events_complete(), 9);
   CHECK_EQ(eb.events_incomplete(), 1);
@@ -636,11 +637,13 @@ static void test_synthetic_stale_head_acceptance() {
   std::set<uint32_t> new_epoch_ids;
   uint64_t old_epoch_events = 0;
   for (uint32_t i = 2038; i <= 2056; ++i) eb.feed(frag_at(29, i, 406000000ull + i * 10ull), 0);
-  emitted += eb.poll(0).size();  // 旧世代は emit 済み(restart は emit 済みを条件にする)
-  old_epoch_events = emitted;
   for (uint32_t i = 0; i <= 2060; ++i) {
     eb.feed(frag_at(29, i, 16000ull + i * 10ull), 0);
-    CHECK_EQ(eb.take_restart_flush().size(), 0);  // 旧世代は emit 済みで pending 無し
+    for (const BuiltEvent& ev : eb.take_restart_flush()) {
+      ++emitted;
+      ++old_epoch_events;
+      CHECK_EQ(ev.epoch, 0);
+    }
   }
   for (const BuiltEvent& ev : eb.poll(0)) {  // タイムアウト前でも complete は出る
     ++emitted;
@@ -702,6 +705,45 @@ static void test_emitted_ids_are_kept_as_ranges_and_released_on_close() {
   CHECK(eb.feed(frag_at(7, 5, 1000050), 0).has_value());
 }
 
+// 古い頭と新しい idx 0.. が**同じバッチ**(poll の前)に入る形。本番で一番ありそうな形で、
+// 旧世代はまだ 1 件も emit されていないが、complete にはなっている。
+static void test_a_stale_head_and_the_new_event_zero_in_the_same_batch_is_a_restart() {
+  EventBuilder eb({{0, 0}}, 1000);
+  for (uint32_t i = 2038; i <= 2056; ++i) eb.feed(frag_at(29, i, 406000000ull + i * 10ull), 0);
+  for (uint32_t i = 0; i <= 3; ++i) eb.feed(frag_at(29, i, 16000ull + i * 10ull), 0);  // poll 無し
+  CHECK_EQ(eb.acquisition_restarts(), 1);
+  CHECK_EQ(eb.late_fragments(), 0);
+  const std::vector<BuiltEvent> old_epoch = eb.take_restart_flush();
+  CHECK_EQ(old_epoch.size(), 19);  // 古い頭が先に出る
+  CHECK(old_epoch.size() == 19 && old_epoch.front().event_idx == 2038 &&
+        old_epoch.back().event_idx == 2056 && old_epoch.back().epoch == 0);
+  const std::vector<BuiltEvent> fresh = eb.poll(0);
+  CHECK_EQ(fresh.size(), 4);
+  CHECK(fresh.size() == 4 && fresh[0].event_idx == 0 && fresh[3].event_idx == 3 &&
+        fresh[0].epoch == 1);
+  CHECK_EQ(eb.late_fragments(), 0);
+}
+
+// 4 AsAd 版: 古い頭が 4 AsAd とも complete。新しい取得も 4 AsAd。
+static void test_a_stale_head_with_four_asads_in_the_same_batch_is_a_restart() {
+  EventBuilder eb({{0, 0}, {0, 1}, {1, 0}, {1, 1}}, 1000);
+  auto feed4 = [&](uint32_t idx, uint64_t base) {
+    for (uint8_t k = 0; k < 4; ++k) {
+      OwnedFragment f = frag(29, idx, k / 2, k % 2);
+      f.event_time = base + k;
+      eb.feed(std::move(f), 0);
+    }
+  };
+  for (uint32_t i = 2038; i <= 2056; ++i) feed4(i, 406000000ull + i * 10ull);
+  for (uint32_t i = 0; i <= 2; ++i) feed4(i, 16000ull + i * 10ull);
+  CHECK_EQ(eb.acquisition_restarts(), 1);
+  const std::vector<BuiltEvent> old_epoch = eb.take_restart_flush();
+  CHECK_EQ(old_epoch.size(), 19);
+  CHECK(old_epoch.size() == 19 && !old_epoch[0].incomplete && !old_epoch[18].incomplete);
+  CHECK_EQ(eb.poll(0).size(), 3);
+  CHECK_EQ(eb.late_fragments(), 0);
+}
+
 int main() {
   test_owned_fragment_deep_copies_the_view();
 
@@ -734,6 +776,8 @@ int main() {
   test_synthetic_stale_head_acceptance();
   test_a_late_event_zero_fragment_from_another_board_with_an_earlier_clock_is_not_a_restart();
   test_emitted_ids_are_kept_as_ranges_and_released_on_close();
+  test_a_stale_head_and_the_new_event_zero_in_the_same_batch_is_a_restart();
+  test_a_stale_head_with_four_asads_in_the_same_batch_is_a_restart();
 
   test_strict_seqcheck_accepts_zero_as_the_first();
   test_strict_seqcheck_treats_a_nonzero_first_as_a_gap();
