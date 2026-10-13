@@ -57,9 +57,13 @@
           </div>
           <div class="projection-bar">
             <span class="status" data-testid="projection-status">{{ projectionStatus() }}</span>
+            @if (trackMismatch()) {
+              <span class="flag bad" data-testid="track-mismatch">≠ UVW</span>
+            }
           </div>
           <p class="hint">
-            <strong>Display only.</strong> Same algorithm as <code>macros/analyzeUVW.C</code> +
+            <strong>Display only.</strong> The projection is computed by monitor (<code>src/reco</code>,
+            sent as <code>0x04 Track</code>) — same algorithm as <code>macros/analyzeUVW.C</code> +
             <code>makeTracks.C</code>: one hit per strip (peak ±5 cells, halo cut q ≥ 2000 ADC), one
             straight track per event; the points are the strip hits placed on that track. Z is the
             time bucket, not mm. Head/tail not determined.

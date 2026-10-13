@@ -26,6 +26,7 @@ import { STATUS_STALE_MS, type LinkState, reconnectDelayMs, statusHealth } from 
 import {
   type Histo1dMessage,
   type Histo2dMessage,
+  type TrackMessage,
   type UvwMessage,
   type WaveformsMessage,
   decodeBinary,
@@ -54,6 +55,7 @@ export interface WsCounters {
   readonly run: number;
   readonly uvw: number;
   readonly waveforms: number;
+  readonly track: number;
   readonly histo1d: number;
   readonly histo2d: number;
   /** バイナリのデコード失敗(magic / version / 長さ)。 */
@@ -75,6 +77,7 @@ const ZERO_COUNTERS: WsCounters = {
   run: 0,
   uvw: 0,
   waveforms: 0,
+  track: 0,
   histo1d: 0,
   histo2d: 0,
   decodeErrors: 0,
@@ -107,6 +110,8 @@ export class WsClientService {
 
   /** 面(0=U,1=V,2=W)毎の最新 Uvw。028 の モニタビューが読む。 */
   readonly uvwByPlane = signal<readonly (UvwMessage | null)[]>([null, null, null]);
+  /** 最新の `0x04 Track`(live ストリーム、0x02 と同じ流れ。TODO/127)。未着は `null`。 */
+  readonly track = signal<TrackMessage | null>(null);
   /** 最新の波形(購読 ON のときだけ届く)。 */
   readonly waveforms = signal<WaveformsMessage | null>(null);
   /** SPEC §5.2 の id をキーにした最新ヒスト。 */
@@ -255,6 +260,11 @@ export class WsClientService {
         this.bump({ uvw: 1 });
         return;
       }
+      case 'track':
+        this.track.set(message);
+        this.bump({ track: 1, unknownJsonKeys: message.unknownKeys.length });
+        this.noteUnknownKeys('track', message.unknownKeys);
+        return;
       case 'waveforms':
         this.waveforms.set(message);
         this.bump({ waveforms: 1 });

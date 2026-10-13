@@ -9,6 +9,7 @@ import {
   FLAG_INCOMPLETE,
   MSG_HISTO1D,
   MSG_HISTO2D,
+  MSG_TRACK,
   MSG_UVW,
   MSG_WAVEFORMS,
   WS_HEADER_LEN,
@@ -258,5 +259,116 @@ describe('異常入力は例外を投げずエラー値を返す(silent 禁止 =
     const message = decodeBinary(short);
     if (!isDecodeError(message)) throw new Error('expected an error value');
     expect(message.reason).toBe('truncated');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// 0x04 Track(TODO/127): 13 B ヘッダ + UTF-8 JSON
+// ---------------------------------------------------------------------------------------------
+
+/** TODO/127 発注書の本文の例(数値は例)。 */
+const TRACK_BODY = {
+  ok: true,
+  reason: '',
+  hits: [72, 40, 34],
+  unplaced: 0,
+  tracks: [
+    {
+      phiDeg: 2.7,
+      dir: [0.998, 0.047, -0.031],
+      start: [-53.1, -7.9, 26.4],
+      end: [53.0, -3.0, 23.1],
+      startF: [-53.5, -8.0, 26.4],
+      endF: [53.6, -3.0, 23.0],
+      length: 106.2,
+      lengthF: 107.2,
+      xyLength: 106.1,
+      charge: 412345.0,
+    },
+  ],
+  points: [
+    [-52.9, -7.9, 152.0, 5480.0, 0, 0],
+    [-51.4, -7.8, 151.6, 5512.0, 2, 0],
+  ],
+};
+
+function trackFrame(body: string | Uint8Array, flags = 0): ArrayBuffer {
+  const payload = typeof body === 'string' ? new TextEncoder().encode(body) : body;
+  const f = frame(WS_HEADER_LEN + payload.length, MSG_TRACK, flags, 7, 99);
+  f.bytes.set(payload, WS_HEADER_LEN);
+  return f.buffer;
+}
+
+describe('0x04 Track', () => {
+  it('ヘッダ + JSON 本文が復元される(f64 のまま、点は [x,y,t,q,view,track])', () => {
+    const message = decodeBinary(trackFrame(JSON.stringify(TRACK_BODY), FLAG_INCOMPLETE));
+    if (message.kind !== 'track') throw new Error(`expected track, got ${message.kind}`);
+    expect(message.header.msgType).toBe(MSG_TRACK);
+    expect(message.header.runNumber).toBe(7);
+    expect(message.header.eventNumber).toBe(99);
+    expect(message.header.incomplete).toBe(true);
+    expect(message.ok).toBe(true);
+    expect(message.reason).toBe('');
+    expect(message.hits).toEqual([72, 40, 34]);
+    expect(message.unplaced).toBe(0);
+    expect(message.tracks).toHaveLength(1);
+    expect(message.tracks[0].phiDeg).toBe(2.7);
+    expect(message.tracks[0].end).toEqual([53.0, -3.0, 23.1]);
+    expect(message.tracks[0].xyLength).toBe(106.1);
+    expect(message.points).toEqual(TRACK_BODY.points);
+    expect(message.unknownKeys).toEqual([]);
+  });
+
+  it('直線が引けないとき(ok=false)も復元される', () => {
+    const body = {
+      ok: false,
+      reason: 'W has 2 strip hits after the halo cut (needs 4)',
+      hits: [10, 9, 2],
+      unplaced: 0,
+      tracks: [],
+      points: [],
+    };
+    const message = decodeBinary(trackFrame(JSON.stringify(body)));
+    if (message.kind !== 'track') throw new Error('expected track');
+    expect(message.ok).toBe(false);
+    expect(message.reason).toBe('W has 2 strip hits after the halo cut (needs 4)');
+    expect(message.tracks).toEqual([]);
+    expect(message.points).toEqual([]);
+  });
+
+  it('未知キーは許し、名前だけ unknownKeys に残す(meta と同じ)', () => {
+    const message = decodeBinary(trackFrame(JSON.stringify({ ...TRACK_BODY, vertex: [1, 2] })));
+    if (message.kind !== 'track') throw new Error('expected track');
+    expect(message.unknownKeys).toEqual(['vertex']);
+    expect(message.ok).toBe(true);
+  });
+
+  it('壊れた JSON → bad-json(例外は投げない)', () => {
+    const message = decodeBinary(trackFrame('{"ok":tru'));
+    if (!isDecodeError(message)) throw new Error('expected an error value');
+    expect(message.reason).toBe('bad-json');
+  });
+
+  it('UTF-8 として不正な本文・空の本文 → bad-json', () => {
+    for (const body of [new Uint8Array([0xff, 0xfe, 0x7b]), new Uint8Array(0)]) {
+      const message = decodeBinary(trackFrame(body));
+      if (!isDecodeError(message)) throw new Error('expected an error value');
+      expect(message.reason).toBe('bad-json');
+    }
+  });
+
+  it('型違い(ok が文字列 / points の要素が 5 個 / hits が 2 個)→ bad-json', () => {
+    const bad = [
+      { ...TRACK_BODY, ok: 'yes' },
+      { ...TRACK_BODY, points: [[1, 2, 3, 4, 0]] },
+      { ...TRACK_BODY, hits: [1, 2] },
+      { ...TRACK_BODY, tracks: [{ phiDeg: 1 }] },
+      [1, 2, 3],
+    ];
+    for (const body of bad) {
+      const message = decodeBinary(trackFrame(JSON.stringify(body)));
+      if (!isDecodeError(message)) throw new Error(`expected an error for ${JSON.stringify(body)}`);
+      expect(message.reason).toBe('bad-json');
+    }
   });
 });
