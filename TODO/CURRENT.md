@@ -34,7 +34,8 @@
 
 | # | 中身 | 状態 | 次の一手 |
 |---|---|---|---|
-| [133](133_restart_detection_multi_asad.md) | 取得の再開の判定の端(4 AsAd で古い頭が全部 incomplete、多 CoBo のカウンタ) | READY(Warsaw ELITPC 向け、mini では起きない) | 一次資料で AsAd のリングを流す順を確かめ → Fable 設計 |
+| [134](134_restart_time_gap_threshold.md) | 再開判定に時刻後退幅の閾値(偽陽性で新イベントを捨てる穴) | 実装中(Sonnet、2026-10-14) | マージ → SPEC §2.3 / §6.3 に 1 行 |
+| [133](133_restart_detection_multi_asad.md) | 4 AsAd では再開検出後に来る他 AsAd の古いフレームで原事故が再発しうる(送出順が AsAd 毎なら標準経路)、多 CoBo のカウンタ | **Warsaw 前の必須**(mini では起きない) | 一次資料で AsAd のリングを流す順を確かめ → Fable 設計(時刻で世代を分ける) |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
 
@@ -42,7 +43,7 @@
 
 元は 080(プログラム票、archive)と 069 Phase 2.5。
 
-- **run 条件 → v_drift、窓の深さ、窓端クリップ率**(080 B-4)— 25 MHz に戻ったので急ぎではない:
+- **run 条件 → v_drift、窓の深さ、窓端クリップ率**(080 B-4)— 25 MHz / delay 1500 でも**トリガ前後の配分とクリップ率は未測定**。急ぎではないが、次の線源 run の前に:
   - 圧力と HV から `v_drift = 0.7233 × E/p` を出し、run_start に書く。
   - f_sample と triggerDelay から、窓の深さ [mm] とトリガ前後の配分を出す。
   - monitor に窓端クリップ率のカウンタを出す。
@@ -62,7 +63,7 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 - ~~SPEC v1.46~~ **確定(2026-10-13、スポット Fable、`61d88d4`)**:
   - 対象: 110(取得の再開)、123(`/api/last-event`)、092(EOS 後の Heartbeat なし)、132(run/start の `params_id` / `notes`)、069 の出口(§13-2/3/6/8 を実測済みに)。
   - Fable が文案から直した点: HMP2020 は HO720 = FTDI VCP(ttyUSB0)、§6.3 の判定は実装の 4 条件、§10.5 の 404 の条件 など。
-- [133](133_restart_detection_multi_asad.md): 取得の再開の判定。4 AsAd で古い頭が全部 incomplete のときの見落とし、多 CoBo での `frames_before_restart`(v1.46 確定時に Fable が挙げた疑義。mini では起きない)。
+- [133](133_restart_detection_multi_asad.md): 取得の再開の判定(4 AsAd)。**2026-10-14 Fable レビューで格上げ**: 送出が AsAd 毎のリング順なら、再開検出後に来る他 AsAd の古いフレーム(idx 2057 など)が新 epoch の pending に入り、タイムアウト emit で高水位が古い値になって新しい取得が late で落ちる = 原事故の再発。idx でなく時刻で世代を分ける設計が要る。一次資料で送出順の確認から。
 
 ## 保留・確認事項
 

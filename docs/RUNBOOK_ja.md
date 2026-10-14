@@ -82,7 +82,17 @@
 - [ ] Parameters の `<id>` と exceptions N を確認(status バー)、Slow control の `slow` が `—` でない
 - [ ] 停止は逆順、logbook にコメント
 
+## 7.1 ソフトの反映チェックリスト(ELITPC、2026-10-14 — 110 の反映ミス 2 件から)
+- [ ] run は Idle(`curl -s http://127.0.0.1:8080/api/status | grep phase`)。走っている run はユーザーの了解を取ってから止める
+- [ ] コード: Mac の main を `git bundle` → ELITPC `~/tpcdaq-rs` で `git merge --ff-only` → `cargo build --release`
+- [ ] root_sink: `make TPCDAQ_TPCRECO_DIR=/opt/tpcdaq/assets/TPCReco-HIGS2026_online -j`(reference/ はリポの外)。`make … -j test` も通す
+- [ ] UI: `ui/dist/ui/browser` の**中身**を `/opt/tpcdaq/ui` へ(旧版は `ui.prevNNN` に退避)。dist/ui ごと置くと `/` が 404
+- [ ] 停止・起動は **`~/tpcdaq-rs/tools/deploy/daq_{down,up}.sh`**(古い写しを使わない。slowctl も扱う版)
+- [ ] 反映後: `/api/status` が 200 **と** `/` が 200(`curl -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/`)、`/srv/tpcdaq/logs/*.log` に WARN / ERROR なし、`pgrep -a -f target/release` に 8 プロセス + root_sink
+- [ ] 試験で run を壊したら(stop せずに落とす等)、ログブックに comment を書き、`run_inprogress_*.root` の扱い(残す / 消す)を決める
+
 ## 8. 変更履歴
 - v0.1(2026-09-17、Fable): 骨子。`[TODO]` は現地で埋める。069 0-3 のリハーサル記録を追記予定。
 - v0.2(2026-09-23、Fable): §3.1 Parameters タブ(078)、§4 Slow control タブ(079 / 089)、§5 に slowctl / Parameters の症状、§6 の自動記録を反映。
+- v0.4(2026-10-14、Fable): §7.1 反映チェックリスト。
 - v0.3(2026-10-12、Opus): §4 に slowctl の記録先(InfluxDB)・機器 × ch の表・ch0 UNV・「機器を繋いだらトリガレートを A/B」(118–122)。
