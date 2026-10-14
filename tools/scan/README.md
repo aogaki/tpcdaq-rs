@@ -57,3 +57,21 @@
 - テスト: `root -l -b -q tools/scan/test_pulser_kernel.C`(区分線形の既知の形 — 10–90 % 6.4 cells、FWHM 16.5、
   アンダーシュート −0.1 @ +30、非対称な尾の揺れ — を 20 イベント × 数 ch、全 ch に common mode の傾き、飽和 ch、100 ADC ちょうどの ch、
   FPN だけのおとりを置いた合成 raw を一時ディレクトリに書く。終了コード = 失敗数)
+
+## α run → 最初 / 最後のヒット cell とドリフト端(CURRENT「今日の進行」A、12.5 MHz ドリフト端 run)
+
+- 使い方: `root -l -b -q 'tools/scan/drift_end.C("…/run0100_raw.root", "run0100_drift_end.json", "run0100_drift_end.png")'`
+  (第 4 引数 `maxEvents` = 先頭から何イベント読むか、0 = 全部。PNG は `nullptr` で省略)。終了コード 0 = 書いた、1 = 失敗(理由は stderr)。
+- 入力の前提・定数・FPN の扱いは run_metrics.C と同じ(それを include して使う): AGET ごとに読めた FPN ch のセル毎平均を引き、
+  信号 ch ごとに ped = cell 1..20 の平均を引いた v。全セル 0 の ch(未読)と FPN ch は除く。
+- **ヒット cell = v > 35 の cell(窓全体、ピーク・電荷の条件なし)**。イベントの first = 全信号 ch のヒット cell の最小、last = 最大。
+  ヒットの無いイベントは `events` に数えるだけで分布に入れない(`events_with_hits`)。
+- 出力: `first_hit_cell`(median / p10 / p90)、`last_hit_cell`(median / p10 / p90 / p99)、`first_hit_hist` / `last_hit_hist`(cell 0..511 ごとのイベント数、512 個)、
+  `edge` = last の分布の上端 — `cell_p99`(上から累積 1 % = `last_hit_cell.p99`)、`width_cells`(上端の立ち下がり幅 = 上から累積 1 % と 10 % の cell の差 = p99 − p90)、
+  `t_max_cells` = `cell_p99 − first_hit_cell.median`(トリガ帯からドリフト端までの cell 数 → v_drift = L / t_max)。
+  `clip_back_frac` = last ≥ 509 のイベント数 ÷ ヒットのあるイベント数(窓で切れていて端が見えていない割合。`cell_p99` ≥ 509 なら WARNING)。
+  分位点は線形補間 h = (n−1)·q。値が無ければ null。
+- PNG: first / last のヒストを重ねた 1 枚(x = cell、対数 y)。
+- テスト: `root -l -b -q tools/scan/test_drift_end.C`(101 イベントで first = 40 + e mod 21、last = 100 + e と窓端 508 / 509 / 510 / 511 の矩形パルス、
+  全 ch に common mode の傾き、閾値ちょうど 35 と FPN ch のおとり、ヒット無しの 3 イベント、maxEvents = 50 で補間の分位点、ヒット無しだけの run を
+  一時ディレクトリに書く。終了コード = 失敗数)
