@@ -34,6 +34,7 @@
 
 | # | 中身 | 状態 | 次の一手 |
 |---|---|---|---|
+| [135](135_param_scan_driver.md) / [136](136_run_metrics.md) | **パラメータスキャン**(ユーザー 2026-10-14「設定を変えながら run を取って解析、AI でガンガン」): 135 = 設定列を回すドライバ(Sonnet)、136 = run 1 本 → 指標 JSON(Opus、macros は呼ぶだけ)。試運転は triggerDelay(布石)、本命は peakingTime / gain / 部分読み出し閾値 | 発注済み(並列) | マージ → ELITPC で triggerDelay 5 点の試運転 → まとめ(Artifact) |
 | [133](133_restart_detection_multi_asad.md) | 4 AsAd では再開検出後に来る他 AsAd の古いフレームで原事故が再発しうる(送出順が AsAd 毎なら標準経路)、多 CoBo のカウンタ | **Warsaw 前の必須**(mini では起きない) | 一次資料で AsAd のリングを流す順を確かめ → Fable 設計(時刻で世代を分ける) |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
