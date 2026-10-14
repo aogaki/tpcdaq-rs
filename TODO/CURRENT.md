@@ -11,7 +11,7 @@
   - 保存先: データは ZFS `data/tpcdaq`。
   - 記録: ELOG(TPC 用)、InfluxDB(HV / LV)。
   - マニュアル: 日英 PDF が `reference/_manual/`。
-- **実装の正本 = docs/SPEC_ja.md v1.47**。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `22e9284` で稼働。
+- **実装の正本 = docs/SPEC_ja.md v1.47**。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `d960c44`(134 込み)で稼働(2026-10-14 反映、RUNBOOK §7.1 の手順で。run 77 を停止して入れ替え、新しい run は未開始)。
 - **できること**:
   - 保存二系統: graw はロスレス、root-sink は PEventTPC と raw ツリー。
   - 取得の再開: 未停止で落とした後の古いフレームを epoch として扱う(110)。
