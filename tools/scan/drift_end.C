@@ -16,9 +16,14 @@
 //      AGET は fpn = 0 — 引かない。数は agets_without_fpn として WARNING)
 //   2. 各信号 ch(FPN 除く、全セル 0 の未読 ch は除く)で v(t) = ADC(t) − fpn(t) − ped、
 //      ped = (ADC − fpn) の cell 1..20 の平均
-//   3. ヒット cell = v > 35 の cell(窓全体 0..511、ピーク・電荷の条件は付けない)。
-//      イベントの first = 全信号 ch のヒット cell の最小、last = 最大。ヒットの無いイベントは
-//      events に数えるだけで分布に入れない
+//   3. ch 条件 = run_metrics.C の「ヒット ch」(ピーク > 35 かつ ピーク ±5 cells の閾値超の和
+//      q ≥ 2000。同じ定数 kAdcThreshold / kPeakHalfCells / kStripQMin、同じ計算)。満たさない ch は無視
+//   4. ヒット cell = 条件を満たす ch の v > 35 の cell のうち cell [2, 509) だけ(kHitCellMin /
+//      kHitCellMax — 先頭の整定ノイズと窓端 2 cell の跳ねを除く)。
+//      イベントの first = 全ヒット ch のヒット cell の最小、last = 最大。ヒットの無いイベントは
+//      events に数えるだけで分布に入れない。JSON に hit_cell_range [2, 509] と
+//      channel_condition "run_metrics" を書く(文書化)。
+//      注: cell < 509 に限るので last ≤ 508 = clip_back_frac(last ≥ 509)は構造的に 0
 //
 // 指標(ヒットのあるイベントだけの分布。分位点は線形補間 h = (n−1)·q — run_metrics.C の quantile):
 //   first_hit_cell {median, p10, p90}、last_hit_cell {median, p10, p90, p99}
@@ -54,12 +59,19 @@ using runmetrics::kCells;
 using runmetrics::kChannels;
 using runmetrics::kFpn;
 using runmetrics::kNull;
+using runmetrics::kPeakHalfCells;
 using runmetrics::kPedHi;
 using runmetrics::kPedLo;
+using runmetrics::kStripQMin;
 using runmetrics::Quantiles;
 
 // 窓で切れている last の下限 = run_metrics.C の clip_back_edge の境界(ヒットセルが ≥ 509)。
 const int kClipBackMinCell = runmetrics::kClipEdgeBackMinCell;  // 509
+
+// ヒットに使う cell の範囲 [kHitCellMin, kHitCellMax)。窓端の跳ね(cell 510, 511)と先頭の整定ノイズ
+// (cell 0, 1)を除く。上端は run_metrics.C の kClipEdgeBackMinCell(509)に合わせる。
+const int kHitCellMin = 2;
+const int kHitCellMax = runmetrics::kClipEdgeBackMinCell;  // 509
 
 struct Edge {
   double cell_p99 = kNull, width_cells = kNull, t_max_cells = kNull;
@@ -111,7 +123,7 @@ bool computeDriftEnd(const std::string &rawPath, int maxEvents, Result &r, std::
   Long64_t n = tree->GetEntries();
   if (maxEvents > 0) n = std::min<Long64_t>(n, maxEvents);
   std::vector<double> firsts, lasts;
-  std::vector<double> fpn(kCells);  // AGET 1 つ分の common mode
+  std::vector<double> fpn(kCells), v(kCells);  // AGET 1 つ分の common mode、ch 1 本分の v
   long clipBack = 0;
   for (Long64_t i = 0; i < n; ++i) {
     tree->GetEntry(i);
@@ -139,9 +151,22 @@ bool computeDriftEnd(const std::string &rawPath, int maxEvents, Result &r, std::
         double ped = 0;
         for (int t = kPedLo; t <= kPedHi; ++t) ped += w[t] - fpn[t];
         ped /= (kPedHi - kPedLo + 1);
-        // 3. ヒット cell = v > 閾値
+        // 3. ch 条件 = run_metrics.C の「ヒット ch」: ピークが閾値超、ピーク ±5 の電荷 q ≥ STRIP_Q_MIN
+        int peak = 0;
         for (int t = 0; t < kCells; ++t) {
-          if (w[t] - fpn[t] - ped <= kAdcThreshold) continue;
+          v[t] = w[t] - fpn[t] - ped;
+          if (v[t] > v[peak]) peak = t;
+        }
+        if (v[peak] <= kAdcThreshold) continue;
+        const int tLo = std::max(0, peak - kPeakHalfCells);
+        const int tHi = std::min(kCells - 1, peak + kPeakHalfCells);
+        double q = 0;
+        for (int t = tLo; t <= tHi; ++t)
+          if (v[t] > kAdcThreshold) q += v[t];
+        if (q < kStripQMin) continue;  // halo / 単独 cell のノイズ
+        // 4. ヒット cell = 範囲 [kHitCellMin, kHitCellMax) の v > 閾値
+        for (int t = kHitCellMin; t < kHitCellMax; ++t) {
+          if (v[t] <= kAdcThreshold) continue;
           first = std::min(first, t);
           last = std::max(last, t);
         }
@@ -185,6 +210,9 @@ std::string toJson(const Result &r)
   s += "  \"raw_file\": " + runmetrics::str(r.raw_file) + ",\n";
   s += "  \"events\": " + std::to_string(r.events) + ",\n";
   s += "  \"events_with_hits\": " + std::to_string(r.events_with_hits) + ",\n";
+  s += "  \"hit_cell_range\": [" + std::to_string(kHitCellMin) + ", " + std::to_string(kHitCellMax) +
+       "],\n";
+  s += "  \"channel_condition\": \"run_metrics\",\n";
   s += "  \"first_hit_cell\": " + runmetrics::obj(r.first_hit_cell) + ",\n";
   s += "  \"last_hit_cell\": {\"median\": " + num(l.median) + ", \"p10\": " + num(l.p10) +
        ", \"p90\": " + num(l.p90) + ", \"p99\": " + num(r.last_hit_cell_p99) + "},\n";
