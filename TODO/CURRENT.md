@@ -41,12 +41,12 @@
 | 順 | 時刻 | やること | 状態 |
 |---|---|---|---|
 | 1 | 〜13:52 | gain スキャン完了 → 4 点の表(揺れの列つき)を 137 の形で記録 | **済 → [140](140_gain_scan.md)**(run 87–90。E 候補 = 502 × 240 fC、1014 × 240 fC を 1 run 追加中 = run 101) |
-| 2 | 〜14:05 | 138 パルサー核 8 run(自動) | run 91–98 済だが**パルスが窓の前**(delay 1750)→ 取り直しを delay 750 基準で自動キュー(run 102〜、14:15 頃)。マクロはマージ済 `df38f8d` |
+| 2 | 〜14:05 | 138 パルサー核 8 run(自動) | **済 → archive/138**(run 103–110、18:31–18:38、template `configure-elinp-pulser.xcfg`)。核は無振動(1.8 µs 成分 ≤ 0.03 %)→ **α の揺れは電子回路由来ではない**。139 起票 |
 | 3 | 14:05 | **D 較正表**: pedestal(`triggerMode: periodically`、`readout: full`、150 s ≈ 150 events — テンプレートの triggerPeriod 1 s は非管理ノブ)を 232 / 502 ns = run 99 / 100、pulser は 138 の取り直し run を流用 → `calib pedestal|scan` で `~/test/scan/calib/*.json` | run 99 済(signal σ 中央値 7.6 ADC、FPN 3.3)、run 100 取得中 |
 | 4 | ~~14:15~~ | ~~**B 自己トリガ**(onMultiplicity)~~ | **中止**: zCoBo FW はマルチプリシティトリガを扱えない(archive/078 §: 「The current firmware version does not handle triggering on MULTIPLICITY」、ユーザー裁定 2026-09-14 で API からも除外)。私の計画ミス |
 | 5 | 14:50 | まとめて報告。**E の設定を決める規則**: 飽和 ch を含むイベント < 2 % の中で最長 peaking とその gain(1 pC で 1014 が収まればそれ、無理なら 502) | 未 |
-| 6 | 15:00 | **A 12.5 MHz ドリフト端 run** 開始: knobs `writingClockFrequency_MHz: 12.5`、`triggerDelay: 3800`(ルール: (窓 40,960 − 2,800 − 160)/10)、ほか現用。**帰宅後まで走らせたまま**(2–3 h)。16:20 以降も走っているのはこれだけ | 未 |
-| 7 | 帰宅後 | A を stop → ドリフト端(t_max → v_drift = L / t_max、σ_L(z))の解析(小マクロ) → **E 一晩 α run**(25 MHz、5 の設定)を開始(開始前にユーザーに一言) | 未 |
+| 6 | ~~15:00~~ **18:37 開始(run 111、`elinp__f591e65b`)** | **A 12.5 MHz ドリフト端 run**: knobs `writingClockFrequency_MHz: 12.5`、`triggerDelay: 3800`(ルール: (窓 40,960 − 2,800 − 160)/10)、ほか現用。**帰宅後まで走らせたまま**(2–3 h)。16:20 以降も走っているのはこれだけ | 未 |
+| 7 | 〜20:40 | A を stop → ドリフト端(t_max → v_drift = L / t_max、σ_L(z))の解析(小マクロ) → **E 一晩 α run**(25 MHz、5 の設定)を開始(開始前にユーザーに一言) | 未 |
 | 8 | 明日 | C(部分読み出し閾値 / ZS を実飛跡で)、139、E の解析(エネルギー較正 C-5、130 の素材) | 未 |
 
 **17:33 復帰(ユーザー帰宅、Mac は朝まで sleep させない)**: run 101(取り直しの 20 s 試験)が **token 競合で stop 失敗 → 3.5 h 走りっぱなし**(データは 14:06 で止まっていた)→ 17:34 停止・base 復元・待機スクリプト 2 本 kill。**A は未開始**。138 の真因 = pulser テンプレートの `TestModeSelection` / `isSelectedforTestMode`(138 経過参照)→ 共有 `GetSoftware_config` へのテンプレート追加はユーザー承認待ち。D: run 100 の `calib/pedestal_502ns.json` 済。`drift_end.C` を run 84 に当てたら last_hit の 96 % が 510/511(窓端の跳ね)→ ヒット定義を [2,509) + run_metrics の ch 条件に直す発注(Sonnet、17:40)。
@@ -59,7 +59,8 @@
 
 | # | 中身 | 状態 | 次の一手 |
 |---|---|---|---|
-| [138](138_pulser_response_kernels.md) | 整形器の応答核(パルサー、peaking 4 × 振幅 2)と「揺れ」の出どころ → 139 デコンボリューション試作(ユーザー「デコンボリューションが可能かも」) | 取得を gain スキャンの後に自動開始(14:00 頃) | 解析マクロ → 139 発注書 |
+| [139](139_deconvolution_prototype.md) | 整形デコンボリューションの試作(138 の核で α 波形を戻す: 電荷回復・時間幅・ノイズ増幅) | READY(発注書) | Opus implementer に出す(A / E の合間) |
+| [140](140_gain_scan.md) | gain スキャンの記録 | 1014 × 240 fC の 1 run が未(gain2 競合で中断) | E の前後で 1 run 取って結果節を閉じる |
 | [133](133_restart_detection_multi_asad.md) | 4 AsAd では再開検出後に来る他 AsAd の古いフレームで原事故が再発しうる(送出順が AsAd 毎なら標準経路)、多 CoBo のカウンタ | **Warsaw 前の必須**(mini では起きない) | 一次資料で AsAd のリングを流す順を確かめ → Fable 設計(時刻で世代を分ける) |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
