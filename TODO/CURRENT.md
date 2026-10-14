@@ -30,6 +30,27 @@
   - root_sink は workers 8 で ≈ 122 events/s。
 - **取得条件**: mini の現用は **25 MHz / triggerDelay 1750**(params `elinp__e090134b`、2026-10-14 の run 83 から。10-11 の run 57〜82 は 1500 = `elinp__dcdaf9ca`。それ以前の α run は 100 MHz で、時間窓 ≈ 24 mm)。
 
+## 今日の進行(2026-10-14 午後 — compact 後はここから再開)
+
+**背景**: ユーザー「ソースと検出器が自由に使える今のうちにガンガン」。13:45 時点の合意プラン。ユーザーは長いミーティング → 16:20 に帰宅 → VPN から続ける。
+**ELITPC**: `daq@192.168.144.220`。現用 params = `base_1750.json`(`elinp__e090134b`: 25 MHz / triggerDelay 1750 / 232 ns / 120 fC / partial)。作業場 `~/test/scan/`(scan.py、run_metrics.C、metrics_for_run.sh、pulser_kernel.sh、ログ・JSON)。指標は `~/test/scan/metrics/runNNNN_metrics.json`、macros = `~/test/ana/ana_107`、`--pressure 91`。
+**済み**: triggerDelay スキャン(run 78–82、archive/135/136)、peaking スキャン(run 83–86、archive/137)。gain スキャン(run 87–90: 502×120fC / 502×240fC / 502×1pC / 1014×1pC、`scan_gain.log`)は 13:52 頃完了予定。
+**自動で走るもの**: `pulser_kernel.sh`(138、gain スキャンの終了を待って自動開始 → 8 run、各 30 s、`pulser_kernel_runs.json` と `pulser_kernel.log`、終了後 base 復元)。
+**走っている implementer**: 138 の解析マクロ `tools/scan/pulser_kernel.C`(Opus、worktree)。戻ったら照合 → マージ → ELITPC で 8 run に適用 → α の「揺れ」(137: 信号 ch のみ・FPN に無し・電荷と同じ比で peaking に増える)と比べて出どころを決める → **139 デコンボリューション試作の発注書**。
+
+| 順 | 時刻 | やること | 状態 |
+|---|---|---|---|
+| 1 | 〜13:52 | gain スキャン完了 → 4 点の表(揺れの列つき)を 137 の形で記録(新チケット or 137 追記) | 待ち |
+| 2 | 〜14:05 | 138 パルサー核 8 run(自動) | 待機中 |
+| 3 | 14:05 | **D 較正表**: pedestal(`triggerMode: periodically`、2 min)と pulser(1 min)を 232 / 502 ns で取り、ELITPC の `~/tpcdaq-rs/target/release/calib pedestal|pulser <graw> --out` で per-ch 表 | 未 |
+| 4 | 14:15 | **B 自己トリガ**: `triggerMode: onMultiplicity`、閾値 4 点(`globalThreshold` 1/2/4/8 — 単位は docs/PARAMS_KNOBS_ja.md で確認してから)、各 ≤ 4 min(`stop.max_s 240`)→ レート・電荷・ok 率を run 84(外部)と比較。scan.py で可 | 未 |
+| 5 | 14:50 | まとめて報告。**E の設定を決める規則**: 飽和 ch を含むイベント < 2 % の中で最長 peaking とその gain(1 pC で 1014 が収まればそれ、無理なら 502) | 未 |
+| 6 | 15:00 | **A 12.5 MHz ドリフト端 run** 開始: knobs `writingClockFrequency_MHz: 12.5`、`triggerDelay: 3800`(ルール: (窓 40,960 − 2,800 − 160)/10)、ほか現用。**帰宅後まで走らせたまま**(2–3 h)。16:20 以降も走っているのはこれだけ | 未 |
+| 7 | 帰宅後 | A を stop → ドリフト端(t_max → v_drift = L / t_max、σ_L(z))の解析(小マクロ) → **E 一晩 α run**(25 MHz、5 の設定)を開始(開始前にユーザーに一言) | 未 |
+| 8 | 明日 | C(部分読み出し閾値 / ZS を実飛跡で)、139、E の解析(エネルギー較正 C-5、130 の素材) | 未 |
+
+守ること: HV / LV / ガスには触らない(web からは不可、方針)。run の開始・停止はこの表の範囲で了承済み(ユーザー「進めてください」)。各 run の設定は台帳の `run_start.params` に自動記録。反映は RUNBOOK §7.1。
+
 ## 開いているチケット
 
 | # | 中身 | 状態 | 次の一手 |
