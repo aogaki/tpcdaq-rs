@@ -21,6 +21,9 @@
 - **14:00 run 91–98(delay 1750 のまま)は使えない**: `pulser_kernel.C` の結果、どの run もパルスが窓に無い(70 ns の 2 run はピーク = cell 508 の端の跳ねだけ、他は A > 100 の揺れ・ノイズを拾った偽の波形で振幅中央値 ≈ 130 ADC、`calib scan` でも −300 / −100 mV の振幅が 38 / 38 ADC = 無信号)。
   読み: onSlowControl では CoBo がパルサーを叩いてから数 µs 後にトリガが出る(= パルスはトリガより前)。external の法則 `cell = 508 − delay/4` で delay 1750 の窓は [t0 − 3 µs, t0 + 17.5 µs] なのでパルスが窓の前に落ちる。実験の `configure-pulser.xcfg`(reference/config)は **triggerDelay 750** = 窓 [t0 − 13 µs, t0 + 7.5 µs]。
 - **取り直し(`pulser_kernel2.sh`、gain2 の後に自動)**: 232 ns × −300 mV × delay 750 を 20 s 試し、ピーク cell を測って `delay = 750 + 4 × (peak − 80)` でピークを cell ≈ 80 に置き直し(尾 +300 cell が窓に入る)、その delay で 8 点(各 30 s)。run 番号は `pulser_kernel2_runs.json`、ログ `pulser_kernel2.log`。
+- **14:20 訂正と追加の読み(VPN 切断中、手元の run 95 の図と archive/091 から)**:
+  - **FPN ch にもパルサーのパルスが入る**(091: −300 mV で FPN 中央値 1,590 ADC、信号 1,074)。`pulser_kernel.C` の FPN 共通モード減算は pulser run では**パルス自体を引いてしまう**。`calib scan`(FPN 減算なし、max − baseline)でも run 93/94 の信号 ch は 38 ADC なので「窓に無い」自体は正しいが、取り直しの解析は **FPN 減算なし**でやる(Sonnet implementer に `subtractFpn=false` + `fpn` グループを発注、14:20)。取り直しスクリプトの delay 自動選択はこの罠で「パルス無し」判定 → 参照値 750 に落ちる(安全側)。
+  - run 95(502 ns、−300 mV、窓にパルス無し)の FPN 減算後の平均波形は**周期 ≈ 45 cell = 1.8 µs(≈ 550 kHz)の持続する振動**(AGET 0 / 3 のほぼ全 ch、正規化で山 0.5–0.7 が 300 cell = 12 µs 以上続く、`kernel/run0095_kernel.png`)。α の「揺れ」(137: 周期 ≈ 1.6 µs、ピーク後 3–7 µs)と同じ周期帯。**読み: 入力で励起される電子回路のリンギング**(信号 ch − FPN の差に残る = ch ごとに自分の入力で鳴る。α では FPN に入力が無いので FPN は平ら、pulser では FPN も鳴るので差に出る)。取り直しの生(減算なし)波形で、FPN グループと信号グループそれぞれに同じ周期が出れば確定。
 - マクロは main に取り込み済み(`df38f8d`、テスト 172 green、Opus implementer の報告は §2 の各項目とテスト名で照合)。
 
 ## 結果(取り直しの後に記入)
