@@ -196,6 +196,10 @@ pub struct RunDecoder {
 /// 再開ゲート: これより大きい eventIdx を見た後の idx 0 だけを再開候補にする。
 /// 067 の「後退幅 1 の隣接混在」(run 頭の idx 1 → 0)を除くため。
 const RESTART_GATE_EVENT_IDX: u32 = 8;
+/// 再開判定の時刻後退幅の下限(TODO/134)。CoBo の event_time は 10 ns 刻みなので 1e7 ticks = 100 ms。
+/// 板どうしの時計ずれは µs 級、本物の取得再開は秒〜数十秒戻る(実機 run 73: 79.6 s → 0.28 s)。
+/// eb_core.hpp の `kRestartMinTimeGap` と同じ値(両層の定義を揃える)。
+const RESTART_MIN_TIME_GAP: u64 = 10_000_000;
 
 /// 1 ソースの現 epoch で見た eventIdx の最大値と event_time の最小値。
 #[derive(Debug, Clone, Copy)]
@@ -662,7 +666,7 @@ impl RunDecoder {
         });
         if event_idx == 0
             && epoch.max_event_idx > RESTART_GATE_EVENT_IDX
-            && event_time < epoch.time_floor
+            && event_time.saturating_add(RESTART_MIN_TIME_GAP) < epoch.time_floor
         {
             let max_before = epoch.max_event_idx;
             let floor_before = epoch.time_floor;
@@ -1966,6 +1970,39 @@ mod tests {
         assert!(!c.errored(), "再開は Error にしない");
     }
 
+    /// 134: 板どうしの時計ずれ(µs 級)は再開ではない。idx 0..9 のあとに idx 0 が floor - 100
+    /// (1 µs 早い)で来ても、後退幅 100 < RESTART_MIN_TIME_GAP(1e7)なので restarts 0。
+    #[test]
+    fn a_small_clock_skew_on_event_zero_is_not_a_restart() {
+        let mut c = core(7, &[0]);
+        let mut frames: Vec<ByteBuf> = (0..10u32)
+            .map(|i| frame_at(0, i, 1_000_000 + u64::from(i) * 10))
+            .collect();
+        frames.push(frame_at(0, 0, 1_000_000 - 100)); // floor = 1_000_000 より 100 ticks 早い
+        c.handle_batch(0, 7, 0, &frames, Instant::now());
+
+        let m = c.metrics_json();
+        assert_eq!(m["acquisition_restarts"].as_u64(), Some(0));
+        assert_eq!(c.pending().len(), 11, "フレームは落とさない");
+    }
+
+    /// 134 境界: floor - RESTART_MIN_TIME_GAP ちょうどは再開でなく、1 tick 小さければ再開。
+    #[test]
+    fn the_restart_time_gap_boundary_is_exclusive() {
+        let floor = 50_000_000u64; // idx 0..9 の最小時刻(idx 0 の時刻)
+        let restarts_with = |t0: u64| {
+            let mut c = core(7, &[0]);
+            let mut frames: Vec<ByteBuf> = (0..10u32)
+                .map(|i| frame_at(0, i, floor + u64::from(i) * 10))
+                .collect();
+            frames.push(frame_at(0, 0, t0));
+            c.handle_batch(0, 7, 0, &frames, Instant::now());
+            c.metrics_json()["acquisition_restarts"].as_u64()
+        };
+        assert_eq!(restarts_with(floor - RESTART_MIN_TIME_GAP), Some(0));
+        assert_eq!(restarts_with(floor - RESTART_MIN_TIME_GAP - 1), Some(1));
+    }
+
     /// 067 の「頭の隣接混在」: idx 1 の次に idx 0 が遅れて来る(max=1 <= 8)。再開ではない。
     /// 時刻が小さくても(0 の方が早い)ゲートで除外される。
     #[test]
@@ -2004,8 +2041,8 @@ mod tests {
             29,
             0,
             &[
-                frame_at(2, 100, 5_000_000),
-                frame_at(2, 101, 5_010_000),
+                frame_at(2, 100, 50_000_000), // 0.5 s: 16_000 へ戻る幅が閾値 1e7 を超える
+                frame_at(2, 101, 50_010_000),
                 frame_at(2, 0, 16_000),
             ],
             now,
