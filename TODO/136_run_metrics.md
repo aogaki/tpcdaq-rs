@@ -35,3 +35,14 @@
 
 ## 4. 報告
 変更ファイル、テスト、赤の実測、実データの JSON、**実行できなかった操作**(無ければ「なし」)。
+
+## 5. 追補(2026-10-14、実データ run0076 で発覚 — Fable): ヒット定義を macros / src/reco の流儀に寄せる
+- 実測: `hit_channels_median 250`(信号 ch は 256)、`last_hit_cell 511 / clip_back 1.0`、`charge_median 1.6e6`。
+- 原因(生波形): 全 ch で基線が窓の中で **20〜40 ADC 単調に上がる**(cell 1 → 511 で 480 → 511、442 → 477、358 → 387)+ ノイズ ±10。common-mode なので FPN ch で引ける。
+- 直し方:
+  1. **FPN で common-mode を引く**: AGET ごとに FPN 4 ch {11,22,45,56} のセル毎平均を作り、同 AGET の各信号 ch から引く。その後 ped = cells 1..20、閾値 35。partial 読み出しで全セル 0 の ch は除く。
+  2. **電荷の下限**: ピーク ±5 セルの ped 減算後の和 > 2000 の ch だけをヒットに(macros STRIP_Q_MIN、`src/reco/mod.rs` の halo cut と同じ定数、出典をコメントに)。
+  3. **帯の位置はピークセル**: first / last = ヒット ch のピークセルの min / max。クリップは「ピークが cell ≤ 5 / ≥ 506」と「閾値超が端に掛かる」の両方(`clip_front_peak` / `clip_front_edge`、back も同様)。
+  4. **向きを畳む**: φ は 180° で畳んだ軸角の RMS(`phi_axial_rms_deg`)、dip は |dip| の RMS(`dip_abs_rms_deg`)。makeTracks の頭尻はコイン投げ。
+  5. `pressure` 引数は残す。
+- テスト: 合成 raw に全 ch 共通の基線の傾き(+40 まで、FPN にも同じ)を入れ、修正前は全 ch ヒット・last 511 になる(red)、修正後は置いたヒットだけ。電荷 < 2000 の小パルスはヒットにならない。φ を 180° 反転させた飛跡を混ぜても axial RMS が変わらない。
