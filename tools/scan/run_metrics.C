@@ -9,7 +9,7 @@
 // 入力:
 //   - raw ツリー(SPEC §6.7、tools/root_sink/raw_tree.hpp): TTree `raw`、`eventTime/l`(CoBo の
 //     48 bit タイムスタンプ、10 ns 刻み — src/decoder.rs RESTART_MIN_TIME_GAP の注記)、
-//     `adc[{4×nAsad}][68][512]/S`(生 ADC、FPN 込み、未読 ch は 0)。先頭次元は焼き込まず
+//     `adc[{4×nAsad}][68][512]/S`(生 ADC、FPN 込み、未読 ch は全セル 0)。先頭次元は焼き込まず
 //     リーフの要素数から求める(mini = 4、ELITPC 4 AsAd = 16)。
 //   - 同じ名前の `_tracks.root`(raw の名前の `_raw.root` を `_tracks.root` に置き換えたもの —
 //     macros の analyzeUVW.C / makeTracks.C の命名と同じ)。あれば読む、無ければ tracks = null。
@@ -17,21 +17,31 @@
 //   - pressureMbar: TODO/136 の呼び出し形のための引数で、ここでは使わない(z の換算 = 圧力は
 //     analyzeUVW.C が `_uvw.root` を作るときに済んでいる — metrics_for_run.sh の --pressure)。
 //
-// raw からの指標(全イベント、macros 非依存)。1 イベントの各信号 ch(FPN 除く)について
-//   ペデスタル = cell PED_LO..PED_HI の平均、ヒットセル = ADC − ped > ADC_THRESHOLD のセル、
-//   ヒット ch = ヒットセルが 1 つでもある ch:
-//   first/last_hit_cell     イベントのヒットセルの最小 / 最大(全 ch)。ヒットのあるイベントだけの
-//                           分布の median / p10 / p90
-//   clip_front / clip_back  first ≤ 2 / last ≥ 509 のイベント数 ÷ 全イベント数
-//   saturated_sample_frac   ヒットセルのうち ADC == 4095 の割合(run 全体で数える)
+// raw からの指標(全イベント、macros 非依存)。ヒットの定義は TODO/136 §5(実データ run0076 で
+// 全 ch の基線が窓の中で 20〜40 ADC 上がる common mode が出た)で macros / src/reco に寄せた:
+//   1. AGET ごとに、読めた FPN ch(全セル 0 でない)のセル毎平均 fpn(t) を作る(読めた FPN が
+//      無い AGET は fpn = 0 — 引かない。数は agets_without_fpn として WARNING に出す)
+//   2. 各信号 ch(FPN 除く、全セル 0 = 部分読み出しの未読 ch は除く)について
+//      v(t) = ADC(t) − fpn(t) − ped、ped = (ADC − fpn) の cell PED_LO..PED_HI の平均
+//   3. ピーク = v の最大の最初の cell。v(ピーク) > ADC_THRESHOLD かつ
+//      q = ピーク ±PEAK_HALF_CELLS の閾値超の v の和 ≥ STRIP_Q_MIN(halo cut)の ch = ヒット ch
+//      (macros/analyzeUVW.C 0 / src/reco/mod.rs strip_hits と同じ判定。違いは 1 の FPN 減算だけ)
+//   ヒットセル = ヒット ch の v > ADC_THRESHOLD のセル(窓全体)。
+//   first/last_hit_cell     イベントのヒット ch のピーク cell の最小 / 最大。ヒットのあるイベント
+//                           だけの分布の median / p10 / p90
+//   clip_front/back_peak    first ≤ 5 / last ≥ 506 のイベント数 ÷ 全イベント数
+//                           (ピーク ±5 の電荷窓が窓端に掛かる)
+//   clip_front/back_edge    ヒットセルが cell ≤ 2 / ≥ 509 にあるイベント数 ÷ 全イベント数
+//   saturated_sample_frac   ヒットセルのうち生 ADC == 4095 の割合(run 全体で数える)
 //   saturated_event_frac    4095 のヒットセルを含むイベント数 ÷ 全イベント数
 //   pulse_width_cells_median  ヒット ch ごとの「閾値超の連続セル数の最長」の中央値(全ヒット ch)
 //   hit_channels_median     イベントごとのヒット ch 数の中央値(全イベント、0 を含む)
-//   charge_median           イベントごとの Σ(ADC − ped)(ヒットセル)の中央値(全イベント)
+//   charge_median           イベントごとの Σ v(ヒットセル)の中央値(全イベント)
 //   rate_hz                 (events − 1) / ((最後のエントリの eventTime − 最初の) × 10 ns)
 // tracks からの指標(ok != 0 の飛跡だけ。n と ok_frac は全エントリ):
-//   length / charge / dEdx の median と IQR(q75 − q25)、
-//   dip = atan2(dirZ, √(dirX² + dirY²))、φ = atan2(dirY, dirX)[deg] の RMS = √(Σx²/n)。
+//   length / charge / dEdx の median と IQR(q75 − q25)。向きは makeTracks 6 の頭尻(dir の符号)が
+//   コイン投げなので畳む: dip_abs_rms_deg = |atan2(dirZ, √(dirX² + dirY²))| の RMS、
+//   phi_axial_rms_deg = atan2(dirY, dirX) を (−90, 90] に畳んだ軸角の RMS。RMS = √(Σx²/n) [deg]。
 // 分位点は線形補間(h = (n−1)·q、numpy の既定と同じ)。値が無ければ JSON は null。
 // =============================================================================
 #include <TFile.h>
@@ -56,6 +66,11 @@ namespace runmetrics {
 const double kAdcThreshold = 35.0;
 const int kPedLo = 1;
 const int kPedHi = 20;  // 両端を含む(PED_LO..=PED_HI、20 cells)
+// src/reco/mod.rs PEAK_HALF_CELLS(= macros/analyzeUVW.C): ch の電荷 q はピーク ±5 cells の閾値超の和。
+const int kPeakHalfCells = 5;
+// src/reco/mod.rs STRIP_Q_MIN(= macros/analyzeUVW.C の halo cut)。macros・reco とも
+// `q < STRIP_Q_MIN` を捨てる(2000 ちょうどは残す)ので同じ向きにする。
+const double kStripQMin = 2000.0;
 // src/geometry.rs FPN_RAW_CHANNELS(各 AGET の 68 ch 中の FPN)。
 const int kFpn[4] = {11, 22, 45, 56};
 // src/msg.rs ITEM_ADC_MAX(12 bit フルスケール)。
@@ -63,9 +78,12 @@ const int kAdcMax = 4095;
 // SPEC §6.7 のリーフ `adc[..][68][512]` の内側 2 次元(AGET の ch 数とセル数 — 検出器で変わらない)。
 const int kChannels = 68;
 const int kCells = 512;
-// 窓端クリップの判定(TODO/136: 最初のヒットが cell ≤ 2、最後が ≥ 509)。
-const int kClipFrontMaxCell = 2;
-const int kClipBackMinCell = 509;
+// 窓端クリップ(TODO/136 §5-3)。peak = ピーク cell ≤ 5 / ≥ 506(ピーク ±PEAK_HALF_CELLS の
+// 電荷窓が cell 0 / 511 に掛かる)、edge = ヒットセルが cell ≤ 2 / ≥ 509(TODO/136 §1 の初版の定義)。
+const int kClipPeakFrontMaxCell = kPeakHalfCells;              // 5
+const int kClipPeakBackMinCell = kCells - 1 - kPeakHalfCells;  // 506
+const int kClipEdgeFrontMaxCell = 2;
+const int kClipEdgeBackMinCell = 509;
 // CoBo の eventTime の刻み [s](10 ns — src/decoder.rs RESTART_MIN_TIME_GAP の注記)。
 const double kTickSeconds = 1e-8;
 
@@ -82,7 +100,7 @@ struct TrackMetrics {
   long n = 0;
   double ok_frac = kNull;
   MedianIqr length, charge, dEdx;
-  double dip_rms_deg = kNull, phi_rms_deg = kNull;
+  double dip_abs_rms_deg = kNull, phi_axial_rms_deg = kNull;
 };
 struct RunMetrics {
   long run = -1;  // -1 = 名前から読めない(JSON は null)
@@ -90,10 +108,15 @@ struct RunMetrics {
   long events = 0;
   double rate_hz = kNull;
   Quantiles first_hit_cell, last_hit_cell;
-  double clip_front = kNull, clip_back = kNull;
+  double clip_front_peak = kNull, clip_front_edge = kNull;
+  double clip_back_peak = kNull, clip_back_edge = kNull;
   double saturated_sample_frac = kNull, saturated_event_frac = kNull;
   double pulse_width_cells_median = kNull, hit_channels_median = kNull, charge_median = kNull;
   TrackMetrics tracks;
+  // 信号 ch は読めたが FPN が 1 本も読めなかった (イベント, AGET) の数 = common mode を引けなかった
+  // ところ(isFPNRead=false の設定)。JSON のキーは固定(TODO/136 §1)なので出さず、
+  // run_metrics() が WARNING で出す。
+  long agets_without_fpn = 0;
 };
 
 // 線形補間の分位点(h = (n−1)·q)。空なら NaN。
@@ -132,11 +155,28 @@ double rms(const std::vector<double> &v)
   return std::sqrt(s / v.size());
 }
 
+// φ [deg] を (−90, 90] に畳む。makeTracks 2 の phi = 0.5·atan2(…) と同じ値域(dir の符号 =
+// 頭尻を決める 6 の前の軸)。φ と φ ± 180 は同じ軸。
+double foldAxial(double phiDeg)
+{
+  if (phiDeg > 90) return phiDeg - 180;
+  if (phiDeg <= -90) return phiDeg + 180;
+  return phiDeg;
+}
+
 bool isFpn(int c)
 {
   for (int f : kFpn)
     if (c == f) return true;
   return false;
+}
+
+// 部分読み出しで読まれなかった ch(全セル 0 — tools/root_sink/raw_tree.hpp fill_entry)。
+bool allZero(const Short_t *w)
+{
+  for (int t = 0; t < kCells; ++t)
+    if (w[t] != 0) return false;
+  return true;
 }
 
 // "…/run0077_raw.root" → 77。形が違えば -1。
@@ -212,8 +252,8 @@ bool computeTrackMetrics(const std::string &path, TrackMetrics &t, std::string &
     vCharge.push_back(charge);
     vDEdx.push_back(dEdx);
     const double dx = dirX, dy = dirY, dz = dirZ;
-    vDip.push_back(std::atan2(dz, std::sqrt(dx * dx + dy * dy)) * deg);
-    vPhi.push_back(std::atan2(dy, dx) * deg);
+    vDip.push_back(std::fabs(std::atan2(dz, std::sqrt(dx * dx + dy * dy)) * deg));
+    vPhi.push_back(foldAxial(std::atan2(dy, dx) * deg));
   }
   t.present = true;
   t.n = static_cast<long>(n);
@@ -221,8 +261,8 @@ bool computeTrackMetrics(const std::string &path, TrackMetrics &t, std::string &
   t.length = medianIqr(vLength);
   t.charge = medianIqr(vCharge);
   t.dEdx = medianIqr(vDEdx);
-  t.dip_rms_deg = rms(vDip);
-  t.phi_rms_deg = rms(vPhi);
+  t.dip_abs_rms_deg = rms(vDip);
+  t.phi_axial_rms_deg = rms(vPhi);
   return true;
 }
 
@@ -259,7 +299,8 @@ bool computeRunMetrics(const std::string &rawPath, RunMetrics &m, std::string &e
 
   const Long64_t n = tree->GetEntries();
   std::vector<double> firsts, lasts, widths, hitChannels, charges;
-  long clipFront = 0, clipBack = 0, satEvents = 0;
+  std::vector<double> fpn(kCells), v(kCells);  // AGET 1 つ分の common mode、ch 1 本分の v
+  long clipFrontPeak = 0, clipBackPeak = 0, clipFrontEdge = 0, clipBackEdge = 0, satEvents = 0;
   long long hitCells = 0, satCells = 0;
   ULong64_t tFirst = 0, tLast = 0;
   for (Long64_t i = 0; i < n; ++i) {
@@ -268,46 +309,76 @@ bool computeRunMetrics(const std::string &rawPath, RunMetrics &m, std::string &e
     tLast = eventTime;
     int first = INT_MAX, last = -1, nHit = 0;
     double charge = 0;
-    bool saturated = false;
+    bool saturated = false, edgeFront = false, edgeBack = false;
     for (int b = 0; b < nBlocks; ++b) {
+      const Short_t *aget = &adc[static_cast<size_t>(b) * kChannels * kCells];
+      // 1. common mode = 読めた FPN ch のセル毎平均(読めた FPN が無ければ 0 のまま)
+      std::fill(fpn.begin(), fpn.end(), 0.0);
+      int nFpn = 0;
+      for (int fc : kFpn) {
+        const Short_t *w = aget + fc * kCells;
+        if (allZero(w)) continue;
+        ++nFpn;
+        for (int t = 0; t < kCells; ++t) fpn[t] += w[t];
+      }
+      if (nFpn > 0)
+        for (double &x : fpn) x /= nFpn;
+      bool signalRead = false;
       for (int c = 0; c < kChannels; ++c) {
         if (isFpn(c)) continue;
-        const Short_t *w = &adc[(static_cast<size_t>(b) * kChannels + c) * kCells];
+        const Short_t *w = aget + c * kCells;
+        if (allZero(w)) continue;
+        signalRead = true;
+        // 2. ped と v
         double ped = 0;
-        for (int t = kPedLo; t <= kPedHi; ++t) ped += w[t];
+        for (int t = kPedLo; t <= kPedHi; ++t) ped += w[t] - fpn[t];
         ped /= (kPedHi - kPedLo + 1);
-        int chFirst = -1, chLast = -1, runLen = 0, longest = 0;
+        int peak = 0;
         for (int t = 0; t < kCells; ++t) {
-          const double v = w[t] - ped;
-          if (v <= kAdcThreshold) {
+          v[t] = w[t] - fpn[t] - ped;
+          if (v[t] > v[peak]) peak = t;
+        }
+        // 3. ピークが閾値超、ピーク ±5 の電荷 q ≥ STRIP_Q_MIN
+        if (v[peak] <= kAdcThreshold) continue;
+        const int tLo = std::max(0, peak - kPeakHalfCells);
+        const int tHi = std::min(kCells - 1, peak + kPeakHalfCells);
+        double q = 0;
+        for (int t = tLo; t <= tHi; ++t)
+          if (v[t] > kAdcThreshold) q += v[t];
+        if (q < kStripQMin) continue;  // halo
+        ++nHit;
+        first = std::min(first, peak);
+        last = std::max(last, peak);
+        int runLen = 0, longest = 0;
+        for (int t = 0; t < kCells; ++t) {
+          if (v[t] <= kAdcThreshold) {
             runLen = 0;
             continue;
           }
-          if (chFirst < 0) chFirst = t;
-          chLast = t;
           longest = std::max(longest, ++runLen);
-          charge += v;
+          charge += v[t];
           ++hitCells;
           if (w[t] == kAdcMax) {
             ++satCells;
             saturated = true;
           }
+          if (t <= kClipEdgeFrontMaxCell) edgeFront = true;
+          if (t >= kClipEdgeBackMinCell) edgeBack = true;
         }
-        if (chFirst < 0) continue;
-        ++nHit;
         widths.push_back(longest);
-        first = std::min(first, chFirst);
-        last = std::max(last, chLast);
       }
+      if (signalRead && nFpn == 0) ++m.agets_without_fpn;
     }
     hitChannels.push_back(nHit);
     charges.push_back(charge);
     if (saturated) ++satEvents;
+    if (edgeFront) ++clipFrontEdge;
+    if (edgeBack) ++clipBackEdge;
     if (nHit > 0) {
       firsts.push_back(first);
       lasts.push_back(last);
-      if (first <= kClipFrontMaxCell) ++clipFront;
-      if (last >= kClipBackMinCell) ++clipBack;
+      if (first <= kClipPeakFrontMaxCell) ++clipFrontPeak;
+      if (last >= kClipPeakBackMinCell) ++clipBackPeak;
     }
   }
 
@@ -316,8 +387,10 @@ bool computeRunMetrics(const std::string &rawPath, RunMetrics &m, std::string &e
   m.first_hit_cell = quantiles(firsts);
   m.last_hit_cell = quantiles(lasts);
   if (n > 0) {
-    m.clip_front = static_cast<double>(clipFront) / n;
-    m.clip_back = static_cast<double>(clipBack) / n;
+    m.clip_front_peak = static_cast<double>(clipFrontPeak) / n;
+    m.clip_front_edge = static_cast<double>(clipFrontEdge) / n;
+    m.clip_back_peak = static_cast<double>(clipBackPeak) / n;
+    m.clip_back_edge = static_cast<double>(clipBackEdge) / n;
     m.saturated_event_frac = static_cast<double>(satEvents) / n;
   }
   if (hitCells > 0) m.saturated_sample_frac = static_cast<double>(satCells) / hitCells;
@@ -376,8 +449,8 @@ std::string toJson(const RunMetrics &m)
     const TrackMetrics &t = m.tracks;
     tracks = "{\"n\": " + std::to_string(t.n) + ", \"ok_frac\": " + num(t.ok_frac) +
              ", \"length\": " + obj(t.length) + ", \"charge\": " + obj(t.charge) +
-             ", \"dEdx\": " + obj(t.dEdx) + ", \"dip_rms_deg\": " + num(t.dip_rms_deg) +
-             ", \"phi_rms_deg\": " + num(t.phi_rms_deg) + "}";
+             ", \"dEdx\": " + obj(t.dEdx) + ", \"dip_abs_rms_deg\": " + num(t.dip_abs_rms_deg) +
+             ", \"phi_axial_rms_deg\": " + num(t.phi_axial_rms_deg) + "}";
   }
   std::string s = "{\n";
   s += "  \"run\": " + (m.run < 0 ? std::string("null") : std::to_string(m.run)) + ",\n";
@@ -386,8 +459,10 @@ std::string toJson(const RunMetrics &m)
   s += "  \"rate_hz\": " + num(m.rate_hz) + ",\n";
   s += "  \"first_hit_cell\": " + obj(m.first_hit_cell) + ",\n";
   s += "  \"last_hit_cell\": " + obj(m.last_hit_cell) + ",\n";
-  s += "  \"clip_front\": " + num(m.clip_front) + ",\n";
-  s += "  \"clip_back\": " + num(m.clip_back) + ",\n";
+  s += "  \"clip_front_peak\": " + num(m.clip_front_peak) + ",\n";
+  s += "  \"clip_front_edge\": " + num(m.clip_front_edge) + ",\n";
+  s += "  \"clip_back_peak\": " + num(m.clip_back_peak) + ",\n";
+  s += "  \"clip_back_edge\": " + num(m.clip_back_edge) + ",\n";
   s += "  \"saturated_sample_frac\": " + num(m.saturated_sample_frac) + ",\n";
   s += "  \"saturated_event_frac\": " + num(m.saturated_event_frac) + ",\n";
   s += "  \"pulse_width_cells_median\": " + num(m.pulse_width_cells_median) + ",\n";
@@ -419,6 +494,11 @@ int run_metrics(const char *rawFile, const char *outJson, double pressureMbar = 
     return 1;
   }
   (void)pressureMbar;  // 呼び出し形のため(冒頭の注記)
+  if (m.agets_without_fpn > 0)
+    std::fprintf(stderr,
+                 "run_metrics: WARNING %ld (event, AGET) had signal channels but no FPN channel "
+                 "read — common mode not subtracted there (isFPNRead=false?)\n",
+                 m.agets_without_fpn);
   std::printf("run_metrics: %ld events, tracks %s, %.1f s -> %s\n", m.events,
               m.tracks.present ? "read" : "absent (null)", sw.RealTime(), outJson);
   return 0;
