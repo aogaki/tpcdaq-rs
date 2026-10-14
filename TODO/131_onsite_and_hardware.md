@@ -39,3 +39,5 @@
 
 ## 参照
 archive/069(Phase 2〜4)、archive/073、archive/079(§1.5、Phase 0)、archive/084、archive/101(追記 3)、archive/107(残り)、124。
+
+- **(2026-10-14 追加)ドリフト端 / v_drift の実測**: α 線源(読み出し面近く)の飛跡はトリガから 2–4 µs しか占めず、陰極(20 cm)に届かない(run 111 / 113、12.5 MHz)。宇宙線 run(自トリガは FW 非対応なので外部トリガ or periodically + オフライン選別)か、線源を陰極側に置いて t_max を測る。道具は `tools/scan/drift_end.C`。
