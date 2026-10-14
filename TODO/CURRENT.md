@@ -50,6 +50,7 @@
 | 8 | 明日 | C(部分読み出し閾値 / ZS を実飛跡で)、139、E の解析(エネルギー較正 C-5、130 の素材) | 未 |
 
 **14:07 VPN 切断(FortiClient が Disconnected。私からは再接続不可)→ ELITPC に届かない。** 実機で**自動で進むもの**: `pulser_kernel2.sh`(138 取り直し: run 101 = 232 ns / −300 mV / delay 750 の 20 s 試験 → ピークを cell ≈ 80 に置く delay で 8 run → base 復元・token 解放、14:25 頃完了)→ その直後に `start_A.sh` が **A(12.5 MHz / delay 3800、run ≈ 110)を自動開始**して走らせたままにする(予定より早いが内容は同じ)。**失われたもの**: gain2(1014 ns × 240 fC、140 の追加 1 run)は 14:05 に取り直しと競合して中断(base は取り直しの最後に復元される)。VPN 復帰後: `~/test/scan/{pulser_kernel2.log, start_A.log, A_run.txt}` を見る → 取り直し 8 run に `pulser_kernel.C` → 138 結果 → A を止めるときに gain2 を 1 run 挟むかはユーザーと相談。ドリフト端マクロ `tools/scan/drift_end.C` は Opus implementer に発注済み(14:10)。
+**A の窓の見積もり(14:15)**: macros の L = 20 cm / 1200 V、91 mbar → E/p = 0.66 → 公称 v = 0.7233 × E/p = **0.48 cm/µs → t_max ≈ 42 µs**。delay 3800 の窓はトリガ後 38 µs(cell 33 以降)なので**公称では末尾が切れる**。HIGS 130 mbar の実測(0.390)は公称(0.334)より 17 % 速かったので、同じ比なら 0.56 cm/µs → 36 µs = cell ≈ 485 で収まる。復帰後に `drift_end.C` の `clip_back_frac` と last_hit の上端で判定し、切れていれば **delay 4000**(トリガ帯を cell ≈ 10 に、後ろ 40 µs)で取り直す。monitor / root-sink の QA 再構成は 25 MHz 固定(`src/reco` の MM_PER_CELL)なので A の z 表示は 2 倍ずれる(表示のみ、保存データは無関係)。
 
 守ること: HV / LV / ガスには触らない(web からは不可、方針)。run の開始・停止はこの表の範囲で了承済み(ユーザー「進めてください」)。各 run の設定は台帳の `run_start.params` に自動記録。反映は RUNBOOK §7.1。
 
