@@ -162,6 +162,26 @@ void fillLate(int)
   addPulse(0, 30, 450, 800);
 }
 
+// FPN にもパルスが入る pulser run の模型(TODO/138 追補)。共通モード cm(t) は無し(FPN を引かない
+// モードで形が s(k) ちょうどになるように)。全 ch 基線 = b(a,c)、信号 ch は ped 窓 cell 1..20 に ±2 の
+// 交互(平均 0)。AGET 0 だけ: 信号 ch 3 と ch 30 @ P(A = 800)、FPN ch 11 と 22 @ P
+// (A = 1200 = 信号の 1.5 倍)。FPN ch 45 / 56 と他 AGET はパルス無し。P = 150 + e mod 3。
+void fillFpnPulse(int e)
+{
+  for (int a = 0; a < 4; ++a)
+    for (int c = 0; c < 68; ++c)
+      for (int t = 0; t < 512; ++t) {
+        int v = baseline(a, c);
+        if (!runmetrics::isFpn(c) && t >= 1 && t <= 20) v += (t % 2 == 1) ? -2 : +2;
+        g_adc[a][c][t] = static_cast<Short_t>(v);
+      }
+  const int P = 150 + e % 3;
+  addPulse(0, 3, P, 800);
+  addPulse(0, 30, P, 800);
+  addPulse(0, 11, P, 1200);
+  addPulse(0, 22, P, 1200);
+}
+
 bool writeRaw(const std::string &path, int nEvents, void (*fill)(int))
 {
   TFile f(path.c_str(), "RECREATE");
@@ -411,7 +431,70 @@ int test_pulser_kernel()
   }
   checkNear(l.all.tail_p2p_ratio, 0.03, "late tail_p2p_ratio");
 
+  // ---- 既定(FPN を引く)の JSON: subtract_fpn / fpn --------------------------------------------
+  std::printf("[subtractFpn = true (default): fpn group absent]\n");
+  check(r.subtract_fpn, "default Result.subtract_fpn == true");
+  check(!r.hasFpn, "default Result.hasFpn == false");
+  check(contains(js, "\"subtract_fpn\": true,"), "JSON subtract_fpn true (default)");
+  check(contains(js, "\"fpn\": null,"), "JSON fpn null (default)");
+
+  // ---- FPN にもパルスが入る raw ------------------------------------------------------------------
+  // 6 イベント、P = 150 + e mod 3(150, 151, 152 各 2 回)。
+  //   信号 ch 3, 30 @ P、A = 800。FPN ch 11, 22 @ P、A = 1200(45 / 56 はパルス無し)。
+  const std::string fpnRaw = dir + "/run0092_raw.root";
+  check(writeRaw(fpnRaw, 6, fillFpnPulse), "write FPN-pulse raw (6 events)");
+
+  // (a) subtractFpn = false: 信号 ch は ped 減算だけ → v = 800·s ちょうど(FPN のパルスに影響されない)
+  std::printf("[subtractFpn = false: FPN pulses kept out of the signal channels]\n");
+  pulserkernel::Result nf;
+  check(pulserkernel::computePulserKernel(fpnRaw, 0, nf, err, false),
+        "computePulserKernel ok (subtractFpn false)");
+  check(!nf.subtract_fpn, "Result.subtract_fpn == false");
+  check(nf.hasFpn, "Result.hasFpn == true");
+  checkCount(nf.agets_without_fpn, 0, "agets_without_fpn (not counted when not subtracting)");
+  // 信号: 2 ch × 6 = 12 波形(FPN ch は all / agets に入らない)
+  checkCount(nf.all.waveforms, 12, "nosub all waveforms (FPN channels not included)");
+  checkCount(nf.all.channels, 2, "nosub all channels");
+  checkNear(nf.all.amplitude_median_adc, 800, "nosub all amplitude_median_adc (unaffected by FPN pulse)");
+  checkCount(nf.agets[0].waveforms, 12, "nosub aget0 waveforms");
+  checkShape(nf.all, 800, "nosub all");
+  // fpn グループ: パルスのある FPN ch 11, 22 × 6 イベント = 12 波形、ch 2 本(45 / 56 は振幅 0 で除外)、
+  //   振幅 1200、形は同じ s(k)
+  checkCount(nf.fpn.waveforms, 12, "nosub fpn waveforms (2 pulsed FPN ch × 6)");
+  checkCount(nf.fpn.channels, 2, "nosub fpn channels");
+  checkCount(nf.fpn.saturated_waveforms, 0, "nosub fpn saturated_waveforms");
+  checkNear(nf.fpn.amplitude_median_adc, 1200, "nosub fpn amplitude_median_adc");
+  checkNear(nf.fpn.rise_10_90_cells, 6.4, "nosub fpn rise_10_90_cells");
+  checkShape(nf.fpn, 1200, "nosub fpn");
+  // 同時性: FPN の 2 ch は同じ P → イベント内ばらつき 0
+  checkNear(nf.fpn.peak_cell_range_in_event.median, 0, "nosub fpn peak_cell_range_in_event.median");
+  // ピーク cell: 150, 151, 152 各 4 波形(12 個): median h = 5.5 → 151
+  checkNear(nf.fpn.peak_cell.median, 151, "nosub fpn peak_cell.median");
+  const std::string njs = pulserkernel::toJson(nf);
+  check(contains(njs, "\"subtract_fpn\": false,"), "JSON subtract_fpn false");
+  check(!contains(njs, "\"fpn\": null"), "JSON fpn is an object (subtractFpn false)");
+  check(contains(njs, "\"fpn\": {\n    \"waveforms\": 12, \"channels\": 2,"), "JSON fpn group body");
+
+  // (b) 既定(減算あり): FPN 平均 = (1200 + 1200 + 0 + 0)/4 = 600·s → 信号 v = 800·s − 600·s = 200·s
+  //     = 減算が(FPN に載った)パルスを引いてしまう対照。fpn は null
+  std::printf("[subtractFpn = true on FPN-pulse raw: subtraction eats the pulse]\n");
+  pulserkernel::Result sub;
+  check(pulserkernel::computePulserKernel(fpnRaw, 0, sub, err), "computePulserKernel ok (default)");
+  checkNear(sub.all.amplitude_median_adc, 200, "sub all amplitude_median_adc (800 − 600)");
+  check(sub.all.amplitude_median_adc < nf.all.amplitude_median_adc,
+        "subtraction reduces the signal amplitude vs subtractFpn=false");
+  check(!sub.hasFpn && contains(pulserkernel::toJson(sub), "\"fpn\": null,"),
+        "subtractFpn true: fpn null on the FPN-pulse raw");
+
+  // (c) 入口: 第 5 引数で JSON に反映される
+  const std::string njson = dir + "/run0092_pulser.json";
+  check(pulser_kernel(fpnRaw.c_str(), njson.c_str(), nullptr, 0, false) == 0,
+        "pulser_kernel(..., subtractFpn=false) returns 0");
+  check(readFile(njson) == njs, "pulser_kernel(subtractFpn=false) wrote the same JSON");
+
   // 後片付け
+  gSystem->Unlink(fpnRaw.c_str());
+  gSystem->Unlink(njson.c_str());
   for (const std::string &q : {raw, lateRaw, json, png}) gSystem->Unlink(q.c_str());
   gSystem->Unlink(dir.c_str());
 

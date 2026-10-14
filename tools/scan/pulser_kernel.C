@@ -98,6 +98,11 @@ struct Result {
   long events = 0;
   // 信号 ch は読めたが FPN が 1 本も読めなかった (イベント, AGET) の数(run_metrics.C と同じ)
   long agets_without_fpn = 0;
+  // FPN 共通モードを引いたか。false のとき FPN ch は別グループ fpn に集計する(AsAd 内蔵パルサーは
+  // FPN にもパルスを入れる — TODO/138)。true のとき hasFpn = false(JSON の fpn = null)
+  bool subtract_fpn = true;
+  bool hasFpn = false;
+  Group fpn;  // FPN ch 4 本 × AGET 全部(all と同じ構造)
   Group all;
   std::vector<Group> agets;  // adc の先頭次元の順(ELITPC は AsAd ブロック × 4 + AGET)
 };
@@ -222,9 +227,12 @@ Group finish(const Acc &acc, long channels, long saturatedChannels)
   return g;
 }
 
-bool computePulserKernel(const std::string &rawPath, int maxEvents, Result &r, std::string &err)
+bool computePulserKernel(const std::string &rawPath, int maxEvents, Result &r, std::string &err,
+                         bool subtractFpn = true)
 {
   r = Result();
+  r.subtract_fpn = subtractFpn;
+  r.hasFpn = !subtractFpn;
   r.raw_file = runmetrics::resolvedPath(rawPath);
   r.run = runmetrics::runFromName(rawPath);
 
@@ -254,7 +262,10 @@ bool computePulserKernel(const std::string &rawPath, int maxEvents, Result &r, s
   Long64_t n = tree->GetEntries();
   if (maxEvents > 0) n = std::min<Long64_t>(n, maxEvents);
   std::vector<Acc> accs(static_cast<size_t>(nBlocks));
-  Acc all;
+  Acc all, fpnAll;
+  // FPN ch(subtractFpn == false のときだけ使う)を 1 回以上使った / 飽和で除いた
+  std::vector<char> fpnUsed(static_cast<size_t>(nBlocks) * kChannels, 0);
+  std::vector<char> fpnSaturated(static_cast<size_t>(nBlocks) * kChannels, 0);
   // ch を 1 回以上使った / 飽和で除いた(AGET × 68)
   std::vector<char> used(static_cast<size_t>(nBlocks) * kChannels, 0);
   std::vector<char> saturated(static_cast<size_t>(nBlocks) * kChannels, 0);
@@ -268,6 +279,7 @@ bool computePulserKernel(const std::string &rawPath, int maxEvents, Result &r, s
       std::fill(fpn.begin(), fpn.end(), 0.0);
       int nFpn = 0;
       for (int fc : kFpn) {
+        if (!subtractFpn) break;  // 引かない: fpn = 0 のまま(ped 減算だけ)
         const Short_t *w = aget + fc * kCells;
         if (runmetrics::allZero(w)) continue;
         ++nFpn;
@@ -277,10 +289,15 @@ bool computePulserKernel(const std::string &rawPath, int maxEvents, Result &r, s
         for (double &x : fpn) x /= nFpn;
       bool signalRead = false;
       for (int c = 0; c < kChannels; ++c) {
-        if (runmetrics::isFpn(c)) continue;
+        const bool isFpnCh = runmetrics::isFpn(c);
+        if (isFpnCh && subtractFpn) continue;
         const Short_t *w = aget + c * kCells;
         if (runmetrics::allZero(w)) continue;
-        signalRead = true;
+        if (!isFpnCh) signalRead = true;
+        // FPN ch(引かないとき)は信号 ch の group とは別の fpn group へ
+        Acc &target = isFpnCh ? fpnAll : acc;
+        std::vector<char> &usedVec = isFpnCh ? fpnUsed : used;
+        std::vector<char> &satVec = isFpnCh ? fpnSaturated : saturated;
         // 2. ped と v
         double ped = 0;
         for (int t = kPedLo; t <= kPedHi; ++t) ped += w[t] - fpn[t];
@@ -295,20 +312,21 @@ bool computePulserKernel(const std::string &rawPath, int maxEvents, Result &r, s
         if (amp <= kMinAmplitude) continue;
         const size_t idx = static_cast<size_t>(b) * kChannels + c;
         if (hasSaturation(w)) {
-          ++acc.saturated;
-          ++all.saturated;
-          saturated[idx] = 1;
+          ++target.saturated;
+          if (!isFpnCh) ++all.saturated;
+          satVec[idx] = 1;
           continue;
         }
         // 4. ピーク揃えで足す
-        used[idx] = 1;
-        addWaveform(acc, v, peak, amp);
-        addWaveform(all, v, peak, amp);
+        usedVec[idx] = 1;
+        addWaveform(target, v, peak, amp);
+        if (!isFpnCh) addWaveform(all, v, peak, amp);
       }
       endEvent(acc);
-      if (signalRead && nFpn == 0) ++r.agets_without_fpn;
+      if (subtractFpn && signalRead && nFpn == 0) ++r.agets_without_fpn;
     }
     endEvent(all);
+    endEvent(fpnAll);
   }
 
   r.events = static_cast<long>(n);
@@ -324,6 +342,14 @@ bool computePulserKernel(const std::string &rawPath, int maxEvents, Result &r, s
     allSaturatedChannels += sat;
   }
   r.all = finish(all, allChannels, allSaturatedChannels);
+  if (!subtractFpn) {
+    long fc = 0, fs = 0;
+    for (size_t i = 0; i < fpnUsed.size(); ++i) {
+      fc += fpnUsed[i];
+      fs += fpnSaturated[i];
+    }
+    r.fpn = finish(fpnAll, fc, fs);
+  }
   return true;
 }
 
@@ -374,10 +400,15 @@ std::string toJson(const Result &r)
   s += "  \"run\": " + (r.run < 0 ? std::string("null") : std::to_string(r.run)) + ",\n";
   s += "  \"raw_file\": " + runmetrics::str(r.raw_file) + ",\n";
   s += "  \"events\": " + std::to_string(r.events) + ",\n";
+  s += "  \"subtract_fpn\": " + std::string(r.subtract_fpn ? "true" : "false") + ",\n";
   s += "  \"agets_without_fpn\": " + std::to_string(r.agets_without_fpn) + ",\n";
   s += "  \"min_amplitude_adc\": " + num(kMinAmplitude) + ",\n";
   s += "  \"window_cells\": [" + std::to_string(kWinLo) + ", " + std::to_string(kWinHi) + "],\n";
   s += "  \"all\": {\n" + groupBody(r.all, "    ") + "  },\n";
+  if (r.hasFpn)
+    s += "  \"fpn\": {\n" + groupBody(r.fpn, "    ") + "  },\n";
+  else
+    s += "  \"fpn\": null,\n";
   s += "  \"agets\": [\n";
   for (size_t b = 0; b < r.agets.size(); ++b) {
     s += "    {\n      \"aget\": " + std::to_string(b) + ",\n" + groupBody(r.agets[b], "      ") +
@@ -434,13 +465,15 @@ bool drawPng(const Result &r, const std::string &path)
 }  // namespace pulserkernel
 
 // 入口。0 = JSON(と PNG)を書いた、1 = 失敗(理由は stderr)。maxEvents ≤ 0 = 全イベント。
+// subtractFpn = false: FPN 共通モードを引かず(ped 減算だけ)、FPN ch を別グループ "fpn" に集計
+// (パルサー run は FPN にもパルスが入るので false で使う)。
 int pulser_kernel(const char *rawFile, const char *outJson, const char *outPng = nullptr,
-                  int maxEvents = 0)
+                  int maxEvents = 0, bool subtractFpn = true)
 {
   TStopwatch sw;
   pulserkernel::Result r;
   std::string err;
-  if (!pulserkernel::computePulserKernel(rawFile, maxEvents, r, err)) {
+  if (!pulserkernel::computePulserKernel(rawFile, maxEvents, r, err, subtractFpn)) {
     std::fprintf(stderr, "pulser_kernel: ERROR %s\n", err.c_str());
     return 1;
   }

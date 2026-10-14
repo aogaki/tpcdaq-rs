@@ -48,6 +48,10 @@
   `tail_50_300`(k = +50…+300 の **0 を基準にした** RMS √(Σy²/個数) とピーク間 max − min、`_ratio` = `mean_norm`、`_adc` = `mean_raw` — 25 MHz で 2 µs 以降の「揺れ」)、
   `peak_cell`(使った波形のピーク cell の median / p10 / p90)、`peak_cell_range_in_event`(イベント内の ch 間のピーク cell の max − min の分布 = パルサーの同時性)、
   `mean_norm` / `mean_raw` / `n`(341 点の配列、値が無い所は null)= 139 デコンボリューションの核。交点はすべて隣のセルとの線形補間、分位点は h = (n−1)·q。
+- **FPN の扱い(第 5 引数 `subtractFpn`、既定 true)**: AsAd 内蔵パルサーは FPN ch {11,22,45,56} にもパルスを入れる(振幅は信号 ch の ≈ 1.5 倍)ので、
+  pulser run は `subtractFpn=false` で使う(`pulser_kernel("…_raw.root", "out.json", nullptr, 0, false)`)。共通モード減算をせず ped(cell 1..20)減算だけにし、
+  FPN ch 4 本 × AGET を別グループ JSON 上位キー `fpn`(`all` と同じ構造)に集計する(`all` / `agets[]` には入れない)。減算するとき(α run 等)は `fpn` = null。
+  JSON に `subtract_fpn`。`agets_without_fpn` の WARNING は減算するときだけ。
 - PNG: 正規化平均を AGET ごとに 1 本重ねた 1 枚(線形、x = −40…+300、y = −0.3…1.05)。
 - 定数の出典: 100 ADC・窓 −40…+300・尾 +50…+300 = TODO/138 §2 の発注。他は run_metrics.C と同じ(上の節)。
 - テスト: `root -l -b -q tools/scan/test_pulser_kernel.C`(区分線形の既知の形 — 10–90 % 6.4 cells、FWHM 16.5、
