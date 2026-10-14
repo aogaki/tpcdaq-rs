@@ -47,7 +47,7 @@
 | 5 | 14:50 | まとめて報告。**E の設定を決める規則**: 飽和 ch を含むイベント < 2 % の中で最長 peaking とその gain(1 pC で 1014 が収まればそれ、無理なら 502) | 未 |
 | 6 | ~~15:00~~ **18:37 開始(run 111、`elinp__f591e65b`)** | **A 12.5 MHz ドリフト端 run**: knobs `writingClockFrequency_MHz: 12.5`、`triggerDelay: 3800`(ルール: (窓 40,960 − 2,800 − 160)/10)、ほか現用。**帰宅後まで走らせたまま**(2–3 h)。16:20 以降も走っているのはこれだけ | 未 |
 | 7 | 〜20:40 | A を stop → ドリフト端(t_max → v_drift = L / t_max、σ_L(z))の解析(小マクロ) → **E 一晩 α run**(25 MHz、5 の設定)を開始(開始前にユーザーに一言) | 未 |
-| 8 | 明日 | C(部分読み出し閾値 / ZS を実飛跡で)、139、E の解析(エネルギー較正 C-5、130 の素材) | 未 |
+| 8 | 明日 | C(部分読み出し閾値 / ZS を実飛跡で)、E の解析(エネルギー較正 C-5、130 の素材) | 未。**139 は済 → archive**(19:15): 逆畳み込み後の電荷比 1 : 1.05 : 1.21 = 総電荷はどの peaking でも和で取れている(137 の読みを訂正)、幅は 0.55–0.75 µs の固有幅に収束。短整形 + 逆畳み込み運用は採らず、E は 502 × 240 fC のまま |
 
 **17:33 復帰(ユーザー帰宅、Mac は朝まで sleep させない)**: run 101(取り直しの 20 s 試験)が **token 競合で stop 失敗 → 3.5 h 走りっぱなし**(データは 14:06 で止まっていた)→ 17:34 停止・base 復元・待機スクリプト 2 本 kill。**A は未開始**。138 の真因 = pulser テンプレートの `TestModeSelection` / `isSelectedforTestMode`(138 経過参照)→ 共有 `GetSoftware_config` へのテンプレート追加はユーザー承認待ち。D: run 100 の `calib/pedestal_502ns.json` 済。`drift_end.C` を run 84 に当てたら last_hit の 96 % が 510/511(窓端の跳ね)→ ヒット定義を [2,509) + run_metrics の ch 条件に直す発注(Sonnet、17:40)。
 **14:07 VPN 切断(FortiClient が Disconnected。私からは再接続不可)→ ELITPC に届かない。** 実機で**自動で進むもの**: `pulser_kernel2.sh`(138 取り直し: run 101 = 232 ns / −300 mV / delay 750 の 20 s 試験 → ピークを cell ≈ 80 に置く delay で 8 run → base 復元・token 解放、14:25 頃完了)→ その直後に `start_A.sh` が **A(12.5 MHz / delay 3800、run ≈ 110)を自動開始**して走らせたままにする(予定より早いが内容は同じ)。**失われたもの**: gain2(1014 ns × 240 fC、140 の追加 1 run)は 14:05 に取り直しと競合して中断(base は取り直しの最後に復元される)。VPN 復帰後: `~/test/scan/{pulser_kernel2.log, start_A.log, A_run.txt}` を見る → 取り直し 8 run に `pulser_kernel.C` → 138 結果 → A を止めるときに gain2 を 1 run 挟むかはユーザーと相談。ドリフト端マクロ `tools/scan/drift_end.C` は Opus implementer に発注済み(14:10)。
@@ -59,7 +59,6 @@
 
 | # | 中身 | 状態 | 次の一手 |
 |---|---|---|---|
-| [139](139_deconvolution_prototype.md) | 整形デコンボリューションの試作(138 の核で α 波形を戻す: 電荷回復・時間幅・ノイズ増幅) | READY(発注書) | Opus implementer に出す(A / E の合間) |
 | [140](140_gain_scan.md) | gain スキャンの記録 | 1014 × 240 fC の 1 run が未(gain2 競合で中断) | E の前後で 1 run 取って結果節を閉じる |
 | [133](133_restart_detection_multi_asad.md) | 4 AsAd では再開検出後に来る他 AsAd の古いフレームで原事故が再発しうる(送出順が AsAd 毎なら標準経路)、多 CoBo のカウンタ | **Warsaw 前の必須**(mini では起きない) | 一次資料で AsAd のリングを流す順を確かめ → Fable 設計(時刻で世代を分ける) |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
