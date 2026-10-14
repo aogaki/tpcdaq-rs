@@ -127,6 +127,11 @@ struct LateFragment {
 
 class EventBuilder {
  public:
+  // 再開判定の時刻後退幅の下限(TODO/134)。CoBo の event_time は 10 ns 刻みなので 1e7 ticks = 100 ms。
+  // 板どうしの時計ずれは µs 級、本物の取得再開は秒〜数十秒戻る(実機 run 73: 79.6 s → 0.28 s)。
+  // 閾値未満の後退は再開ではなく通常の遅延到着として扱う(偽陽性で新イベントを捨てない)。
+  static constexpr uint64_t kRestartMinTimeGap = 10000000;
+
   // expected = 設定 + ジオメトリ由来の {(cobo, asad)}(mini: {(0,0)}、
   // ELITPC: {(0,0),(0,1),(1,0),(1,1)})。空集合は「全イベントが即 complete」という
   // 無意味な動作になるので設定ミスとして止める。
@@ -143,12 +148,13 @@ class EventBuilder {
   // 同一バッチ内でも検出できるよう、emit だけでなく complete でも立てる)、より大きい idx
   // (> kRestartMinIdx)を見た後に、その世代で見た最小 event_time より小さい時刻で来たら、
   // ECC 不在で走り続けた zCoBo の古いフレームの後に新しい取得が始まったと見なす。
+  // 時刻は世代内の最小より kRestartMinTimeGap(100 ms)以上戻っていること(板のずれ=µs は再開にしない)。
   // late 判定より前に見る。起きたら旧世代の pending を押し出し(take_restart_flush() で
   // 受け取る)、世代を +1 して高水位をリセットする。
   std::optional<LateFragment> feed(OwnedFragment f, uint64_t now_ms) {
     RunState& rs = runs_[f.run_number];
     if (f.event_idx == 0 && (rs.have_emitted || rs.have_complete) && rs.max_seen > kRestartMinIdx && rs.have_time &&
-        f.event_time < rs.time_floor) {
+        f.event_time + kRestartMinTimeGap < rs.time_floor) {
       restart(f.run_number, rs);
     }
     if (rs.have_emitted && f.event_idx <= rs.emitted_upto) {

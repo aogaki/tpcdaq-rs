@@ -505,6 +505,9 @@ static void test_strict_seqcheck_applies_per_source_and_after_reset() {
 // 新しい取得が eventIdx 0 / 時刻 0 付近から始まる。判定 = event_idx==0 かつ同 run で
 // idx > 8 を見た後かつ event_time が世代内の最小より小さい。
 
+// 旧世代の時刻基準 = 1e8 ticks(1 s)。134 の閾値(1e7)より十分大きく、新世代(数十〜数千 ticks)から戻る。
+static constexpr uint64_t kOld = 100000000ull;
+
 // 時刻を指定できる合成 fragment(単一ソース (0,0) 用)。
 static OwnedFragment frag_at(uint32_t run, uint32_t event_idx, uint64_t time, uint8_t asad = 0) {
   OwnedFragment f = frag(run, event_idx, 0, asad);
@@ -519,7 +522,7 @@ static void feed_range(EventBuilder& eb, uint32_t run, uint32_t lo, uint32_t hi,
 
 static void test_an_event_idx_zero_with_an_earlier_clock_after_emission_starts_a_new_epoch() {
   EventBuilder eb({{0, 0}}, 1000);
-  feed_range(eb, 7, 5, 14, 1000000);  // 旧世代: idx 5..14(最大 14 > 8)、時刻 ≥ 1000050
+  feed_range(eb, 7, 5, 14, kOld);  // 旧世代: idx 5..14(最大 14 > 8)、時刻 ≥ kOld+50
   CHECK_EQ(eb.poll(0).size(), 10);
 
   const std::optional<LateFragment> r = eb.feed(frag_at(7, 0, 50), 0);  // 時刻 50 < 1000050
@@ -542,10 +545,10 @@ static void test_a_restart_flushes_the_pending_events_of_the_old_epoch() {
   EventBuilder eb({{0, 0}, {0, 1}}, 1000);
   // 旧世代: idx 5..13 は両 asad 揃い。poll しない = 全部 pending。
   for (uint32_t i = 5; i <= 13; ++i) {
-    eb.feed(frag_at(7, i, 1000000 + i * 10ull, 0), 0);
-    eb.feed(frag_at(7, i, 1000000 + i * 10ull, 1), 0);
+    eb.feed(frag_at(7, i, kOld + i * 10ull, 0), 0);
+    eb.feed(frag_at(7, i, kOld + i * 10ull, 1), 0);
   }
-  eb.feed(frag_at(7, 14, 1000140, 0), 0);
+  eb.feed(frag_at(7, 14, kOld + 140, 0), 0);
   CHECK_EQ(eb.pending(), 10);
 
   eb.feed(frag_at(7, 0, 50, 0), 0);  // restart
@@ -592,12 +595,12 @@ static void test_adjacent_mixing_at_the_head_is_not_a_restart() {
 
 static void test_two_restarts_in_one_run_are_both_counted() {
   EventBuilder eb({{0, 0}}, 1000);
-  feed_range(eb, 7, 5, 14, 1000000);
+  feed_range(eb, 7, 5, 14, kOld);
   CHECK_EQ(eb.poll(0).size(), 10);  // 世代 0: 5..14 の 10 件
-  eb.feed(frag_at(7, 0, 50), 0);    // 再開 1
-  feed_range(eb, 7, 100, 109, 100);  // 世代 1: 0, 100..109(時刻 1100.. ≥ floor 50)
+  eb.feed(frag_at(7, 0, 30000000), 0);    // 再開 1(kOld から 7e7 戻る)
+  feed_range(eb, 7, 100, 109, 30000000);  // 世代 1: 0, 100..109(時刻 ≥ floor 3e7)
   CHECK_EQ(eb.poll(0).size(), 11);
-  eb.feed(frag_at(7, 0, 10), 0);  // 再開 2(時刻 10 < 世代 1 の floor 50)
+  eb.feed(frag_at(7, 0, 10), 0);  // 再開 2(時刻 10 は世代 1 の floor 3e7 より 3e7 戻る)
   eb.feed(frag_at(7, 1, 20), 0);
   const std::vector<BuiltEvent> out = eb.poll(0);
 
@@ -612,7 +615,7 @@ static void test_two_restarts_in_one_run_are_both_counted() {
 
 static void test_new_epoch_events_with_ids_already_emitted_are_dropped_and_counted() {
   EventBuilder eb({{0, 0}}, 1000);
-  feed_range(eb, 7, 30, 40, 1000000);  // 旧世代 11 件
+  feed_range(eb, 7, 30, 40, kOld);  // 旧世代 11 件
   CHECK_EQ(eb.poll(0).size(), 11);
   feed_range(eb, 7, 0, 50, 0);  // 新世代 0..50(51 件)。30..40 は旧世代と同じ番号
   const std::vector<BuiltEvent> out = eb.poll(0);
@@ -744,6 +747,66 @@ static void test_a_stale_head_with_four_asads_in_the_same_batch_is_a_restart() {
   CHECK_EQ(eb.late_fragments(), 0);
 }
 
+
+// 134: 4 AsAd。AsAd 0..2 の event 0..9 が build timeout で incomplete のまま emit された後、
+// 遅れた AsAd 3 の event 0 が板の時刻ずれ(1 µs = 100 ticks 早い)で来る。再開ではなく late。
+// 以後の 4 AsAd 完全な event 10..20 は捨てられず complete で出ること。
+static void test_a_late_event_zero_fragment_after_an_incomplete_emit_with_a_slightly_earlier_clock_is_late_not_a_restart() {
+  EventBuilder eb({{0, 0}, {0, 1}, {1, 0}, {1, 1}}, 1000);
+  for (uint32_t i = 0; i < 10; ++i) {
+    for (uint8_t k = 0; k < 3; ++k) {
+      OwnedFragment f = frag(7, i, k / 2, k % 2);
+      f.event_time = 1000000 + i * 10ull + k;  // floor = 1000000
+      eb.feed(std::move(f), 0);
+    }
+  }
+  const std::vector<BuiltEvent> timed_out = eb.poll(2000);  // 2000 ms > 1000 ms timeout
+  CHECK_EQ(timed_out.size(), 10);
+  CHECK(timed_out.size() == 10 && timed_out[0].incomplete && timed_out[9].incomplete);
+
+  OwnedFragment late = frag(7, 0, 1, 1);
+  late.event_time = 1000000 - 100;  // floor より 1 µs 早い
+  const std::optional<LateFragment> r = eb.feed(std::move(late), 2000);
+  CHECK(r.has_value());
+  CHECK_EQ(eb.acquisition_restarts(), 0);
+  CHECK_EQ(eb.late_fragments(), 1);
+  CHECK_EQ(eb.restart_duplicate_events(), 0);
+
+  for (uint32_t i = 10; i <= 20; ++i) {
+    for (uint8_t k = 0; k < 4; ++k) {
+      OwnedFragment f = frag(7, i, k / 2, k % 2);
+      f.event_time = 1000000 + i * 10ull + k;
+      eb.feed(std::move(f), 2000);
+    }
+  }
+  const std::vector<BuiltEvent> out = eb.poll(2000);
+  CHECK_EQ(out.size(), 11);  // 10..20 の 11 件(手計算: 20-10+1)
+  bool all_complete = true;
+  for (const BuiltEvent& ev : out) all_complete = all_complete && !ev.incomplete && ev.epoch == 0;
+  CHECK(all_complete);
+  CHECK_EQ(eb.restart_duplicate_events(), 0);
+}
+
+// 134: 本物の再開(数十秒戻る)は検出を続ける。境界: floor - gap ちょうどは検出しない、1 小さければ検出。
+static void test_a_genuine_restart_tens_of_seconds_back_is_still_detected() {
+  {
+    EventBuilder eb({{0, 0}}, 1000);
+    for (uint32_t i = 2038; i <= 2056; ++i) eb.feed(frag_at(29, i, 406000000ull + (i - 2038) * 140000ull), 0);
+    for (uint32_t i = 0; i <= 3; ++i) eb.feed(frag_at(29, i, 16000ull + i * 10ull), 0);
+    CHECK_EQ(eb.acquisition_restarts(), 1);
+  }
+  const uint64_t floor_time = 50000000ull;  // 0.5 s。gap を引いても 0 以上
+  auto run = [&](uint64_t t0) {
+    EventBuilder eb({{0, 0}}, 1000);
+    feed_range(eb, 7, 5, 14, floor_time);  // 最小時刻 = floor_time + 5*10
+    eb.feed(frag_at(7, 0, t0), 0);
+    return eb.acquisition_restarts();
+  };
+  const uint64_t floor_actual = floor_time + 50;
+  CHECK_EQ(run(floor_actual - EventBuilder::kRestartMinTimeGap), 0);      // ちょうど閾値: late
+  CHECK_EQ(run(floor_actual - EventBuilder::kRestartMinTimeGap - 1), 1);  // 1 tick 超: 再開
+}
+
 int main() {
   test_owned_fragment_deep_copies_the_view();
 
@@ -778,6 +841,8 @@ int main() {
   test_emitted_ids_are_kept_as_ranges_and_released_on_close();
   test_a_stale_head_and_the_new_event_zero_in_the_same_batch_is_a_restart();
   test_a_stale_head_with_four_asads_in_the_same_batch_is_a_restart();
+  test_a_late_event_zero_fragment_after_an_incomplete_emit_with_a_slightly_earlier_clock_is_late_not_a_restart();
+  test_a_genuine_restart_tens_of_seconds_back_is_still_detected();
 
   test_strict_seqcheck_accepts_zero_as_the_first();
   test_strict_seqcheck_treats_a_nonzero_first_as_a_gap();
