@@ -64,9 +64,9 @@
   (第 4 引数 `maxEvents` = 先頭から何イベント読むか、0 = 全部。PNG は `nullptr` で省略)。終了コード 0 = 書いた、1 = 失敗(理由は stderr)。
 - 入力の前提・定数・FPN の扱いは run_metrics.C と同じ(それを include して使う): AGET ごとに読めた FPN ch のセル毎平均を引き、
   信号 ch ごとに ped = cell 1..20 の平均を引いた v。全セル 0 の ch(未読)と FPN ch は除く。
-- **ヒット cell = v > 35 の cell のうち cell [2, 509) だけ**(先頭の整定ノイズと窓端 2 cell の跳ねを除く。JSON `hit_cell_range: [2, 509]`)。
+- **ヒット cell = v > 35 の cell のうち cell [2, 508) だけ**(先頭の整定ノイズと窓端 4 cell(508..511)の跳ねを除く。JSON `hit_cell_range: [2, 508]`)。
   **ch 条件**: run_metrics.C の「ヒット ch」(ピーク > 35 かつ q ≥ 2000)を満たす ch の cell だけ数える(同じ定数・同じ計算、JSON `channel_condition: "run_metrics"`)。
-  cell < 509 に限るので `clip_back_frac` は構造的に 0。イベントの first = 全ヒット ch のヒット cell の最小、last = 最大。
+  cell < 508 に限るので `clip_back_frac` は構造的に 0。イベントの first = 全ヒット ch のヒット cell の最小、last = 最大。
   ヒットの無いイベントは `events` に数えるだけで分布に入れない(`events_with_hits`)。
 - 出力: `first_hit_cell`(median / p10 / p90)、`last_hit_cell`(median / p10 / p90 / p99)、`first_hit_hist` / `last_hit_hist`(cell 0..511 ごとのイベント数、512 個)、
   `edge` = last の分布の上端 — `cell_p99`(上から累積 1 % = `last_hit_cell.p99`)、`width_cells`(上端の立ち下がり幅 = 上から累積 1 % と 10 % の cell の差 = p99 − p90)、
@@ -75,7 +75,7 @@
   分位点は線形補間 h = (n−1)·q。値が無ければ null。
 - PNG: first / last のヒストを重ねた 1 枚(x = cell、対数 y)。
 - テスト: `root -l -b -q tools/scan/test_drift_end.C`(101 イベントで first = 40 + e mod 21、last = 100 + e と窓端 508 / 509 / 510 / 511 の矩形パルス、
-  全 ch に common mode の傾き、窓端の跳ね(cell 510–511)・先頭の整定(cell 0–1)・単独 cell のノイズ(q < 2000)・閾値ちょうど 35 と FPN ch のおとり、ヒット無しの 3 イベント、maxEvents = 50 で補間の分位点、ヒット無しだけの run を
+  全 ch に common mode の傾き、窓端の跳ね(cell 508–511)・先頭の整定(cell 0–1)・単独 cell のノイズ(q < 2000)・閾値ちょうど 35 と FPN ch のおとり、ヒット無しの 3 イベント、maxEvents = 50 で補間の分位点、ヒット無しだけの run を
   一時ディレクトリに書く。終了コード = 失敗数)
 
 ## α run → 整形核の逆畳み込み(TODO/139 §1)

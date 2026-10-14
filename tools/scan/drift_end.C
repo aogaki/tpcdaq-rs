@@ -18,12 +18,12 @@
 //      ped = (ADC − fpn) の cell 1..20 の平均
 //   3. ch 条件 = run_metrics.C の「ヒット ch」(ピーク > 35 かつ ピーク ±5 cells の閾値超の和
 //      q ≥ 2000。同じ定数 kAdcThreshold / kPeakHalfCells / kStripQMin、同じ計算)。満たさない ch は無視
-//   4. ヒット cell = 条件を満たす ch の v > 35 の cell のうち cell [2, 509) だけ(kHitCellMin /
-//      kHitCellMax — 先頭の整定ノイズと窓端 2 cell の跳ねを除く)。
+//   4. ヒット cell = 条件を満たす ch の v > 35 の cell のうち cell [2, 508) だけ(kHitCellMin /
+//      kHitCellMax — 先頭の整定ノイズと窓端 4 cell(508..511)の跳ねを除く)。
 //      イベントの first = 全ヒット ch のヒット cell の最小、last = 最大。ヒットの無いイベントは
-//      events に数えるだけで分布に入れない。JSON に hit_cell_range [2, 509] と
+//      events に数えるだけで分布に入れない。JSON に hit_cell_range [2, 508] と
 //      channel_condition "run_metrics" を書く(文書化)。
-//      注: cell < 509 に限るので last ≤ 508 = clip_back_frac(last ≥ 509)は構造的に 0
+//      注: cell < 508 に限るので last ≤ 507 = clip_back_frac(last ≥ 509)は構造的に 0
 //
 // 指標(ヒットのあるイベントだけの分布。分位点は線形補間 h = (n−1)·q — run_metrics.C の quantile):
 //   first_hit_cell {median, p10, p90}、last_hit_cell {median, p10, p90, p99}
@@ -68,10 +68,11 @@ using runmetrics::Quantiles;
 // 窓で切れている last の下限 = run_metrics.C の clip_back_edge の境界(ヒットセルが ≥ 509)。
 const int kClipBackMinCell = runmetrics::kClipEdgeBackMinCell;  // 509
 
-// ヒットに使う cell の範囲 [kHitCellMin, kHitCellMax)。窓端の跳ね(cell 510, 511)と先頭の整定ノイズ
-// (cell 0, 1)を除く。上端は run_metrics.C の kClipEdgeBackMinCell(509)に合わせる。
+// ヒットに使う cell の範囲 [kHitCellMin, kHitCellMax)。窓端の跳ね(cell 508..511)と先頭の整定ノイズ
+// (cell 0, 1)を除く。上端は run_metrics.C の kClipEdgeBackMinCell − 1(= 508。実データ run 111 / 84 で
+// cell 508 だけに単独のスパイクがあった)。
 const int kHitCellMin = 2;
-const int kHitCellMax = runmetrics::kClipEdgeBackMinCell;  // 509
+const int kHitCellMax = runmetrics::kClipEdgeBackMinCell - 1;  // 508
 
 struct Edge {
   double cell_p99 = kNull, width_cells = kNull, t_max_cells = kNull;

@@ -15,13 +15,13 @@
 //   v = cm(t) − 0.4(cm の cell 1..20 の平均 = 8/20)が残り、cell ≥ 468(cm ≥ 36)で全信号 ch が
 //   35 を越える → 全イベントの last = 511、ヒット無しイベントもヒットありになる。
 //
-// ヒット定義(drift_end.C): ヒットに使う cell は [2, 509) だけ、かつ ch が run_metrics.C の「ヒット ch」
+// ヒット定義(drift_end.C): ヒットに使う cell は [2, 508) だけ、かつ ch が run_metrics.C の「ヒット ch」
 // (ピーク > 35 かつ ピーク ±5 cells の閾値超の和 q ≥ 2000。ピークは窓全体の最大の最初の cell)を
 // 満たすときだけ。矩形パルスは peak = 先頭 cell なので ±5 の窓に入るのは先頭から 6 cell
 // → q = 6 × 高さ。高さ 400 なら q = 2400 ≥ 2000(幅 ≥ 11 cell のパルスは従来どおり数える)。
 //
 // 全イベント共通の「ヒットに数えてはいけないもの」(信号 ch のみ、FPN ch には入れない):
-//   窓端の跳ね    全 AGET・全信号 ch の cell 510, 511 に +60、先頭の整定 cell 0, 1 に +60
+//   窓端の跳ね    全 AGET・全信号 ch の cell 508..511 に +60、先頭の整定 cell 0, 1 に +60
 //                 (v = 60 > 35 だが q ≤ 120 < 2000 で ch 条件に落ちる。cell 1 は ped 窓 1..20 に
 //                  入るので ped が +60/20 = +3 ずれ、パルス以外の v は −3 になる = 閾値 35 のおとりは
 //                  v = 32 に下がるだけで結論は同じ)
@@ -32,9 +32,9 @@
 //   e = 0..100(101 イベント)= ヒットあり。F = 40 + e mod 21、L は下の表。
 //     AGET 1 ch 7   cell F .. F+20     高さ 400(q = 6×400 = 2400 → ヒット ch)→ first = F
 //     AGET 0 ch 3   cell F+5 .. L−5    高さ 300(中の ch — first にも last にもならない)
-//     AGET 2 ch 40  cell L−30 .. L     高さ 400(q = 2400)→ last = min(L, 508)
+//     AGET 2 ch 40  cell L−30 .. L     高さ 400(q = 2400)→ last = min(L, 507)
 //     L = 100 + e(e = 0..95)、508(e = 96)、509(e = 97)、510(e = 98, 99)、511(e = 100)。
-//         cell ≥ 509 は数えないので e = 96..100 の last はすべて 508
+//         cell ≥ 508 は数えないので e = 96..100 の last はすべて 507
 //   おとり(e = 0..100 にも全部入れる):
 //     閾値ちょうど: AGET 2 ch 10 cell 30..34 と AGET 0 ch 60 cell 490..500 に高さ 35(v = 35 は越えない。
 //                  数えると first = 30 / last = 500 になる)
@@ -47,11 +47,11 @@
 //   F: r = e mod 21。101 = 4·21 + 17 → r = 0..16 が 5 個、17..20 が 4 個
 //      昇順 index: r ≤ 16 は [5r, 5r+4]、r = 17 → 85..88、18 → 89..92、19 → 93..96、20 → 97..100
 //      p10 = idx 10 → r 2 → 42、median = idx 50 → r 10 → 50、p90 = idx 90 → r 18 → 58
-//   last: 昇順 idx 0..95 = 100..195、96..100 = 508(窓端 cell ≥ 509 は数えない)
-//      p10 = idx 10 → 110、median = idx 50 → 150、p90 = idx 90 → 190、p99 = idx 99 → 508
-//   edge: cell_p99 = 508(= p99)、width_cells = 508 − 190(上から累積 10 % = p90)= 318、
-//         t_max_cells = 508 − 50(first の median)= 458
-//   clip_back_frac = last ≥ 509 は無い(cell を [2, 509) に限ったので構造的に 0)= 0
+//   last: 昇順 idx 0..95 = 100..195、96..100 = 507(窓端 cell ≥ 508 は数えない)
+//      p10 = idx 10 → 110、median = idx 50 → 150、p90 = idx 90 → 190、p99 = idx 99 → 507
+//   edge: cell_p99 = 507(= p99)、width_cells = 507 − 190(上から累積 10 % = p90)= 317、
+//         t_max_cells = 507 − 50(first の median)= 457
+//   clip_back_frac = last ≥ 509 は無い(cell を [2, 508) に限ったので構造的に 0)= 0
 //
 // maxEvents = 50(e = 0..49)は分位点が補間になる(n = 50、h = 49·q):
 //   F: r = 0..7 が 3 個(idx [3r, 3r+2])、8..20 が 2 個(idx [24 + 2(r−8), 25 + 2(r−8)])
@@ -151,7 +151,7 @@ void edgeArtifactsAndLoneNoise()
     for (int c = 0; c < 68; ++c) {
       if (runmetrics::isFpn(c)) continue;
       addBox(a, c, 0, 1, 60);
-      addBox(a, c, 510, 511, 60);
+      addBox(a, c, 508, 511, 60);
     }
   addBox(2, 20, 25, 25, 40);
   addBox(2, 20, 505, 505, 40);
@@ -287,15 +287,15 @@ int test_drift_end()
   checkNear(r.first_hit_cell.p10, 42, "first_hit_cell.p10");
   checkNear(r.first_hit_cell.median, 50, "first_hit_cell.median");
   checkNear(r.first_hit_cell.p90, 58, "first_hit_cell.p90");
-  // last の p10 / median / p90 / p99 = 110 / 150 / 190 / 508(FPN を引かないと全部 508 超、跳ねを数えると 511)
+  // last の p10 / median / p90 / p99 = 110 / 150 / 190 / 507(FPN を引かないと全部 507 超、跳ねを数えると 511)
   checkNear(r.last_hit_cell.p10, 110, "last_hit_cell.p10");
   checkNear(r.last_hit_cell.median, 150, "last_hit_cell.median");
   checkNear(r.last_hit_cell.p90, 190, "last_hit_cell.p90");
-  checkNear(r.last_hit_cell_p99, 508, "last_hit_cell.p99");
-  // edge: 508、508 − 190 = 318、508 − 50 = 458
-  checkNear(r.edge.cell_p99, 508, "edge.cell_p99 (= last_hit_cell.p99)");
-  checkNear(r.edge.width_cells, 318, "edge.width_cells (p99 - p90)");
-  checkNear(r.edge.t_max_cells, 458, "edge.t_max_cells (cell_p99 - first median)");
+  checkNear(r.last_hit_cell_p99, 507, "last_hit_cell.p99");
+  // edge: 507、507 − 190 = 317、507 − 50 = 457
+  checkNear(r.edge.cell_p99, 507, "edge.cell_p99 (= last_hit_cell.p99)");
+  checkNear(r.edge.width_cells, 317, "edge.width_cells (p99 - p90)");
+  checkNear(r.edge.t_max_cells, 457, "edge.t_max_cells (cell_p99 - first median)");
   // cell ≥ 509 は数えないので last ≥ 509 は 0 個
   checkNear(r.clip_back_frac, 0.0, "clip_back_frac = 0 (cells >= 509 not counted)");
 
@@ -315,12 +315,13 @@ int test_drift_end()
   checkCount(bin(r.first_hit_hist, 0), 0, "first_hit_hist[0] (settling bump)");
   checkCount(bin(r.first_hit_hist, 1), 0, "first_hit_hist[1] (settling bump)");
   checkCount(bin(r.first_hit_hist, 30), 0, "first_hit_hist[30] (threshold decoy)");
-  // L: 100..195 は 1 個ずつ、196 は 0、508 は 5(e = 96..100)、509 / 510 / 511 は 0(跳ね・窓端は数えない)。
+  // L: 100..195 は 1 個ずつ、196 は 0、507 は 5(e = 96..100)、508..511 は 0(跳ね・窓端は数えない)。
   // おとりの 495 / 500 / 単独ノイズの 505 は 0
   checkCount(bin(r.last_hit_hist, 100), 1, "last_hit_hist[100]");
   checkCount(bin(r.last_hit_hist, 195), 1, "last_hit_hist[195]");
   checkCount(bin(r.last_hit_hist, 196), 0, "last_hit_hist[196]");
-  checkCount(bin(r.last_hit_hist, 508), 5, "last_hit_hist[508] (e = 96..100 clamp to the range end)");
+  checkCount(bin(r.last_hit_hist, 507), 5, "last_hit_hist[507] (e = 96..100 clamp to the range end)");
+  checkCount(bin(r.last_hit_hist, 508), 0, "last_hit_hist[508] (edge bump, real-data spike cell)");
   checkCount(bin(r.last_hit_hist, 509), 0, "last_hit_hist[509]");
   checkCount(bin(r.last_hit_hist, 510), 0, "last_hit_hist[510] (edge bump)");
   checkCount(bin(r.last_hit_hist, 511), 0, "last_hit_hist[511] (edge bump)");
@@ -333,14 +334,14 @@ int test_drift_end()
   check(contains(js, "\"run\": 105,"), "JSON \"run\": 105");
   check(contains(js, "\"events\": 104,"), "JSON \"events\": 104");
   check(contains(js, "\"events_with_hits\": 101,"), "JSON \"events_with_hits\": 101");
-  check(contains(js, "\"hit_cell_range\": [2, 509],"), "JSON hit_cell_range");
+  check(contains(js, "\"hit_cell_range\": [2, 508],"), "JSON hit_cell_range");
   check(contains(js, "\"channel_condition\": \"run_metrics\","), "JSON channel_condition");
   check(contains(js, "\"first_hit_cell\": {\"median\": 50, \"p10\": 42, \"p90\": 58}"),
         "JSON first_hit_cell");
   check(contains(js,
-                 "\"last_hit_cell\": {\"median\": 150, \"p10\": 110, \"p90\": 190, \"p99\": 508}"),
+                 "\"last_hit_cell\": {\"median\": 150, \"p10\": 110, \"p90\": 190, \"p99\": 507}"),
         "JSON last_hit_cell");
-  check(contains(js, "\"edge\": {\"cell_p99\": 508, \"width_cells\": 318, \"t_max_cells\": 458}"),
+  check(contains(js, "\"edge\": {\"cell_p99\": 507, \"width_cells\": 317, \"t_max_cells\": 457}"),
         "JSON edge");
   check(contains(js, "\"clip_back_frac\": 0,"),
         "JSON clip_back_frac");
