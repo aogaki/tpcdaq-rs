@@ -1,0 +1,4 @@
+{"name": "tdelay_2026-10-14", "base": "/srv/tpcdaq/params/current.json",
+ "stop": {"events": 1500, "max_s": 600},
+ "points": [{"knobs": {"triggerDelay": 1000}}, {"knobs": {"triggerDelay": 1250}}, {"knobs": {"triggerDelay": 1500}},
+            {"knobs": {"triggerDelay": 1750}}, {"knobs": {"triggerDelay": 2000}}]}
