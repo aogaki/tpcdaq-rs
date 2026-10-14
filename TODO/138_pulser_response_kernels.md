@@ -17,5 +17,10 @@
 - 出すもの: 立ち上がり 10–90 %、FWHM、ピーク後のアンダーシュートの深さと時刻、2 µs 以降の尾(揺れ)の振幅、−300 / −100 の振幅比(線形性)、飽和 ch の数。
 - 137 の α の「揺れ」(周期 ≈ 1.6 µs、−20 ADC)と形を比べる。
 
-## 結果(取得後に記入)
-EOF
+## 経過
+- **14:00 run 91–98(delay 1750 のまま)は使えない**: `pulser_kernel.C` の結果、どの run もパルスが窓に無い(70 ns の 2 run はピーク = cell 508 の端の跳ねだけ、他は A > 100 の揺れ・ノイズを拾った偽の波形で振幅中央値 ≈ 130 ADC、`calib scan` でも −300 / −100 mV の振幅が 38 / 38 ADC = 無信号)。
+  読み: onSlowControl では CoBo がパルサーを叩いてから数 µs 後にトリガが出る(= パルスはトリガより前)。external の法則 `cell = 508 − delay/4` で delay 1750 の窓は [t0 − 3 µs, t0 + 17.5 µs] なのでパルスが窓の前に落ちる。実験の `configure-pulser.xcfg`(reference/config)は **triggerDelay 750** = 窓 [t0 − 13 µs, t0 + 7.5 µs]。
+- **取り直し(`pulser_kernel2.sh`、gain2 の後に自動)**: 232 ns × −300 mV × delay 750 を 20 s 試し、ピーク cell を測って `delay = 750 + 4 × (peak − 80)` でピークを cell ≈ 80 に置き直し(尾 +300 cell が窓に入る)、その delay で 8 点(各 30 s)。run 番号は `pulser_kernel2_runs.json`、ログ `pulser_kernel2.log`。
+- マクロは main に取り込み済み(`df38f8d`、テスト 172 green、Opus implementer の報告は §2 の各項目とテスト名で照合)。
+
+## 結果(取り直しの後に記入)

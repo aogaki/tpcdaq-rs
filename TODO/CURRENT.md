@@ -40,10 +40,10 @@
 
 | 順 | 時刻 | やること | 状態 |
 |---|---|---|---|
-| 1 | 〜13:52 | gain スキャン完了 → 4 点の表(揺れの列つき)を 137 の形で記録(新チケット or 137 追記) | 待ち |
-| 2 | 〜14:05 | 138 パルサー核 8 run(自動) | 待機中 |
-| 3 | 14:05 | **D 較正表**: pedestal(`triggerMode: periodically`、2 min)と pulser(1 min)を 232 / 502 ns で取り、ELITPC の `~/tpcdaq-rs/target/release/calib pedestal|pulser <graw> --out` で per-ch 表 | 未 |
-| 4 | 14:15 | **B 自己トリガ**: `triggerMode: onMultiplicity`、閾値 4 点(`globalThreshold` 1/2/4/8 — 単位は docs/PARAMS_KNOBS_ja.md で確認してから)、各 ≤ 4 min(`stop.max_s 240`)→ レート・電荷・ok 率を run 84(外部)と比較。scan.py で可 | 未 |
+| 1 | 〜13:52 | gain スキャン完了 → 4 点の表(揺れの列つき)を 137 の形で記録 | **済 → [140](140_gain_scan.md)**(run 87–90。E 候補 = 502 × 240 fC、1014 × 240 fC を 1 run 追加中 = run 101) |
+| 2 | 〜14:05 | 138 パルサー核 8 run(自動) | run 91–98 済だが**パルスが窓の前**(delay 1750)→ 取り直しを delay 750 基準で自動キュー(run 102〜、14:15 頃)。マクロはマージ済 `df38f8d` |
+| 3 | 14:05 | **D 較正表**: pedestal(`triggerMode: periodically`、`readout: full`、150 s ≈ 150 events — テンプレートの triggerPeriod 1 s は非管理ノブ)を 232 / 502 ns = run 99 / 100、pulser は 138 の取り直し run を流用 → `calib pedestal|scan` で `~/test/scan/calib/*.json` | run 99 済(signal σ 中央値 7.6 ADC、FPN 3.3)、run 100 取得中 |
+| 4 | ~~14:15~~ | ~~**B 自己トリガ**(onMultiplicity)~~ | **中止**: zCoBo FW はマルチプリシティトリガを扱えない(archive/078 §: 「The current firmware version does not handle triggering on MULTIPLICITY」、ユーザー裁定 2026-09-14 で API からも除外)。私の計画ミス |
 | 5 | 14:50 | まとめて報告。**E の設定を決める規則**: 飽和 ch を含むイベント < 2 % の中で最長 peaking とその gain(1 pC で 1014 が収まればそれ、無理なら 502) | 未 |
 | 6 | 15:00 | **A 12.5 MHz ドリフト端 run** 開始: knobs `writingClockFrequency_MHz: 12.5`、`triggerDelay: 3800`(ルール: (窓 40,960 − 2,800 − 160)/10)、ほか現用。**帰宅後まで走らせたまま**(2–3 h)。16:20 以降も走っているのはこれだけ | 未 |
 | 7 | 帰宅後 | A を stop → ドリフト端(t_max → v_drift = L / t_max、σ_L(z))の解析(小マクロ) → **E 一晩 α run**(25 MHz、5 の設定)を開始(開始前にユーザーに一言) | 未 |
