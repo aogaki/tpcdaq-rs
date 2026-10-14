@@ -1,6 +1,6 @@
 # 135 — パラメータスキャンのドライバ(設定列 → PUT /api/params → run → 待つ → stop → 記録)
 
-**Status: READY**(2026-10-14 起票 Fable。ユーザー「パラメータを変えながら run を取って解析したい。Parameters 画面ができたので AI でガンガンやりたい」。
+**Status: COMPLETED(2026-10-14、結果は末尾)** — 旧: READY(2026-10-14 起票 Fable。ユーザー「パラメータを変えながら run を取って解析したい。Parameters 画面ができたので AI でガンガンやりたい」。
 triggerDelay は「目視の範疇だが、最適値の自動化の布石としてアリ」= 最初の試運転に使う。本命は peakingTime / gain / 部分読み出し閾値。Sonnet、1 日)
 
 ## 0. 前提(実装済みのもの — 新しいサーバ機能は作らない)
@@ -38,3 +38,22 @@ triggerDelay は「目視の範疇だが、最適値の自動化の布石とし�
 
 ## 4. 報告
 変更ファイル、テスト名、赤の実測、`python3 -m unittest` の総数、`--dry-run` の出力例、**実行できなかった操作**(無ければ「なし」)。
+
+## 結果(2026-10-14、Sonnet `d0026e2` 系 → merge、試運転 = triggerDelay 5 点、ELITPC、Fable 照合)
+- 実装: `tools/scan/scan.py`(標準ライブラリのみ)、`test_scan.py` 8 本(発注 6 + resume / dry-run)、`examples/trigger_delay.json`、README。呼ぶ API は status / params / run start・stop / control acquire・release だけ(power 系なし — diff で確認)。
+- 逸脱(承認): 「notes が空でない」は abort 条件にせず `start_notes` として記録(params 由来の note が毎回出るため)。
+- dry-run(ELITPC 現用 current.json、25 MHz / delay 1500): PUT 本文の差は `triggerDelay` と `note` だけ。
+- **試運転(ユーザー了承「試運転してくれていいですよ」、12:23–12:52 EEST、α 線源・外部トリガ・HV ON のまま無人)**: 5 点 × 1,500 events、全点 ok、最後に base(`elinp__dcdaf9ca`)へ復元、相 Idle。
+
+| 点 | triggerDelay | run | params id | events | 所要 |
+|---|---|---|---|---|---|
+| 0 | 1000 | 78 | elinp__ac74447b | 1500 | 329 s |
+| 1 | 1250 | 79 | elinp__0ae4216d | 1503 | ≈ 330 s |
+| 2 | 1500(現用) | 80 | elinp__dcdaf9ca | 1508 | ≈ 330 s |
+| 3 | 1750 | 81 | — | 1501 | 335 s |
+| 4 | 2000 | 82 | — | 1506 | 337 s |
+
+- レート ≈ 4.5 Hz(α、5 分 / 1,500)。malformed / restarts / late は全点 0。台帳の `run_start.params` に各点の id が残っている(索引は `~/test/scan/scan_tdelay_test.json`)。
+- 教訓: 1 点 5 分で 30 分。解析(136)は run 1 本 3 s なので、点を増やすコストは取得だけ。
+
+**Status: COMPLETED(2026-10-14)**
