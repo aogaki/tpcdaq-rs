@@ -1,6 +1,6 @@
 # 134 — 取得の再開の判定に「時刻の後退幅」の閾値を足す(偽陽性で新しいイベントを捨てる穴を塞ぐ)
 
-**Status: READY**(2026-10-14 起票 Fable。110 完了時の批判的レビューで発見。小さいが、起きると ROOT からデータを**意図して**捨てる経路なので Warsaw(4 AsAd)前に必須。Sonnet)
+**Status: COMPLETED(2026-10-14、結果は末尾)** — 旧: READY(2026-10-14 起票 Fable。110 完了時の批判的レビューで発見。小さいが、起きると ROOT からデータを**意図して**捨てる経路なので Warsaw(4 AsAd)前に必須。Sonnet)
 
 ## 0. 穴(SPEC v1.46 §6.3 の判定、`tools/root_sink/eb_core.hpp` `feed`)
 - 判定は `event_idx == 0 && (complete か emit 済み) && max_seen > 8 && event_time < time_floor`。
@@ -34,3 +34,14 @@
 
 ## 参照
 SPEC v1.46 §2.3 / §6.3、archive/110、133(4 AsAd の送出順 — こちらは設計が要る。134 はそれと独立に今入れる)。
+
+## 結果(2026-10-14、Sonnet `f2f06af` → merge `49e4b01`、Fable 照合)
+- 両層に閾値 100 ms(`kRestartMinTimeGap` / `RESTART_MIN_TIME_GAP` = 10,000,000 ticks)。判定は `event_time + gap < time_floor`(decoder は saturating_add)。
+- 新規テスト: C++ `test_a_late_event_zero_fragment_after_an_incomplete_emit_with_a_slightly_earlier_clock_is_late_not_a_restart` / `test_a_genuine_restart_tens_of_seconds_back_is_still_detected`(境界: ちょうど閾値は 0、1 tick 超で 1)、Rust `a_small_clock_skew_on_event_zero_is_not_a_restart` / `the_restart_time_gap_boundary_is_exclusive`。
+- **赤の実測(閾値なし)**: C++ 1 本目で `restarts == 0 (got 1)`、`late == 1 (got 0)`、**`out.size() == 11 (got 0)`** = 以後の event 10..20 が 1 件も出ない(発注書の予想「dup で捨てる」とは症状が違い、偽の新世代の incomplete な event 0 の後ろで head-of-line が詰まる — どちらにせよ新しい取得が出てこない)。279 passed / 5 failed。Rust 2 本は restarts 1 で赤。
+- 既存テストの時刻データ 28 件を閾値より大きい後退に直した(期待値は不変、実機の後退は秒〜数十秒)。
+- ゲート: `make -j test` eb_core **284** ほか全 passed、`make -j test-root` 174 / 99 / 91、cargo fmt / clippy / test green(lib 761)。
+- SPEC v1.47(§2.3 / §6.3)。
+- 実行できなかった操作: `source thisroot.sh` が worktree 隔離で拒否 → 環境変数直指定で test-root を実行(結果に影響なし)。
+
+**Status: COMPLETED(2026-10-14)**

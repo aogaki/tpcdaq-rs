@@ -11,7 +11,7 @@
   - 保存先: データは ZFS `data/tpcdaq`。
   - 記録: ELOG(TPC 用)、InfluxDB(HV / LV)。
   - マニュアル: 日英 PDF が `reference/_manual/`。
-- **実装の正本 = docs/SPEC_ja.md v1.46**。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `22e9284` で稼働。
+- **実装の正本 = docs/SPEC_ja.md v1.47**。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `22e9284` で稼働。
 - **できること**:
   - 保存二系統: graw はロスレス、root-sink は PEventTPC と raw ツリー。
   - 取得の再開: 未停止で落とした後の古いフレームを epoch として扱う(110)。
@@ -34,7 +34,6 @@
 
 | # | 中身 | 状態 | 次の一手 |
 |---|---|---|---|
-| [134](134_restart_time_gap_threshold.md) | 再開判定に時刻後退幅の閾値(偽陽性で新イベントを捨てる穴) | 実装中(Sonnet、2026-10-14) | マージ → SPEC §2.3 / §6.3 に 1 行 |
 | [133](133_restart_detection_multi_asad.md) | 4 AsAd では再開検出後に来る他 AsAd の古いフレームで原事故が再発しうる(送出順が AsAd 毎なら標準経路)、多 CoBo のカウンタ | **Warsaw 前の必須**(mini では起きない) | 一次資料で AsAd のリングを流す順を確かめ → Fable 設計(時刻で世代を分ける) |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
@@ -60,6 +59,7 @@
 
 Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をここに積み、Fable で**まとめて**確定する(運用ルールの正は CLAUDE.md「モデル使い分け」)。
 
+- ~~134~~ 完了 → archive(2026-10-14、SPEC v1.47)。
 - ~~SPEC v1.46~~ **確定(2026-10-13、スポット Fable、`61d88d4`)**:
   - 対象: 110(取得の再開)、123(`/api/last-event`)、092(EOS 後の Heartbeat なし)、132(run/start の `params_id` / `notes`)、069 の出口(§13-2/3/6/8 を実測済みに)。
   - Fable が文案から直した点: HMP2020 は HO720 = FTDI VCP(ttyUSB0)、§6.3 の判定は実装の 4 条件、§10.5 の 404 の条件 など。
