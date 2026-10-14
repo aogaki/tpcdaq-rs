@@ -77,3 +77,37 @@
 - テスト: `root -l -b -q tools/scan/test_drift_end.C`(101 イベントで first = 40 + e mod 21、last = 100 + e と窓端 508 / 509 / 510 / 511 の矩形パルス、
   全 ch に common mode の傾き、窓端の跳ね(cell 510–511)・先頭の整定(cell 0–1)・単独 cell のノイズ(q < 2000)・閾値ちょうど 35 と FPN ch のおとり、ヒット無しの 3 イベント、maxEvents = 50 で補間の分位点、ヒット無しだけの run を
   一時ディレクトリに書く。終了コード = 失敗数)
+
+## α run → 整形核の逆畳み込み(TODO/139 §1)
+
+- 使い方: `root -l -b -q 'tools/scan/deconv.C("…/run0084_raw.root", "run0105_kernel.json", "run0084_l0.01.json", 0.01, "run0084_l0.01.png")'`
+  (第 4 引数 = λ_rel、第 5 = PNG(`nullptr` で省略)、第 6 = `maxEvents`(先頭から何イベント、0 = 全部))。終了コード 0 = 書いた、1 = 失敗(理由は stderr)。
+  核 JSON = `pulser_kernel.C` の出力(α run と同じ peaking の核)。λ は 3 点(例 `0.001` / `0.01` / `0.1`)で 3 回呼ぶ — JSON は run × λ ごとに 1 本。
+- **速さ**: ROOT が FFTW 付きなら `TVirtualFFT` で速い。FFTW 無し(`TVirtualFFT::FFT` が null — Mac の /opt/ROOT がそう。
+  stderr に `Error in <TVirtualFFT::FFT>: handler not found` と `deconv: INFO … O(N^2) DFT fallback`、JSON `"transform": "dft"`)だと
+  素朴な O(N²) DFT で **1 波形 15 ms(cling)/ 1.5 ms(ACLiC = `'tools/scan/deconv.C+(…)'`)**(Mac 実測)。1,500 events × 200 波形なら
+  cling ≈ 75 分、ACLiC ≈ 8 分 / λ。ACLiC の生成物(`*.so` / `*.d` / `*.pcm`)は .gitignore 済み。`maxEvents` で間引ける。
+- 核: `all.mean_norm`(341 点、k = −40 … +300 cell、index 40 = ピーク = 1)だけを読む(`fpn` / `agets` は読まない)。
+  尾 k = +50 … +300 の平均(≈ +1 % の一定オフセット — パルサー run の ped を cell 1..20 で取るための基線のずれ)を **341 点すべてから**引く
+  (JSON `kernel_offset`)。長さ 341 でない・null がある・最大が index 40 でない核は失敗。
+- 方法(Wiener 型): N = 1024 の円環で H = DFT(h を k mod N に置く)、`x̂ = IDFT(DFT(y)·H*/(|H|² + λ_abs))` の cell 0..511。
+  y = 前処理後の 512 cell、512..1023 は 0。**λ_abs = λ_rel × max|H|²**(JSON `lambda_rel` / `lambda_abs` / `max_h2`。λ_rel = 0 = 厳密な逆)。
+  |H|² + λ_abs = 0 の周波数は W = 0 にして `zero_denominator_bins` に数える(WARNING)。
+  x̂ の単位は「ピーク相当 ADC」: 核のピークを 1 にしてあるので、1 cell に来た点電荷は x̂ でも元の波形のピーク高さになる
+  (幅のある電荷は低く広く出る)。非負の核は max|H| = H(0) なので **x̂ の総和 = Σy / Σh / (1 + λ_rel)**(Σh = JSON `kernel_sum`)
+  — λ_rel = 0.1 なら電荷は 1/1.1 に縮む(run 間の比較は同じ λ_rel どうしで)。
+- 前処理とヒット ch は run_metrics.C と同じ(pulser_kernel.C 経由で include): FPN のセル毎平均と ped(cell 1..20)を引いた v、
+  ヒット ch = ピーク > 35 かつ q ≥ 2000。それ以外の読めた信号 ch = 雑音 ch(「ped 領域(ヒット無し ch)」)。全セル 0 の未読 ch は除く。
+- 指標(前 = v、後 = x̂。和・RMS・ピーク・FWHM はすべて cell **[2, 509)** — drift_end.C と同じ範囲、JSON `cell_range`):
+  `charge_event` = イベントごとの Σ(ヒット ch の和)の median / p10 / p90(ヒットのあるイベント)と `ratio_median`(後 / 前)、
+  `fwhm_cells` = ヒット ch ごとの FWHM(ピーク = 最大の最初の cell、半値の交点は線形補間)、
+  `ped_rms` = 雑音 ch ごとの RMS √(Σw²/507) の中央値と `ratio`(後 / 前 = 点電荷に対する S/N の悪化率)、
+  `peak_cell_spread_in_event` = イベント内のヒット ch のピーク cell の母標準偏差(ヒット 2 本以上のイベント)。分位点は h = (n−1)·q。
+  **注意**: partial readout で読めた非ヒット ch はハードのしきい値を越えた halo なので、`ped_rms` は純粋な雑音より大きく出うる
+  (`ped_rms.before` が ≈ 3 ADC から離れていれば halo が支配)。
+- PNG: ヒットのある最初のイベントで前のピークが最大の ch の前後重ね(x = cell 0..511)+ 指標の表。
+- テスト: `root -l -b -q tools/scan/test_deconv.C`(約 10 s。[1] 核 JSON の読み込み(オフセットを全点から、おとりの fpn / agets、
+  無いファイル・`all` 無し・null・340 点・ピーク位置違い・閉じない配列)、[2] CR-RC⁴ 核 × 矩形 + 指数尾の電流で λ = 0 の厳密な逆・
+  電荷 = Σx/(1+λ_rel)・σ = 2 の雑音で λ_rel = 1e-3 の電荷 1 % 以内・λ_rel 1e-3 → 1e-1 で雑音 RMS が下がり幅が広がる、
+  [3] 二進の短い核で全セル整数になる合成 raw(partial readout、FPN のおとり、halo、ヒット 1 本のイベント、ヒット無しのイベント)で
+  電荷・FWHM・雑音 RMS(手計算 3·|W(π)|)・ピーク cell のばらつき・PNG の波形。終了コード = 失敗数)
