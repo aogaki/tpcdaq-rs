@@ -31,3 +31,25 @@
   `src/reco/mod.rs` 冒頭(= macros/analyzeUVW.C)、FPN {11,22,45,56} = `src/geometry.rs` FPN_RAW_CHANNELS、4095 = `src/msg.rs` ITEM_ADC_MAX、
   クリップの 5 / 506・2 / 509 = TODO/136 §5-3 / §1。分位点は線形補間 h = (n−1)·q。
 - テスト: `root -l -b -q tools/scan/test_run_metrics.C`(合成 raw / tracks を一時ディレクトリに書く。終了コード = 失敗数)
+
+## パルサー run → 応答核と形の指標(TODO/138 §2)
+
+- 使い方: `root -l -b -q 'tools/scan/pulser_kernel.C("…/run0090_raw.root", "run0090_pulser.json", "run0090_pulser.png")'`
+  (第 4 引数 `maxEvents` = 先頭から何イベント読むか、0 = 全部。PNG は `nullptr` で省略)。終了コード 0 = 書いた、1 = 失敗(理由は stderr)。
+- 入力の前提・定数・FPN の扱いは run_metrics.C と同じ(それを include して使う): AGET ごとに読めた FPN ch のセル毎平均を引き、
+  信号 ch ごとに ped = cell 1..20 の平均を引いた v。ピーク = v 最大の最初の cell、振幅 A = v(ピーク)。
+  **A > 100 ADC の ch を使い、そのうち生 ADC に 4095 を含む ch は飽和として数えて除く**。全セル 0 の ch(未読)は除く。
+- 使う ch の v をピークで揃え(offset k = −40 … +300 cell)、AGET ごと・全体で全イベントを足して平均 —
+  生の平均 `mean_raw` と、波形ごとに A で割った正規化平均 `mean_norm`。ピークが読み出し窓の端に寄って
+  はみ出した offset は在るものだけで平均し、その数を `n` に出す(全体で欠けた offset があれば WARNING)。
+- 指標(AGET ごと `agets[]` + 全体 `all`。形は `mean_norm` から): `waveforms` / `channels`(使った波形 = イベント × ch / 使った ch)、
+  `saturated_waveforms` / `saturated_channels`、`amplitude_median_adc`、`rise_10_90_cells`(ピークの前で 0.9 と 0.1 を下回る交点の差)、
+  `fwhm_cells`(0.5 の交点、前後)、`undershoot`(k = +1…+300 の `mean_norm` の最小 `min_ratio`、その k の `mean_raw` = `min_adc`、その k = `cell`)、
+  `tail_50_300`(k = +50…+300 の **0 を基準にした** RMS √(Σy²/個数) とピーク間 max − min、`_ratio` = `mean_norm`、`_adc` = `mean_raw` — 25 MHz で 2 µs 以降の「揺れ」)、
+  `peak_cell`(使った波形のピーク cell の median / p10 / p90)、`peak_cell_range_in_event`(イベント内の ch 間のピーク cell の max − min の分布 = パルサーの同時性)、
+  `mean_norm` / `mean_raw` / `n`(341 点の配列、値が無い所は null)= 139 デコンボリューションの核。交点はすべて隣のセルとの線形補間、分位点は h = (n−1)·q。
+- PNG: 正規化平均を AGET ごとに 1 本重ねた 1 枚(線形、x = −40…+300、y = −0.3…1.05)。
+- 定数の出典: 100 ADC・窓 −40…+300・尾 +50…+300 = TODO/138 §2 の発注。他は run_metrics.C と同じ(上の節)。
+- テスト: `root -l -b -q tools/scan/test_pulser_kernel.C`(区分線形の既知の形 — 10–90 % 6.4 cells、FWHM 16.5、
+  アンダーシュート −0.1 @ +30、非対称な尾の揺れ — を 20 イベント × 数 ch、全 ch に common mode の傾き、飽和 ch、100 ADC ちょうどの ch、
+  FPN だけのおとりを置いた合成 raw を一時ディレクトリに書く。終了コード = 失敗数)
