@@ -102,3 +102,4 @@
 2. デスクトップで `caengeco2020`(Wayland では事前に `xhost +SI:localuser:daq`、autostart 済み)。接続: **SMART HV / VCP USB / Port `ttyACM0`(`/dev/` を付けない)/ 9600 / LBus 0**。本体は REMOTE。
 3. 設定後、GECO を閉じる(閉じないとポートの取り合い)。残った `/dev/shm/CAENV_LCK_0_0` は消してよい。
 4. `daq_up.sh`。次の run_start.slow に新しい値が記録される。電圧値を web から変える経路は無い(SPEC §11)。
+5. **LV(AsAd)を入れ直した直後の最初の run/start は configure(AGET レジスタの読み戻しが 0)で失敗することがある** — そのまま run/start をもう一度(archive/149、2026-10-15)。LV が OFF のままだと prepare が「AsAd が電源から切り離されている」で止まる(正常な拒否)。
