@@ -1,6 +1,6 @@
 # 143 — スキャン台帳(docs/SCANS_ja.md)と表の生成ツール(tools/scan/ledger.py)
 
-**Status: IN PROGRESS**(2026-10-15 起票 Fable。ユーザー「まずはこの一連のスキャンを記録に残しましょう。もちろん今後分量が増えていきます」)
+**Status: COMPLETED**(2026-10-15 起票・完了 Fable。ユーザー「まずはこの一連のスキャンを記録に残しましょう。もちろん今後分量が増えていきます」)
 
 ## 1. 台帳(済、本票で作成)
 `docs/SCANS_ja.md`: 索引 + 規則 + S1–S9(2026-10-14/15 の全スキャン)。1 スキャン = 1 節。数字は archive チケットから転記。
@@ -14,3 +14,8 @@
 - README に節を 1 つ。
 
 ## 結果
+- 2026-10-15 09:05: `tools/scan/ledger.py` + `test_ledger.py`(Sonnet、9 tests OK、`test_scan.py` 8 本回帰 OK、Fable 照合 → main)。ELITPC で S9(`scan_readout_2026-10-15*.json`、`--metrics metrics --run-root /data/tpcdaq`)に適用し、17 列の表が archive/141 の手書き表と一致(kB/event 278.8 / 557.3 / 14.8、ok、長さ、dEdx)。
+- 使い方(今後のスキャン): ELITPC で `python3 ~/test/scan/ledger.py scan_<name>_<date>.json --metrics metrics --run-root /data/tpcdaq --title "S10 …"` → 出力を `docs/SCANS_ja.md` に貼り、結論を 2 行足す。
+- kB = 1000 B、欠損は「—」、tracks null の run も行を残す(implementer の判断、採用)。
+
+**Status: COMPLETED**(2026-10-15)
