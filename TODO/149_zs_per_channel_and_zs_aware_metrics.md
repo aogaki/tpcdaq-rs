@@ -7,7 +7,7 @@
 
 ## 1. 生成ツール `tools/scan/zs_exceptions.py`(標準ライブラリのみ、Sonnet)
 - 入力: `calib pedestal` の JSON(`channels[] {asad, aget, ch, mean, rms, is_fpn}`、ELITPC `~/test/scan/calib/pedestal_502ns.json`)、k(既定 5)、下限 `--min-above`(既定 20 ADC)。
-- 出力: params の `exceptions` 配列(JSON、標準出力または `--out`): 各 ch(FPN 含む)に `{"knob": "zeroSuppression.threshold", "at": {"asad": a, "aget": g, "channel": c}, "value": round(mean + max(k*rms, min_above))}`。range [0, 4095] にクリップ。`--merge BASE.json` があれば base params に `exceptions` を差し込み `zeroSuppression.enabled = true` にした params JSON を出す。
+- 出力: params の `exceptions` 配列(JSON、標準出力または `--out`): 各 ch(FPN 含む)に `{"knob": "zeroSuppression.threshold", "at": {"asad": a, "aget": g, "ch": c}, "value": round(mean + max(k*rms, min_above))}`(`at` のキーは schema どおり `ch`)。range [0, 4095] にクリップ。`--merge BASE.json` があれば base params に `exceptions` を差し込み `zeroSuppression.enabled = true` にした params JSON を出す。
 - テスト `tools/scan/test_zs_exceptions.py`(unittest): 3 ch の合成 pedestal で値・丸め・クリップ・min_above・FPN の扱い・merge の結果を固定。
 - 注意: `exceptions[].at` の形(`{asad, aget, channel}`)と knob 名は `docs/PARAMS_KNOBS_ja.md` §4-3 / §6 と `src/params/` のスキーマに合わせる(読んで確認し、報告に引用)。
 
