@@ -153,6 +153,10 @@ class EventBuilder {
   // **そのソースの**世代を +1 する(板のずれ = µs は再開にしない — 134)。
   // late 判定より前に見る。フラグメントはそのソースの現世代の鍵 (run, epoch, idx) に入る
   // ので、まだ再開していない AsAd の古いフレームが新世代に混ざらない(133 §1b)。
+  // **追従(133 追補)**: 古い残りを持たないソースは idx が跳ばないので再開と判定されない。
+  // そのソースの世代が run の最大世代より古く、フレームの時刻が最大世代の時間帯
+  // [floor − 100 ms, ceil + 100 ms] に入れば、そのソースを最大世代へ進める
+  // (source_epoch_joins に数える。source_restarts には数えない)。
   // 期待集合の全ソースが次の世代に進んだら(= run の世代が上がったら)旧世代の pending を
   // 押し出し(take_restart_flush() で受け取る)、acquisition_restarts を +1 する。
   std::optional<LateFragment> feed(OwnedFragment f, uint64_t now_ms) {
@@ -164,7 +168,10 @@ class EventBuilder {
         f.event_time + kRestartMinTimeGap < src.time_floor) {
       restart_source(run, rs, src, fk);
     }
-    const EpochState& es = rs.epochs[src.epoch];
+    if (rs.max_epoch > src.epoch && in_epoch_band(rs.epochs[rs.max_epoch], f.event_time)) {
+      join_epoch(run, rs, src, fk);
+    }
+    EpochState& es = rs.epochs[src.epoch];
     if (es.have_emitted && f.event_idx <= es.emitted_upto) {
       ++late_fragments_;
       LateFragment late;
@@ -175,6 +182,9 @@ class EventBuilder {
     if (!src.have_time || f.event_time < src.time_floor) src.time_floor = f.event_time;
     src.have_time = true;
     if (f.event_idx > src.max_seen) src.max_seen = f.event_idx;
+    if (!es.have_time || f.event_time < es.time_floor) es.time_floor = f.event_time;
+    if (!es.have_time || f.event_time > es.time_ceil) es.time_ceil = f.event_time;
+    es.have_time = true;
 
     Pending& ev = pending_[EventKey{run, src.epoch, f.event_idx}];
     if (ev.fragments.empty()) ev.first_arrival_ms = now_ms;
@@ -246,6 +256,8 @@ class EventBuilder {
   uint64_t restart_duplicate_events() const { return restart_duplicate_events_; }  // 新世代で捨てた数
   // ソース(cobo, asad)ごとの再開の回数(累積、TODO/133)。再開したソースだけが載る。
   const std::map<FragmentKey, uint64_t>& source_restarts() const { return source_restarts_; }
+  // ソースごとの「追従」の回数(累積、133 追補)。時刻で新しい世代へ移ったソースだけが載る。
+  const std::map<FragmentKey, uint64_t>& source_epoch_joins() const { return source_epoch_joins_; }
   // その run で、世代が最小(= run の世代)に留まり他のソースより遅れている期待ソースの数。
   // 全ソースが同じ世代なら 0(TODO/133 §4-5: 死んだ AsAd の可視化 — status PUB)。
   uint64_t sources_behind(uint32_t run) const {
@@ -345,11 +357,16 @@ class EventBuilder {
     uint32_t emitted_upto = 0;  // この世代の emit 済み最大 event_idx
     uint64_t count = 0;         // この世代で emit した数
     IdRanges ids;               // この世代で emit した event_idx
+    // この世代に入ったフラグメント(全ソース)の時間帯 [time_floor, time_ceil](追従の判定材料)。
+    bool have_time = false;
+    uint64_t time_floor = 0;
+    uint64_t time_ceil = 0;
   };
 
   // run 毎の状態。
   struct RunState {
     uint32_t epoch = 0;       // run の世代 = 期待集合の全ソースの世代の最小値
+    uint32_t max_epoch = 0;   // run 内のソースの世代の最大値(追従先)
     bool dup_logged = false;  // restart_duplicate の stderr は run 毎に 1 回
     std::map<FragmentKey, SourceState> sources;
     std::map<uint32_t, EpochState> epochs;
@@ -363,14 +380,43 @@ class EventBuilder {
   // ソース 1 つの再開。そのソースの判定材料を消して世代を +1 する。期待集合の全ソースが
   // 次の世代に進んだ(= run の世代が上がった)ら旧世代を締める。
   void restart_source(uint32_t run, RunState& rs, SourceState& src, const FragmentKey& fk) {
+    enter_epoch(src, src.epoch + 1);
+    rs.max_epoch = std::max(rs.max_epoch, src.epoch);
+    ++source_restarts_[fk];
+    advance_run_epoch(run, rs);
+  }
+
+  // **追従**(133 追補、Fable 判断 (A)): 古い残りを持たないソースは再開と判定されない
+  // (idx の跳びが無い)。フレームの時刻が run の最大世代の時間帯に入れば、そのソースを
+  // その世代へ進める。再開の「検出」ではないので source_restarts には数えない。
+  void join_epoch(uint32_t run, RunState& rs, SourceState& src, const FragmentKey& fk) {
+    enter_epoch(src, rs.max_epoch);
+    ++source_epoch_joins_[fk];
+    advance_run_epoch(run, rs);
+  }
+
+  // フレームの時刻 t が世代 es の時間帯 [time_floor, time_ceil] に入るか(両端に
+  // kRestartMinTimeGap = 100 ms の余裕、両端とも含む)。**上端も要る**: 取得の再開で時計は
+  // 0 付近から始め直すので、まだ再開していないソースの古い残りは新しい世代の時間帯より
+  // **大きい**時刻を持つ(run 73: 古い 60.8–79.6 s、新しい 0.28 s〜)。下端だけだと古い残りが
+  // 全部新しい世代へ引き込まれる(TODO/133 追補の実測)。
+  static bool in_epoch_band(const EpochState& es, uint64_t t) {
+    return es.have_time && t + kRestartMinTimeGap >= es.time_floor &&
+           t <= es.time_ceil + kRestartMinTimeGap;
+  }
+
+  static void enter_epoch(SourceState& src, uint32_t epoch) {
+    src.epoch = epoch;
     src.max_seen = 0;
     src.have_time = false;
     src.time_floor = 0;
-    ++src.epoch;
-    ++source_restarts_[fk];
+  }
+
+  // 期待集合の全ソースが次の世代に進んだぶんだけ run の世代を締める(追従は 2 以上跳べる)。
+  void advance_run_epoch(uint32_t run, RunState& rs) {
     uint32_t lo = UINT32_MAX;
     for (const FragmentKey& k : expected_) lo = std::min(lo, rs.source_epoch(k));
-    if (lo > rs.epoch) retire_epoch(run, rs);  // 1 フラグメントで上がるのは高々 1
+    while (lo > rs.epoch) retire_epoch(run, rs);
   }
 
   // run の世代を締める: 旧世代(以下)の pending を昇順に押し出す(complete / incomplete の
@@ -462,6 +508,7 @@ class EventBuilder {
   uint64_t events_before_restart_ = 0;
   uint64_t restart_duplicate_events_ = 0;
   std::map<FragmentKey, uint64_t> source_restarts_;
+  std::map<FragmentKey, uint64_t> source_epoch_joins_;
 };
 
 }  // namespace rootsink

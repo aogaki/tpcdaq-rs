@@ -1017,6 +1017,69 @@ static void test_new_epoch_ids_already_emitted_by_the_old_epoch_are_dropped_with
   CHECK_EQ(eb.late_fragments(), 0);
 }
 
+static uint64_t joins_of(const EventBuilder& eb, uint8_t asad) {
+  const auto it = eb.source_epoch_joins().find(FragmentKey(0, asad));
+  return it == eb.source_epoch_joins().end() ? 0 : it->second;
+}
+
+// 133 追補(Fable 2026-10-15、判断 (A)): 古い残りを持たない AsAd(A3)は idx 0 から新しい
+// 時刻で始まるので再開と判定されない。時刻が新しい世代の時間帯に入るフレームはその世代へ
+// **追従**させる(source_restarts ではなく source_epoch_joins に数える)。
+// 手計算: 旧世代 2050..2057 = A0–A2 の 3 本ずつ(A3 は旧世代に居ない)→ incomplete 8 件、
+// 新世代 0..5 = 4 AsAd 揃い 6 件。A3 の追従で全ソースが世代 1 → run の世代が上がる(restarts 1)。
+static void test_a_fresh_asad_without_a_stale_head_follows_the_new_epoch_by_time() {
+  EventBuilder eb(kFourAsads, 1000);
+  for (uint8_t a = 0; a < 3; ++a) {
+    feed_asad(eb, 29, a, 2050, 2057, kOld);
+    feed_asad(eb, 29, a, 0, 5, 16000);
+  }
+  feed_asad(eb, 29, 3, 0, 5, 16000);  // A3: 古い残りなし
+  CHECK_EQ(eb.acquisition_restarts(), 1);
+  CHECK_EQ(eb.sources_behind(29), 0);
+  CHECK(restarts_of(eb, 0) == 1 && restarts_of(eb, 1) == 1 && restarts_of(eb, 2) == 1 &&
+        restarts_of(eb, 3) == 0);
+  CHECK(joins_of(eb, 0) == 0 && joins_of(eb, 3) == 1);
+
+  const std::vector<BuiltEvent> old_epoch = eb.take_restart_flush();
+  CHECK_EQ(old_epoch.size(), 8);
+  bool old_ok = old_epoch.size() == 8;
+  for (size_t k = 0; old_ok && k < old_epoch.size(); ++k) {
+    old_ok = old_epoch[k].event_idx == 2050 + k && old_epoch[k].incomplete &&
+             old_epoch[k].epoch == 0 && old_epoch[k].fragments.size() == 3;
+  }
+  CHECK(old_ok);
+  const std::vector<BuiltEvent> fresh = eb.poll(0);
+  CHECK_EQ(fresh.size(), 6);
+  bool fresh_ok = fresh.size() == 6;
+  for (size_t k = 0; fresh_ok && k < fresh.size(); ++k) {
+    fresh_ok = fresh[k].event_idx == k && !fresh[k].incomplete && fresh[k].epoch == 1 &&
+               fresh[k].fragments.size() == 4;
+  }
+  CHECK(fresh_ok);
+  CHECK_EQ(eb.late_fragments(), 0);
+  CHECK_EQ(eb.restart_duplicate_events(), 0);
+  CHECK_EQ(eb.events_before_restart(), 8);
+}
+
+// 追従の境界(両端とも 100 ms = kRestartMinTimeGap まで含む)。A0 の新しい世代の時間帯は
+// [T, T+10](idx 0, 1 を T + idx*10 で)。A1 は古い残りなしで、最初のフレーム idx 0 が t0。
+static void test_the_epoch_follow_band_is_inclusive_by_the_restart_gap() {
+  const uint64_t T = 50000000ull;  // 0.5 s(下端から gap を引いても 0 以上)
+  const uint64_t gap = EventBuilder::kRestartMinTimeGap;
+  auto joins_with = [&](uint64_t t0) {
+    EventBuilder eb({{0, 0}, {0, 1}}, 1000);
+    for (uint32_t i = 10; i <= 13; ++i) eb.feed(frag_at(7, i, kOld * 10 + i * 10ull, 0), 0);
+    eb.feed(frag_at(7, 0, T, 0), 0);  // A0 の再開(1e9 台 → 0.5 s)
+    eb.feed(frag_at(7, 1, T + 10, 0), 0);
+    eb.feed(frag_at(7, 0, t0, 1), 0);
+    return joins_of(eb, 1);
+  };
+  CHECK_EQ(joins_with(T - gap), 1);           // 下端ちょうど: 追従
+  CHECK_EQ(joins_with(T - gap - 1), 0);       // 1 tick 外: 旧世代のまま
+  CHECK_EQ(joins_with(T + 10 + gap), 1);      // 上端ちょうど: 追従
+  CHECK_EQ(joins_with(T + 10 + gap + 1), 0);  // 1 tick 外(= 古い残りの時刻): 旧世代のまま
+}
+
 int main() {
   test_owned_fragment_deep_copies_the_view();
 
@@ -1059,6 +1122,8 @@ int main() {
   test_single_source_oracles_of_run73_and_run76_are_unchanged();
   test_a_dead_asad_holds_the_run_epoch_and_new_events_time_out_incomplete();
   test_new_epoch_ids_already_emitted_by_the_old_epoch_are_dropped_with_four_asads();
+  test_a_fresh_asad_without_a_stale_head_follows_the_new_epoch_by_time();
+  test_the_epoch_follow_band_is_inclusive_by_the_restart_gap();
 
   test_strict_seqcheck_accepts_zero_as_the_first();
   test_strict_seqcheck_treats_a_nonzero_first_as_a_gap();
