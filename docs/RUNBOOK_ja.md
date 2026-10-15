@@ -96,3 +96,9 @@
 - v0.2(2026-09-23、Fable): §3.1 Parameters タブ(078)、§4 Slow control タブ(079 / 089)、§5 に slowctl / Parameters の症状、§6 の自動記録を反映。
 - v0.4(2026-10-14、Fable): §7.1 反映チェックリスト。
 - v0.3(2026-10-12、Opus): §4 に slowctl の記録先(InfluxDB)・機器 × ch の表・ch0 UNV・「機器を繋いだらトリガレートを A/B」(118–122)。
+
+## HV の値を変えるとき(CAEN GECO2020、2026-10-15、archive/145)
+1. `daq_down.sh`(slowctl が同じ USB ポート `/dev/ttyACM0` を使うため)。
+2. デスクトップで `caengeco2020`(Wayland では事前に `xhost +SI:localuser:daq`、autostart 済み)。接続: **SMART HV / VCP USB / Port `ttyACM0`(`/dev/` を付けない)/ 9600 / LBus 0**。本体は REMOTE。
+3. 設定後、GECO を閉じる(閉じないとポートの取り合い)。残った `/dev/shm/CAENV_LCK_0_0` は消してよい。
+4. `daq_up.sh`。次の run_start.slow に新しい値が記録される。電圧値を web から変える経路は無い(SPEC §11)。
