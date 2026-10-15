@@ -47,3 +47,6 @@
 
 ### 実行できなかった操作
 なし。
+
+## 追記(2026-10-15 20:55、`Reading = only_if_hit` での再スキャン、run 135–140、SCANS S15)
+ユーザー承認で `configure-elinp-hit.xcfg`(elinp の `channel Reading` を `only_if_hit` に)を `GetSoftware_config` に追加し、運用点 B の電子回路で global / lsb 6 点。**hit register は効く**(557 → 241–400 kB/event、global 4 / lsb 15 が最小)。飛跡は全点で無傷(ok ≥ 0.997、ヒット ch 118–122、電荷 2.07–2.09 M)。しかし partial は frameType 1(4 B/sample)なので full(frameType 2、279 kB)比で最大 14 % 減にしかならない → **運用は full(現行 B)のまま**。圧縮の本命は ZS(archive/149: 1/8.8、macros の対応待ち)。読み出し ch 数そのものは閾値で 557/2 → 241/2 ≈ 43 % まで減るので、frameType 2 で partial が出せる FW なら意味が出る(zCoBo FW の仕様、変えられない)。
