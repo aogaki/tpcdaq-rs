@@ -156,7 +156,9 @@ class EventBuilder {
   // **追従(133 追補)**: 古い残りを持たないソースは idx が跳ばないので再開と判定されない。
   // そのソースの世代が run の最大世代より古く、フレームの時刻が最大世代の時間帯
   // [floor − 100 ms, ceil + 100 ms] に入れば、そのソースを最大世代へ進める
-  // (source_epoch_joins に数える。source_restarts には数えない)。
+  // (source_epoch_joins に数える。source_restarts には数えない)。再開を検出した瞬間には、
+  // 旧世代の pending にある「まだ旧世代に居る他ソースの、時計を始め直した側のフラグメント」を
+  // 新しい世代へ付け替える(reattach_new_acquisition、133 追補 2)。
   // 期待集合の全ソースが次の世代に進んだら(= run の世代が上がったら)旧世代の pending を
   // 押し出し(take_restart_flush() で受け取る)、acquisition_restarts を +1 する。
   std::optional<LateFragment> feed(OwnedFragment f, uint64_t now_ms) {
@@ -380,10 +382,75 @@ class EventBuilder {
   // ソース 1 つの再開。そのソースの判定材料を消して世代を +1 する。期待集合の全ソースが
   // 次の世代に進んだ(= run の世代が上がった)ら旧世代を締める。
   void restart_source(uint32_t run, RunState& rs, SourceState& src, const FragmentKey& fk) {
-    enter_epoch(src, src.epoch + 1);
+    const uint32_t from = src.epoch;
+    const uint64_t floor_old = src.time_floor;  // have_time は再開判定の条件なので有効
+    enter_epoch(src, from + 1);
     rs.max_epoch = std::max(rs.max_epoch, src.epoch);
     ++source_restarts_[fk];
+    reattach_new_acquisition(run, rs, fk, from, floor_old);  // 旧世代を締める前に
     advance_run_epoch(run, rs);
+  }
+
+  // **付け替え**(133 追補 2、Fable): ソース `restarted` が世代 from → from+1 を開いた瞬間、
+  // 世代 from の pending にある**他ソースの**フラグメントで `event_time + 100 ms < floor_old`
+  // (= 再開したソースの古い残りより 100 ms 以上前 = 時計を 0 付近から始め直した側)のものは
+  // 新しい取得に属する。世代 from+1 の同じ idx へ移し、そのソースを from+1 へ進める
+  // (source_epoch_joins)。古い残りを持たない AsAd が AsAd 順で最初の再開より前に来ると、
+  // 追従(時刻帯)の相手がまだ無いので、ここでしか拾えない。1 ソースでは他ソースが居ないので
+  // 発火しない。
+  void reattach_new_acquisition(uint32_t run, RunState& rs, const FragmentKey& restarted,
+                                uint32_t from, uint64_t floor_old) {
+    const uint32_t to = from + 1;
+    EpochState& target = rs.epochs[to];
+    std::map<FragmentKey, std::vector<std::pair<uint32_t, uint64_t>>> moved;  // ソース → (idx, 時刻)
+    auto it = pending_.lower_bound(EventKey{run, from, 0});
+    while (it != pending_.end() && it->first.run == run && it->first.epoch == from) {
+      const uint32_t idx = it->first.idx;
+      Pending& ev = it->second;
+      std::vector<OwnedFragment> keep;
+      for (OwnedFragment& f : ev.fragments) {
+        const FragmentKey k = f.key();
+        // まだ世代 from に居るソースだけ。先に再開したソースの世代 from のフラグメントは古い残り
+        // そのもの(そのソースの新しい取得は既に先の世代に居る)— 古い残りの長さは AsAd ごとに
+        // 違いうるので、時刻だけでは区別できない(追補 2 の実測)。
+        // 移し先の世代が既にその idx 以上を emit していたら移さない(世代内の emit 昇順と
+        // 区間リストを壊さない。旧世代に残して捨てない)。
+        if (k == restarted || rs.source_epoch(k) != from ||
+            f.event_time + kRestartMinTimeGap >= floor_old ||
+            (target.have_emitted && idx <= target.emitted_upto)) {
+          keep.push_back(std::move(f));
+          continue;
+        }
+        moved[k].emplace_back(idx, f.event_time);
+        Pending& dst = pending_[EventKey{run, to, idx}];
+        if (dst.fragments.empty()) dst.first_arrival_ms = ev.first_arrival_ms;
+        if (expected_.count(k) != 0) dst.seen.insert(k);
+        if (!target.have_time || f.event_time < target.time_floor) target.time_floor = f.event_time;
+        if (!target.have_time || f.event_time > target.time_ceil) target.time_ceil = f.event_time;
+        target.have_time = true;
+        dst.fragments.push_back(std::move(f));
+      }
+      if (keep.empty()) {
+        it = pending_.erase(it);
+        continue;
+      }
+      ev.fragments.swap(keep);
+      ev.seen.clear();
+      for (const OwnedFragment& f : ev.fragments) {
+        if (expected_.count(f.key()) != 0) ev.seen.insert(f.key());
+      }
+      ++it;
+    }
+    for (const auto& m : moved) {
+      SourceState& s = rs.sources[m.first];
+      enter_epoch(s, to);
+      for (const auto& p : m.second) {
+        if (p.first > s.max_seen) s.max_seen = p.first;
+        if (!s.have_time || p.second < s.time_floor) s.time_floor = p.second;
+        s.have_time = true;
+      }
+      ++source_epoch_joins_[m.first];
+    }
   }
 
   // **追従**(133 追補、Fable 判断 (A)): 古い残りを持たないソースは再開と判定されない

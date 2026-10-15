@@ -1080,6 +1080,129 @@ static void test_the_epoch_follow_band_is_inclusive_by_the_restart_gap() {
   CHECK_EQ(joins_with(T + 10 + gap + 1), 0);  // 1 tick 外(= 古い残りの時刻): 旧世代のまま
 }
 
+// 133 追補 2(Fable 2026-10-15): 古い残りを持たない AsAd が AsAd 順で**最初**(A0)。A0 の新しい
+// 0..5 は誰も再開していない時点で世代 0 に入るので、追従(時刻)では拾えない。A1 が再開を検出した
+// 瞬間に、世代 0 の pending にある**他ソースの**フラグメントのうち時刻が A1 の旧世代の floor より
+// 100 ms 以上前のもの(= 時計を始め直した側)を世代 1 の同じ idx へ付け替え、A0 を世代 1 へ進める。
+// 手計算: 1 回目の割り込み = A0 の新 0..5 → A1–A3 の古い 2050..2057 → 新 0..5(AsAd-major)、
+// 2 回目 = 全 AsAd の 6..8。旧世代 8 件は A1–A3 の 3 本で incomplete、新世代 0..8 の 9 件は complete。
+// 付け替えが無いと restart_duplicates = 6(新世代の 0..5 が A0 だけの旧世代 0..5 と番号で衝突)。
+static void test_a_fresh_asad_that_comes_first_is_reattached_when_another_asad_restarts() {
+  EventBuilder eb(kFourAsads, 1000);
+  feed_asad(eb, 29, 0, 0, 5, 16000);  // A0: 古い残りなし、AsAd 順で最初
+  for (uint8_t a = 1; a < 4; ++a) {
+    feed_asad(eb, 29, a, 2050, 2057, kOld);
+    feed_asad(eb, 29, a, 0, 5, 16000);
+  }
+  CHECK_EQ(eb.acquisition_restarts(), 1);
+  CHECK_EQ(eb.sources_behind(29), 0);
+  CHECK(restarts_of(eb, 0) == 0 && restarts_of(eb, 1) == 1 && restarts_of(eb, 2) == 1 &&
+        restarts_of(eb, 3) == 1);
+  CHECK(joins_of(eb, 0) == 1 && joins_of(eb, 1) == 0);
+
+  const std::vector<BuiltEvent> old_epoch = eb.take_restart_flush();
+  CHECK_EQ(old_epoch.size(), 8);  // A0 だけの 0..5 は旧世代に残っていない
+  bool old_ok = old_epoch.size() == 8;
+  for (size_t k = 0; old_ok && k < old_epoch.size(); ++k) {
+    old_ok = old_epoch[k].event_idx == 2050 + k && old_epoch[k].incomplete &&
+             old_epoch[k].epoch == 0 && old_epoch[k].fragments.size() == 3;
+  }
+  CHECK(old_ok);
+  std::vector<BuiltEvent> fresh = eb.poll(0);
+  for (uint8_t a = 0; a < 4; ++a) feed_asad(eb, 29, a, 6, 8, 16000, 10);  // 2 回目の割り込み
+  for (BuiltEvent& ev : eb.poll(10)) fresh.push_back(std::move(ev));
+  CHECK_EQ(fresh.size(), 9);
+  bool fresh_ok = fresh.size() == 9;
+  for (size_t k = 0; fresh_ok && k < fresh.size(); ++k) {
+    fresh_ok = fresh[k].event_idx == k && !fresh[k].incomplete && fresh[k].epoch == 1 &&
+               fresh[k].fragments.size() == 4;
+  }
+  CHECK(fresh_ok);
+  // 付け替えたフラグメントは中身ごと動く(A0 の idx 3 の items が A0 のもの)。
+  CHECK(fresh.size() == 9 && fresh[3].fragments[0].item(0) == marker_word(3, 0, 0));
+  CHECK_EQ(eb.late_fragments(), 0);
+  CHECK_EQ(eb.restart_duplicate_events(), 0);
+  CHECK_EQ(eb.events_before_restart(), 8);
+  CHECK_EQ(eb.pending(), 0);
+}
+
+// 付け替えの境界(`event_time + 100 ms < floor_old` は等号を含まない)。A1 の古い残りの
+// floor = F、A0 は先に idx 0 を 1 本だけ時刻 t で送る(古い残りなし)。A1 の新 idx 0 で再開。
+static void test_the_reattach_threshold_is_exclusive() {
+  const uint64_t F = 1000000000ull;  // 10 s
+  const uint64_t gap = EventBuilder::kRestartMinTimeGap;
+  auto joins_with = [&](uint64_t t) {
+    EventBuilder eb({{0, 0}, {0, 1}}, 1000);
+    eb.feed(frag_at(7, 0, t, 0), 0);
+    for (uint32_t i = 10; i <= 13; ++i) eb.feed(frag_at(7, i, F + (i - 10) * 10ull, 1), 0);
+    eb.feed(frag_at(7, 0, 50, 1), 0);  // A1 の再開(10 s → 0.5 µs)
+    return joins_of(eb, 0);
+  };
+  CHECK_EQ(joins_with(F - gap), 0);      // ちょうど 100 ms 前: 付け替えない
+  CHECK_EQ(joins_with(F - gap - 1), 1);  // 1 tick 超: 付け替える
+}
+
+// 付け替えるのは**まだ世代 e に居るソース**のフラグメントだけ。先に再開した A0 の世代 0 に
+// 残るフラグメントは古い残りそのもの(A0 の新しい取得は既に世代 1 に居る)。古い残りの長さは
+// AsAd ごとに違いうる(リング容量とフレーム長)ので、A0 の古い残り 1900..2049 は A1 の
+// floor より 100 ms 以上前の時刻を持つ — それでも新世代へ引き込まない。
+// 時刻: 古い残りは 30 s + (idx − 1900) × 10 ms。A1–A3 の floor = 30 s + 1.5 s。
+// 手計算: 旧世代 = 1900..2049(A0 だけ、150 件 incomplete)+ 2050..2057(4 AsAd、8 件 complete)。
+static void test_stale_frames_of_an_already_restarted_asad_are_not_reattached() {
+  EventBuilder eb(kFourAsads, 1000);
+  auto stale = [&](uint8_t a, uint32_t lo) {
+    for (uint32_t i = lo; i <= 2057; ++i) {
+      eb.feed(frag_at(29, i, 3000000000ull + (i - 1900) * 1000000ull + a, a), 0);
+    }
+  };
+  stale(0, 1900);
+  feed_asad(eb, 29, 0, 0, 5, 16000);  // A0 の再開
+  for (uint8_t a = 1; a < 4; ++a) {
+    stale(a, 2050);
+    feed_asad(eb, 29, a, 0, 5, 16000);
+  }
+  CHECK_EQ(eb.acquisition_restarts(), 1);
+  CHECK(joins_of(eb, 0) == 0 && joins_of(eb, 1) == 0 && joins_of(eb, 2) == 0 &&
+        joins_of(eb, 3) == 0);
+  const std::vector<BuiltEvent> old_epoch = eb.take_restart_flush();
+  CHECK_EQ(old_epoch.size(), 158);
+  CHECK(old_epoch.size() == 158 && old_epoch[0].event_idx == 1900 && old_epoch[0].incomplete &&
+        old_epoch[149].event_idx == 2049 && old_epoch[150].event_idx == 2050 &&
+        !old_epoch[150].incomplete && old_epoch[157].epoch == 0);
+  const std::vector<BuiltEvent> fresh = eb.poll(0);
+  CHECK(fresh.size() == 6 && !fresh[0].incomplete && fresh[0].epoch == 1 && !fresh[5].incomplete);
+  CHECK_EQ(eb.restart_duplicate_events(), 0);
+  CHECK_EQ(eb.late_fragments(), 0);
+}
+
+// 付け替え先の世代が既にその idx を emit 済みなら移さない(世代内の emit 昇順を守る)。
+// 組み立て: 3 AsAd。A1 が先に再開して世代 1 を開く。A0 は世代 0 のまま idx 3 を時刻 0.5 s で
+// 送る(世代 1 の時間帯 [16001, 16051] ± 100 ms の外なので追従しない。到着 1500 ms なので
+// 世代 0 の先頭として 2000 ms ではまだ timeout しない)。2000 ms の poll で世代 1 の 0..5 だけ
+// A1 単独で timeout emit(高水位 5)。A2 が再開(古い残りの floor 10 s)→ A0 の idx 3 は付け替え
+// 条件(0.5 s + 100 ms < 10 s)を満たすが、移し先の idx 3 は emit 済み → 旧世代に残す。
+static void test_a_fragment_is_not_reattached_onto_an_already_emitted_idx() {
+  EventBuilder eb({{0, 0}, {0, 1}, {0, 2}}, 1000);
+  for (uint32_t i = 10; i <= 13; ++i) eb.feed(frag_at(7, i, 1000000000ull + i * 10ull, 1), 0);
+  feed_asad(eb, 7, 1, 0, 5, 16000);              // A1 の再開 → 世代 1
+  eb.feed(frag_at(7, 3, 50000000ull, 0), 1500);  // A0: 世代 0、追従しない
+  const std::vector<BuiltEvent> timed_out = eb.poll(2000);
+  CHECK_EQ(timed_out.size(), 6);  // 世代 1 の 0..5 だけ(世代 0 は先頭 idx 3 が塞ぐ)
+  CHECK(timed_out.size() == 6 && timed_out[5].event_idx == 5 && timed_out[5].epoch == 1);
+  for (uint32_t i = 10; i <= 13; ++i) eb.feed(frag_at(7, i, 1000000000ull + i * 10ull + 2, 2), 2000);
+  eb.feed(frag_at(7, 0, 16002, 2), 2000);  // A2 の再開
+  CHECK_EQ(restarts_of(eb, 2), 1);
+  CHECK_EQ(joins_of(eb, 0), 0);  // 移せるフラグメントが無かった
+  // A0 の idx 3 は旧世代(0)に残る。世代 1 が eventId 3 を書き済みなので、flush では番号衝突として
+  // 数える(restart_duplicates、+1)。世代 1 の idx 3 が 2 回出ることは無い。
+  const uint64_t dups_before = eb.restart_duplicate_events();
+  const std::vector<BuiltEvent> rest = eb.flush();
+  bool second_idx3 = false;
+  for (const BuiltEvent& ev : rest) second_idx3 = second_idx3 || ev.event_idx == 3;
+  CHECK(!second_idx3);
+  CHECK_EQ(eb.restart_duplicate_events() - dups_before, 1);
+}
+
 int main() {
   test_owned_fragment_deep_copies_the_view();
 
@@ -1124,6 +1247,10 @@ int main() {
   test_new_epoch_ids_already_emitted_by_the_old_epoch_are_dropped_with_four_asads();
   test_a_fresh_asad_without_a_stale_head_follows_the_new_epoch_by_time();
   test_the_epoch_follow_band_is_inclusive_by_the_restart_gap();
+  test_a_fresh_asad_that_comes_first_is_reattached_when_another_asad_restarts();
+  test_the_reattach_threshold_is_exclusive();
+  test_stale_frames_of_an_already_restarted_asad_are_not_reattached();
+  test_a_fragment_is_not_reattached_onto_an_already_emitted_idx();
 
   test_strict_seqcheck_accepts_zero_as_the_first();
   test_strict_seqcheck_treats_a_nonzero_first_as_a_gap();
