@@ -163,7 +163,10 @@
   (両方に当たるときは view 不足)、3 面とも 1 塊 → 採用。
   **ヒット ch(第 7 引数 `hitChannelsOnly`、既定 true)**: イベントごとに run_metrics.C / drift_end.C と同じ「ヒット ch」(ピーク > 35 かつ ピーク ±5 cell の q ≥ 2000、FPN + ped 減算後)を満たす ch だけを重心の候補にし、満たさない ch は全 cell で無視(halo — 飛跡の時刻に全ストリップに乗る 35–200 ADC、analyzeUVW.C:67-73 — を除く)。
   false = 閾値 35 だけで選ぶ以前の挙動(halo は `slices_multi_cluster` / `strips_median` に出る)。JSON に `hit_channels_only` と `channels_used_median`(ok イベントあたりの候補 ch 数の中央値。false のときは読めたストリップ数)。
-- 出力 JSON: `run`、`events`(読んだエントリ)、`events_ok`、`slice_cells`、`cell_range`、`adc_threshold`、`slices`(採用)、`slices_missing_view`、
+- **cell 条件(hitChannelsOnly の true / false 共通)**: スライス t で ch を使うのは **v(t) > 35 かつ |t − tpeak| ≤ `kSliceWindowCells`**(15 cell ≈ 固有幅 14.5、
+  tpeak = その ch の FPN + ped 減算後の v が最大の cell)。別の z に本体がある ch の halo / 尾を、そのスライスの重心から外す。JSON に `slice_window_cells`。
+  **限界**: 1 ch に長い堆積(斜めの飛跡が同じ ch に数十 cell 載る)があると、その ch はピーク ±15 cell のスライスにしか寄与しない(精度の測定としては近傍の S/N の良いスライスに偏る)。
+- 出力 JSON: `run`、`events`(読んだエントリ)、`events_ok`、`slice_cells`、`cell_range`、`adc_threshold`、`slice_window_cells`、`slices`(採用)、`slices_missing_view`、
   `slices_multi_cluster`、**`c_mm`** = 和の中央値、`residual_mm` = r = 和 − c の `{n, rms, robust_sigma}`(RMS = √(Σr²/n)、c 基準。
   robust σ = 1.4826 × MAD)、**`sigma_per_view_mm`** = robust σ / √3、`charge_quartiles` = スライス電荷(3 面の Σw)の 4 分位
   [min, q25] / (q25, q50] / (q50, q75] / (q75, max] ごとの `{q_lo, q_hi, n, rms, robust_sigma, median}`、`strips_median` = view ごとの

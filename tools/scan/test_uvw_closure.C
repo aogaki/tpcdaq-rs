@@ -28,7 +28,7 @@
 //   s*_v = o_v + (u', v', w')_v + ε_v、和 = 4.5 + Σε。
 //
 // [1] run0083(4 イベント、手計算で全部の値を固定):
-//   e0 (id 500, ok 1) スライス i = 0..7 を cell 100..106 と 507(範囲 [2, 508) の最後の cell)に
+//   e0 (id 500, ok 1) スライス i = 0..7 を cell 500..507(範囲 [2, 508) の最後の cell 507 を含む。kSliceWindowCells = 15 以内に収める — 旧: 100..106 と 507)に
 //   e1 (id 501, ok 1) スライス i = 0..7 を cell 200..207 に
 //      級 = i/2 → A A B B C C D D、view ごとの T = T_c + (0, +128, −64)、T_c = A 1280 / B 1920 / C 2560 / D 3840
 //      → スライス電荷 Q = 3T_c + 64 = A 3904 / B 5824 / C 7744 / D 11584。
@@ -41,9 +41,10 @@
 //   e3 (id 503, ok 1) 捨てるスライスだけ(基本 = 点 (0, 0)、ε = 0、T 1280、3 本 → どの view も j 11..13):
 //      cell 300..302 V に j 18 の 1 本(200)を足す → 塊 2 つ(3)
 //      cell 303      U に j 15 の 1 本を足す(j 14 が空 = 1 本の隙間)→ 塊 2 つ(1)  → slices_multi_cluster 4
-//      cell 310..314 U と V だけ(5)、cell 315 U だけ(1)、
-//      cell 316      U が塊 2 つ + V、W 無し(view 不足を先に数える)(1)、
-//      cell 320      U と V、W は j 11..13 に高さ 35 ちょうど(> 35 でない)(1)     → slices_missing_view 8
+//      cell 304..308 U と V だけ(5)、cell 309 U だけ(1)、
+//      cell 310      U が塊 2 つ + V、W 無し(view 不足を先に数える)(1)、
+//      cell 311      U と V、W は j 11..13 に高さ 35 ちょうど(> 35 でない)(1)     → slices_missing_view 8
+//      (旧: 310..314 / 315 / 316 / 320。同じストリップの堆積を kSliceWindowCells = 15 以内に詰めた。個数は同じ)
 //   手計算(採用 = e0 / e1 の 16 スライス、r = ρ の 16 個):
 //     ρ = A ±3, ±1、B ±1.5, ±0.5、C ±0.75, ±0.25、D ±0.375, ±0.125 → 中央値 0 → c = 4.5(= Σ o)
 //     |ρ| の中央値 (0.5 + 0.75)/2 = 0.625 → robust σ = 0.926625、σ_s = 0.926625/√3 = 0.5349871932
@@ -57,7 +58,7 @@
 //   maxEvents = 1(e0 だけ): ρ = −3, 1, −1.5, 0.5, −0.75, 0.25, −0.375, 0.125 → 中央値 −0.125 → c = 4.375、
 //     r = ρ + 0.125 → |r| の中央値 0.625 → robust σ 0.926625、RMS = √(12.46875/8) = 1.248436522、slices 8
 //
-// [2] run0084 ガウス(既知の σ = 0.4 mm、TRandom3 seed 4148、60 イベント × cell 100..199 = 6000 スライス):
+// [2] run0084 ガウス(既知の σ = 0.4 mm、TRandom3 seed 4148、600 イベント × cell 100..109 = 6000 スライス(1 ch の堆積を窓 ±15 cell 以内に収める — 旧: 60 イベント × 100 cell)):
 //   イベントごとの点 (x, y) = (−3 + 0.75·(e mod 9), −2.5 + 0.5·(e mod 11))、s*_v = o_v + pitch_v·(x, y) + ε_v、
 //   pitch_U = (−1, 0)、pitch_V = (0.5, +√3/2)、pitch_W = (0.5, −√3/2)(makeTracks.C:7-8)、ε_v ~ N(0, 0.4) を 3 面
 //   独立に、T は view ごとに 1280 + [0, 5120) の一様な整数(64 の倍数に限ると Q が 4 分位の境界で同値になり
@@ -101,6 +102,16 @@
 //   hit only = halo を無視 → 本数 3、c = 4.5、channels_used_median = 3 x 3 = 9。
 //   all strips = 24 本全部 1 塊 → 本数 24、10 スライス、channels_used_median 72、
 //   重心 = (3200·s_t + 60·24·s̄)/4640、s̄ = o - 1(24 本の一様な halo の重心)→ Σ = (3200·4.5 + 1440·1.5)/4640 = 3.5689655
+// [7] スライス窓(kSliceWindowCells = 15: スライス t で ch を使うのは v(t) > 35 かつ |t − tpeak| ≤ 15、tpeak = その ch の v の
+//     最大の最初の cell)。run0089/90/91、各 1 イベント、点 (2, -4)(D = 0)T 3200 の 3 本を cell 100..104 に(本体。tpeak = 100)、
+//     中心ストリップ(U j 13、V j 10、W j 13)に 200 ADC(> 35、ヒット ch 条件の q には入らない)の尾 3 cell:
+//     tail 無し(run0089)  = 5 スライス、Σ = 4.5 x 5、c = 4.5。
+//     尾が cell 124..126(tpeak から 24 cell、本体の最後から 20)= 窓外 → 使われない: 5 スライス、本数・c は尾無しと一致。
+//     尾が cell 110..112(tpeak から 10..12 cell)= 窓内 → 使われる: 8 スライス(尾の 3 つは各 view 1 本、重心 = 中心ストリップ
+//     ちょうど → Σ = 4.5)、c = 4.5、robust σ 0。hitChannelsOnly の true / false とも同じ。JSON に "slice_window_cells": 15。
+// 設計上の限界(uvw_closure.C 冒頭と同じ): 1 ch に長い堆積(斜めの飛跡が同じ ch に数十 cell 載る)があると、その ch は
+//   ピーク ±15 cell のスライスにしか寄与しない。[1] の cell 500..507、[2] の cell 100..109、[1] e3 の 300..311 は
+//   この窓に収めてある(旧: 100..106 と 507、100..199、300..320)。
 // =============================================================================
 #include "uvw_closure.C"
 
@@ -348,9 +359,9 @@ void fillMain(int ev)
   fillBaseline();
   for (int t = 100; t <= 107; ++t) add(0, 0, t, 1000);  // map に無い ch
   if (ev == 0) {
-    const int cells[8] = {100, 101, 102, 103, 104, 105, 106, 507};
+    const int cells[8] = {500, 501, 502, 503, 504, 505, 506, 507};
     for (int i = 0; i < 8; ++i) mainSlice(0, i, cells[i]);
-    decoySlice(0);
+    simpleSlice(0, 7, 2.0, 192);  // 小振幅(B 58 / C 76): 他の堆積と同じストリップを共有しても tpeak を奪わない
     for (int t = 508; t <= 511; ++t) decoySlice(t);
   } else if (ev == 1) {
     for (int i = 0; i < 8; ++i) mainSlice(1, i, 200 + i);
@@ -363,12 +374,12 @@ void fillMain(int ev)
     }
     simpleSlice(303, 7);
     addStrip(0, 15, 303, 200);
-    for (int t = 310; t <= 314; ++t) simpleSlice(t, 1 | 2);
-    simpleSlice(315, 1);
-    simpleSlice(316, 1 | 2);
-    addStrip(0, 18, 316, 200);
-    simpleSlice(320, 1 | 2);
-    for (int j = 11; j <= 13; ++j) addStrip(2, j, 320, 35);
+    for (int t = 304; t <= 308; ++t) simpleSlice(t, 1 | 2);
+    simpleSlice(309, 1);
+    simpleSlice(310, 1 | 2);
+    addStrip(0, 18, 310, 200);
+    simpleSlice(311, 1 | 2);
+    for (int j = 11; j <= 13; ++j) addStrip(2, j, 311, 35);
   }
 }
 
@@ -379,7 +390,7 @@ void fillGauss(int e)
 {
   fillBaseline();
   const double x = -3 + 0.75 * (e % 9), y = -2.5 + 0.5 * (e % 11);
-  for (int t = 100; t < 200; ++t)
+  for (int t = 100; t < 110; ++t)
     for (int v = 0; v < 3; ++v) {
       const double sStar = kOrigin[v] + kP[v][0] * x + kP[v][1] * y + g_rnd.Gaus(0, 0.4);
       const int T = 1280 + static_cast<int>(5120 * g_rnd.Rndm());
@@ -426,6 +437,23 @@ void fillHit(int ev)
       addStrip(1, j, t, 60);
       addStrip(2, j, t, 60);
     }
+  }
+}
+
+// [7] スライス窓。g_tailLo = 尾の最初の cell(0 = 尾無し)。
+int g_tailLo = 0;
+
+void fillWindow(int)
+{
+  fillBaseline();
+  const double eps[3] = {0, 0, 0};
+  const int T[3] = {3200, 3200, 3200}, n[3] = {3, 3, 3};
+  for (int t = 100; t < 105; ++t) depositPoint(2, -4, eps, T, n, t);
+  if (g_tailLo == 0) return;
+  for (int t = g_tailLo; t < g_tailLo + 3; ++t) {
+    addStrip(0, 13, t, 200);
+    addStrip(1, 10, t, 200);
+    addStrip(2, 13, t, 200);
   }
 }
 
@@ -573,11 +601,11 @@ int test_uvw_closure()
   const std::string raw84 = dir + "/run0084_raw.root", trk84 = dir + "/run0084_tracks.root";
   cleanup.insert(cleanup.end(), {raw84, trk84});
   g_fixtureOk = true;
-  check(writeRaw(raw84, 60, fillGauss, 0), "write Gaussian raw (60 events x 100 slices)");
+  check(writeRaw(raw84, 600, fillGauss, 0), "write Gaussian raw (600 events x 10 slices)");
   check(g_fixtureOk, "fixture (Gaussian): every deposited strip > 35, inside the plane");
   std::vector<UInt_t> ids84;
   std::vector<int> oks84;
-  for (int e = 0; e < 60; ++e) {
+  for (int e = 0; e < 600; ++e) {
     ids84.push_back(static_cast<UInt_t>(e));
     oks84.push_back(1);
   }
@@ -788,6 +816,40 @@ int test_uvw_closure()
   check(uvw_closure(raw87h.c_str(), map.c_str(), trk87.c_str(), json87.c_str(), nullptr, 0, false) == 0,
         "uvw_closure(..., false) returns 0");
   check(contains(readFile(json87), "\"hit_channels_only\": false,"), "uvw_closure(..., false) writes false");
+
+  // ---- [7] スライス窓 ------------------------------------------------------------------------------
+  std::printf("[7] slice window: a tail 20 cells from the body is ignored, 10 cells is used\n");
+  const int tails[3] = {0, 124, 110};
+  const char *tailName[3] = {"no tail", "tail at 124..126 (20 cells from the body)", "tail at 110..112 (10 cells)"};
+  const long wantSlices[3] = {5, 5, 8};
+  const std::string trk89 = dir + "/run0089_tracks.root";
+  cleanup.push_back(trk89);
+  check(writeTracks(trk89, {900}, {1}), "write window tracks");
+  for (int k = 0; k < 3; ++k) {
+    const std::string rawW = dir + "/run0089_" + std::to_string(k) + "_raw.root";
+    cleanup.push_back(rawW);
+    g_tailLo = tails[k];
+    g_fixtureOk = true;
+    g_inexact = 0;
+    check(writeRaw(rawW, 1, fillWindow, 900), std::string("write window raw: ") + tailName[k]);
+    g_tailLo = 0;
+    check(g_fixtureOk, std::string("fixture (window): ") + tailName[k]);
+    checkCount(g_inexact, 0, std::string("fixture (window): centroids exact: ") + tailName[k]);
+    for (int hitOnly = 0; hitOnly < 2; ++hitOnly) {
+      uvwclosure::Result w;
+      const std::string nm = std::string(tailName[k]) + (hitOnly ? ", hit only" : ", all strips");
+      check(uvwclosure::computeClosure(rawW, map, trk89, 0, 1, w, err, hitOnly == 1), "computeClosure ok (" + nm + ")");
+      checkCount(w.slices, wantSlices[k], nm + ": slices");
+      checkCount(w.slices_missing_view + w.slices_multi_cluster, 0, nm + ": no discarded slice");
+      checkNear(w.c, 4.5, nm + ": c");
+      checkNear(w.residual.robust_sigma, 0, nm + ": robust_sigma");
+    }
+  }
+  {
+    uvwclosure::Result w;
+    check(uvwclosure::computeClosure(dir + "/run0089_0_raw.root", map, trk89, 0, 1, w, err, true), "computeClosure ok (JSON)");
+    check(contains(uvwclosure::toJson(w), "\"slice_window_cells\": 15,"), "JSON \"slice_window_cells\": 15");
+  }
 
   // 後片付け
   for (const std::string &p : cleanup) gSystem->Unlink(p.c_str());

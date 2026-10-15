@@ -57,6 +57,11 @@
 //   channels_used_median = イベントあたりの候補 ch 数(ok == 1 のイベントのうち)の中央値。false のときの候補 = 読めた(全セル 0
 //   でない)ストリップ ch。
 //
+// スライス t の cell 条件(hitChannelsOnly の true / false 共通): v(t) > kAdcThreshold かつ |t − tpeak_ch| ≤ kSliceWindowCells
+//   (kSliceWindowCells = 15、tpeak_ch = その ch の FPN + ped 減算後の v の最大の cell)。別の z に本体がある ch の halo / 尾を外す。
+// 設計上の限界: 1 ch に長い堆積(斜めの飛跡が同じ ch に数十 cell 載る)があると、その ch はピーク ±kSliceWindowCells の
+//   スライスにしか寄与しない(精度の測定としては近傍の S/N の良いスライスに偏る)。
+//
 // PNG(任意): 左 = r のヒスト(範囲 ±5 robust σ)、右 = r vs スライス電荷。
 // =============================================================================
 #include "run_metrics.C"
@@ -91,6 +96,9 @@ using runmetrics::kStripQMin;
 
 // スライス幅 [cell](TODO/148 §2: 既定 1 cell、2–4 にまとめたいときはここを変える)。
 const int kSliceCells = 1;
+// スライス t で ch を使う条件 v(t) > kAdcThreshold かつ |t − tpeak_ch| ≤ kSliceWindowCells(tpeak_ch = その ch の v の最大の cell)。
+// 別の z(別の時刻)に本体がある ch の halo / 尾(35–200 ADC)を、そのスライスの重心から外す。固有幅 ≈ 14.5 cell。
+const int kSliceWindowCells = 15;
 // スライスに使う cell の範囲 [kCellMin, kCellMax)(drift_end.C の kHitCellMin / kHitCellMax と同じ)。
 const int kCellMin = 2;
 const int kCellMax = runmetrics::kClipEdgeBackMinCell - 1;  // 508
@@ -311,6 +319,7 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
   const size_t nStrips = map.strips.size();
   std::vector<double> v(nStrips * kCells);  // ストリップごとの v(t)
   std::vector<char> read(nStrips, 0);       // 読めたストリップ(全セル 0 でない)
+  std::vector<int> peakT(nStrips, 0);      // ストリップごとの v が最大の cell(kSliceWindowCells 用)
   std::vector<char> usable(nStrips, 0);     // 重心の候補(hitChannelsOnly ならヒット ch、でなければ read)
   std::vector<double> channelCounts;        // ok イベントごとの候補 ch 数
   std::vector<double> fpn(kCells);
@@ -355,6 +364,10 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
         ped /= (kPedHi - kPedLo + 1);
         double *vk = &v[static_cast<size_t>(k) * kCells];
         for (int t = 0; t < kCells; ++t) vk[t] = w[t] - fpn[t] - ped;
+        int pt = 0;
+        for (int t = 1; t < kCells; ++t)
+          if (vk[t] > vk[pt]) pt = t;
+        peakT[static_cast<size_t>(k)] = pt;
         usable[static_cast<size_t>(k)] = hitChannelsOnly ? isHitChannel(vk) : 1;
       }
       if (signalRead && nFpn == 0) ++r.agets_without_fpn;
@@ -373,9 +386,10 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
         for (int k : map.byView[view]) {
           if (!usable[static_cast<size_t>(k)]) continue;
           const double *vk = &v[static_cast<size_t>(k) * kCells];
+          const int pt = peakT[static_cast<size_t>(k)];
           double w = 0;
           for (int t = t0; t < t0 + sliceCells; ++t)
-            if (vk[t] > kAdcThreshold) w += vk[t];
+            if (vk[t] > kAdcThreshold && std::abs(t - pt) <= kSliceWindowCells) w += vk[t];
           if (w <= 0) continue;
           const Strip &st = map.strips[static_cast<size_t>(k)];
           if (nStr[view] == 0 || st.strip != prev + 1) ++nClu[view];
@@ -451,6 +465,7 @@ std::string toJson(const Result &r)
   s += "  \"slice_cells\": " + std::to_string(r.slice_cells) + ",\n";
   s += "  \"cell_range\": [" + std::to_string(kCellMin) + ", " + std::to_string(kCellMax) + "],\n";
   s += "  \"adc_threshold\": " + num(kAdcThreshold) + ",\n";
+  s += "  \"slice_window_cells\": " + std::to_string(kSliceWindowCells) + ",\n";
   s += std::string("  \"hit_channels_only\": ") + (r.hit_channels_only ? "true" : "false") + ",\n";
   s += "  \"channels_used_median\": " + num(r.channels_used_median) + ",\n";
   s += "  \"slices\": " + std::to_string(r.slices) + ",\n";
