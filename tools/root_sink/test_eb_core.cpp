@@ -1127,19 +1127,84 @@ static void test_a_fresh_asad_that_comes_first_is_reattached_when_another_asad_r
 }
 
 // 付け替えの境界(`event_time + 100 ms < floor_old` は等号を含まない)。A1 の古い残りの
-// floor = F、A0 は先に idx 0 を 1 本だけ時刻 t で送る(古い残りなし)。A1 の新 idx 0 で再開。
+// floor = F、A0 は先に idx 0 を 1 本だけ時刻 t で送る(古い残りなし)。A1 の新 idx 0(t0 = 50)で再開。
+// F − t0 = 1.5 × gap にしてあるのは、こちらの条件(t < F − gap = 50 + 0.5 gap)が中点条件
+// (t < t0 + (F − t0)/2 = 50 + 0.75 gap)より先に効く範囲で境界を見るため(F − t0 ≤ 2 gap)。
 static void test_the_reattach_threshold_is_exclusive() {
-  const uint64_t F = 1000000000ull;  // 10 s
   const uint64_t gap = EventBuilder::kRestartMinTimeGap;
+  const uint64_t F = 50 + gap + gap / 2;  // 150 ms + 0.5 µs
   auto joins_with = [&](uint64_t t) {
     EventBuilder eb({{0, 0}, {0, 1}}, 1000);
     eb.feed(frag_at(7, 0, t, 0), 0);
     for (uint32_t i = 10; i <= 13; ++i) eb.feed(frag_at(7, i, F + (i - 10) * 10ull, 1), 0);
-    eb.feed(frag_at(7, 0, 50, 1), 0);  // A1 の再開(10 s → 0.5 µs)
+    eb.feed(frag_at(7, 0, 50, 1), 0);  // A1 の再開(150 ms → 0.5 µs)
     return joins_of(eb, 0);
   };
   CHECK_EQ(joins_with(F - gap), 0);      // ちょうど 100 ms 前: 付け替えない
   CHECK_EQ(joins_with(F - gap - 1), 1);  // 1 tick 超: 付け替える
+}
+
+// 133 追補 3(Fable): 付け替えは「新しい取得の時刻帯に近い側」だけ —
+// `event_time < t0 + (floor_old − t0) / 2`(t0 = 再開を検出したフレームの時刻、等号を含まない)。
+// 手計算: F = 10 s(1e9)、t0 = 50 → 中点 = 50 + (1e9 − 50)/2 = 500,000,025。
+static void test_the_reattach_midpoint_is_exclusive() {
+  const uint64_t F = 1000000000ull;
+  const uint64_t mid = 50 + (F - 50) / 2;
+  CHECK_EQ(mid, 500000025);
+  auto joins_with = [&](uint64_t t) {
+    EventBuilder eb({{0, 0}, {0, 1}}, 1000);
+    eb.feed(frag_at(7, 0, t, 0), 0);
+    for (uint32_t i = 10; i <= 13; ++i) eb.feed(frag_at(7, i, F + (i - 10) * 10ull, 1), 0);
+    eb.feed(frag_at(7, 0, 50, 1), 0);  // A1 の再開(t0 = 50)
+    return joins_of(eb, 0);
+  };
+  CHECK_EQ(joins_with(mid), 0);      // 中点ちょうど: 付け替えない
+  CHECK_EQ(joins_with(mid - 1), 1);  // 中点 − 1: 付け替える
+}
+
+// 133 追補 3: 死んだ A0 の古い残りが長い(1900..2057、30 s + 10 ms 間隔)ときも、新しい取得へは
+// 付け替えない(probe_dead_long_stale_first の設定)。A1 の floor_old = 31.5 s、t0 ≈ 160 µs →
+// 中点 ≈ 15.75 s、A0 の古い残り(30 s〜)は中点より floor 寄り。A1–A3 は古い 2050..2057 → 新 0..5。
+// 手計算: 旧世代 = 1900..2049(A0 だけ 150 件、incomplete)+ 2050..2057(4 AsAd 揃い 8 件、complete)、
+// 先頭 1900 が incomplete なので世代 0 は timeout まで出ない。新世代 0..5 は A0 待ちで 3/4 の
+// incomplete。run の世代は上がらない(A0 は世代 0 のまま)。
+static void test_a_dead_asad_with_a_longer_stale_head_is_not_reattached() {
+  EventBuilder eb(kFourAsads, 1000);
+  auto stale = [&](uint8_t a, uint32_t lo) {
+    for (uint32_t i = lo; i <= 2057; ++i) {
+      eb.feed(frag_at(29, i, 3000000000ull + (i - 1900) * 1000000ull + a, a), 0);
+    }
+  };
+  stale(0, 1900);  // A0: 死んでいる(再開しない)
+  for (uint8_t a = 1; a < 4; ++a) {
+    stale(a, 2050);
+    feed_asad(eb, 29, a, 0, 5, 16000);
+  }
+  CHECK_EQ(eb.acquisition_restarts(), 0);
+  CHECK_EQ(eb.sources_behind(29), 1);
+  CHECK(joins_of(eb, 0) == 0 && joins_of(eb, 1) == 0 && joins_of(eb, 2) == 0 &&
+        joins_of(eb, 3) == 0);
+  CHECK_EQ(eb.take_restart_flush().size(), 0);
+  CHECK_EQ(eb.poll(0).size(), 0);  // どちらの世代も先頭が incomplete
+  const std::vector<BuiltEvent> out = eb.poll(1001);
+  size_t old_incomplete = 0, old_complete = 0, fresh_incomplete = 0, other = 0;
+  for (const BuiltEvent& ev : out) {
+    if (ev.epoch == 0 && ev.event_idx >= 1900 && ev.incomplete && ev.fragments.size() == 1) {
+      ++old_incomplete;
+    } else if (ev.epoch == 0 && ev.event_idx >= 2050 && !ev.incomplete) {
+      ++old_complete;
+    } else if (ev.epoch == 1 && ev.event_idx <= 5 && ev.incomplete && ev.fragments.size() == 3) {
+      ++fresh_incomplete;
+    } else {
+      ++other;
+    }
+  }
+  CHECK_EQ(old_incomplete, 150);
+  CHECK_EQ(old_complete, 8);
+  CHECK_EQ(fresh_incomplete, 6);
+  CHECK_EQ(other, 0);
+  CHECK_EQ(eb.restart_duplicate_events(), 0);
+  CHECK_EQ(eb.late_fragments(), 0);
 }
 
 // 付け替えるのは**まだ世代 e に居るソース**のフラグメントだけ。先に再開した A0 の世代 0 に
@@ -1251,6 +1316,8 @@ int main() {
   test_the_reattach_threshold_is_exclusive();
   test_stale_frames_of_an_already_restarted_asad_are_not_reattached();
   test_a_fragment_is_not_reattached_onto_an_already_emitted_idx();
+  test_the_reattach_midpoint_is_exclusive();
+  test_a_dead_asad_with_a_longer_stale_head_is_not_reattached();
 
   test_strict_seqcheck_accepts_zero_as_the_first();
   test_strict_seqcheck_treats_a_nonzero_first_as_a_gap();

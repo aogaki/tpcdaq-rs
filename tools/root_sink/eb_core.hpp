@@ -168,7 +168,7 @@ class EventBuilder {
     SourceState& src = rs.sources[fk];
     if (f.event_idx == 0 && src.max_seen > kRestartMinIdx && src.have_time &&
         f.event_time + kRestartMinTimeGap < src.time_floor) {
-      restart_source(run, rs, src, fk);
+      restart_source(run, rs, src, fk, f.event_time);
     }
     if (rs.max_epoch > src.epoch && in_epoch_band(rs.epochs[rs.max_epoch], f.event_time)) {
       join_epoch(run, rs, src, fk);
@@ -381,13 +381,15 @@ class EventBuilder {
 
   // ソース 1 つの再開。そのソースの判定材料を消して世代を +1 する。期待集合の全ソースが
   // 次の世代に進んだ(= run の世代が上がった)ら旧世代を締める。
-  void restart_source(uint32_t run, RunState& rs, SourceState& src, const FragmentKey& fk) {
+  // t0 = 再開を検出したフレーム(= そのソースの新しい取得の最初のフレーム)の event_time。
+  void restart_source(uint32_t run, RunState& rs, SourceState& src, const FragmentKey& fk,
+                      uint64_t t0) {
     const uint32_t from = src.epoch;
     const uint64_t floor_old = src.time_floor;  // have_time は再開判定の条件なので有効
     enter_epoch(src, from + 1);
     rs.max_epoch = std::max(rs.max_epoch, src.epoch);
     ++source_restarts_[fk];
-    reattach_new_acquisition(run, rs, fk, from, floor_old);  // 旧世代を締める前に
+    reattach_new_acquisition(run, rs, fk, from, floor_old, t0);  // 旧世代を締める前に
     advance_run_epoch(run, rs);
   }
 
@@ -398,9 +400,14 @@ class EventBuilder {
   // (source_epoch_joins)。古い残りを持たない AsAd が AsAd 順で最初の再開より前に来ると、
   // 追従(時刻帯)の相手がまだ無いので、ここでしか拾えない。1 ソースでは他ソースが居ないので
   // 発火しない。
+  // さらに **`event_time < t0 + (floor_old − t0) / 2`**(中点より t0 寄り、133 追補 3): 時計を
+  // 始め直した側は t0 の近く(同じ割り込み内)に居り、古い残りは floor_old の直前に固まる。
+  // まだ再開していない死んだ AsAd の長い古い残り(floor_old より 100 ms 以上前)を新しい取得へ
+  // 引き込まない。floor_old > t0 + 100 ms は再開判定が保証する。
   void reattach_new_acquisition(uint32_t run, RunState& rs, const FragmentKey& restarted,
-                                uint32_t from, uint64_t floor_old) {
+                                uint32_t from, uint64_t floor_old, uint64_t t0) {
     const uint32_t to = from + 1;
+    const uint64_t midpoint = t0 + (floor_old - t0) / 2;
     EpochState& target = rs.epochs[to];
     std::map<FragmentKey, std::vector<std::pair<uint32_t, uint64_t>>> moved;  // ソース → (idx, 時刻)
     auto it = pending_.lower_bound(EventKey{run, from, 0});
@@ -416,7 +423,7 @@ class EventBuilder {
         // 移し先の世代が既にその idx 以上を emit していたら移さない(世代内の emit 昇順と
         // 区間リストを壊さない。旧世代に残して捨てない)。
         if (k == restarted || rs.source_epoch(k) != from ||
-            f.event_time + kRestartMinTimeGap >= floor_old ||
+            f.event_time + kRestartMinTimeGap >= floor_old || f.event_time >= midpoint ||
             (target.have_emitted && idx <= target.emitted_upto)) {
           keep.push_back(std::move(f));
           continue;
