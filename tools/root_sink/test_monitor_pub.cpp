@@ -85,11 +85,12 @@ void check_bytes(const std::vector<uint8_t>& got, const std::vector<uint8_t>& wa
 // 手計算の出典(値はすべて取り違えが見えるようにずらしてある):
 //   envelope  = fixmap(1){"Data": array(5)[101, 7, 0, 42, payload]}
 //               source_id 101 = SPEC §3.2 v1.9(root-sink のモニタ PUB)
-//   payload   = fixmap(12){ kind, run, state, events_built, events_incomplete,
+//   payload   = fixmap(13){ kind, run, state, events_built, events_incomplete,
 //                           late_fragments, pending_events, frames_per_cobo,
 //                           bytes_written, saturation, publish_drops }
 //   pending_events(v1.10、R-P2-5)は late_fragments の次(SPEC §5.3)。
 //   acquisition_restarts(TODO/110)は pending_events の次(12 キー目)。
+//   sources_behind(TODO/133)は acquisition_restarts の次(13 キー目)。値 9 は他と被らない。
 //   frames_per_cobo は **値が 0 でない CoBo だけ**を 10 進文字列キーで(cobo 昇順)。
 //   bytes_written = 200 は fixint(≤127)に入らないので uint8(0xcc)。
 void test_status_bytes() {
@@ -101,6 +102,7 @@ void test_status_bytes() {
   s.late_fragments = 2;
   s.pending_events = 8;
   s.acquisition_restarts = 3;
+  s.sources_behind = 9;
   s.frames_per_cobo[0] = 3;
   s.frames_per_cobo[2] = 4;
   s.bytes_written = 200;
@@ -121,7 +123,7 @@ void test_status_bytes() {
   e.fixint(7);    // run_number
   e.fixint(0);    // sequence_number(最初の 1 通)
   e.fixint(42);   // created_ns
-  e.fixmap(12);
+  e.fixmap(13);
   e.str("kind");              e.str("status");
   e.str("run");               e.fixint(7);
   e.str("state");             e.str("running");
@@ -130,6 +132,7 @@ void test_status_bytes() {
   e.str("late_fragments");    e.fixint(2);
   e.str("pending_events");    e.fixint(8);
   e.str("acquisition_restarts"); e.fixint(3);  // TODO/110: pending_events の次
+  e.str("sources_behind");    e.fixint(9);     // TODO/133: acquisition_restarts の次
   e.str("frames_per_cobo");
   e.fixmap(2);
   e.str("0");                 e.fixint(3);
@@ -164,7 +167,7 @@ void test_status_idle_state_string() {
 
   tpcwire::Reader r(h.payload, h.payload_size);
   const uint32_t n = r.read_map_len();
-  CHECK_EQ(n, 12);
+  CHECK_EQ(n, 13);
   bool saw_idle = false;
   for (uint32_t i = 0; i < n; ++i) {
     const std::string key = r.read_str();

@@ -211,7 +211,19 @@ function shapeRunStop(raw: Raw): Shaped {
     lines.push(`malformed = ${counterValue(counters['malformed'])}`);
     // TODO/110: 取得の再開(前の取得の残りフレーム)。旧行・旧 decoder はキー無し = 取得不能。
     lines.push(`acquisition_restarts = ${counterValue(counters['acquisition_restarts'])}`);
-    lines.push(`frames_before_restart = ${counterValue(counters['frames_before_restart'])}`);
+    // TODO/133: 上流ソース別の辞書(再開したソースだけが載る)。旧行は全ソース合算の 1 数。
+    const framesBeforeRestart = obj(counters, 'frames_before_restart');
+    if (framesBeforeRestart) {
+      const sources = Object.keys(framesBeforeRestart).sort(byCoboId);
+      if (sources.length === 0) lines.push('frames_before_restart = none (no source restarted)');
+      for (const source of sources) {
+        lines.push(
+          `frames_before_restart source ${source} = ${counterValue(framesBeforeRestart[source])}`,
+        );
+      }
+    } else {
+      lines.push(`frames_before_restart = ${counterValue(counters['frames_before_restart'])}`);
+    }
     details.push({ label: 'counters', lines });
   }
   if (files.length > 0) {

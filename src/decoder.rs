@@ -184,12 +184,14 @@ pub struct RunDecoder {
     /// ソース毎の epoch 状態(取得の再開の判定材料 — TODO/110)。エントリはソース数ぶんだけで、
     /// フレーム毎には確保しない。`rearm` で消す。
     source_epochs: HashMap<u32, SourceEpoch>,
-    /// run 内でデコードできたデータフレーム数(`frames_before_restart` の材料)。
-    data_frames: u64,
-    /// 取得の再開(acquisition restart)の検出回数。フレームは落とさず数えるだけ。
+    /// run の世代 = 期待ソース全部の世代の最小値(TODO/133)。`rearm` で 0 に戻す。
+    min_epoch: u32,
+    /// 取得の再開(acquisition restart)の回数 = `min_epoch` が上がった回数(TODO/133: 全ソースが
+    /// 再開して初めて 1 回)。フレームは落とさず数えるだけ。
     acquisition_restarts: u64,
-    /// 最初の再開の時点の `data_frames`(前の取得の残りの本数)。2 回目以降は変えない。
-    frames_before_restart: u64,
+    /// ソース毎: そのソースが最初に再開した時点までに**そのソースから**来たデータフレーム数
+    /// (前の取得の残りの本数、TODO/133)。再開したソースだけが載る。2 回目以降は変えない。
+    frames_before_restart: HashMap<u32, u64>,
     logged_restart: bool,
 }
 
@@ -201,11 +203,14 @@ const RESTART_GATE_EVENT_IDX: u32 = 8;
 /// eb_core.hpp の `kRestartMinTimeGap` と同じ値(両層の定義を揃える)。
 const RESTART_MIN_TIME_GAP: u64 = 10_000_000;
 
-/// 1 ソースの現 epoch で見た eventIdx の最大値と event_time の最小値。
+/// 1 ソースの世代(再開の回数)と、現 epoch で見た eventIdx の最大値・event_time の最小値。
 #[derive(Debug, Clone, Copy)]
 struct SourceEpoch {
+    epoch: u32,
     max_event_idx: u32,
     time_floor: u64,
+    /// run 内でこのソースからデコードできたデータフレーム数(`frames_before_restart` の材料)。
+    data_frames: u64,
 }
 
 impl RunDecoder {
@@ -251,9 +256,9 @@ impl RunDecoder {
             logged_cobo_mismatch: false,
             logged_heartbeat_abandoned: false,
             source_epochs: HashMap::new(),
-            data_frames: 0,
+            min_epoch: 0,
             acquisition_restarts: 0,
-            frames_before_restart: 0,
+            frames_before_restart: HashMap::new(),
             logged_restart: false,
         }
     }
@@ -599,6 +604,10 @@ impl RunDecoder {
         for (source_id, n) in &self.batches_in {
             batches_in.insert(source_id.to_string(), serde_json::json!(n));
         }
+        let mut frames_before_restart = serde_json::Map::new();
+        for (source_id, n) in &self.frames_before_restart {
+            frames_before_restart.insert(source_id.to_string(), serde_json::json!(n));
+        }
         serde_json::json!({
             "run_number": self.run_number,
             "batches_in": serde_json::Value::Object(batches_in),
@@ -620,7 +629,7 @@ impl RunDecoder {
             "batches_abandoned": self.batches_abandoned,
             "cobo_mismatch": self.cobo_mismatch,
             "acquisition_restarts": self.acquisition_restarts,
-            "frames_before_restart": self.frames_before_restart,
+            "frames_before_restart": serde_json::Value::Object(frames_before_restart),
         })
     }
 
@@ -655,48 +664,65 @@ impl RunDecoder {
         }
     }
 
-    /// 取得の再開(TODO/110 Fable 裁定)の判定。3 条件がそろったとき数える:
+    /// 取得の再開(TODO/110 Fable 裁定)の判定。3 条件がそろったとき**そのソースの**世代を +1:
     /// `event_idx == 0` / そのソースで `RESTART_GATE_EVENT_IDX` を超える idx を見た後 /
-    /// `event_time` がその epoch の最小値より小さい。フレームは落とさず Error にもしない。
+    /// `event_time` がその epoch の最小値より `RESTART_MIN_TIME_GAP` 以上前。
+    /// `acquisition_restarts` は期待ソース全部の世代の最小値が上がったときだけ +1(TODO/133)。
+    /// フレームは落とさず Error にもしない。
     fn track_acquisition_restart(&mut self, source_id: u32, event_idx: u32, event_time: u64) {
-        self.data_frames += 1;
-        let epoch = self.source_epochs.entry(source_id).or_insert(SourceEpoch {
+        let state = self.source_epochs.entry(source_id).or_insert(SourceEpoch {
+            epoch: 0,
             max_event_idx: 0,
             time_floor: u64::MAX,
+            data_frames: 0,
         });
-        if event_idx == 0
-            && epoch.max_event_idx > RESTART_GATE_EVENT_IDX
-            && event_time.saturating_add(RESTART_MIN_TIME_GAP) < epoch.time_floor
-        {
-            let max_before = epoch.max_event_idx;
-            let floor_before = epoch.time_floor;
-            // 新しい epoch の始まり。
-            epoch.max_event_idx = 0;
-            epoch.time_floor = event_time;
-            // このフレーム自身は新 epoch の 1 本目なので、残りの本数に含めない。
-            let before = self.data_frames - 1;
-            if self.acquisition_restarts == 0 {
-                self.frames_before_restart = before;
-            }
-            self.acquisition_restarts += 1;
-            if !self.logged_restart {
-                self.logged_restart = true;
-                info!(
-                    source_id,
-                    max_event_idx = max_before,
-                    time_floor = floor_before,
-                    event_time,
-                    frames_before_restart = self.frames_before_restart,
-                    "decoder: acquisition restart — event_idx fell back to 0 with an earlier \
-                     clock after higher indices; the head of this run is stale frames of a \
-                     previous acquisition (zCoBo kept running). Frames are kept (lossless); \
-                     further restarts are counted only"
-                );
-            }
+        state.data_frames += 1;
+        let restarted = event_idx == 0
+            && state.max_event_idx > RESTART_GATE_EVENT_IDX
+            && event_time.saturating_add(RESTART_MIN_TIME_GAP) < state.time_floor;
+        if !restarted {
+            state.max_event_idx = state.max_event_idx.max(event_idx);
+            state.time_floor = state.time_floor.min(event_time);
             return;
         }
-        epoch.max_event_idx = epoch.max_event_idx.max(event_idx);
-        epoch.time_floor = epoch.time_floor.min(event_time);
+        let max_before = state.max_event_idx;
+        let floor_before = state.time_floor;
+        // このソースの新しい epoch の始まり。
+        state.epoch += 1;
+        state.max_event_idx = 0;
+        state.time_floor = event_time;
+        // このフレーム自身は新 epoch の 1 本目なので、残りの本数に含めない。
+        let before = state.data_frames - 1;
+        self.frames_before_restart
+            .entry(source_id)
+            .or_insert(before);
+        // まだ来ていない期待ソースは世代 0(= run の世代を上げない)。
+        let min_epoch = self
+            .expected_sources
+            .iter()
+            .map(|s| self.source_epochs.get(s).map_or(0, |e| e.epoch))
+            .min()
+            .unwrap_or(0);
+        if min_epoch > self.min_epoch {
+            self.min_epoch = min_epoch;
+            self.acquisition_restarts += 1;
+        }
+        if !self.logged_restart {
+            self.logged_restart = true;
+            info!(
+                source_id,
+                max_event_idx = max_before,
+                time_floor = floor_before,
+                event_time,
+                frames_before_restart = before,
+                acquisition_restarts = self.acquisition_restarts,
+                "decoder: acquisition restart on this source — event_idx fell back to 0 with an \
+                 earlier clock after higher indices; the head of this run is stale frames of a \
+                 previous acquisition (zCoBo kept running). Frames are kept (lossless); the run \
+                 counts a restart once every expected source has restarted; further restarts \
+                 are counted only"
+            );
+        }
     }
 
     fn clear_pending(&mut self) {
@@ -711,7 +737,7 @@ impl RunDecoder {
         self.out_seq = 0;
         self.awaiting_run = true;
         self.source_epochs.clear();
-        self.data_frames = 0;
+        self.min_epoch = 0;
         // acquisition_restarts / frames_before_restart は戻さない(malformed と同じ run カウンタ)。
         self.logged_restart = false;
         self.clear_pending();
@@ -1956,7 +1982,8 @@ mod tests {
     }
 
     /// 手計算: 古い 19 本(2038..=2056 は 2056-2038+1 = 19)→ 続く idx 0 は max=2056 > 8 かつ
-    /// time 16e3 < floor 406e6 → 再開 1 回。idx 1 は再開ではない。frames_before_restart = 19。
+    /// time 16e3 < floor 406e6 → 再開 1 回。idx 1 は再開ではない。frames_before_restart = 19
+    /// (133: ソース別の辞書 `{"0": 19}` — 1 ソースなら数は従来と同じ)。
     /// フレームは 1 本も落とさない(pending = 19 + 2 = 21)・Error にしない。
     #[test]
     fn a_stale_head_followed_by_event_idx_zero_counts_an_acquisition_restart() {
@@ -1965,7 +1992,7 @@ mod tests {
 
         let m = c.metrics_json();
         assert_eq!(m["acquisition_restarts"].as_u64(), Some(1));
-        assert_eq!(m["frames_before_restart"].as_u64(), Some(19));
+        assert_eq!(m["frames_before_restart"], serde_json::json!({"0": 19}));
         assert_eq!(c.pending().len(), 21, "フレームは落とさない");
         assert!(!c.errored(), "再開は Error にしない");
     }
@@ -2017,44 +2044,55 @@ mod tests {
 
         let m = c.metrics_json();
         assert_eq!(m["acquisition_restarts"].as_u64(), Some(0));
-        assert_eq!(m["frames_before_restart"].as_u64(), Some(0));
+        assert_eq!(m["frames_before_restart"], serde_json::json!({}));
     }
 
-    /// ソース毎に判定する: source 0 は再開あり、source 1 は idx 0 から正常開始(再開なし)、
-    /// source 2 も再開。→ 2 回。frames_before_restart は最初の再開(source 0 の 19)で
-    /// ラッチされ、2 回目で変わらない。
+    /// 133 §4-6: `frames_before_restart` はソース(receiver)別の辞書で、そのソースが最初に
+    /// 再開するまでに**そのソースから**来たデータフレーム数。`acquisition_restarts` は期待ソース
+    /// 全部の世代の最小値が上がった回数 = 全ソースが再開して初めて 1 回。
+    /// 手計算: source 0 = 古い 19 本の後に idx 0 → `{"0": 19}`。source 1 は古い idx 100, 101
+    /// (max 101 > 8、floor 0.5 s)の後、別バッチで idx 0(16e3、戻り幅 > 1e7)→ `{"1": 2}`
+    /// (run 全体の合算なら 19 + 2 + 2 = 23 になる — 単位が root-sink とずれる元)。
     #[test]
-    fn a_restart_is_counted_per_source_and_reported_once_per_run_start() {
-        let mut c = core(29, &[0, 1, 2]);
+    fn frames_before_restart_is_per_source_and_a_restart_counts_once_every_source_restarted() {
+        let mut c = core(29, &[0, 1]);
         let now = Instant::now();
         c.handle_batch(0, 29, 0, &stale_head_then_restart(0), now);
         c.handle_batch(
             1,
             29,
             0,
-            &[frame_at(1, 0, 16_000), frame_at(1, 1, 26_000)],
-            now,
-        );
-        // 2 つ目の再開は source 2 の 3 本目(frames は run 全体で 21 + 2 + 2 = 25 本目付近)。
-        c.handle_batch(
-            2,
-            29,
-            0,
-            &[
-                frame_at(2, 100, 50_000_000), // 0.5 s: 16_000 へ戻る幅が閾値 1e7 を超える
-                frame_at(2, 101, 50_010_000),
-                frame_at(2, 0, 16_000),
-            ],
+            &[frame_at(1, 100, 50_000_000), frame_at(1, 101, 50_010_000)],
             now,
         );
 
         let m = c.metrics_json();
-        assert_eq!(m["acquisition_restarts"].as_u64(), Some(2));
         assert_eq!(
-            m["frames_before_restart"].as_u64(),
-            Some(19),
-            "最初の再開でラッチ、2 回目で変えない"
+            m["frames_before_restart"],
+            serde_json::json!({"0": 19}),
+            "再開したソースだけが載る"
         );
+        assert_eq!(
+            m["acquisition_restarts"].as_u64(),
+            Some(0),
+            "source 1 は旧世代のまま = 最小の世代は上がらない"
+        );
+
+        c.handle_batch(
+            1,
+            29,
+            1,
+            &[frame_at(1, 0, 16_000), frame_at(1, 1, 26_000)],
+            now,
+        );
+        let m = c.metrics_json();
+        assert_eq!(
+            m["frames_before_restart"],
+            serde_json::json!({"0": 19, "1": 2})
+        );
+        assert_eq!(m["acquisition_restarts"].as_u64(), Some(1));
+        assert_eq!(c.pending().len(), 21 + 4, "フレームは落とさない");
+        assert!(!c.errored(), "再開は Error にしない");
     }
 
     /// 自分の EOS 送出(rearm)後も 2 項目は残る: controller は EOS が伝わった後に run_stop の
@@ -2071,13 +2109,13 @@ mod tests {
 
         let m = c.metrics_json();
         assert_eq!(m["acquisition_restarts"].as_u64(), Some(1));
-        assert_eq!(m["frames_before_restart"].as_u64(), Some(19));
+        assert_eq!(m["frames_before_restart"], serde_json::json!({"0": 19}));
 
         // 次の Start = 新しい RunDecoder: 0 から始まる。
         let next = core(30, &[0]);
         let m = next.metrics_json();
         assert_eq!(m["acquisition_restarts"].as_u64(), Some(0));
-        assert_eq!(m["frames_before_restart"].as_u64(), Some(0));
+        assert_eq!(m["frames_before_restart"], serde_json::json!({}));
     }
 
     // -----------------------------------------------------------------

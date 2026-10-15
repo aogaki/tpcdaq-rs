@@ -4,9 +4,10 @@
 // TPC には使えない(SPEC §6.1「新規」欄・§14-1: ソース毎 FIFO も timestamp キーも
 // 実在しない)。流用したのは Channel<T>(rs_core.hpp 側、008 の波)だけ。
 //
-// このヘッダがやること —— (run_number, event_idx) をキーに、設定で与えた期待
+// このヘッダがやること —— (run_number, 世代, event_idx) をキーに、設定で与えた期待
 // フラグメント集合 {(cobo, asad)} が揃うまで貯め、揃ったら(または build_timeout_ms
-// を過ぎたら)**event_idx 昇順**で吐き出す。「到着順連結で順序が狂う」現行 GET の
+// を過ぎたら)**世代内で event_idx 昇順**で吐き出す。世代は取得の再開(TODO/110)で
+// ソース(cobo, asad)ごとに +1 され、再開前後のフレームを混ぜない(TODO/133)。「到着順連結で順序が狂う」現行 GET の
 // 問題(PROPOSAL Q3)の構造的回避点がここ。
 //
 // 設計上の決めごと(すべて SPEC §6.3 と CLAUDE.md の絶対ルール由来):
@@ -34,6 +35,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -108,7 +110,8 @@ struct BuiltEvent {
   uint32_t run_number = 0;
   uint32_t event_idx = 0;
   bool incomplete = false;  // 期待集合が揃わないまま出た(timeout / flush)
-  // 取得の再開(restart)で +1 される世代(その run 内、0 始まり)。recorder は世代が
+  // 取得の再開(restart)で +1 される世代(その run 内、0 始まり)。世代はソース(cobo, asad)
+  // ごとに持ち、イベントの鍵は (run, epoch, event_idx)(TODO/133)。recorder は世代が
   // 変わったら「最後に書いた eventId」の高水位をリセットする(TODO/110)。
   uint32_t epoch = 0;
   std::vector<OwnedFragment> fragments;
@@ -118,7 +121,7 @@ struct BuiltEvent {
 // 呼び手が書き出す責任を持つ(SPEC §6.3「順序より可逆性優先」)。
 struct LateFragment {
   OwnedFragment fragment;
-  uint32_t emitted_upto = 0;  // その run で emit 済みの最大 event_idx(可視化用)
+  uint32_t emitted_upto = 0;  // そのフラグメントの世代で emit 済みの最大 event_idx(可視化用)
 };
 
 // ---------------------------------------------------------------------------
@@ -143,58 +146,74 @@ class EventBuilder {
 
   // フラグメントを 1 個食わせる。戻り値が入っていれば遅延到着(呼び手が書き出す)。
   //
-  // **取得の再開(TODO/110)**: event_idx==0 のフレームが、同じ run・同じ世代で complete または
-  // emit 済みのイベントがあり(2 枚目の板の event 0 が未着の間は誤検出しない。poll 前の
-  // 同一バッチ内でも検出できるよう、emit だけでなく complete でも立てる)、より大きい idx
-  // (> kRestartMinIdx)を見た後に、その世代で見た最小 event_time より小さい時刻で来たら、
-  // ECC 不在で走り続けた zCoBo の古いフレームの後に新しい取得が始まったと見なす。
-  // 時刻は世代内の最小より kRestartMinTimeGap(100 ms)以上戻っていること(板のずれ=µs は再開にしない)。
-  // late 判定より前に見る。起きたら旧世代の pending を押し出し(take_restart_flush() で
-  // 受け取る)、世代を +1 して高水位をリセットする。
+  // **取得の再開(TODO/110、133 でソースごとに)**: そのソース(cobo, asad)の現世代で
+  // より大きい idx(> kRestartMinIdx)を見た後に、event_idx==0 のフレームが、そのソースの
+  // 現世代で見た最小 event_time より kRestartMinTimeGap(100 ms)以上前の時刻で来たら、
+  // ECC 不在で走り続けた zCoBo の古いフレームの後に新しい取得が始まったと見なし、
+  // **そのソースの**世代を +1 する(板のずれ = µs は再開にしない — 134)。
+  // late 判定より前に見る。フラグメントはそのソースの現世代の鍵 (run, epoch, idx) に入る
+  // ので、まだ再開していない AsAd の古いフレームが新世代に混ざらない(133 §1b)。
+  // 期待集合の全ソースが次の世代に進んだら(= run の世代が上がったら)旧世代の pending を
+  // 押し出し(take_restart_flush() で受け取る)、acquisition_restarts を +1 する。
   std::optional<LateFragment> feed(OwnedFragment f, uint64_t now_ms) {
-    RunState& rs = runs_[f.run_number];
-    if (f.event_idx == 0 && (rs.have_emitted || rs.have_complete) && rs.max_seen > kRestartMinIdx && rs.have_time &&
-        f.event_time + kRestartMinTimeGap < rs.time_floor) {
-      restart(f.run_number, rs);
+    const uint32_t run = f.run_number;
+    const FragmentKey fk = f.key();
+    RunState& rs = runs_[run];
+    SourceState& src = rs.sources[fk];
+    if (f.event_idx == 0 && src.max_seen > kRestartMinIdx && src.have_time &&
+        f.event_time + kRestartMinTimeGap < src.time_floor) {
+      restart_source(run, rs, src, fk);
     }
-    if (rs.have_emitted && f.event_idx <= rs.emitted_upto) {
+    const EpochState& es = rs.epochs[src.epoch];
+    if (es.have_emitted && f.event_idx <= es.emitted_upto) {
       ++late_fragments_;
       LateFragment late;
-      late.emitted_upto = rs.emitted_upto;
+      late.emitted_upto = es.emitted_upto;
       late.fragment = std::move(f);
       return late;
     }
-    if (!rs.have_time || f.event_time < rs.time_floor) rs.time_floor = f.event_time;
-    rs.have_time = true;
-    if (f.event_idx > rs.max_seen) rs.max_seen = f.event_idx;
+    if (!src.have_time || f.event_time < src.time_floor) src.time_floor = f.event_time;
+    src.have_time = true;
+    if (f.event_idx > src.max_seen) src.max_seen = f.event_idx;
 
-    Pending& ev = pending_[EventKey(f.run_number, f.event_idx)];
+    Pending& ev = pending_[EventKey{run, src.epoch, f.event_idx}];
     if (ev.fragments.empty()) ev.first_arrival_ms = now_ms;
-    const FragmentKey fk = f.key();
     if (expected_.count(fk) == 0) {
       ++unexpected_fragments_;  // complete 判定には数えないが、イベントには載せる
     } else if (!ev.seen.insert(fk).second) {
       ++duplicate_fragments_;  // 同じソースから 2 回 = 片肺での早出しを防ぐ
     }
     ev.fragments.push_back(std::move(f));
-    if (is_complete(ev)) rs.have_complete = true;
     return std::nullopt;
   }
 
-  // 出せるイベントを event_idx 昇順で返す。先頭が complete でも timeout でもない間は
-  // 後続を出さない(head-of-line)。
+  // 出せるイベントを (世代, event_idx) 昇順で返す。head-of-line は **(run, 世代) ごと**:
+  // 世代内の先頭が complete でも timeout でもない間はその世代の後続を出さないが、別の世代は
+  // 待たない(死んだ AsAd の旧世代が新世代を塞がない — 133 §4-3)。run を跨いだ順序は従来どおり
+  // (前の run に塞がった世代が残っている間は次の run を出さない)。
   std::vector<BuiltEvent> poll(uint64_t now_ms) {
     std::vector<BuiltEvent> out;
-    while (!pending_.empty()) {
-      const auto it = pending_.begin();
-      if (!is_complete(it->second) && !timed_out(it->second, now_ms)) break;
+    auto it = pending_.begin();
+    if (it == pending_.end()) return out;
+    uint32_t run = it->first.run;
+    bool run_blocked = false;
+    while (it != pending_.end()) {
+      if (it->first.run != run) {
+        if (run_blocked) break;
+        run = it->first.run;
+      }
+      if (!is_complete(it->second) && !timed_out(it->second, now_ms)) {
+        run_blocked = true;
+        it = pending_.lower_bound(EventKey{run, it->first.epoch + 1, 0});  // 次の世代へ
+        continue;
+      }
       emit_into(it, out);
-      pending_.erase(it);
+      it = pending_.erase(it);
     }
     return out;
   }
 
-  // feed() が restart を検出したときに押し出した旧世代のイベント(昇順)を渡して空にする。
+  // run の世代が上がったときに押し出した旧世代のイベント(昇順)を渡して空にする。
   // 呼び手は **eb.poll() の結果より先に** 書き出すこと(旧世代 → 新世代の順)。
   std::vector<BuiltEvent> take_restart_flush() {
     std::vector<BuiltEvent> out;
@@ -220,27 +239,59 @@ class EventBuilder {
   uint64_t late_fragments() const { return late_fragments_; }
   uint64_t unexpected_fragments() const { return unexpected_fragments_; }
   uint64_t duplicate_fragments() const { return duplicate_fragments_; }
-  // 取得の再開(TODO/110)。累積。
+  // 取得の再開(TODO/110)。累積。acquisition_restarts は **run の世代**(期待集合の全ソースの
+  // 世代の最小値)が上がった回数 = 4 AsAd 全部が再開して初めて 1 回(TODO/133)。
   uint64_t acquisition_restarts() const { return acquisition_restarts_; }
   uint64_t events_before_restart() const { return events_before_restart_; }  // 旧世代で emit した数
   uint64_t restart_duplicate_events() const { return restart_duplicate_events_; }  // 新世代で捨てた数
+  // ソース(cobo, asad)ごとの再開の回数(累積、TODO/133)。再開したソースだけが載る。
+  const std::map<FragmentKey, uint64_t>& source_restarts() const { return source_restarts_; }
+  // その run で、世代が最小(= run の世代)に留まり他のソースより遅れている期待ソースの数。
+  // 全ソースが同じ世代なら 0(TODO/133 §4-5: 死んだ AsAd の可視化 — status PUB)。
+  uint64_t sources_behind(uint32_t run) const {
+    const auto it = runs_.find(run);
+    if (it == runs_.end()) return 0;
+    uint32_t lo = UINT32_MAX;
+    uint32_t hi = 0;
+    for (const FragmentKey& k : expected_) {
+      const uint32_t e = it->second.source_epoch(k);
+      lo = std::min(lo, e);
+      hi = std::max(hi, e);
+    }
+    if (lo == hi) return 0;
+    uint64_t n = 0;
+    for (const FragmentKey& k : expected_) {
+      if (it->second.source_epoch(k) == lo) ++n;
+    }
+    return n;
+  }
   // run を閉じたら emit 済み番号の区間リストを解放する(EOS の flush 後に呼ぶ)。
   // 小さな状態(emitted_upto 等)は、EOS 後の迷子を late と判定するために残す。
   void close_run(uint32_t run) {
     const auto it = runs_.find(run);
     if (it == runs_.end()) return;
-    it->second.epoch_ids.release();
-    it->second.retired_ids.release();
+    for (auto& e : it->second.epochs) e.second.ids.release();
   }
-  // テスト・可視化用: その run が保持している区間数(現世代 + 旧世代)。
+  // テスト・可視化用: その run が保持している区間数(全世代の合計)。
   size_t emitted_id_ranges(uint32_t run) const {
     const auto it = runs_.find(run);
-    return it == runs_.end() ? 0 : it->second.epoch_ids.v.size() + it->second.retired_ids.v.size();
+    if (it == runs_.end()) return 0;
+    size_t n = 0;
+    for (const auto& e : it->second.epochs) n += e.second.ids.v.size();
+    return n;
   }
   size_t pending() const { return pending_.size(); }
 
  private:
-  using EventKey = std::pair<uint32_t, uint32_t>;  // (run_number, event_idx)
+  // イベントの鍵 = (run_number, ソースの世代, event_idx)(TODO/133)。map の順 = この辞書順。
+  struct EventKey {
+    uint32_t run;
+    uint32_t epoch;
+    uint32_t idx;
+    bool operator<(const EventKey& o) const {
+      return std::tie(run, epoch, idx) < std::tie(o.run, o.epoch, o.idx);
+    }
+  };
 
   struct Pending {
     uint64_t first_arrival_ms = 0;
@@ -277,71 +328,75 @@ class EventBuilder {
                                  });
       return it != v.begin() && idx <= std::prev(it)->second;
     }
-    void absorb(const IdRanges& o) {  // 併合(昇順に整え、隣接・重複を結ぶ)
-      v.insert(v.end(), o.v.begin(), o.v.end());
-      std::sort(v.begin(), v.end());
-      std::vector<std::pair<uint32_t, uint32_t>> m;
-      for (const auto& r : v) {
-        if (!m.empty() && r.first <= m.back().second + 1ull) {
-          if (r.second > m.back().second) m.back().second = r.second;
-        } else {
-          m.push_back(r);
-        }
-      }
-      v.swap(m);
-    }
     void release() { std::vector<std::pair<uint32_t, uint32_t>>().swap(v); }
   };
 
-  // run 毎の状態。世代(epoch)内で emit は昇順。
-  struct RunState {
-    bool have_emitted = false;
-    bool have_complete = false;     // 現世代に期待フラグメントが揃ったイベントがある
-    uint32_t emitted_upto = 0;      // 現世代の emit 済み最大 event_idx
-    uint32_t max_seen = 0;          // 現世代で見た最大 event_idx(pending 含む)
-    bool have_time = false;
-    uint64_t time_floor = 0;        // 現世代で見た最小 event_time
+  // ソース(cobo, asad)ごとの再開判定の材料(TODO/133)。値はそのソースの現世代のもの。
+  struct SourceState {
     uint32_t epoch = 0;
-    bool dup_logged = false;        // restart_duplicate の stderr は run 毎に 1 回
-    uint64_t epoch_count = 0;       // 現世代で emit した数
-    IdRanges epoch_ids;             // 現世代で emit した event_idx
-    IdRanges retired_ids;           // 旧世代で emit した event_idx
+    uint32_t max_seen = 0;    // 現世代で見た最大 event_idx(pending 含む)
+    bool have_time = false;
+    uint64_t time_floor = 0;  // 現世代で見た最小 event_time
   };
 
-  void restart(uint32_t run, RunState& rs) {
-    // 旧世代の pending を昇順に押し出す(complete / incomplete のまま — 捨てない)。
-    const auto first = pending_.lower_bound(EventKey(run, 0));
-    auto it = first;
-    while (it != pending_.end() && it->first.first == run) {
-      emit_into(it, restart_flush_);
-      ++it;
-    }
-    pending_.erase(first, it);
+  // 世代ごとの emit の状態。世代内で emit は昇順(late 判定の高水位はここ)。
+  struct EpochState {
+    bool have_emitted = false;
+    uint32_t emitted_upto = 0;  // この世代の emit 済み最大 event_idx
+    uint64_t count = 0;         // この世代で emit した数
+    IdRanges ids;               // この世代で emit した event_idx
+  };
 
-    events_before_restart_ += rs.epoch_count;
-    rs.retired_ids.absorb(rs.epoch_ids);
-    rs.epoch_ids.release();
-    rs.epoch_count = 0;
-    rs.have_emitted = false;
-    rs.have_complete = false;
-    rs.emitted_upto = 0;
-    rs.max_seen = 0;
-    rs.have_time = false;
-    rs.time_floor = 0;
+  // run 毎の状態。
+  struct RunState {
+    uint32_t epoch = 0;       // run の世代 = 期待集合の全ソースの世代の最小値
+    bool dup_logged = false;  // restart_duplicate の stderr は run 毎に 1 回
+    std::map<FragmentKey, SourceState> sources;
+    std::map<uint32_t, EpochState> epochs;
+
+    uint32_t source_epoch(const FragmentKey& k) const {
+      const auto it = sources.find(k);
+      return it == sources.end() ? 0 : it->second.epoch;  // まだ来ていないソースは世代 0
+    }
+  };
+
+  // ソース 1 つの再開。そのソースの判定材料を消して世代を +1 する。期待集合の全ソースが
+  // 次の世代に進んだ(= run の世代が上がった)ら旧世代を締める。
+  void restart_source(uint32_t run, RunState& rs, SourceState& src, const FragmentKey& fk) {
+    src.max_seen = 0;
+    src.have_time = false;
+    src.time_floor = 0;
+    ++src.epoch;
+    ++source_restarts_[fk];
+    uint32_t lo = UINT32_MAX;
+    for (const FragmentKey& k : expected_) lo = std::min(lo, rs.source_epoch(k));
+    if (lo > rs.epoch) retire_epoch(run, rs);  // 1 フラグメントで上がるのは高々 1
+  }
+
+  // run の世代を締める: 旧世代(以下)の pending を昇順に押し出す(complete / incomplete の
+  // まま — 捨てない)→ 旧世代で emit した数を events_before_restart へ → 世代 +1。
+  void retire_epoch(uint32_t run, RunState& rs) {
+    const auto first = pending_.lower_bound(EventKey{run, 0, 0});
+    const auto last = pending_.lower_bound(EventKey{run, rs.epoch + 1, 0});
+    for (auto it = first; it != last; ++it) emit_into(it, restart_flush_);
+    pending_.erase(first, last);
+    events_before_restart_ += rs.epochs[rs.epoch].count;
     ++rs.epoch;
     ++acquisition_restarts_;
   }
 
-  // emit して out に積む。新世代で、旧世代が emit 済みの番号と同じイベントは
-  // 書かずに数える(restart_duplicate_events — ユーザー裁定 2026-10-13)。
+  // emit して out に積む。**別の世代が emit 済みの番号**と同じイベントは書かずに数える
+  // (restart_duplicate_events — ユーザー裁定 2026-10-13。eventId は run の中で一回きり)。
   void emit_into(std::map<EventKey, Pending>::iterator it, std::vector<BuiltEvent>& out) {
-    RunState& rs = runs_[it->first.first];
-    const uint32_t idx = it->first.second;
+    const uint32_t run = it->first.run;
+    const uint32_t epoch = it->first.epoch;
+    const uint32_t idx = it->first.idx;
+    RunState& rs = runs_[run];
+    EpochState& es = rs.epochs[epoch];
     // 世代内の昇順は保たれる(drop しても高水位は進める — 以降の late 判定のため)。
-    rs.have_emitted = true;
-    rs.emitted_upto = idx;
-    if (rs.epoch > 0 &&
-        rs.retired_ids.contains(idx)) {
+    es.have_emitted = true;
+    es.emitted_upto = idx;
+    if (emitted_in_another_epoch(rs, epoch, idx)) {
       ++restart_duplicate_events_;
       if (!rs.dup_logged) {  // run 毎に 1 回(ホットパスで毎回整形しない)
         rs.dup_logged = true;
@@ -349,21 +404,29 @@ class EventBuilder {
                      "root_sink: run %u epoch %u: event_idx=%u was already emitted before "
                      "the acquisition restart — not written, counted (raw graw keeps the "
                      "data)\n",
-                     it->first.first, rs.epoch, idx);
+                     run, epoch, idx);
       }
       return;
     }
-    rs.epoch_ids.add(idx);
-    ++rs.epoch_count;
+    es.ids.add(idx);
+    ++es.count;
     BuiltEvent ev = emit(it);
-    ev.epoch = rs.epoch;
+    ev.epoch = epoch;
     out.push_back(std::move(ev));
+  }
+
+  // 世代は run 内で数個なので素直に回す(世代が 1 つなら 1 回で抜ける)。
+  static bool emitted_in_another_epoch(const RunState& rs, uint32_t epoch, uint32_t idx) {
+    for (const auto& e : rs.epochs) {
+      if (e.first != epoch && e.second.ids.contains(idx)) return true;
+    }
+    return false;
   }
 
   BuiltEvent emit(std::map<EventKey, Pending>::iterator it) {
     BuiltEvent ev;
-    ev.run_number = it->first.first;
-    ev.event_idx = it->first.second;
+    ev.run_number = it->first.run;
+    ev.event_idx = it->first.idx;
     ev.incomplete = !is_complete(it->second);
     ev.fragments = std::move(it->second.fragments);
     // **(cobo, asad) 昇順で決定的にする**(SPEC v1.3 §6.3)。到着順は run 毎に揺れるので、
@@ -385,10 +448,10 @@ class EventBuilder {
 
   std::set<FragmentKey> expected_;
   uint64_t build_timeout_ms_;
-  std::map<EventKey, Pending> pending_;      // キー順 = (run, event_idx) 昇順
+  std::map<EventKey, Pending> pending_;      // キー順 = (run, 世代, event_idx) 昇順
   // run → 状態。run が閉じても消さない(EOS 後に来た迷子を pending に戻さないため)。
   std::map<uint32_t, RunState> runs_;
-  std::vector<BuiltEvent> restart_flush_;  // take_restart_flush() 待ち
+  std::vector<BuiltEvent> restart_flush_;  // take_restart_flush() 待ち(run の世代が上がった時の旧世代)
 
   uint64_t events_complete_ = 0;
   uint64_t events_incomplete_ = 0;
@@ -398,6 +461,7 @@ class EventBuilder {
   uint64_t acquisition_restarts_ = 0;
   uint64_t events_before_restart_ = 0;
   uint64_t restart_duplicate_events_ = 0;
+  std::map<FragmentKey, uint64_t> source_restarts_;
 };
 
 }  // namespace rootsink

@@ -175,6 +175,26 @@ describe('run_stop(SPEC §9.2 — ok=false を目立たせる / counters の nul
     expect(lines).toContain('frames_before_restart = 2,056');
   });
 
+  it('frames_before_restart のソース別辞書は 1 ソース 1 行(TODO/133)', () => {
+    // 出典: TODO/133 の decoder テスト(source 0 = 19 / source 1 = 2,056 は非対称値)。
+    const base = RUN_STOP as { counters: Record<string, unknown> };
+    const perSource = {
+      ...base,
+      counters: { ...base.counters, acquisition_restarts: 1, frames_before_restart: { '1': 2056, '0': 19 } },
+    };
+    const lines = detail(parsed(perSource), 'counters');
+    expect(lines).toContain('frames_before_restart source 0 = 19');
+    expect(lines).toContain('frames_before_restart source 1 = 2,056');
+    expect(lines.indexOf('frames_before_restart source 0 = 19')).toBeLessThan(
+      lines.indexOf('frames_before_restart source 1 = 2,056'),
+    );
+
+    const none = { ...base, counters: { ...base.counters, frames_before_restart: {} } };
+    expect(detail(parsed(none), 'counters')).toContain(
+      'frames_before_restart = none (no source restarted)',
+    );
+  });
+
   it('files は件数つきで畳む', () => {
     expect(detail(parsed(RUN_STOP), 'files (2)')).toEqual([
       'run58/CoBo0_AsAd0_ts_0000.graw — 30,108,672 B',

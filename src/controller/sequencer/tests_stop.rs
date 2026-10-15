@@ -419,7 +419,8 @@ fn stop_fills_counters_and_files_from_get_status() {
 }
 
 /// decoder の取得再開カウンタ(TODO/110)が `run_stop.counters` に載る。
-/// 値は非対称(restarts=1 / frames_before_restart=19)。metrics に無ければ `None`(0 と区別)。
+/// `frames_before_restart` は上流ソース別の辞書(TODO/133)。値は非対称(restarts=1 /
+/// source 0 = 19 / source 1 = 2)。metrics に無ければ `None`(0 と区別)。
 #[test]
 fn run_stop_counters_carry_the_decoder_restart_counters() {
     let params = params_with(&[0]);
@@ -427,15 +428,21 @@ fn run_stop_counters_carry_the_decoder_restart_counters() {
     mock.metrics.insert(
         "decoder".to_string(),
         json!({"eos_in": 1, "eos_out": 1, "malformed": 0,
-               "acquisition_restarts": 1, "frames_before_restart": 19}),
+               "acquisition_restarts": 1, "frames_before_restart": {"0": 19, "1": 2}}),
     );
     let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
     assert_eq!(report.counters.acquisition_restarts, Some(1));
-    assert_eq!(report.counters.frames_before_restart, Some(19));
+    assert_eq!(
+        report.counters.frames_before_restart,
+        Some(FramesBeforeRestart::PerSource(BTreeMap::from([
+            ("0".to_string(), 19),
+            ("1".to_string(), 2),
+        ])))
+    );
 
     let json = serde_json::to_value(&report.counters).unwrap();
     assert_eq!(json["acquisition_restarts"], json!(1));
-    assert_eq!(json["frames_before_restart"], json!(19));
+    assert_eq!(json["frames_before_restart"], json!({"0": 19, "1": 2}));
 
     // decoder が古くてキーを持たない → null(取得不能)。
     let mut mock = MockTransport::new(&params).with_eos_closed();

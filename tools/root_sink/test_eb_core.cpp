@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -541,6 +542,8 @@ static void test_an_event_idx_zero_with_an_earlier_clock_after_emission_starts_a
   CHECK_EQ(eb.restart_duplicate_events(), 0);  // 0,1,2 は旧世代に無い
 }
 
+// 133: 世代はソース(AsAd)ごと。run の世代(= 旧世代の pending を押し出す契機)が上がるのは
+// **期待集合の全ソースが再開したとき**。asad 0 だけ再開した時点では数えず、押し出さない。
 static void test_a_restart_flushes_the_pending_events_of_the_old_epoch() {
   EventBuilder eb({{0, 0}, {0, 1}}, 1000);
   // 旧世代: idx 5..13 は両 asad 揃い。poll しない = 全部 pending。
@@ -551,8 +554,15 @@ static void test_a_restart_flushes_the_pending_events_of_the_old_epoch() {
   eb.feed(frag_at(7, 14, kOld + 140, 0), 0);
   CHECK_EQ(eb.pending(), 10);
 
-  eb.feed(frag_at(7, 0, 50, 0), 0);  // restart
+  eb.feed(frag_at(7, 0, 50, 0), 0);  // asad 0 だけ再開
+  CHECK_EQ(eb.acquisition_restarts(), 0);  // asad 1 はまだ旧世代
+  CHECK_EQ(eb.sources_behind(7), 1);
+  CHECK_EQ(eb.take_restart_flush().size(), 0);
+  CHECK_EQ(eb.pending(), 11);  // 旧世代 10 + 新世代の idx 0(asad 0 だけ)
+
+  eb.feed(frag_at(7, 0, 51, 1), 0);  // asad 1 も再開 → run の世代が上がる
   CHECK_EQ(eb.acquisition_restarts(), 1);
+  CHECK_EQ(eb.sources_behind(7), 0);
   CHECK_EQ(eb.pending(), 1);  // 新世代の idx 0 だけ残る
 
   const std::vector<BuiltEvent> flushed = eb.take_restart_flush();
@@ -807,6 +817,206 @@ static void test_a_genuine_restart_tens_of_seconds_back_is_still_detected() {
   CHECK_EQ(run(floor_actual - EventBuilder::kRestartMinTimeGap - 1), 1);  // 1 tick 超: 再開
 }
 
+// ---------------------------------------------------------------------------
+// 11. 4 AsAd の取得の再開 —— 世代はソース(AsAd)ごと(TODO/133 §4)
+// ---------------------------------------------------------------------------
+//
+// 一次資料(133 §3、GET MemRead::flushData): 割り込みごとに AsAd 0..3 のリングを順に
+// readPtr→writePtr まで全部送る(AsAd-major)。再開の瞬間は
+//   A0 の古い残り → A0 の新 idx 0.. → A1 の古い残り → A1 の新 idx 0.. → …
+// の順で届く。run に世代が 1 つだと、A0 の再開検出の後に来る A1 の古い 2057 が新世代に
+// 混ざり、timeout で emit されて新しい取得が全部 late になる(§1b = 110 の原事故の形)。
+
+// ELITPC の期待集合(SPEC §6.3 v1.7: 1 論理 CoBo × 4 AsAd)。
+static const std::set<FragmentKey> kFourAsads = {{0, 0}, {0, 1}, {0, 2}, {0, 3}};
+
+// (cobo 0, asad) の idx lo..hi を time = base + idx*10 + asad で食わせる。asad を時刻に
+// 足すのは板どうしの僅かなずれ(再開閾値 1e7 ticks よりずっと小さい)を模すため。
+static void feed_asad(EventBuilder& eb, uint32_t run, uint8_t asad, uint32_t lo, uint32_t hi,
+                      uint64_t base, uint64_t now_ms = 0) {
+  for (uint32_t i = lo; i <= hi; ++i) eb.feed(frag_at(run, i, base + i * 10ull + asad, asad), now_ms);
+}
+
+static uint64_t restarts_of(const EventBuilder& eb, uint8_t asad) {
+  const auto it = eb.source_restarts().find(FragmentKey(0, asad));
+  return it == eb.source_restarts().end() ? 0 : it->second;
+}
+
+// §4 テスト 1: AsAd-major の再開バッチ(poll を挟まない同じ feed バッチ)。
+// 手計算: 旧世代 2050..2057 = 8 件(各 4 AsAd 揃い)、新世代 0..5 = 6 件(各 4 AsAd 揃い)。
+static void test_a_four_asad_restart_in_asad_major_order_keeps_old_and_new_epochs_apart() {
+  EventBuilder eb(kFourAsads, 1000);
+  for (uint8_t a = 0; a < 4; ++a) {
+    feed_asad(eb, 29, a, 2050, 2057, kOld);  // 古い残り(1 s 台)
+    feed_asad(eb, 29, a, 0, 5, 16000);       // 新しい取得(160 µs 台)
+  }
+  CHECK_EQ(eb.acquisition_restarts(), 1);  // 4 AsAd 全部が再開して初めて 1 回
+  CHECK_EQ(eb.late_fragments(), 0);
+  CHECK_EQ(eb.source_restarts().size(), 4);
+  CHECK(restarts_of(eb, 0) == 1 && restarts_of(eb, 1) == 1 && restarts_of(eb, 2) == 1 &&
+        restarts_of(eb, 3) == 1);
+  CHECK_EQ(eb.sources_behind(29), 0);
+
+  const std::vector<BuiltEvent> old_epoch = eb.take_restart_flush();
+  CHECK_EQ(old_epoch.size(), 8);
+  bool old_ok = old_epoch.size() == 8;
+  for (size_t k = 0; old_ok && k < old_epoch.size(); ++k) {
+    old_ok = old_epoch[k].event_idx == 2050 + k && !old_epoch[k].incomplete &&
+             old_epoch[k].epoch == 0 && old_epoch[k].fragments.size() == 4;
+  }
+  CHECK(old_ok);  // 旧世代は 4 AsAd で complete(incomplete に化けない)
+
+  const std::vector<BuiltEvent> fresh = eb.poll(0);
+  CHECK_EQ(fresh.size(), 6);
+  bool fresh_ok = fresh.size() == 6;
+  for (size_t k = 0; fresh_ok && k < fresh.size(); ++k) {
+    fresh_ok = fresh[k].event_idx == k && !fresh[k].incomplete && fresh[k].epoch == 1 &&
+               fresh[k].fragments.size() == 4;
+  }
+  CHECK(fresh_ok);
+  CHECK_EQ(eb.events_before_restart(), 8);
+  CHECK_EQ(eb.restart_duplicate_events(), 0);
+
+  // 新世代の高水位は 5(2057 ではない): idx 5 の再来は late で emitted_upto = 5、idx 6 は通る。
+  const std::optional<LateFragment> late = eb.feed(frag_at(29, 5, 16000 + 50, 0), 0);
+  CHECK(late.has_value() && late->emitted_upto == 5);
+  CHECK_EQ(eb.late_fragments(), 1);
+  for (uint8_t a = 0; a < 4; ++a) feed_asad(eb, 29, a, 6, 6, 16000);
+  const std::vector<BuiltEvent> next = eb.poll(0);
+  CHECK(next.size() == 1 && next[0].event_idx == 6 && !next[0].incomplete && next[0].epoch == 1);
+  CHECK_EQ(eb.late_fragments(), 1);
+}
+
+// §4 テスト 2: 旧世代が全部 incomplete(§1 の形)。各 AsAd の古い頭は 1 フラグメントずつで
+// 番号もばらばら(A0 = 2057, A1 = 2058, …)なので、どの古いイベントも 1/4 のまま。
+// run に 1 つの「complete か emit 済み」条件では再開と判定できなかった形。
+static void test_a_restart_is_detected_even_when_every_old_event_is_incomplete() {
+  EventBuilder eb(kFourAsads, 1000);
+  for (uint8_t a = 0; a < 4; ++a) {
+    feed_asad(eb, 29, a, 2057 + a, 2057 + a, kOld);
+    feed_asad(eb, 29, a, 0, 5, 16000);
+  }
+  CHECK_EQ(eb.acquisition_restarts(), 1);
+  const std::vector<BuiltEvent> old_epoch = eb.take_restart_flush();
+  CHECK_EQ(old_epoch.size(), 4);  // 2057..2060
+  bool old_ok = old_epoch.size() == 4;
+  for (size_t k = 0; old_ok && k < old_epoch.size(); ++k) {
+    old_ok = old_epoch[k].event_idx == 2057 + k && old_epoch[k].incomplete &&
+             old_epoch[k].epoch == 0 && old_epoch[k].fragments.size() == 1;
+  }
+  CHECK(old_ok);  // 捨てない(incomplete のまま出す)
+  const std::vector<BuiltEvent> fresh = eb.poll(0);
+  CHECK(fresh.size() == 6 && fresh[0].epoch == 1 && !fresh[0].incomplete && !fresh[5].incomplete);
+
+  // build timeout を過ぎても新しい取得は late にならない(旧世代の高水位 2060 を持ち込まない)。
+  CHECK_EQ(eb.poll(5000).size(), 0);
+  for (uint8_t a = 0; a < 4; ++a) feed_asad(eb, 29, a, 6, 10, 16000, 5000);
+  const std::vector<BuiltEvent> more = eb.poll(5000);
+  CHECK_EQ(more.size(), 5);  // 6..10
+  CHECK(more.size() == 5 && more[0].event_idx == 6 && more[4].event_idx == 10 &&
+        more[0].epoch == 1 && !more[4].incomplete);
+  CHECK_EQ(eb.late_fragments(), 0);
+}
+
+// §4 テスト 3: 1 AsAd(mini)の実機オラクルが不変(archive/110 §結果、ELI-NP、2026-10-13)。
+//   run 73 = 古い 91 本(idx 259..349、t 60.8..79.6 s)→ 新しい 0..297(298 本、t 0.28 s〜)
+//     close 行 `events_complete=350 events_incomplete=0 late_fragments=0 restarts=1
+//              events_before_restart=91 restart_duplicates=39`(350 = 91 + 298 − 39、重複 = 259..297)
+//   run 76 = 古い 17 本 → 新しい 119 本、番号は重ならない(close 行 events_complete=136
+//     restarts=1 events_before_restart=17 restart_duplicates=0)。idx は合成(古い 120..136、新 0..118)。
+// root_sink と同じく fragment ごとに feed → take_restart_flush → poll、EOS で flush。
+// batches はビルダの数ではないので 0 にして close 行の文字列ごと照合する。
+static std::string replay_single_source(uint32_t run, uint32_t old_lo, uint32_t old_hi,
+                                        uint64_t old_t0, uint64_t old_dt, uint32_t new_hi) {
+  EventBuilder eb({{0, 0}}, 1000);
+  auto feed = [&](uint32_t idx, uint64_t t) {
+    eb.feed(frag_at(run, idx, t), 0);
+    eb.take_restart_flush();
+    eb.poll(0);
+  };
+  for (uint32_t i = old_lo; i <= old_hi; ++i) feed(i, old_t0 + (i - old_lo) * old_dt);
+  for (uint32_t i = 0; i <= new_hi; ++i) feed(i, 28000000ull + i * 20000000ull);  // 0.28 s + 0.2 s 刻み
+  eb.flush();
+  eb.close_run(run);
+  RunCounts now;
+  now.events_complete = eb.events_complete();
+  now.events_incomplete = eb.events_incomplete();
+  now.late_fragments = eb.late_fragments();
+  now.acquisition_restarts = eb.acquisition_restarts();
+  now.events_before_restart = eb.events_before_restart();
+  now.restart_duplicates = eb.restart_duplicate_events();
+  return format_run_closed(run, now, RunCounts());
+}
+
+static void test_single_source_oracles_of_run73_and_run76_are_unchanged() {
+  // 60.8 s = 6.08e9 ticks(10 ns)、90 区間で 79.6 s へ: 18.8 s / 90 ≈ 20,888,888 ticks。
+  CHECK(replay_single_source(73, 259, 349, 6080000000ull, 20888888ull, 297) ==
+        "root_sink: run 73 closed (batches=0 events_complete=350 events_incomplete=0 "
+        "late_fragments=0 restarts=1 events_before_restart=91 restart_duplicates=39)\n");
+  CHECK(replay_single_source(76, 120, 136, 3000000000ull, 20000000ull, 118) ==
+        "root_sink: run 76 closed (batches=0 events_complete=136 events_incomplete=0 "
+        "late_fragments=0 restarts=1 events_before_restart=17 restart_duplicates=0)\n");
+}
+
+// §4 テスト 4: 死んだ AsAd(A3 は古い残りを送ったまま再開しない)。run の世代は 0 のまま、
+// sources_behind = 1。新世代(A0–A2 の 0..5)は A3 待ちで build timeout → 3/4 の incomplete で
+// emit、late 0。旧世代 2050..2057 は 4 AsAd 揃っているので complete で(新世代を待たずに)出る。
+static void test_a_dead_asad_holds_the_run_epoch_and_new_events_time_out_incomplete() {
+  EventBuilder eb(kFourAsads, 1000);
+  for (uint8_t a = 0; a < 3; ++a) {
+    feed_asad(eb, 29, a, 2050, 2057, kOld);
+    feed_asad(eb, 29, a, 0, 5, 16000);
+  }
+  feed_asad(eb, 29, 3, 2050, 2057, kOld);  // A3 はここで止まる
+  CHECK_EQ(eb.acquisition_restarts(), 0);
+  CHECK_EQ(eb.sources_behind(29), 1);
+  CHECK(restarts_of(eb, 0) == 1 && restarts_of(eb, 1) == 1 && restarts_of(eb, 2) == 1 &&
+        restarts_of(eb, 3) == 0);
+  CHECK_EQ(eb.take_restart_flush().size(), 0);  // run の世代は上がっていない
+
+  const std::vector<BuiltEvent> old_epoch = eb.poll(0);
+  CHECK_EQ(old_epoch.size(), 8);  // 新世代の先頭(A3 待ち)に塞がれない
+  CHECK(old_epoch.size() == 8 && old_epoch[0].event_idx == 2050 && old_epoch[0].epoch == 0 &&
+        !old_epoch[0].incomplete && !old_epoch[7].incomplete);
+  CHECK_EQ(eb.pending(), 6);
+  CHECK_EQ(eb.poll(1000).size(), 0);  // 経過 1000 ms = 境界(まだ出さない)
+
+  const std::vector<BuiltEvent> fresh = eb.poll(1001);
+  CHECK_EQ(fresh.size(), 6);
+  bool fresh_ok = fresh.size() == 6;
+  for (size_t k = 0; fresh_ok && k < fresh.size(); ++k) {
+    fresh_ok = fresh[k].event_idx == k && fresh[k].incomplete && fresh[k].epoch == 1 &&
+               fresh[k].fragments.size() == 3;
+  }
+  CHECK(fresh_ok);
+  CHECK_EQ(eb.late_fragments(), 0);
+  CHECK_EQ(eb.restart_duplicate_events(), 0);
+  CHECK_EQ(eb.events_before_restart(), 0);  // run の再開は確定していない
+}
+
+// §4 テスト 5: 旧世代で emit 済みの番号が新世代で来たら restart_duplicates(4 AsAd 版)。
+// 手計算: 旧 10..13(4 件)、新 0..15(16 件)のうち 10..13 を捨てる → 新世代 12 件、重複 4。
+static void test_new_epoch_ids_already_emitted_by_the_old_epoch_are_dropped_with_four_asads() {
+  EventBuilder eb(kFourAsads, 1000);
+  for (uint8_t a = 0; a < 4; ++a) {
+    feed_asad(eb, 29, a, 10, 13, kOld);
+    feed_asad(eb, 29, a, 0, 15, 16000);
+  }
+  CHECK_EQ(eb.acquisition_restarts(), 1);
+  const std::vector<BuiltEvent> old_epoch = eb.take_restart_flush();
+  CHECK(old_epoch.size() == 4 && old_epoch[0].event_idx == 10 && !old_epoch[0].incomplete);
+  const std::vector<BuiltEvent> fresh = eb.poll(0);
+  CHECK_EQ(fresh.size(), 12);
+  bool no_retired = true;
+  for (const BuiltEvent& ev : fresh) {
+    if (ev.event_idx >= 10 && ev.event_idx <= 13) no_retired = false;
+  }
+  CHECK(no_retired);
+  CHECK_EQ(eb.restart_duplicate_events(), 4);
+  CHECK_EQ(eb.events_complete(), 4 + 12);
+  CHECK_EQ(eb.late_fragments(), 0);
+}
+
 int main() {
   test_owned_fragment_deep_copies_the_view();
 
@@ -843,6 +1053,12 @@ int main() {
   test_a_stale_head_with_four_asads_in_the_same_batch_is_a_restart();
   test_a_late_event_zero_fragment_after_an_incomplete_emit_with_a_slightly_earlier_clock_is_late_not_a_restart();
   test_a_genuine_restart_tens_of_seconds_back_is_still_detected();
+
+  test_a_four_asad_restart_in_asad_major_order_keeps_old_and_new_epochs_apart();
+  test_a_restart_is_detected_even_when_every_old_event_is_incomplete();
+  test_single_source_oracles_of_run73_and_run76_are_unchanged();
+  test_a_dead_asad_holds_the_run_epoch_and_new_events_time_out_incomplete();
+  test_new_epoch_ids_already_emitted_by_the_old_epoch_are_dropped_with_four_asads();
 
   test_strict_seqcheck_accepts_zero_as_the_first();
   test_strict_seqcheck_treats_a_nonzero_first_as_a_gap();

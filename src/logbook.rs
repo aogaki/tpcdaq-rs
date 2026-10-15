@@ -109,9 +109,23 @@ pub struct Counters {
     /// 持たない / 不達なら `None`。既存 JSONL(キー無し)は `#[serde(default)]` で `None`。
     #[serde(default)]
     pub acquisition_restarts: Option<u64>,
-    /// 最初の再開より前に受けたデータフレーム数(前の取得の残り。TODO/110)。
+    /// 再開より前に受けたデータフレーム数(前の取得の残り。TODO/110)。TODO/133 から上流ソース別
+    /// の辞書。旧行の 1 数も読めるよう [`FramesBeforeRestart`] で両形を受ける。
     #[serde(default)]
-    pub frames_before_restart: Option<u64>,
+    pub frames_before_restart: Option<FramesBeforeRestart>,
+}
+
+/// `run_stop.counters.frames_before_restart` の値(TODO/133)。
+///
+/// 書くのは常に `PerSource`(上流 source_id の文字列 → そのソースが最初に再開するまでに
+/// 来たデータフレーム数。再開したソースだけが載る)。`Total` は TODO/110〜133 前の行
+/// (全ソース合算の 1 数)を読み戻すためだけにある — 台帳の旧行で `read_since` / 歩き戻しが
+/// 止まらないこと。キーが文字列なのは `frames` と同じ理由(上の [`Counters`] の doc)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FramesBeforeRestart {
+    PerSource(BTreeMap<String, u64>),
+    Total(u64),
 }
 
 /// `run_stop.files` の 1 要素(SPEC §9.2)。
@@ -899,6 +913,41 @@ mod tests {
         );
         let back: Counters = serde_json::from_str(&json).unwrap();
         assert_eq!(back, counters);
+    }
+
+    /// 133: `frames_before_restart` はソース別の辞書になった。それ以前の行(全ソース合算の
+    /// 1 数 — 実機 run 76 = 17、archive/110)も読み戻せる: `read_since` / 歩き戻しの seq 復旧が
+    /// 旧行で止まらないこと。値は非対称(17 / 2)。
+    #[test]
+    fn frames_before_restart_reads_both_the_old_number_and_the_per_source_map() {
+        let old = r#"{"ts":"2026-10-13T13:01:00.000+03:00","seq":9,"type":"run_stop","actor":"controller","run":76,"duration_s":30.0,"ok":true,"reason":"normal","forced_eos":true,"eos_closed":true,"counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":136},"overflow_frames":0,"malformed":0,"acquisition_restarts":1,"frames_before_restart":17},"files":[]}"#;
+        let counters_of = |raw: &str| {
+            let line: LogbookLine = serde_json::from_str(raw).expect("run_stop 行が読めない");
+            let LogbookRecord::RunStop { counters, .. } = line.record else {
+                panic!("run_stop として読めていない");
+            };
+            counters
+        };
+        assert_eq!(
+            counters_of(old).frames_before_restart,
+            Some(FramesBeforeRestart::Total(17))
+        );
+
+        let new = old.replace(
+            r#""frames_before_restart":17"#,
+            r#""frames_before_restart":{"0":17,"1":2}"#,
+        );
+        let counters = counters_of(&new);
+        let per_source = BTreeMap::from([("0".to_string(), 17u64), ("1".to_string(), 2u64)]);
+        assert_eq!(
+            counters.frames_before_restart,
+            Some(FramesBeforeRestart::PerSource(per_source))
+        );
+        let json = serde_json::to_value(&counters).unwrap();
+        assert_eq!(
+            json["frames_before_restart"],
+            serde_json::json!({"0": 17, "1": 2})
+        );
     }
 
     /// `audit` も同様に手組みオラクル。

@@ -157,6 +157,8 @@ struct Counts {
   uint64_t acquisition_restarts = 0;
   uint64_t events_before_restart = 0;  // 旧世代で emit した数(累積)
   uint64_t restart_duplicates = 0;     // 新世代で、旧世代と同じ番号のため書かずに数えた数
+  // 世代が遅れている期待ソース(AsAd)の数(TODO/133、瞬間値)。status PUB に出す。
+  uint64_t sources_behind = 0;
   // 以下は「黙って通さない」ための可視化カウンタ(CLAUDE.md)
   uint64_t heartbeats = 0;
   uint64_t unknown = 0;              // 知らない variant 名(前方互換で無視するが数える)
@@ -854,6 +856,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
           absorb(eb.take_restart_flush(), eb, c, rec, raw);
         }
       }
+      c.sources_behind = eb.sources_behind(h.run_number);
       absorb(eb.poll(tick), eb, c, rec, raw);
       c.run_number_mismatch = run.run_number_mismatch();
       break;
@@ -954,6 +957,7 @@ void update_status_material(const rootsink::RunState& run, const Counts& c) {
   g_mon.status.late_fragments = c.late_fragments;
   g_mon.status.pending_events = c.pending_events;
   g_mon.status.acquisition_restarts = c.acquisition_restarts;
+  g_mon.status.sources_behind = c.sources_behind;
   std::memcpy(g_mon.status.frames_per_cobo, c.frames_per_cobo,
               sizeof(g_mon.status.frames_per_cobo));
 }

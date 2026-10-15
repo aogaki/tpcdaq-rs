@@ -78,7 +78,8 @@ use crate::command::{Command, CommandResponse, ComponentState, RunConfig};
 use crate::config::{Config, ConfigIds};
 use crate::geometry::Geometry;
 use crate::logbook::{
-    CoboListen, Counters, Geometry as GeometryRecord, LogbookRecord, LogbookWriter, OutputFile,
+    CoboListen, Counters, FramesBeforeRestart, Geometry as GeometryRecord, LogbookRecord,
+    LogbookWriter, OutputFile,
 };
 
 // ---------------------------------------------------------------------

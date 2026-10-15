@@ -77,7 +77,8 @@ pub(super) fn counters_from(params: &ControllerParams, statuses: &[ComponentStat
     let mut malformed = 0u64;
     // decoder が持っていれば Some(合計)、どの decoder も持たなければ None(0 と区別)。
     let mut acquisition_restarts: Option<u64> = None;
-    let mut frames_before_restart: Option<u64> = None;
+    // ソース別の辞書(TODO/133)。どの decoder も辞書を持たなければ None。
+    let mut frames_before_restart: Option<BTreeMap<String, u64>> = None;
     for status in statuses {
         match status.kind {
             ComponentKind::Receiver { cobo_id } => {
@@ -92,8 +93,16 @@ pub(super) fn counters_from(params: &ControllerParams, statuses: &[ComponentStat
                 if let Some(n) = status.metric_u64("acquisition_restarts") {
                     *acquisition_restarts.get_or_insert(0) += n;
                 }
-                if let Some(n) = status.metric_u64("frames_before_restart") {
-                    *frames_before_restart.get_or_insert(0) += n;
+                if let Some(per_source) = status
+                    .metrics
+                    .as_ref()
+                    .and_then(|m| m.get("frames_before_restart"))
+                    .and_then(Value::as_object)
+                {
+                    let merged = frames_before_restart.get_or_insert_with(BTreeMap::new);
+                    for (source, n) in per_source {
+                        *merged.entry(source.clone()).or_insert(0) += n.as_u64().unwrap_or(0);
+                    }
                 }
             }
             ComponentKind::GrawWriter => {}
@@ -111,7 +120,7 @@ pub(super) fn counters_from(params: &ControllerParams, statuses: &[ComponentStat
         overflow_frames: Some(overflow_frames),
         malformed: Some(malformed),
         acquisition_restarts,
-        frames_before_restart,
+        frames_before_restart: frames_before_restart.map(FramesBeforeRestart::PerSource),
     }
 }
 
