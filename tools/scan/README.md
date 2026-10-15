@@ -112,6 +112,38 @@
   [3] 二進の短い核で全セル整数になる合成 raw(partial readout、FPN のおとり、halo、ヒット 1 本のイベント、ヒット無しのイベント)で
   電荷・FWHM・雑音 RMS(手計算 3·|W(π)|)・ピーク cell のばらつき・PNG の波形。終了コード = 失敗数)
 
+## α run → ストリップヒットの z 残差(TODO/146 §2)
+
+- 使い方: `root -l -b -q 'tools/scan/hit_residuals.C("…/run0083_uvw.root", "…/run0083_tracks.root", "run0083_hit_residuals.json", "run0083_hit_residuals.png")'`
+  (第 4 引数 = PNG(`nullptr` で省略)、第 5 = `maxEvents`(先頭から何イベント、0 = 全部))。終了コード 0 = 書いた、1 = 失敗(理由は stderr)。
+- 入力 = ユーザー macros の出力(**macros は読むだけ**): analyzeUVW.C の `_uvw.root`(`uvw`: `eventId`、`width[3]`、`slView/slZ/slS/slQ`)と
+  makeTracks.C の `_tracks.root`(`tracks`: `eventId`、`ok`、`xStart..zEnd`)。同じ run であること(エントリ数と各エントリの eventId を
+  突き合わせ、違えば失敗)。`ok == 1` に、どれかの view のヒットが無ければ失敗(別 run の組み合わせ)。
+- 幾何は makeTracks.C と同じ式(冒頭のコメントに行番号): s = pitch_v·(x, y)、pitch_U = (−1, 0)、pitch_V = (0.5, +√3/2)、pitch_W = (0.5, −√3/2)。
+  ヒットの **l = (s − ms_v)/(pitch_v·d_xy)**、ms_v = その view の全ヒットの電荷加重平均の s。tracks には ms_v と anchor m
+  (pitch_v·m = ms_v の最小二乗)が残っていないので uvw のヒットから作り直し、start / end を l に戻して(l = (点_xy − m)·d_xy、
+  d_xy = (end − start)_xy の単位ベクトル)z(l) = z0 + tanθ·l を復元する。残差 **r = slZ − z(l)**。
+  start 点を pitch に素朴に射影する方式は makeTracks と一致しない(view ごとに tanθ·(Σ ms_v / 3)/proj_v のずれ)。
+- 使うヒット: `ok == 1`、|pitch_v·d_xy| ≥ 0.3(makeTracks の MIN_PROJ。外は `hits_cut_proj`)、l が [start, end] の中
+  (= makeTracks 5 の l の 2–98 % 電荷分位。閉区間、float の丸めに 1e-3 mm の許容。外は `hits_cut_ends`)。
+  start == end(xy)は向きが決まらないので `events_degenerate` に数えて使わない(WARNING)。
+  **注意**: makeTracks の分位(`quantileRange`)は両側とも累積を含めて数えるので、1 本の電荷が全体の 2 % を超えるふつうのイベントでは
+  lo = l の最小(低い側は 1 本も切らない)、hi = 最後から 2 番目(高い側の 1 本だけ切る)。端の切り方は makeTracks の d_xy(φ ∈ (−90°, 90°])
+  について非対称。
+- 出力 JSON: `run`、`events`(読んだエントリ)、`events_ok`、`events_degenerate`、`hits`(使ったヒット)、`hits_cut_ends`、`hits_cut_proj`、`min_proj`、
+  `residual_mm` = `all` / `U` / `V` / `W` の `{n, rms, robust_sigma, median}`(RMS = √(Σr²/n)、0 基準。robust σ = 1.4826 × MAD、
+  MAD = |r − 中央値| の中央値。中央値 = バイアス)、`charge_quartiles` = 使ったヒットの slQ の 4 分位
+  [min, q25] / (q25, q50] / (q50, q75] / (q75, max] ごとの `{q_lo, q_hi, n, rms, robust_sigma, median}`(S/N 依存)、
+  `width_median_mm` = uvw の `width[3]` の view ごとの中央値(使ったイベント)。分位点は線形補間 h = (n−1)·q。値が無ければ null。
+- **σ は少し小さめに出る**: 直線は makeTracks がそのヒットも含めて当てはめたもの(自己相関)。ヒットが多い(≥ 20)ので補正は小さい。
+- PNG: 左 = 残差のヒスト(view 別に重ねる、範囲 ±5 robust σ)、右 = 残差 vs 電荷。
+- テスト: `root -l -b -q tools/scan/test_hit_residuals.C`(約 1 s。[1] makeTracks の l の座標系で作った合成 uvw / tracks —
+  view ごとに勝手な ms_v、start / end の入れ替え、ok=0 のゴミ、|proj| < 0.3 の view、端の外のヒット(重み無しの平均だと view ごとに違うずれ)、
+  端点ちょうどのヒット、start == end — で view・全体・電荷 4 分位の RMS / robust σ / 中央値、width の中央値、数え上げを手計算で固定、maxEvents = 1、
+  [2] σ = 0.8 mm のガウス残差 7200 本で robust σ と RMS が 5 % 以内、[3] 真の幾何(view ごとの原点のずれ)で書いた uvw に
+  **本物の `macros/makeTracks.C` を実行して**作った tracks で、残差が入れたとおり(U = ρ、V = −ρ、W = 0)に戻る、
+  [4] 無いファイル・エントリ数 / eventId の不一致・ヒットの無い view、[5] 使えるイベントが無い run で null。終了コード = 失敗数)
+
 ## スキャン結果 → 台帳の表(TODO/143 §2)
 `docs/SCANS_ja.md` に貼る Markdown の表を、scan.py の結果 JSON と run_metrics.C の指標 JSON から生成する(標準出力)。標準ライブラリのみ。
 
