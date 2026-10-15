@@ -17,7 +17,7 @@
 | S8 | 2026-10-14 | デコンボリューション(解析のみ) | 84, 86, 87, 88 | 総電荷は peaking に依らず和で取れる | archive/139 |
 | S9 | 2026-10-15 | readout / hit 閾値 / ZS 7 点 | 115–121 | partial は全 ch を読み full の 2 倍、ZS 600 は通る | archive/141 |
 
-共通条件(断りが無ければ): α 線源(x = −470 mm の入射壁の外)、CO2 91 mbar、HV = TR1 350 / GEM 250 × 3 / TR 350 × 2 / DRIFT 600 × 2(メモリ hv-stack-channel-map、run_start.slow に毎 run 記録)、外部トリガ ≈ 4.6 Hz、25 MHz、1,500 events / 点 ≈ 5.5 min。データ = ELITPC `/data/tpcdaq/run00NN/`、指標 = `~/test/scan/metrics/run00NN_metrics.json`、スキャン索引 = `~/test/scan/scan_<name>_<date>.json`。
+共通条件(断りが無ければ): α 線源(x = −370 mm、入射壁の外 — ユーザー 2026-10-15。macros の SRC_X −470 は 09-25 当時の値)、CO2 91 mbar、HV = TR1 350 / GEM 250 × 3 / TR 350 × 2 / DRIFT 600 × 2(メモリ hv-stack-channel-map、run_start.slow に毎 run 記録)、外部トリガ ≈ 4.6 Hz、25 MHz、1,500 events / 点 ≈ 5.5 min。データ = ELITPC `/data/tpcdaq/run00NN/`、指標 = `~/test/scan/metrics/run00NN_metrics.json`、スキャン索引 = `~/test/scan/scan_<name>_<date>.json`。
 
 ## 規則(スキャンから決めたもの)
 - **triggerDelay**: 帯の先頭をトリガの ≈ 2.8 µs 前に → `delay[10 ns] = (窓[ns] − 2,800 − 160) / 10`(25 MHz: 1750、12.5 MHz: 3800)。L(トリガ遅れ)≈ 0.16 µs + peaking。
