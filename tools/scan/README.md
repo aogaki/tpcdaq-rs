@@ -144,6 +144,37 @@
   **本物の `macros/makeTracks.C` を実行して**作った tracks で、残差が入れたとおり(U = ρ、V = −ρ、W = 0)に戻る、
   [4] 無いファイル・エントリ数 / eventId の不一致・ヒットの無い view、[5] 使えるイベントが無い run で null。終了コード = 失敗数)
 
+## α run → U/V/W の閉合残差 = 2D 重心の精度(TODO/148 §2)
+
+- 使い方: `root -l -b -q 'tools/scan/uvw_closure.C("…/run0083_raw.root", "…/channel_map.csv", "…/run0083_tracks.root", "run0083_uvw_closure.json", "run0083_uvw_closure.png")'`
+  (第 5 引数 = PNG(`nullptr` で省略)、第 6 = `maxEvents`(先頭から何エントリ、0 = 全部))。終了コード 0 = 書いた、1 = 失敗(理由は stderr)。
+- 原理: pitch_U + pitch_V + pitch_W = 0(macros/makeTracks.C:7-8: (−1, 0)、(0.5, +√3/2)、(0.5, −√3/2))なので、同じ点のストリップ座標の和
+  **s_U + s_V + s_W = c**(map の view ごとの原点の和、点に依らない)。同じ時刻スライスの 3 面の電荷重心の和の広がり = 飛跡モデルに依らない
+  2D 重心の精度。3 面が独立に σ_s なら σ_r = √3·σ_s。pitch の値そのものは使わない(map の s をそのまま足す)。146(z 残差)の 2D 版。
+- 入力: raw ツリー(`eventId`、`adc[N][68][512]/S`)、`channel_map.csv`(読み方は macros/analyzeUVW.C:97-118 と同じ — `#` 行と空行を飛ばし、
+  `aget,raw_channel,view,strip,s_mm`、view 0/1/2 = U/V/W、aget = adc の先頭の index、s_mm = slS になる値)、makeTracks.C の `_tracks.root`
+  (`eventId`、`ok`。raw のエントリ i = tracks のエントリ i — エントリ数と eventId を突き合わせ、違えば失敗)。**`ok == 1` のイベントだけ使う**。
+  map は黙って読み飛ばさない: 読めない行・view ∉ {0,1,2}・ch ∉ [0, 68)・aget < 0・FPN ch・(aget, ch) / (view, strip) の重複・
+  ストリップの無い view・raw に無い aget は失敗(analyzeUVW は読めない行を飛ばす)。
+- 前処理は run_metrics.C と同じ(include して使う): AGET ごとの FPN のセル毎平均と ped(cell 1..20)を引いた v。全セル 0 の ch は除く。
+- スライス = cell **[2, 508)**(drift_end.C と同じ範囲)を `kSliceCells`(既定 1)cell ずつ。ストリップの重み w = スライス内で **v > 35 の cell の v の和**
+  (閾値は cell ごと)。view ごとに w > 0 のストリップを strip 番号順に見て、番号が 1 ずつ続く塊を数え、重心 s_v = Σw·s/Σw。
+  何かあるスライスのうち、0 本の view がある → `slices_missing_view`、そうでなく塊が 2 つ以上の view がある → `slices_multi_cluster`
+  (両方に当たるときは view 不足)、3 面とも 1 塊 → 採用。
+  **注意**: ストリップの選別は閾値だけで、run_metrics.C の「ヒット ch」(q ≥ 2000 の halo cut)は掛けない(TODO/148 §1 の列挙どおり)。
+  halo(飛跡の時刻に多くのストリップに乗る 35–200 ADC — analyzeUVW.C:67-73)は離れていれば `slices_multi_cluster`、塊につながれば `strips_median` に出る。
+- 出力 JSON: `run`、`events`(読んだエントリ)、`events_ok`、`slice_cells`、`cell_range`、`adc_threshold`、`slices`(採用)、`slices_missing_view`、
+  `slices_multi_cluster`、**`c_mm`** = 和の中央値、`residual_mm` = r = 和 − c の `{n, rms, robust_sigma}`(RMS = √(Σr²/n)、c 基準。
+  robust σ = 1.4826 × MAD)、**`sigma_per_view_mm`** = robust σ / √3、`charge_quartiles` = スライス電荷(3 面の Σw)の 4 分位
+  [min, q25] / (q25, q50] / (q50, q75] / (q75, max] ごとの `{q_lo, q_hi, n, rms, robust_sigma, median}`、`strips_median` = view ごとの
+  塊の本数(重心に使った幅)の中央値。分位点は線形補間 h = (n−1)·q。値が無ければ null。
+- PNG: 左 = r のヒスト(範囲 ±5 robust σ)、右 = r vs スライス電荷。
+- テスト: `root -l -b -q tools/scan/test_uvw_closure.C`(約 1 s。合成 channel_map = 3 面 × 24 本・pitch 2 mm・view ごとの原点
+  (和 4.5)・map を読まないと解けない (aget, ch) の並び。[1] 4 イベントで c = 4.5、r の robust σ / RMS / σ_s、電荷 4 分位、本数の中央値、
+  ok=0・窓の外(cell 0 / 508..511)のおとり、塊 2 つ・1 本の隙間・view 不足・閾値ちょうど 35 の数え上げを手計算で固定、maxEvents = 1、
+  [2] 3 面独立に σ = 0.4 mm のガウス 6000 スライスで robust σ ≈ √3·0.4・σ_s ≈ 0.4(5 %)・c ≈ 4.5、[3] スライス幅 2 cell の電荷加重と
+  cell ごとの閾値、[4] 無いファイル・エントリ数 / eventId の不一致・map の不正 8 種、[5] 使えるスライスが無い run で null。終了コード = 失敗数)
+
 ## スキャン結果 → 台帳の表(TODO/143 §2)
 `docs/SCANS_ja.md` に貼る Markdown の表を、scan.py の結果 JSON と run_metrics.C の指標 JSON から生成する(標準出力)。標準ライブラリのみ。
 
