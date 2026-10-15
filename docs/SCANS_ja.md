@@ -67,7 +67,7 @@ run 91–98 / 101 は elinp テンプレート(`TestModeSelection = nothing`)で
 | peaking | run | 信号 ch ped 中央値(範囲)[ADC] | 信号 σ 中央値 / p90 / max | FPN σ 中央値 | 表 |
 |---|---|---|---|---|---|
 | 232 ns | 99 | 456.5(364.5–547.7) | 7.59 / 15.35 / 21.19 | 3.28 | `calib/pedestal_232ns.json` |
-| 502 ns | 100 | (表参照) | | | `calib/pedestal_502ns.json` |
+| 502 ns | 100 | 456.6(365.4–547.6) | 7.97 / 20.46 / 29.03 | 3.29 | `calib/pedestal_502ns.json` |
 σ は生(整定・共通モード込み)。用途: ch ごとの ZS 閾値(S9 の次)。
 
 ## S6 ドリフト端 12.5 MHz(2026-10-14 18:37–21:51、`writingClockFrequency_MHz: 12.5`)
