@@ -1,6 +1,6 @@
 # 142 — GEM 電圧の余裕(下げる方向だけ)のスキャン案(電圧操作はユーザー、DAQ は run と集計のみ)
 
-**Status: PROPOSED**(2026-10-15 Fable。ユーザー「GEM の電圧は危険なのでちゃんと考えたい」。実施するかはユーザー判断)
+**Status: READY**(2026-10-15 Fable。ユーザー「GEM の電圧は危険なのでちゃんと考えたい」→「今のスキャンが終わったら現地に行きたい」。DAQ 側の道具 = `~/test/scan/gem_point.sh <label> <peaking> <gain>`、`hv_now.sh`)
 
 ## 0. 現在値(mini、91 mbar CO2、run 117 時点の slow、メモリ hv-stack-channel-map)
 | ch | 要素 | V_set | V_mon | I_mon [µA] |
