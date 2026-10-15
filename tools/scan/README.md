@@ -161,8 +161,8 @@
   (閾値は cell ごと)。view ごとに w > 0 のストリップを strip 番号順に見て、番号が 1 ずつ続く塊を数え、重心 s_v = Σw·s/Σw。
   何かあるスライスのうち、0 本の view がある → `slices_missing_view`、そうでなく塊が 2 つ以上の view がある → `slices_multi_cluster`
   (両方に当たるときは view 不足)、3 面とも 1 塊 → 採用。
-  **注意**: ストリップの選別は閾値だけで、run_metrics.C の「ヒット ch」(q ≥ 2000 の halo cut)は掛けない(TODO/148 §1 の列挙どおり)。
-  halo(飛跡の時刻に多くのストリップに乗る 35–200 ADC — analyzeUVW.C:67-73)は離れていれば `slices_multi_cluster`、塊につながれば `strips_median` に出る。
+  **ヒット ch(第 7 引数 `hitChannelsOnly`、既定 true)**: イベントごとに run_metrics.C / drift_end.C と同じ「ヒット ch」(ピーク > 35 かつ ピーク ±5 cell の q ≥ 2000、FPN + ped 減算後)を満たす ch だけを重心の候補にし、満たさない ch は全 cell で無視(halo — 飛跡の時刻に全ストリップに乗る 35–200 ADC、analyzeUVW.C:67-73 — を除く)。
+  false = 閾値 35 だけで選ぶ以前の挙動(halo は `slices_multi_cluster` / `strips_median` に出る)。JSON に `hit_channels_only` と `channels_used_median`(ok イベントあたりの候補 ch 数の中央値。false のときは読めたストリップ数)。
 - 出力 JSON: `run`、`events`(読んだエントリ)、`events_ok`、`slice_cells`、`cell_range`、`adc_threshold`、`slices`(採用)、`slices_missing_view`、
   `slices_multi_cluster`、**`c_mm`** = 和の中央値、`residual_mm` = r = 和 − c の `{n, rms, robust_sigma}`(RMS = √(Σr²/n)、c 基準。
   robust σ = 1.4826 × MAD)、**`sigma_per_view_mm`** = robust σ / √3、`charge_quartiles` = スライス電荷(3 面の Σw)の 4 分位

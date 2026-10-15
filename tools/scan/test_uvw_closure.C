@@ -78,6 +78,29 @@
 //     aget −1、FPN ch、raw に無い aget、(aget, ch) と (view, strip) の重複、W のストリップ無し)→ 失敗
 //     (理由ごとに別の語で縛る)、sliceCells 0 → 失敗
 // [5] 使えるスライスが無い run(ok=0 だけ)→ 値は null、入口は 0 を返す
+//
+// [6] hitChannelsOnly(halo を除く ch 条件 = run_metrics.C / drift_end.C の「ヒット ch」: ピーク > 35 かつ
+//     ピーク ±5 cell の v > 35 の和 q ≥ 2000。FPN + ped 減算後)。run0087、2 イベント、点 (u', v') = (2, -4)
+//     (w' = 2。pitch 2 mm の格子上 → D = 0)、T 3200 の 3 本 (960, 1280, 960) → 重心は中心ストリップちょうど:
+//   e0 (id 700) cell 100..104 ε = 0、cell 105..109 ε_U = +2(U が 1 ストリップずれる)
+//   e1 (id 701) cell 100..104 ε = 0、cell 105..109 ε_U = -4(U が 2 ストリップずれる)
+//   Σ = 4.5 + ε_U → e0 {4.5 x5, 6.5 x5}、e1 {4.5 x5, 0.5 x5}。20 スライス、c = 4.5(ソート 20 個の 10・11 番目が 4.5)。
+//   r = {-4 x5, 0 x10, +2 x5} → 中央値 0、|r| = {0 x10, 2 x5, 4 x5} → MAD = (0 + 2)/2 = 1 → robust σ 1.4826、
+//   RMS = sqrt((16·5 + 4·5)/20) = sqrt5 = 2.2360680。本数は全 view 3。Q = 3 x 3200 = 9600。
+//   ヒット ch(各ストリップのピークは最初の活性 cell、窓 = ピーク..+5 の活性 5 cell 以上で q ≥ 4800 ≥ 2000):
+//     e0 = U j 12..14 ∪ 13..15 = 4 + V j 9..11 = 3 + W j 12..14 = 3 → 10
+//     e1 = U j 12..14 ∪ 10..12 = 5 + V 3 + W 3 → 11     → channels_used_median = (10 + 11)/2 = 10.5
+//   halo = cell 100..109 に map の全ストリップ +60(q = 60 x 6 = 360 < 2000 → ヒット ch にならない)。ただし U の
+//   ヒット ch で堆積の無い cell は除く(ヒット ch の halo は正当に重心に入るので、検査対象外にする)。
+//   hitChannelsOnly = true は halo の有無で c / robust σ / RMS / 本数 / スライス数 / channels_used_median が同じ
+//   (トラックの 3 本は (B+60, C+60, B+60) と対称なので重心は動かない)。電荷 Q だけ +60 x 3 本 x 3 面 = +540。
+//   hitChannelsOnly = false: halo 無しでは true と同じ(全部ヒット)、channels_used_median = 読めた 72 ストリップ。
+//   halo 有りでは U のヒット ch の堆積の無い cell が halo の隙間になる(U j 15 など)→ 全スライスが U で塊 2 つ
+//   (slices_multi_cluster 20、slices 0)。
+// [6b] run0088(1 イベント = fillHit の ev 2: 10 cell とも ε = 0 の同じ点、halo は全ストリップ全 cell。隙間無し):
+//   hit only = halo を無視 → 本数 3、c = 4.5、channels_used_median = 3 x 3 = 9。
+//   all strips = 24 本全部 1 塊 → 本数 24、10 スライス、channels_used_median 72、
+//   重心 = (3200·s_t + 60·24·s̄)/4640、s̄ = o - 1(24 本の一様な halo の重心)→ Σ = (3200·4.5 + 1440·1.5)/4640 = 3.5689655
 // =============================================================================
 #include "uvw_closure.C"
 
@@ -377,6 +400,35 @@ void fillSliceWidth(int)
   addStrip(2, 20, 101, 30);
 }
 
+
+// [6] hitChannelsOnly。g_halo = true で cell 100..109 に map の全ストリップ +60。
+bool g_halo = false;
+
+void fillHit(int ev)
+{
+  fillBaseline();
+  const double epsA[3] = {0, 0, 0};
+  const double epsB[3] = {ev == 0 ? 2.0 : (ev == 1 ? -4.0 : 0.0), 0, 0};  // ev 2 = ずれ無し(10 cell とも同じ点)
+  const int T[3] = {3200, 3200, 3200}, n[3] = {3, 3, 3};
+  for (int t = 100; t < 105; ++t) depositPoint(2, -4, epsA, T, n, t);
+  for (int t = 105; t < 110; ++t) depositPoint(2, -4, epsB, T, n, t);
+  if (!g_halo) return;
+  // 同じイベントのどこかで堆積のあるストリップ(U だけがずれる)は、その堆積の無い cell には halo を足さない
+  // (足すと hit ch の halo が重心に入る — hit ch は正当に使われるので、ここでは検査したい「hit ch でない
+  // ストリップの halo」だけを入れる)。U: A = j 12..14、B = e0 j 13..15 / e1 j 10..12。V j 9..11、W j 12..14 は全 cell 同じ。
+  for (int t = 100; t < 110; ++t) {
+    const bool a = t < 105;
+    const int uLo = a ? 12 : (ev == 0 ? 13 : (ev == 1 ? 10 : 12)), uHi = uLo + 2;
+    const int uEverLo = ev == 1 ? 10 : 12, uEverHi = ev == 0 ? 15 : 14;
+    for (int j = 0; j < kStripsPerView; ++j) {
+      const bool uEver = j >= uEverLo && j <= uEverHi;
+      if (!uEver || (j >= uLo && j <= uHi)) addStrip(0, j, t, 60);
+      addStrip(1, j, t, 60);
+      addStrip(2, j, t, 60);
+    }
+  }
+}
+
 bool writeRaw(const std::string &path, int nEvents, void (*fill)(int), UInt_t firstId)
 {
   TFile f(path.c_str(), "RECREATE");
@@ -443,7 +495,7 @@ int test_uvw_closure()
 
   uvwclosure::Result r;
   std::string err;
-  check(uvwclosure::computeClosure(raw83, map, trk83, 0, 1, r, err), "computeClosure ok (" + err + ")");
+  check(uvwclosure::computeClosure(raw83, map, trk83, 0, 1, r, err, false), "computeClosure ok (" + err + ")");
   checkCount(r.run, 83, "run (from run0083_raw.root)");
   checkCount(r.events, 4, "events");
   checkCount(r.events_ok, 3, "events_ok (e2 has ok = 0)");
@@ -498,7 +550,7 @@ int test_uvw_closure()
   checkNear(jsonNum(js, "\"strips_median\": {", "V"), 4, "JSON strips_median.V");
 
   // ---- 入口: JSON と PNG を書く ------------------------------------------------------------------
-  check(uvw_closure(raw83.c_str(), map.c_str(), trk83.c_str(), json83.c_str(), png83.c_str(), 0) == 0,
+  check(uvw_closure(raw83.c_str(), map.c_str(), trk83.c_str(), json83.c_str(), png83.c_str(), 0, false) == 0,
         "uvw_closure() returns 0");
   check(!js.empty() && readFile(json83) == js, "uvw_closure() wrote the same JSON");
   FileStat_t st;
@@ -507,7 +559,7 @@ int test_uvw_closure()
   // ---- maxEvents = 1(e0 だけ)--------------------------------------------------------------------
   std::printf("[1b] maxEvents = 1\n");
   uvwclosure::Result m1;
-  check(uvwclosure::computeClosure(raw83, map, trk83, 1, 1, m1, err), "computeClosure ok (maxEvents 1)");
+  check(uvwclosure::computeClosure(raw83, map, trk83, 1, 1, m1, err, false), "computeClosure ok (maxEvents 1)");
   checkCount(m1.events, 1, "events (maxEvents 1)");
   checkCount(m1.events_ok, 1, "events_ok (maxEvents 1)");
   checkCount(m1.slices, 8, "slices (maxEvents 1)");
@@ -531,7 +583,7 @@ int test_uvw_closure()
   }
   check(writeTracks(trk84, ids84, oks84), "write Gaussian tracks (all ok)");
   uvwclosure::Result g;
-  check(uvwclosure::computeClosure(raw84, map, trk84, 0, 1, g, err), "computeClosure ok (Gaussian)");
+  check(uvwclosure::computeClosure(raw84, map, trk84, 0, 1, g, err, false), "computeClosure ok (Gaussian)");
   checkCount(g.slices, 6000, "slices (Gaussian)");
   checkCount(g.slices_missing_view + g.slices_multi_cluster, 0, "no discarded slice (Gaussian)");
   checkNear(g.c, kOriginSum, "c ~ sum of origins 4.5 (Gaussian)", 0.05);
@@ -561,12 +613,12 @@ int test_uvw_closure()
   checkCount(g_inexact, 0, "fixture (slice width): centroids exact");
   check(writeTracks(trk86, {900}, {1}), "write slice-width tracks");
   uvwclosure::Result w1, w2;
-  check(uvwclosure::computeClosure(raw86, map, trk86, 0, 1, w1, err), "computeClosure ok (sliceCells 1)");
+  check(uvwclosure::computeClosure(raw86, map, trk86, 0, 1, w1, err, false), "computeClosure ok (sliceCells 1)");
   checkCount(w1.slices, 2, "slices (sliceCells 1)");
   checkNear(w1.c, 5.0625, "c (sliceCells 1: (6.0 + 4.125) / 2)");
   checkNear(w1.residual.robust_sigma, 1.3899375, "robust_sigma (sliceCells 1: 1.4826 x 0.9375)");
   checkNear(w1.residual.rms, 0.9375, "rms (sliceCells 1)");
-  check(uvwclosure::computeClosure(raw86, map, trk86, 0, 2, w2, err), "computeClosure ok (sliceCells 2)");
+  check(uvwclosure::computeClosure(raw86, map, trk86, 0, 2, w2, err, false), "computeClosure ok (sliceCells 2)");
   checkCount(w2.slice_cells, 2, "slice_cells (sliceCells 2)");
   checkCount(w2.slices, 1, "slices (sliceCells 2: cells 100..101 in one slice)");
   checkCount(w2.slices_multi_cluster, 0, "W 30 + 30 is below the per-cell threshold (sliceCells 2)");
@@ -578,7 +630,7 @@ int test_uvw_closure()
   check(contains(uvwclosure::toJson(w2), "\"slice_cells\": 2,"), "JSON \"slice_cells\": 2");
   uvwclosure::Result w0;
   err.clear();
-  check(!uvwclosure::computeClosure(raw86, map, trk86, 0, 0, w0, err), "sliceCells 0 fails (" + err + ")");
+  check(!uvwclosure::computeClosure(raw86, map, trk86, 0, 0, w0, err, false), "sliceCells 0 fails (" + err + ")");
 
   // ---- [4] 異常系 --------------------------------------------------------------------------------
   std::printf("[4] errors\n");
@@ -595,11 +647,11 @@ int test_uvw_closure()
   uvwclosure::Result x;
   check(writeTracks(bad, {500, 501, 502}, {1, 1, 0}), "write tracks with 3 of 4 entries");
   err.clear();
-  check(!uvwclosure::computeClosure(raw83, map, bad, 0, 1, x, err) && contains(err, "entries"),
+  check(!uvwclosure::computeClosure(raw83, map, bad, 0, 1, x, err, false) && contains(err, "entries"),
         "entry count mismatch fails (" + err + ")");
   check(writeTracks(bad, {500, 501, 7777, 503}, {1, 1, 0, 1}), "write tracks with eventId 7777 at entry 2");
   err.clear();
-  check(!uvwclosure::computeClosure(raw83, map, bad, 0, 1, x, err) && contains(err, "eventId"),
+  check(!uvwclosure::computeClosure(raw83, map, bad, 0, 1, x, err, false) && contains(err, "eventId"),
         "eventId mismatch fails (" + err + ")");
 
   const std::string badMap = dir + "/bad_map.csv";
@@ -626,12 +678,12 @@ int test_uvw_closure()
     lines.push_back(bm.extra);
     check(writeLines(badMap, lines), "write map with " + bm.what + " (" + bm.extra + ")");
     err.clear();
-    check(!uvwclosure::computeClosure(raw83, badMap, trk83, 0, 1, x, err) && contains(err, bm.keyword),
+    check(!uvwclosure::computeClosure(raw83, badMap, trk83, 0, 1, x, err, false) && contains(err, bm.keyword),
           "map with " + bm.what + " fails (" + err + ")");
   }
   check(writeLines(badMap, mapLines(false)), "write map without W strips");
   err.clear();
-  check(!uvwclosure::computeClosure(raw83, badMap, trk83, 0, 1, x, err) && contains(err, "no strip"),
+  check(!uvwclosure::computeClosure(raw83, badMap, trk83, 0, 1, x, err, false) && contains(err, "no strip"),
         "map without W strips fails (" + err + ")");
 
   // ---- [5] 使えるスライスが無い run → null ---------------------------------------------------------
@@ -642,7 +694,7 @@ int test_uvw_closure()
   check(writeRaw(raw85, 1, [](int) { fillMain(2); }, 502), "write ok=0-only raw (e2)");
   check(writeTracks(trk85, {502}, {0}), "write ok=0-only tracks");
   uvwclosure::Result z;
-  check(uvwclosure::computeClosure(raw85, map, trk85, 0, 1, z, err), "computeClosure ok (no usable slice)");
+  check(uvwclosure::computeClosure(raw85, map, trk85, 0, 1, z, err, false), "computeClosure ok (no usable slice)");
   checkCount(z.events, 1, "events (no usable slice)");
   checkCount(z.slices, 0, "slices (no usable slice)");
   checkNull(z.c, "c (no usable slice)");
@@ -656,6 +708,86 @@ int test_uvw_closure()
         "JSON c_mm / sigma_per_view_mm null (no usable slice)");
   check(uvw_closure(raw85.c_str(), map.c_str(), trk85.c_str(), json85.c_str()) == 0,
         "uvw_closure() returns 0 without usable slices (WARNING)");
+
+  // ---- [6] hitChannelsOnly -----------------------------------------------------------------------
+  std::printf("[6] hitChannelsOnly: halo on every strip is ignored\n");
+  const std::string raw87 = dir + "/run0087_raw.root", trk87 = dir + "/run0087_tracks.root";
+  const std::string raw87h = dir + "/run0087h_raw.root";
+  const std::string json87 = dir + "/run0087_uvw_closure.json";
+  cleanup.insert(cleanup.end(), {raw87, trk87, raw87h, json87});
+  g_fixtureOk = true;
+  g_inexact = 0;
+  g_halo = false;
+  check(writeRaw(raw87, 2, fillHit, 700), "write hit-channel raw without halo (2 events)");
+  g_halo = true;
+  check(writeRaw(raw87h, 2, fillHit, 700), "write hit-channel raw with halo +60 on every strip");
+  g_halo = false;
+  check(g_fixtureOk, "fixture (hit channels): every deposited strip > 35, ADC inside 0..4095");
+  checkCount(g_inexact, 0, "fixture (hit channels): centroids exact (D = 0)");
+  check(writeTracks(trk87, {700, 701}, {1, 1}), "write hit-channel tracks");
+  uvwclosure::Result hn, hh, an, ah;
+  check(uvwclosure::computeClosure(raw87, map, trk87, 0, 1, hn, err, true), "computeClosure ok (hit only, no halo)");
+  check(uvwclosure::computeClosure(raw87h, map, trk87, 0, 1, hh, err, true), "computeClosure ok (hit only, halo)");
+  check(uvwclosure::computeClosure(raw87, map, trk87, 0, 1, an, err, false), "computeClosure ok (all strips, no halo)");
+  check(uvwclosure::computeClosure(raw87h, map, trk87, 0, 1, ah, err, false), "computeClosure ok (all strips, halo)");
+  const uvwclosure::Result *same[2] = {&hn, &hh};
+  const char *sameName[2] = {"hit only, no halo", "hit only, halo"};
+  for (int k = 0; k < 2; ++k) {
+    const uvwclosure::Result &q = *same[k];
+    const std::string nm = sameName[k];
+    check(q.hit_channels_only, nm + ": hit_channels_only");
+    checkCount(q.slices, 20, nm + ": slices");
+    checkCount(q.slices_missing_view + q.slices_multi_cluster, 0, nm + ": no discarded slice");
+    checkNear(q.c, 4.5, nm + ": c");
+    checkNear(q.residual.robust_sigma, 1.4826, nm + ": robust_sigma (1.4826 x 1)");
+    checkNear(q.residual.rms, std::sqrt(5.0), nm + ": rms (sqrt 5)");
+    for (int v = 0; v < 3; ++v)
+      checkNear(q.strips_median[v], 3, nm + ": strips median view " + std::to_string(v));
+    checkNear(q.channels_used_median, 10.5, nm + ": channels_used_median ((10 + 11) / 2)");
+  }
+  checkNear(hn.quartile[0].q_lo, 9600, "hit only, no halo: slice charge 3 x 3200");
+  checkNear(hh.quartile[0].q_lo, 9600 + 9 * 60, "hit only, halo: slice charge + 9 track strips x 60");
+  check(!an.hit_channels_only, "all strips: hit_channels_only false");
+  checkCount(an.slices, 20, "all strips, no halo: slices");
+  checkNear(an.c, 4.5, "all strips, no halo: c (every deposited strip is a hit)");
+  checkNear(an.residual.robust_sigma, 1.4826, "all strips, no halo: robust_sigma");
+  checkNear(an.channels_used_median, 72, "all strips: channels_used_median = 72 read strips");
+  checkCount(ah.slices, 0, "all strips, halo: slices (U halo gap beside the hit strips)");
+  checkCount(ah.slices_multi_cluster, 20, "all strips, halo: slices_multi_cluster (halo clusters in U)");
+  checkNear(ah.channels_used_median, 72, "all strips, halo: channels_used_median = 72");
+  const std::string jh = uvwclosure::toJson(hh);
+  check(contains(jh, "\"hit_channels_only\": true,"), "JSON \"hit_channels_only\": true");
+  checkNear(jsonNum(jh, "{", "channels_used_median"), 10.5, "JSON channels_used_median");
+  const std::string ja = uvwclosure::toJson(ah);
+  check(contains(ja, "\"hit_channels_only\": false,"), "JSON \"hit_channels_only\": false");
+  checkNear(jsonNum(ja, "{", "channels_used_median"), 72, "JSON channels_used_median (all strips)");
+  // [6b] 隙間の無い halo
+  std::printf("[6b] hitChannelsOnly: uniform halo, no shift\n");
+  const std::string raw88 = dir + "/run0088_raw.root", trk88 = dir + "/run0088_tracks.root";
+  cleanup.insert(cleanup.end(), {raw88, trk88});
+  g_halo = true;
+  check(writeRaw(raw88, 1, [](int) { fillHit(2); }, 800), "write uniform-halo raw (1 event)");
+  g_halo = false;
+  check(writeTracks(trk88, {800}, {1}), "write uniform-halo tracks");
+  uvwclosure::Result un, ua;
+  check(uvwclosure::computeClosure(raw88, map, trk88, 0, 1, un, err, true), "computeClosure ok (uniform halo, hit only)");
+  check(uvwclosure::computeClosure(raw88, map, trk88, 0, 1, ua, err, false), "computeClosure ok (uniform halo, all strips)");
+  checkCount(un.slices, 10, "uniform halo, hit only: slices");
+  checkNear(un.c, 4.5, "uniform halo, hit only: c (halo ignored)");
+  for (int v = 0; v < 3; ++v)
+    checkNear(un.strips_median[v], 3, "uniform halo, hit only: strips median view " + std::to_string(v));
+  checkNear(un.channels_used_median, 9, "uniform halo, hit only: channels_used_median (3 x 3)");
+  checkCount(ua.slices, 10, "uniform halo, all strips: slices (24 strips = one cluster)");
+  checkNear(ua.c, 16560.0 / 4640.0, "uniform halo, all strips: c = (3200 x 4.5 + 1440 x 1.5) / 4640");
+  for (int v = 0; v < 3; ++v)
+    checkNear(ua.strips_median[v], 24, "uniform halo, all strips: strips median view " + std::to_string(v));
+  checkNear(ua.channels_used_median, 72, "uniform halo, all strips: channels_used_median");
+  // 入口の既定 = hitChannelsOnly true(halo を無視する)、false を渡すと halo が入る
+  check(uvw_closure(raw87h.c_str(), map.c_str(), trk87.c_str(), json87.c_str()) == 0, "uvw_closure() default returns 0");
+  check(contains(readFile(json87), "\"hit_channels_only\": true,"), "uvw_closure() default is hitChannelsOnly = true");
+  check(uvw_closure(raw87h.c_str(), map.c_str(), trk87.c_str(), json87.c_str(), nullptr, 0, false) == 0,
+        "uvw_closure(..., false) returns 0");
+  check(contains(readFile(json87), "\"hit_channels_only\": false,"), "uvw_closure(..., false) writes false");
 
   // 後片付け
   for (const std::string &p : cleanup) gSystem->Unlink(p.c_str());

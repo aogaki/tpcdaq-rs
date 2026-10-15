@@ -3,6 +3,8 @@
 //
 //   root -l -b -q 'uvw_closure.C("run0083_raw.root", "channel_map.csv", "run0083_tracks.root", "run0083_uvw_closure.json", "run0083_uvw_closure.png")'
 //   root -l -b -q 'uvw_closure.C("run0083_raw.root", "channel_map.csv", "run0083_tracks.root", "out.json", nullptr, 200)'  (先頭 200 件)
+//   root -l -b -q 'uvw_closure.C("run0083_raw.root", "channel_map.csv", "run0083_tracks.root", "out.json", nullptr, 0, false)'
+//     (第 7 引数 hitChannelsOnly = false: 閾値越えのストリップを全部使う — 下の「ヒット ch」参照)
 //
 // 終了コード 0 = JSON(と PNG)を書いた、1 = 失敗(理由は stderr)。
 //
@@ -47,9 +49,13 @@
 //                        {q_lo, q_hi, n, rms, robust_sigma, median}(hit_residuals.C の電荷 4 分位と同じ定義)
 //   strips_median      = view ごとの塊の本数(重心に使った幅)の中央値
 //   分位点はすべて線形補間 h = (n−1)·q(run_metrics.C の quantile)。値が無ければ JSON は null。
-// 注意: ストリップの選別は閾値 35(cell ごと)だけで、run_metrics.C の「ヒット ch」条件(q ≥ 2000 の halo cut)は
-//   掛けない(TODO/148 §1 の前処理の列挙どおり)。halo(飛跡の時刻に多くのストリップに乗る 35–200 ADC —
-//   macros/analyzeUVW.C:67-73)は離れていれば slices_multi_cluster に、塊につながれば strips_median に出る。
+// ヒット ch(hitChannelsOnly、既定 true): イベントごとに run_metrics.C / drift_end.C と同じ「ヒット ch」条件 — その ch の
+//   ピーク(全 cell の v の最大、最初の cell)> kAdcThreshold かつ q = ピーク ±kPeakHalfCells cell の v > kAdcThreshold の
+//   和 ≥ kStripQMin(FPN + ped 減算後の v)— を満たす ch だけを重心の候補にする。満たさない ch は全 cell で無視。
+//   halo(飛跡の時刻にほぼ全ストリップに乗る 35–200 ADC — macros/analyzeUVW.C:67-73)は q < 2000 で落ちる。
+//   false のときは閾値 35(cell ごと)だけで選ぶ(以前の挙動。halo は slices_multi_cluster / strips_median に出る)。
+//   channels_used_median = イベントあたりの候補 ch 数(ok == 1 のイベントのうち)の中央値。false のときの候補 = 読めた(全セル 0
+//   でない)ストリップ ch。
 //
 // PNG(任意): 左 = r のヒスト(範囲 ±5 robust σ)、右 = r vs スライス電荷。
 // =============================================================================
@@ -80,6 +86,8 @@ using runmetrics::kFpn;
 using runmetrics::kNull;
 using runmetrics::kPedHi;
 using runmetrics::kPedLo;
+using runmetrics::kPeakHalfCells;
+using runmetrics::kStripQMin;
 
 // スライス幅 [cell](TODO/148 §2: 既定 1 cell、2–4 にまとめたいときはここを変える)。
 const int kSliceCells = 1;
@@ -127,6 +135,8 @@ struct Result {
   Stats residual;
   Quartile quartile[4];
   double strips_median[3] = {kNull, kNull, kNull};
+  bool hit_channels_only = true;
+  double channels_used_median = kNull;  // イベントあたりの候補 ch 数の中央値
   std::vector<Slice> used;
 };
 
@@ -208,10 +218,27 @@ bool readChannelMap(const std::string &path, ChannelMap &m, std::string &err)
   return true;
 }
 
+// run_metrics.C:439-451 / drift_end.C:158-167 と同じ「ヒット ch」: ピーク(最初の最大)> 閾値 かつ
+// ピーク ±kPeakHalfCells の v > 閾値の和 ≥ kStripQMin。v = FPN + ped 減算後。
+bool isHitChannel(const double *v)
+{
+  int peak = 0;
+  for (int t = 0; t < kCells; ++t)
+    if (v[t] > v[peak]) peak = t;
+  if (v[peak] <= kAdcThreshold) return false;
+  const int tLo = std::max(0, peak - kPeakHalfCells);
+  const int tHi = std::min(kCells - 1, peak + kPeakHalfCells);
+  double q = 0;
+  for (int t = tLo; t <= tHi; ++t)
+    if (v[t] > kAdcThreshold) q += v[t];
+  return q >= kStripQMin;
+}
+
 bool computeClosure(const std::string &rawPath, const std::string &mapPath, const std::string &tracksPath,
-                    int maxEvents, int sliceCells, Result &r, std::string &err)
+                    int maxEvents, int sliceCells, Result &r, std::string &err, bool hitChannelsOnly)
 {
   r = Result();
+  r.hit_channels_only = hitChannelsOnly;
   r.raw_file = runmetrics::resolvedPath(rawPath);
   r.channel_map = runmetrics::resolvedPath(mapPath);
   r.tracks_file = runmetrics::resolvedPath(tracksPath);
@@ -284,6 +311,8 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
   const size_t nStrips = map.strips.size();
   std::vector<double> v(nStrips * kCells);  // ストリップごとの v(t)
   std::vector<char> read(nStrips, 0);       // 読めたストリップ(全セル 0 でない)
+  std::vector<char> usable(nStrips, 0);     // 重心の候補(hitChannelsOnly ならヒット ch、でなければ read)
+  std::vector<double> channelCounts;        // ok イベントごとの候補 ch 数
   std::vector<double> fpn(kCells);
   std::vector<double> sums, charges, widths[3];
 
@@ -318,6 +347,7 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
       for (int k : stripsOfAget[static_cast<size_t>(b)]) {
         const Short_t *w = aget + map.strips[static_cast<size_t>(k)].channel * kCells;
         read[static_cast<size_t>(k)] = !runmetrics::allZero(w);
+        usable[static_cast<size_t>(k)] = 0;
         if (!read[static_cast<size_t>(k)]) continue;
         signalRead = true;
         double ped = 0;
@@ -325,9 +355,14 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
         ped /= (kPedHi - kPedLo + 1);
         double *vk = &v[static_cast<size_t>(k) * kCells];
         for (int t = 0; t < kCells; ++t) vk[t] = w[t] - fpn[t] - ped;
+        usable[static_cast<size_t>(k)] = hitChannelsOnly ? isHitChannel(vk) : 1;
       }
       if (signalRead && nFpn == 0) ++r.agets_without_fpn;
     }
+
+    long nUsable = 0;
+    for (size_t k = 0; k < nStrips; ++k) nUsable += usable[k];
+    channelCounts.push_back(static_cast<double>(nUsable));
 
     // 2.–4. スライスごと
     for (int t0 = kCellMin; t0 + sliceCells <= kCellMax; t0 += sliceCells) {
@@ -336,7 +371,7 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
       for (int view = 0; view < 3; ++view) {
         int prev = 0;  // 直前の閾値越えストリップの番号(nStr > 0 のときだけ意味がある)
         for (int k : map.byView[view]) {
-          if (!read[static_cast<size_t>(k)]) continue;
+          if (!usable[static_cast<size_t>(k)]) continue;
           const double *vk = &v[static_cast<size_t>(k) * kCells];
           double w = 0;
           for (int t = t0; t < t0 + sliceCells; ++t)
@@ -366,6 +401,7 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
   }
   r.events = static_cast<long>(n);
   r.slices = static_cast<long>(sums.size());
+  r.channels_used_median = runmetrics::quantile(channelCounts, 0.5);
 
   // 指標
   for (int view = 0; view < 3; ++view) r.strips_median[view] = runmetrics::quantile(widths[view], 0.5);
@@ -415,6 +451,8 @@ std::string toJson(const Result &r)
   s += "  \"slice_cells\": " + std::to_string(r.slice_cells) + ",\n";
   s += "  \"cell_range\": [" + std::to_string(kCellMin) + ", " + std::to_string(kCellMax) + "],\n";
   s += "  \"adc_threshold\": " + num(kAdcThreshold) + ",\n";
+  s += std::string("  \"hit_channels_only\": ") + (r.hit_channels_only ? "true" : "false") + ",\n";
+  s += "  \"channels_used_median\": " + num(r.channels_used_median) + ",\n";
   s += "  \"slices\": " + std::to_string(r.slices) + ",\n";
   s += "  \"slices_missing_view\": " + std::to_string(r.slices_missing_view) + ",\n";
   s += "  \"slices_multi_cluster\": " + std::to_string(r.slices_multi_cluster) + ",\n";
@@ -486,13 +524,13 @@ bool drawPng(const Result &r, const std::string &path)
 
 // 入口。0 = JSON(と PNG)を書いた、1 = 失敗(理由は stderr)。maxEvents ≤ 0 = 全イベント。
 int uvw_closure(const char *raw, const char *channelMap, const char *tracksRoot, const char *outJson,
-                const char *outPng = nullptr, int maxEvents = 0)
+                const char *outPng = nullptr, int maxEvents = 0, bool hitChannelsOnly = true)
 {
   TStopwatch sw;
   uvwclosure::Result r;
   std::string err;
   if (!uvwclosure::computeClosure(raw, channelMap, tracksRoot, maxEvents, uvwclosure::kSliceCells, r,
-                                  err)) {
+                                  err, hitChannelsOnly)) {
     std::fprintf(stderr, "uvw_closure: ERROR %s\n", err.c_str());
     return 1;
   }
