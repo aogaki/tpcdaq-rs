@@ -1,6 +1,6 @@
 # 149 — ch ごとの ZS 閾値(pedestal 表から exceptions を生成)と、ZS データに対応した run_metrics
 
-**Status: IN PROGRESS**(2026-10-15 起票 Fable。141 の次: 「ch ごとの ZS 閾値(S5 の表)」「解析側の ZS 対応」。080 D-2)
+**Status: COMPLETED**(2026-10-15 起票 Fable。141 の次: 「ch ごとの ZS 閾値(S5 の表)」「解析側の ZS 対応」。080 D-2)
 
 ## 0. 狙い
 141 で CoBo の ZS(一律 600)が端まで通り 14.8 kB/event(full の 1/19)だった。ped が ch により 364–548 ADC とばらつくので、**ch ごとに threshold = ped + k·σ** にすれば小さい信号を失わずに同じ圧縮が得られる。解析側は ZS データ(抑制されたセルが 0、FPN も抑制される)で ped / FPN 減算が成り立たないので、外部の pedestal 表を使う経路が要る。
@@ -21,3 +21,18 @@
 pedestal_502ns.json → exceptions(k = 5)→ params(B + ZS on)→ 1 run(1,500 events)→ `metrics_for_run.sh --ped` で指標、kB/event。141 の一律 600(run 121)・full(run 130)と比較。
 
 ## 結果
+
+## 結果(2026-10-15 14:30–14:40、run 133、運用点 B + ZS(ch ごと ped + 5σ、`base_zs_k5.json`、272 exceptions、閾値 中央値 504 / 410–674 ADC)、full readout、1,500 events。電源復帰直後の最初の run/start は configure(AGET reg 読み戻し 0)で失敗、再試行で通った)
+
+| run | 設定 | kB/event | ped の出所 | ヒット ch | 総電荷 | 飽和 | ok | 長さ [mm] | dEdx / IQR | σ_z [mm] |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 130 | B、full、ZS なし | 278.8 | cells 1..20 | 121.5 | 2.09 M | 0.6 % | 0.998 | 84.4 | 13,673 / 6,413 | 0.21 |
+| 121 | A、partial、ZS 一律 600 | 14.8 | (無効) | 121 | (無効) | 0.7 % | 0.997 | 86.0 | (無効) | — |
+| **133** | **B、full、ZS ch ごと ped+5σ** | **31.8** | **表(`--ped`)** | 123 | **2.02 M** | 1.1 % | 0.989 | **126.2 ※** | 13,530 / 5,649 | **0.73 ※** |
+
+- **道具は成立**: `run_metrics --ped` で ZS データの電荷(2.02 M vs 2.09 M = −3 %)・ヒット ch・飽和が非 ZS と一致。データ量は full の **1/8.8**(一律 600 の 1/19 より大きいのは、閾値が多くの ch で 600 より低く(中央値 504)小さい信号を残しているため = 意図どおり)。
+- **※ ユーザー macros(analyzeUVW / makeTracks)は ZS データで壊れる**: 長さ 126 mm(84 が正)、σ_z 0.73 mm(0.21 が正)。macros が波形内から ped を取る(ZS で抑制されたセルが 0)ためと思われる。**macros はユーザーのもので触らない** → ZS を本番に使うなら、macros 側に pedestal 表(`calib/pedestal_*.json`)を読む経路が要る(ユーザー判断)。それまで運用は ZS なし(full、279 kB/event)。
+- 141 の「一律 600 の run 121 の電荷が 2 倍に見えた」は ped 未減算によるもので、`--ped` で解決する種類の問題(確認済み)。
+
+## 実行できなかった操作
+なし(HV/LV の ON はユーザーが UI から)。
