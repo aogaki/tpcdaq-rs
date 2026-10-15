@@ -111,3 +111,18 @@
   電荷 = Σx/(1+λ_rel)・σ = 2 の雑音で λ_rel = 1e-3 の電荷 1 % 以内・λ_rel 1e-3 → 1e-1 で雑音 RMS が下がり幅が広がる、
   [3] 二進の短い核で全セル整数になる合成 raw(partial readout、FPN のおとり、halo、ヒット 1 本のイベント、ヒット無しのイベント)で
   電荷・FWHM・雑音 RMS(手計算 3·|W(π)|)・ピーク cell のばらつき・PNG の波形。終了コード = 失敗数)
+
+## スキャン結果 → 台帳の表(TODO/143 §2)
+`docs/SCANS_ja.md` に貼る Markdown の表を、scan.py の結果 JSON と run_metrics.C の指標 JSON から生成する(標準出力)。標準ライブラリのみ。
+
+```
+python3 tools/scan/ledger.py ~/test/scan/scan_<name>_<date>.json --metrics ~/test/scan/metrics \
+    [--run-root /data/tpcdaq] [--title "S10 …"]
+```
+
+- 1 点 = 1 行。列 = 点 / run / knobs / events / kB/event / first・last hit / 幅 / ヒット ch / 総電荷 / 飽和 event / クリップ(先頭 / 末尾、edge)/ ok / 長さ / 飛跡電荷 / dEdx / dip RMS。
+- knobs は点の上書き(scan JSON の `points[].knobs`)だけ。空なら `(base)`。ネストした値は JSON 1 行。
+- 指標は `--metrics DIR/run%04d_metrics.json`。無い run、tracks が null の run も行は残し、無い値は「—」。
+- `--run-root DIR` があれば `DIR/run%04d/*.graw` の合計バイト ÷ 指標の events ÷ 1000 を kB/event に(graw が無ければ「—」)。
+- 書式: 電荷 = `x.xx M`、比率 = `x.x %`(クリップは `先頭 / 末尾 %`)、dEdx は桁区切り整数、dip RMS は `x.x°`。
+- テスト: `python3 -m unittest tools/scan/test_ledger.py`。
