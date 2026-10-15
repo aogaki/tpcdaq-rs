@@ -1,6 +1,6 @@
 # 133 — 取得の再開の判定: 4 AsAd で古い頭が全部 incomplete のときの見落とし / 多 CoBo での `frames_before_restart`
 
-**Status: IN PROGRESS**(2026-10-13 起票 Opus。SPEC v1.46 確定時に Fable が挙げた実装側の疑義 2 点。**今の mini(1 AsAd、1 フレーム = 1 イベントで即 complete)では起きない** — Warsaw ELITPC(4 AsAd、2 枚の zCoBo)と多 CoBo に効く。設計判断あり → Fable。**2026-10-14 Fable レビューで「端」から「Warsaw 前の必須」に格上げ — §1b**)
+**Status: COMPLETED**(2026-10-13 起票 Opus。SPEC v1.46 確定時に Fable が挙げた実装側の疑義 2 点。**今の mini(1 AsAd、1 フレーム = 1 イベントで即 complete)では起きない** — Warsaw ELITPC(4 AsAd、2 枚の zCoBo)と多 CoBo に効く。設計判断あり → Fable。**2026-10-14 Fable レビューで「端」から「Warsaw 前の必須」に格上げ — §1b**)
 
 ## 1. 4 AsAd で再開を見落とす端(root-sink、`tools/root_sink/eb_core.hpp`)
 - いまの判定(SPEC v1.46 §6.3)は `event_idx == 0 && (この epoch に complete のイベントがある || emit 済み) && max_seen > 8 && event_time < time_floor`。
@@ -53,3 +53,18 @@ SPEC v1.46 §1.3 / §2.3 / §6.3 / §9.2、archive/110(実機 run 72–76)。
 - 死んだ AsAd(A3 が再開しない): run の世代は 0 のまま、`sources_behind` = 1、新世代の A0–A2 のイベントは A3 待ちで timeout → incomplete emit(3/4)、late 0。
 - 同じ idx が旧世代で emit 済み → 新世代で来たら restart_duplicates(現行どおり)。
 - decoder: 2 ソース(2 receiver)で片方だけ再開 → `frames_before_restart` が辞書で片方だけ、`acquisition_restarts` 0(最小 epoch 上がらず)。両方再開 → 1。
+
+## 結果(2026-10-15、Opus implementer × 4 往復(本体 + 追従 + 付け替え + 中点)、Fable 照合・SPEC v1.48)
+- コミット(main に cherry-pick): `476dcb9`(§4 本体)、`eb60806`(時刻帯による追従)、`ff3fd34`(再開検出時の付け替え)、`b01c2e8`(中点規則)。変更: `tools/root_sink/{eb_core.hpp, monitor_pub.hpp, root_sink.cxx, test_eb_core.cpp, test_monitor_pub.cpp}`、`src/{decoder.rs, logbook.rs, controller/status.rs, controller/mod.rs, controller/sequencer/tests_stop.rs}`、`ui/src/app/logbook/logbook-record.{ts,spec.ts}`。
+- 実測(Mac、2026-10-15): `test_eb_core` 284(着手前)→ 赤 293/41(§1b の症状: 4 AsAd バッチで restarts 0、新イベントが late)→ **391 / 0**。`test_monitor_pub` 92(13 キー)。`cargo test` **1081 / 0**(clippy 警告 0、fmt OK)。root_sink `make -j` 警告 0、conformance 49、recorder 174 / pevent 99 / raw_tree 91。実機 .graw リプレイ `root_sink_intake` 11/0(108 entries)、`mini_rawtree_e2e` 1/0。UI `npx ng build` 通過、spec 31/31。
+- **1 ソースのオラクル不変**: archive/110 の実機 close 行を合成で再現(run 73 `events_complete=350 events_incomplete=0 late_fragments=0 restarts=1 events_before_restart=91 restart_duplicates=39`、run 76 `…=136 … restarts=1 events_before_restart=17 restart_duplicates=0`)、新旧コードで一致。
+- 実装中に implementer が見つけて Fable が裁定した穴 3 つ(SPEC §6.3 に反映): (A) 古い残りを持たない AsAd が新しい取得を世代で割る → 時刻帯による追従(上端も要る: 再開で時計が 0 から始め直すので古い残りは新世代より時刻が大きい)。(A′) その AsAd が AsAd 順で最初の再開より前に来る → 再開検出時の付け替え(pending を新世代へ)。(A″) 死んだ AsAd の長い古い残りを誤って付け替える → 中点規則 `t < t0 + (floor_old − t0)/2`。却下した案: 振幅や idx の条件(高レートで取りこぼす)。
+- 判断(採用): 「全ソース」= 期待集合(未着ソースは 0)、`restart_duplicates` は両向き、decoder は receiver 単位のまま(追従・付け替え無し、SPEC §2.3 に明記)、`source_restarts` / `source_epoch_joins` はビルダの受け口のみ(JSON には出さない)、`sources_behind` は C++ status PUB まで(Rust monitor / UI への配線は後続)。
+- テスト名(§4 の 6 項目 + 追補): `test_a_four_asad_restart_in_asad_major_order_keeps_old_and_new_epochs_apart`、`test_a_restart_is_detected_even_when_every_old_event_is_incomplete`、`test_single_source_oracles_of_run73_and_run76_are_unchanged`、`test_a_dead_asad_holds_the_run_epoch_and_new_events_time_out_incomplete`、`test_new_epoch_ids_already_emitted_by_the_old_epoch_are_dropped_with_four_asads`、decoder `frames_before_restart_is_per_source_and_a_restart_counts_once_every_source_restarted`、logbook `frames_before_restart_reads_both_the_old_number_and_the_per_source_map`、`test_a_fresh_asad_without_a_stale_head_follows_the_new_epoch_by_time`、`test_the_epoch_follow_band_is_inclusive_by_the_restart_gap`、`test_a_fresh_asad_that_comes_first_is_reattached_when_another_asad_restarts`、`test_the_reattach_threshold_is_exclusive`、`test_stale_frames_of_an_already_restarted_asad_are_not_reattached`、`test_a_fragment_is_not_reattached_onto_an_already_emitted_idx`、`test_a_dead_asad_with_a_longer_stale_head_is_not_reattached`、`test_the_reattach_midpoint_is_exclusive`。
+- §2(decoder の全ソース合算)は辞書化で解消。
+
+## 実機反映(未)
+ELITPC への反映(RUNBOOK §7.1: bundle → build → root_sink make → daq_down/up)と 110 と同じ再開の再現(stop せずにスタックを落として run/start、1 AsAd なので close 行が 110 と同じ形になること)は、**一晩 run(134)の後、ユーザー了解を得てから**。Warsaw(4 AsAd)での実機確認は現地。
+
+## 実行できなかった操作
+implementer: heredoc の一括書き換えが worktree 隔離で拒否(Edit で代替)、`timeout` コマンド無し(付けずに実行)。主対話: なし。
