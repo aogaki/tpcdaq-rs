@@ -304,6 +304,66 @@ std::string readFile(const std::string &path)
 
 }  // namespace test_rm
 
+
+// ---- ZS 対応(TODO/149 §2)の合成 raw ------------------------------------------------------------
+// 傾き s(t) の無い平らな基線 b(a,c) = 200 + 3c + 50a に、全セル 奇数 cell −2 / 偶数 cell +2(512 cells
+// で平均ちょうど 0 → 表の mean = b)。pulse は kPool の P0..P(n_k−1)、n_k = 1 + k(k = 0..3 → 1..4 本)。
+// ZS 版 = 閾値 thr(a,c) = b + 10 未満のセルを 0 にしたもの(FPN ch は全セル b ± 2 < thr → 全 0)。
+//   パルスのセルは b + 200 以上 ± 2 なので残る。
+// 手計算: ch の全体 = 31·H + 20(bump)+ 雑音の和。cell 100..130 は偶数 16 個(+2)・奇数 15 個(−2) → +2。
+//   P0 H200: 6222、P1 300: 9322。k0 = 6222、k1 = 6222 + 9322 = 15544、k2 = 15544 + 7772(P2 H250) = 23316、
+//   k3 = 23316 + 12422(P3 H400) = 35738。charge_median(4 イベント、h = 1.5)= (15544 + 23316)/2 = 19430。
+//   ヒット ch 数 [1,2,3,4] → median 2.5(halo 無し)。
+namespace test_rm {
+bool g_zsMode = false;
+
+void fillFlat(int k)
+{
+  for (int a = 0; a < 4; ++a)
+    for (int c = 0; c < 68; ++c)
+      for (int t = 0; t < 512; ++t)
+        g_adc[a][c][t] = static_cast<Short_t>(baseline(a, c) + ((t % 2 == 1) ? -2 : +2));
+  const int n = 1 + (k % 4);
+  for (int p = 0; p < n; ++p) regular(p);
+  if (g_zsMode)
+    for (int a = 0; a < 4; ++a)
+      for (int c = 0; c < 68; ++c)
+        for (int t = 0; t < 512; ++t)
+          if (g_adc[a][c][t] < baseline(a, c) + 10) g_adc[a][c][t] = 0;
+}
+void fillFlatPlain(int k)
+{
+  g_zsMode = false;
+  fillFlat(k);
+}
+void fillFlatZs(int k)
+{
+  g_zsMode = true;
+  fillFlat(k);
+  g_zsMode = false;
+}
+
+// calib pedestal の JSON(src/calib/pedestal.rs の形)。skipAsad/aget/ch が負でなければその ch を省く。
+bool writePedTable(const std::string &path, int skipA, int skipC)
+{
+  FILE *fp = std::fopen(path.c_str(), "w");
+  if (!fp) return false;
+  std::fputs("{\"meta\": {\"note\": \"synthetic\"}, \"channels\": [\n", fp);
+  bool first = true;
+  for (int a = 0; a < 4; ++a)
+    for (int c = 0; c < 68; ++c) {
+      if (a == skipA && c == skipC) continue;
+      std::fprintf(fp,
+                   "%s{\"asad\": 0, \"aget\": %d, \"ch\": %d, \"mean\": %d.0, \"rms\": 1.5, "
+                   "\"runs\": 1, \"is_fpn\": %s}",
+                   first ? "" : ",\n", a, c, baseline(a, c), runmetrics::isFpn(c) ? "true" : "false");
+      first = false;
+    }
+  std::fputs("\n]}\n", fp);
+  return std::fclose(fp) == 0;
+}
+} // namespace test_rm
+
 int test_run_metrics()
 {
   using namespace test_rm;
@@ -493,6 +553,64 @@ int test_run_metrics()
             1e-4);
   checkNear(r.tracks.phi_axial_rms_deg, t.tracks.phi_axial_rms_deg,
             "flipped == unflipped: phi_axial_rms_deg", 1e-9);
+
+  // ---- ZS 対応(TODO/149 §2)-----------------------------------------------------------------------
+  std::printf("[ZS: pedestal table vs cells 1..20]\n");
+  const std::string plainRaw = dir + "/run0045_raw.root";
+  const std::string zsRaw = dir + "/run0046_raw.root";
+  const std::string ped = dir + "/ped.json";
+  const std::string pedMissing = dir + "/ped_missing.json";
+  check(writeRaw(plainRaw, 4, fillFlatPlain, 0ULL, 100000000ULL), "write flat non-ZS raw");
+  check(writeRaw(zsRaw, 4, fillFlatZs, 0ULL, 100000000ULL), "write flat ZS raw");
+  check(writePedTable(ped, -1, -1), "write pedestal table");
+  check(writePedTable(pedMissing, 0, 3), "write pedestal table without (AGET 0, ch 3)");
+  runmetrics::RunMetrics nz, zt, zn, nt;
+  check(runmetrics::computeRunMetrics(plainRaw, nz, err), "non-ZS, no table: ok");
+  check(runmetrics::computeRunMetrics(plainRaw, nt, err, ped), "non-ZS, table: ok");
+  check(runmetrics::computeRunMetrics(zsRaw, zt, err, ped), "ZS, table: ok");
+  check(runmetrics::computeRunMetrics(zsRaw, zn, err), "ZS, no table: ok");
+  // test_zs_table_matches_non_zs: 電荷・ヒット ch が非 ZS と一致(±5 %)
+  // 表なしは FPN の common mode を引くので雑音も消える: 6220, 15540, 23310 → (15540 + 23310)/2 = 19425
+  checkNear(nz.charge_median, 19425, "non-ZS no table: charge_median");
+  checkNear(zt.charge_median, 19430, "ZS + table: charge_median", 19430 * 0.05);
+  checkNear(zt.charge_median, nz.charge_median, "ZS + table == non-ZS: charge_median (5 %)",
+            nz.charge_median * 0.05);
+  checkNear(zt.hit_channels_median, 2.5, "ZS + table: hit_channels_median");
+  checkNear(nt.charge_median, 19430, "non-ZS + table: charge_median", 19430 * 0.05);
+  checkNear(zt.first_hit_cell.median, nz.first_hit_cell.median, "ZS + table == non-ZS: first_hit_cell");
+  // ped_source と zs_suspected
+  check(nz.ped_source == "cells_1_20" && !nz.zs_suspected, "non-ZS no table: cells_1_20, not suspected");
+  check(zt.ped_source == "table", "ZS + table: ped_source == table");
+  check(zt.agets_without_fpn == 0, "ZS + table: no FPN-missing count (common mode not used)");
+  check(zt.ped_missing == 0, "ZS + table: ped_missing == 0");
+  const std::string zjs = runmetrics::toJson(zt);
+  check(contains(zjs, "\"ped_source\": \"table\"") && contains(zjs, "\"zs_suspected\": "),
+        "JSON has ped_source and zs_suspected");
+  check(contains(runmetrics::toJson(nz), "\"ped_source\": \"cells_1_20\""),
+        "JSON ped_source == cells_1_20 without a table");
+  // test_zs_suspected_without_table: ZS で表なし → 疑い + WARNING。非 ZS はどちらも出ない
+  check(zn.zs_suspected, "ZS, no table: zs_suspected == true");
+  check(contains(runmetrics::zsWarning(zn, false), "WARNING"), "ZS, no table: WARNING text");
+  check(runmetrics::zsWarning(zt, true).empty(), "ZS + table: no WARNING");
+  check(!nz.zs_suspected && runmetrics::zsWarning(nz, false).empty(),
+        "non-ZS: not suspected, no WARNING");
+  // ZS で表なし = 誤った ped(cells 1..20 が 0)→ 電荷が非 ZS から大きく外れる(WARNING が要る理由)
+  check(std::fabs(zn.charge_median - 19430) > 19430 * 0.05, "ZS, no table: charge is wrong (>5 % off)");
+  // 表に無い ch は飛ばして数える(黙って別の ped を使わない): (AGET 0, ch 3) = P0 は全 4 イベントにある
+  runmetrics::RunMetrics pm;
+  check(runmetrics::computeRunMetrics(zsRaw, pm, err, pedMissing), "ZS, table missing a ch: ok");
+  check(pm.ped_missing == 4, "ped_missing == 4 (got " + std::to_string(pm.ped_missing) + ")");
+  // P0 を除くとヒット ch 数 [0,1,2,3] → median 1.5
+  checkNear(pm.hit_channels_median, 1.5, "table missing P0: hit_channels_median");
+  // 壊れた・無い表はエラー
+  runmetrics::RunMetrics em;
+  check(!runmetrics::computeRunMetrics(zsRaw, em, err, dir + "/nope.json") && !err.empty(),
+        "missing pedestal file: error");
+  // run_metrics() 入口の第 4 引数
+  const std::string zjson = dir + "/run0046_metrics.json";
+  check(run_metrics(zsRaw.c_str(), zjson.c_str(), 100.0, ped.c_str()) == 0, "run_metrics() with pedJson");
+  check(contains(readFile(zjson), "\"ped_source\": \"table\""), "run_metrics() JSON ped_source table");
+  for (const std::string &q : {plainRaw, zsRaw, ped, pedMissing, zjson}) gSystem->Unlink(q.c_str());
 
   // 後片付け
   for (const std::string &q : {raw, tracks, fpnRaw, partialRaw, json}) gSystem->Unlink(q.c_str());

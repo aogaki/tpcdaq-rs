@@ -42,6 +42,14 @@
 //   length / charge / dEdx の median と IQR(q75 − q25)。向きは makeTracks 6 の頭尻(dir の符号)が
 //   コイン投げなので畳む: dip_abs_rms_deg = |atan2(dirZ, √(dirX² + dirY²))| の RMS、
 //   phi_axial_rms_deg = atan2(dirY, dirX) を (−90, 90] に畳んだ軸角の RMS。RMS = √(Σx²/n) [deg]。
+// ZS データ(TODO/149 §2): CoBo の zero suppression は閾値未満のセルを 0 にする(FPN も抑制される)ので、
+// cells 1..20 の平均 ped も FPN の common mode も成り立たない。第 4 引数 pedJson(`calib pedestal` の
+// JSON、channels[] {asad, aget, ch, mean, …})があれば: ped = 表の mean(ch ごと、block = asad*4 + aget)、
+// FPN 共通モードは引かない、ヒット閾値は従来どおり 35 ADC。表に無い信号 ch は判定できないので飛ばし、
+// 数を WARNING に出す(ped_missing)。pedJson 無しなら従来どおり。JSON の ped_source = "table" /
+// "cells_1_20"。zs_suspected = イベントの過半数で「(読めた AGET の)信号 ch の過半数が cells 1..20
+// 全 0」(ZS の疑い。部分読み出しの未読 ch も全 0 なので区別できない — 疑いに留め、pedJson 無しなら
+// run_metrics() が WARNING を 1 回出す)。
 // 分位点は線形補間(h = (n−1)·q、numpy の既定と同じ)。値が無ければ JSON は null。
 // =============================================================================
 #include <TFile.h>
@@ -117,6 +125,10 @@ struct RunMetrics {
   // ところ(isFPNRead=false の設定)。JSON のキーは固定(TODO/136 §1)なので出さず、
   // run_metrics() が WARNING で出す。
   long agets_without_fpn = 0;
+  // TODO/149: ped の出どころと ZS の疑い
+  std::string ped_source = "cells_1_20";
+  bool zs_suspected = false;
+  long ped_missing = 0;  // pedJson ありで表に無かった (イベント, 信号 ch) の数(その ch は飛ばした)
 };
 
 // 線形補間の分位点(h = (n−1)·q)。空なら NaN。
@@ -177,6 +189,72 @@ bool allZero(const Short_t *w)
   for (int t = 0; t < kCells; ++t)
     if (w[t] != 0) return false;
   return true;
+}
+
+// 数値を 1 つ読む: obj の中の "key": <number>。無ければ false。
+bool numAfterKey(const std::string &obj, const char *key, double &out)
+{
+  const std::string k = std::string("\"") + key + "\"";
+  const size_t p = obj.find(k);
+  if (p == std::string::npos) return false;
+  const size_t colon = obj.find(':', p + k.size());
+  if (colon == std::string::npos) return false;
+  const char *start = obj.c_str() + colon + 1;
+  char *end = nullptr;
+  out = std::strtod(start, &end);
+  return end != start;
+}
+
+// `calib pedestal` の JSON(src/calib/pedestal.rs: channels[] {asad, aget, ch, mean, rms, runs, is_fpn})
+// → mean[block*kChannels + ch](block = asad*4 + aget、無い・範囲外は NaN)。channels の要素は
+// 平らなオブジェクトなので '{'…'}' で切って読む。1 件も読めなければ false。
+bool loadPedTable(const std::string &path, int nBlocks, std::vector<double> &mean, std::string &err)
+{
+  FILE *fp = std::fopen(path.c_str(), "rb");
+  if (!fp) {
+    err = "cannot open pedestal table " + path;
+    return false;
+  }
+  std::string text;
+  char buf[65536];
+  size_t got;
+  while ((got = std::fread(buf, 1, sizeof(buf), fp)) > 0) text.append(buf, got);
+  std::fclose(fp);
+  size_t pos = text.find("\"channels\"");
+  if (pos == std::string::npos) {
+    err = "pedestal table " + path + " has no \"channels\" array";
+    return false;
+  }
+  mean.assign(static_cast<size_t>(nBlocks) * kChannels, kNull);
+  long loaded = 0;
+  while ((pos = text.find('{', pos)) != std::string::npos) {
+    const size_t close = text.find('}', pos);
+    if (close == std::string::npos) break;
+    const std::string o = text.substr(pos, close - pos + 1);
+    pos = close + 1;
+    double asad, aget, ch, mu;
+    if (!numAfterKey(o, "asad", asad) || !numAfterKey(o, "aget", aget) ||
+        !numAfterKey(o, "ch", ch) || !numAfterKey(o, "mean", mu))
+      continue;
+    const long block = static_cast<long>(asad) * 4 + static_cast<long>(aget);
+    if (block < 0 || block >= nBlocks || aget < 0 || aget > 3 || ch < 0 || ch >= kChannels) continue;
+    mean[static_cast<size_t>(block) * kChannels + static_cast<size_t>(ch)] = mu;
+    ++loaded;
+  }
+  if (loaded == 0) {
+    err = "pedestal table " + path + ": no usable channels[] entries (asad/aget/ch/mean)";
+    return false;
+  }
+  return true;
+}
+
+// pedJson 無しで ZS の疑いがあるときの WARNING 文(無ければ空)。run_metrics() が 1 回だけ出す。
+std::string zsWarning(const RunMetrics &m, bool havePedTable)
+{
+  if (havePedTable || !m.zs_suspected) return "";
+  return "run_metrics: WARNING zero-suppressed data suspected (most signal channels are all-zero in "
+         "cells 1..20) but no pedestal table given — ped from cells 1..20 and the FPN common mode "
+         "are wrong here; pass a `calib pedestal` JSON (metrics_for_run.sh --ped FILE)\n";
 }
 
 // "…/run0077_raw.root" → 77。形が違えば -1。
@@ -266,7 +344,8 @@ bool computeTrackMetrics(const std::string &path, TrackMetrics &t, std::string &
   return true;
 }
 
-bool computeRunMetrics(const std::string &rawPath, RunMetrics &m, std::string &err)
+bool computeRunMetrics(const std::string &rawPath, RunMetrics &m, std::string &err,
+                       const std::string &pedJson = "")
 {
   m = RunMetrics();
   m.raw_file = resolvedPath(rawPath);
@@ -297,6 +376,14 @@ bool computeRunMetrics(const std::string &rawPath, RunMetrics &m, std::string &e
     return false;
   }
 
+  std::vector<double> pedTable;
+  const bool useTable = !pedJson.empty();
+  if (useTable) {
+    if (!loadPedTable(pedJson, nBlocks, pedTable, err)) return false;
+    m.ped_source = "table";
+  }
+  long zsEvents = 0;
+
   const Long64_t n = tree->GetEntries();
   std::vector<double> firsts, lasts, widths, hitChannels, charges;
   std::vector<double> fpn(kCells), v(kCells);  // AGET 1 つ分の common mode、ch 1 本分の v
@@ -310,12 +397,14 @@ bool computeRunMetrics(const std::string &rawPath, RunMetrics &m, std::string &e
     int first = INT_MAX, last = -1, nHit = 0;
     double charge = 0;
     bool saturated = false, edgeFront = false, edgeBack = false;
+    long evSig = 0, evZero = 0;  // ZS の疑い: 読めた AGET の信号 ch 数と、cells 1..20 が全 0 の数
     for (int b = 0; b < nBlocks; ++b) {
       const Short_t *aget = &adc[static_cast<size_t>(b) * kChannels * kCells];
       // 1. common mode = 読めた FPN ch のセル毎平均(読めた FPN が無ければ 0 のまま)
       std::fill(fpn.begin(), fpn.end(), 0.0);
       int nFpn = 0;
       for (int fc : kFpn) {
+        if (useTable) break;  // ZS では FPN も抑制される — common mode は引かない
         const Short_t *w = aget + fc * kCells;
         if (allZero(w)) continue;
         ++nFpn;
@@ -324,15 +413,29 @@ bool computeRunMetrics(const std::string &rawPath, RunMetrics &m, std::string &e
       if (nFpn > 0)
         for (double &x : fpn) x /= nFpn;
       bool signalRead = false;
+      long blkSig = 0, blkZero = 0;
       for (int c = 0; c < kChannels; ++c) {
         if (isFpn(c)) continue;
         const Short_t *w = aget + c * kCells;
+        ++blkSig;
+        bool zero120 = true;
+        for (int t = kPedLo; t <= kPedHi; ++t)
+          if (w[t] != 0) zero120 = false;
+        if (zero120) ++blkZero;
         if (allZero(w)) continue;
         signalRead = true;
         // 2. ped と v
         double ped = 0;
-        for (int t = kPedLo; t <= kPedHi; ++t) ped += w[t] - fpn[t];
-        ped /= (kPedHi - kPedLo + 1);
+        if (useTable) {
+          ped = pedTable[static_cast<size_t>(b) * kChannels + c];
+          if (std::isnan(ped)) {
+            ++m.ped_missing;
+            continue;
+          }
+        } else {
+          for (int t = kPedLo; t <= kPedHi; ++t) ped += w[t] - fpn[t];
+          ped /= (kPedHi - kPedLo + 1);
+        }
         int peak = 0;
         for (int t = 0; t < kCells; ++t) {
           v[t] = w[t] - fpn[t] - ped;
@@ -367,8 +470,13 @@ bool computeRunMetrics(const std::string &rawPath, RunMetrics &m, std::string &e
         }
         widths.push_back(longest);
       }
-      if (signalRead && nFpn == 0) ++m.agets_without_fpn;
+      if (signalRead && !useTable && nFpn == 0) ++m.agets_without_fpn;
+      if (signalRead) {
+        evSig += blkSig;
+        evZero += blkZero;
+      }
     }
+    if (evSig > 0 && 2 * evZero > evSig) ++zsEvents;
     hitChannels.push_back(nHit);
     charges.push_back(charge);
     if (saturated) ++satEvents;
@@ -383,6 +491,7 @@ bool computeRunMetrics(const std::string &rawPath, RunMetrics &m, std::string &e
   }
 
   m.events = static_cast<long>(n);
+  m.zs_suspected = n > 0 && 2 * zsEvents > n;
   if (n > 1 && tLast > tFirst) m.rate_hz = (n - 1) / ((tLast - tFirst) * kTickSeconds);
   m.first_hit_cell = quantiles(firsts);
   m.last_hit_cell = quantiles(lasts);
@@ -455,6 +564,8 @@ std::string toJson(const RunMetrics &m)
   std::string s = "{\n";
   s += "  \"run\": " + (m.run < 0 ? std::string("null") : std::to_string(m.run)) + ",\n";
   s += "  \"raw_file\": " + str(m.raw_file) + ",\n";
+  s += "  \"ped_source\": " + str(m.ped_source) + ",\n";
+  s += std::string("  \"zs_suspected\": ") + (m.zs_suspected ? "true" : "false") + ",\n";
   s += "  \"events\": " + std::to_string(m.events) + ",\n";
   s += "  \"rate_hz\": " + num(m.rate_hz) + ",\n";
   s += "  \"first_hit_cell\": " + obj(m.first_hit_cell) + ",\n";
@@ -476,12 +587,13 @@ std::string toJson(const RunMetrics &m)
 }  // namespace runmetrics
 
 // 入口。0 = JSON を書いた、1 = 失敗(理由は stderr。JSON は書かない)。
-int run_metrics(const char *rawFile, const char *outJson, double pressureMbar = 100.0)
+int run_metrics(const char *rawFile, const char *outJson, double pressureMbar = 100.0,
+                const char *pedJson = nullptr)
 {
   TStopwatch sw;
   runmetrics::RunMetrics m;
   std::string err;
-  if (!runmetrics::computeRunMetrics(rawFile, m, err)) {
+  if (!runmetrics::computeRunMetrics(rawFile, m, err, pedJson ? pedJson : "")) {
     std::fprintf(stderr, "run_metrics: ERROR %s\n", err.c_str());
     return 1;
   }
@@ -499,6 +611,12 @@ int run_metrics(const char *rawFile, const char *outJson, double pressureMbar = 
                  "run_metrics: WARNING %ld (event, AGET) had signal channels but no FPN channel "
                  "read — common mode not subtracted there (isFPNRead=false?)\n",
                  m.agets_without_fpn);
+  if (m.ped_missing > 0)
+    std::fprintf(stderr,
+                 "run_metrics: WARNING %ld (event, channel) not in the pedestal table — skipped\n",
+                 m.ped_missing);
+  const std::string zsw = runmetrics::zsWarning(m, pedJson && *pedJson);
+  if (!zsw.empty()) std::fputs(zsw.c_str(), stderr);
   std::printf("run_metrics: %ld events, tracks %s, %.1f s -> %s\n", m.events,
               m.tracks.present ? "read" : "absent (null)", sw.RealTime(), outJson);
   return 0;

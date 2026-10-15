@@ -2,7 +2,7 @@
 #
 # TODO/136 — run 1 本 → 指標 JSON。
 #
-#   tools/scan/metrics_for_run.sh [--macros DIR] [--pressure MBAR] RUN_DIR OUT_DIR
+#   tools/scan/metrics_for_run.sh [--macros DIR] [--pressure MBAR] [--ped FILE] RUN_DIR OUT_DIR
 #
 #   RUN_DIR     root-sink の run ディレクトリ(`<output_root>/run0077/`)。中の `run0077_raw.root` を読む
 #   OUT_DIR     出力先。`run0077_metrics.json` と、macros が作る `run0077_uvw.root` /
@@ -13,22 +13,27 @@
 #               (既定 ~/test/ana/ana_107。読むだけ・そこで実行するだけで、書き換えない)
 #   --pressure  analyzeUVW.C の第 2 引数 [mbar](ドリフト速度 = z の換算。既定 100 = macros の既定)
 #
+#   --ped       `calib pedestal` の JSON(TODO/149)。ZS 取得のデータ用: ped = 表の mean、FPN 共通モードは引かない。
+#               無ければ従来どおり(cells 1..20 の ped + FPN 減算。ZS の疑いがあれば WARNING)
+#
 # `_tracks.root` が OUT_DIR に無ければ macros で作る(`_uvw.root` も無ければ analyzeUVW.C から)。
 # macros が無い・tracks が作れなかったときは WARNING を出して tracks = null のまま raw の指標だけ出す。
 # 終了コード: 0 = JSON を書いた、1 = 入力が無い・run_metrics.C が失敗、2 = 使い方の誤り。
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 [--macros DIR] [--pressure MBAR] RUN_DIR OUT_DIR" >&2
+  echo "usage: $0 [--macros DIR] [--pressure MBAR] [--ped FILE] RUN_DIR OUT_DIR" >&2
   exit 2
 }
 
 macros="${HOME}/test/ana/ana_107"
 pressure=100
+ped=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --macros) [[ $# -ge 2 ]] || usage; macros="$2"; shift 2 ;;
     --pressure) [[ $# -ge 2 ]] || usage; pressure="$2"; shift 2 ;;
+    --ped) [[ $# -ge 2 ]] || usage; ped="$2"; shift 2 ;;
     -h | --help) usage ;;
     -*) echo "unknown option: $1" >&2; usage ;;
     *) break ;;
@@ -86,4 +91,10 @@ else
   [[ -f "${tracks}" ]] || echo "WARNING: ${tracks} was not produced — tracks = null" >&2
 fi
 
-"${root_bin}" -l -b -q "${here}/run_metrics.C(\"${link}\", \"${json}\", ${pressure})"
+if [[ -n "${ped}" ]]; then
+  [[ -f "${ped}" ]] || { echo "ERROR: --ped ${ped} not found" >&2; exit 1; }
+  ped="$(cd "$(dirname "${ped}")" && pwd)/$(basename "${ped}")"
+  "${root_bin}" -l -b -q "${here}/run_metrics.C(\"${link}\", \"${json}\", ${pressure}, \"${ped}\")"
+else
+  "${root_bin}" -l -b -q "${here}/run_metrics.C(\"${link}\", \"${json}\", ${pressure})"
+fi

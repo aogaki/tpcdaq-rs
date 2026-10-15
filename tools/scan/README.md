@@ -158,3 +158,15 @@ python3 tools/scan/ledger.py ~/test/scan/scan_<name>_<date>.json --metrics ~/tes
 - `--run-root DIR` があれば `DIR/run%04d/*.graw` の合計バイト ÷ 指標の events ÷ 1000 を kB/event に(graw が無ければ「—」)。
 - 書式: 電荷 = `x.xx M`、比率 = `x.x %`(クリップは `先頭 / 末尾 %`)、dEdx は桁区切り整数、dip RMS は `x.x°`。
 - テスト: `python3 -m unittest tools/scan/test_ledger.py`。
+
+## ch ごとの ZS 閾値と ZS 対応の指標(TODO/149)
+```
+python3 tools/scan/zs_exceptions.py PED.json [--k 5] [--min-above 20] [--out FILE] [--merge BASE.json]
+tools/scan/metrics_for_run.sh --ped PED.json RUN_DIR OUT_DIR
+```
+- `zs_exceptions.py`: `calib pedestal` の JSON から各 ch(FPN 込み)の `zeroSuppression.threshold` 例外
+  (`at` = `{asad, aget, ch}`、値 = round(mean + max(k·rms, min-above))、[0, 4095])を作る。`--merge` は base params に差し込み
+  `zeroSuppression.enabled = true` にする(base にあった閾値の例外は置き換え)。テスト: `python3 -m unittest tools/scan/test_zs_exceptions.py`。
+- `run_metrics.C` の第 4 引数 / `--ped`: ZS データ(閾値未満のセルと FPN が 0)用に ped = 表の mean、FPN 共通モードは引かない。
+  表に無い信号 ch は飛ばして数を WARNING に出す。指標 JSON に `ped_source`(`table` / `cells_1_20`)と `zs_suspected`
+  (過半数のイベントで読めた AGET の信号 ch の過半数が cells 1..20 全 0)が入り、表なしで疑いがあれば WARNING を 1 回出す。
