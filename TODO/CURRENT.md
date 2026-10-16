@@ -62,7 +62,7 @@
 |---|---|---|---|
 | ~~151~~ | root_sink: `[system] ped_table` + ZS 対応 PEventTPC | 済 → archive(86792dd、§12-3 不変を実 graw 3 組で確認) | — |
 | [152](152_monitor_zs_restore.md) | monitor: 0x02 の ZS 復元(ライブ再構成・UI 基線) | READY(Opus、151 の後) | 第 2 波 |
-| [153](153_uvw_closure_pedjson.md) | uvw_closure.C に pedJson(任意) | READY(Sonnet) | 任意 |
+| ~~153~~ | uvw_closure.C に pedJson | 済 → archive | — |
 | ~~154~~ | zs_restore.C(macros 無改造の橋)+ `--zs-fill` | 済 → archive(ba2d332、run 133 で macros 復活: 85.4 mm / σ_z 0.20) | — |
 | ~~155~~ | zs_params.sh + RUNBOOK「ZS 運用」 | 済 → archive(72f0703) | — |
 | [156](156_zs_validation_runs.md) | 検証 α run(FPN あり / なし)→ S18 | READY(主対話) | 反映後 |
