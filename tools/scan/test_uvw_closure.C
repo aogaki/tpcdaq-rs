@@ -496,6 +496,39 @@ bool writeTracks(const std::string &path, const std::vector<UInt_t> &ids, const 
   return true;
 }
 
+// [8] ZS + pedestal 表(TODO/153)。fillGaussZs = [2] と同じガウスの点を ZS にしたもの: FPN は全セル 0、信号 ch は
+// baseline(a, c) からの高さが 20 未満のセルを 0 にする(足した高さ > 35 は残る。common mode t/13 ≤ 7 は
+// 100..109 では消える)。表の mean = baseline(a, c)(ped 窓の ±2 は平均 0)。
+bool g_zs = false;
+
+void fillGaussZs(int e)
+{
+  fillGauss(e);
+  if (!g_zs) return;
+  for (int a = 0; a < 4; ++a)
+    for (int c = 0; c < 68; ++c)
+      for (int t = 0; t < 512; ++t)
+        if (runmetrics::isFpn(c) || g_adc[a][c][t] - baseline(a, c) < 20) g_adc[a][c][t] = 0;
+}
+
+// skipA < 0 なら全 ch、でなければ (skipA, skipC) を除く。
+bool writePedTable(const std::string &path, int skipA, int skipC)
+{
+  FILE *fp = std::fopen(path.c_str(), "w");
+  if (!fp) return false;
+  std::fputs("{\"meta\": {\"note\": \"synthetic\"}, \"channels\": [\n", fp);
+  bool first = true;
+  for (int a = 0; a < 4; ++a)
+    for (int c = 0; c < 68; ++c) {
+      if (a == skipA && c == skipC) continue;
+      std::fprintf(fp, "%s{\"asad\": 0, \"aget\": %d, \"ch\": %d, \"mean\": %d.0, \"rms\": 1.5, \"runs\": 1, \"is_fpn\": %s}",
+                   first ? "" : ",\n", a, c, baseline(a, c), runmetrics::isFpn(c) ? "true" : "false");
+      first = false;
+    }
+  std::fputs("\n]}\n", fp);
+  return std::fclose(fp) == 0;
+}
+
 }  // namespace test_uc
 
 int test_uvw_closure()
@@ -850,6 +883,52 @@ int test_uvw_closure()
     check(uvwclosure::computeClosure(dir + "/run0089_0_raw.root", map, trk89, 0, 1, w, err, true), "computeClosure ok (JSON)");
     check(contains(uvwclosure::toJson(w), "\"slice_window_cells\": 15,"), "JSON \"slice_window_cells\": 15");
   }
+
+  // ---- [8] ZS + pedestal 表(TODO/153)-----------------------------------------------------------------
+  std::printf("[8] ZS raw + pedestal table: sigma_per_view matches the non-ZS value (5 %%)\n");
+  const std::string rawP = dir + "/run0091_raw.root", rawZ = dir + "/run0092_raw.root";
+  const std::string trkP = dir + "/run0091_tracks.root", trkZ = dir + "/run0092_tracks.root";
+  const std::string pedT = dir + "/ped.json", pedMiss = dir + "/ped_missing.json";
+  cleanup.insert(cleanup.end(), {rawP, rawZ, trkP, trkZ, pedT, pedMiss});
+  std::vector<UInt_t> ids8;
+  for (UInt_t i = 0; i < 200; ++i) ids8.push_back(i);
+  const std::vector<int> oks8(200, 1);
+  g_rnd.SetSeed(5148);
+  g_zs = false;
+  check(writeRaw(rawP, 200, fillGaussZs, 0), "write non-ZS Gaussian raw (200 events)");
+  g_rnd.SetSeed(5148);
+  g_zs = true;
+  check(writeRaw(rawZ, 200, fillGaussZs, 0), "write ZS Gaussian raw (same points)");
+  g_zs = false;
+  check(writeTracks(trkP, ids8, oks8) && writeTracks(trkZ, ids8, oks8), "write tracks (200 ok)");
+  check(writePedTable(pedT, -1, -1), "write pedestal table");
+  int missA = 0, missC = 0;
+  stripChannel(0, 12, missA, missC);  // 点の中心に近い U ストリップ
+  check(writePedTable(pedMiss, missA, missC), "write pedestal table without one U strip channel");
+  uvwclosure::Result p8, z8, zn8, pm8;
+  check(uvwclosure::computeClosure(rawP, map, trkP, 0, 1, p8, err, true), "non-ZS, no table: ok (" + err + ")");
+  check(uvwclosure::computeClosure(rawZ, map, trkZ, 0, 1, z8, err, true, pedT), "ZS + table: ok (" + err + ")");
+  check(uvwclosure::computeClosure(rawP, map, trkP, 0, 1, pm8, err, true, pedT), "non-ZS + table: ok (" + err + ")");
+  checkRel(z8.sigma_per_view, p8.sigma_per_view, 0.05, "test_zs_table_matches_non_zs: ZS + table sigma_per_view vs non-ZS");
+  checkRel(pm8.sigma_per_view, p8.sigma_per_view, 0.05, "non-ZS + table sigma_per_view vs non-ZS");
+  check(z8.slices > 1000, "ZS + table: slices used (got " + std::to_string(z8.slices) + ")");
+  check(p8.ped_source == "cells_1_20" && z8.ped_source == "table", "ped_source: cells_1_20 without a table, table with one");
+  checkCount(z8.ped_missing, 0, "ZS + table: ped_missing");
+  checkCount(z8.agets_without_fpn, 0, "ZS + table: agets_without_fpn == 0 (FPN not used, no WARNING)");
+  const std::string jz8 = uvwclosure::toJson(z8);
+  check(contains(jz8, "\"ped_source\": \"table\",") && contains(jz8, "\"ped_missing\": 0,"), "JSON ped_source table / ped_missing 0");
+  check(contains(uvwclosure::toJson(p8), "\"ped_source\": \"cells_1_20\","), "JSON ped_source cells_1_20 without a table");
+  // 表に無い ch は飛ばして数える(黙って別の ped を使わない)
+  check(uvwclosure::computeClosure(rawZ, map, trkZ, 0, 1, zn8, err, true, pedMiss), "ZS + table missing a strip: ok (" + err + ")");
+  check(zn8.ped_missing > 0, "table missing a strip: ped_missing > 0 (got " + std::to_string(zn8.ped_missing) + ")");
+  // 壊れた・無い表はエラー
+  uvwclosure::Result em8;
+  check(!uvwclosure::computeClosure(rawZ, map, trkZ, 0, 1, em8, err, true, dir + "/nope.json") && !err.empty(), "missing pedestal file: error");
+  // 入口の第 8 引数
+  const std::string json8 = dir + "/run0092_uvw_closure.json";
+  cleanup.push_back(json8);
+  check(uvw_closure(rawZ.c_str(), map.c_str(), trkZ.c_str(), json8.c_str(), nullptr, 0, true, pedT.c_str()) == 0, "uvw_closure() with pedJson returns 0");
+  check(contains(readFile(json8), "\"ped_source\": \"table\","), "uvw_closure() JSON ped_source table");
 
   // 後片付け
   for (const std::string &p : cleanup) gSystem->Unlink(p.c_str());

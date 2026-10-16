@@ -171,6 +171,8 @@
   robust σ = 1.4826 × MAD)、**`sigma_per_view_mm`** = robust σ / √3、`charge_quartiles` = スライス電荷(3 面の Σw)の 4 分位
   [min, q25] / (q25, q50] / (q50, q75] / (q75, max] ごとの `{q_lo, q_hi, n, rms, robust_sigma, median}`、`strips_median` = view ごとの
   塊の本数(重心に使った幅)の中央値。分位点は線形補間 h = (n−1)·q。値が無ければ null。
+- ZS の raw: 第 8 引数 `pedJson`(`uvw_closure.C(…, nullptr, 0, true, "ped.json")`)= `calib pedestal` の表。run_metrics.C と同じ経路で ped = 表の mean、FPN の common mode は引かない。JSON に `ped_source` / `ped_missing`(表に無い ch は飛ばして数え、WARNING)。
+- 表モードのテスト = test_uvw_closure.C の [8](ZS 合成 raw + 表で `sigma_per_view` が非 ZS の 5 % 以内)。
 - PNG: 左 = r のヒスト(範囲 ±5 robust σ)、右 = r vs スライス電荷。
 - テスト: `root -l -b -q tools/scan/test_uvw_closure.C`(約 1 s。合成 channel_map = 3 面 × 24 本・pitch 2 mm・view ごとの原点
   (和 4.5)・map を読まないと解けない (aget, ch) の並び。[1] 4 イベントで c = 4.5、r の robust σ / RMS / σ_s、電荷 4 分位、本数の中央値、

@@ -5,6 +5,9 @@
 //   root -l -b -q 'uvw_closure.C("run0083_raw.root", "channel_map.csv", "run0083_tracks.root", "out.json", nullptr, 200)'  (先頭 200 件)
 //   root -l -b -q 'uvw_closure.C("run0083_raw.root", "channel_map.csv", "run0083_tracks.root", "out.json", nullptr, 0, false)'
 //     (第 7 引数 hitChannelsOnly = false: 閾値越えのストリップを全部使う — 下の「ヒット ch」参照)
+//   root -l -b -q 'uvw_closure.C("run0083_raw.root", "channel_map.csv", "run0083_tracks.root", "out.json", nullptr, 0, true, "ped.json")'
+//     (第 8 引数 pedJson: ZS の raw 用。`calib pedestal` の JSON を run_metrics.C と同じ経路(loadPedTable)で読み、
+//      ped = 表の mean、FPN の common mode は引かない(v = w − ped)。JSON に ped_source / ped_missing。TODO/153)
 //
 // 終了コード 0 = JSON(と PNG)を書いた、1 = 失敗(理由は stderr)。
 //
@@ -138,6 +141,8 @@ struct Result {
   long events = 0, events_ok = 0;
   // 信号 ch(map のストリップ)は読めたが FPN が 1 本も読めなかった (イベント, AGET) の数(run_metrics.C と同じ)
   long agets_without_fpn = 0;
+  std::string ped_source = "cells_1_20";  // pedJson ありなら "table"
+  long ped_missing = 0;  // pedJson ありで表に無かった (イベント, ストリップ ch) の数(その ch は飛ばした)
   long slices = 0, slices_missing_view = 0, slices_multi_cluster = 0;
   double c = kNull, sigma_per_view = kNull;
   Stats residual;
@@ -243,7 +248,8 @@ bool isHitChannel(const double *v)
 }
 
 bool computeClosure(const std::string &rawPath, const std::string &mapPath, const std::string &tracksPath,
-                    int maxEvents, int sliceCells, Result &r, std::string &err, bool hitChannelsOnly)
+                    int maxEvents, int sliceCells, Result &r, std::string &err, bool hitChannelsOnly,
+                    const std::string &pedJson = "")
 {
   r = Result();
   r.hit_channels_only = hitChannelsOnly;
@@ -286,6 +292,12 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
       return false;
     }
     stripsOfAget[static_cast<size_t>(a)].push_back(static_cast<int>(i));
+  }
+  std::vector<double> pedTable;
+  const bool useTable = !pedJson.empty();
+  if (useTable) {
+    if (!runmetrics::loadPedTable(pedJson, nBlocks, pedTable, err)) return false;
+    r.ped_source = "table";
   }
   std::vector<Short_t> adc(static_cast<size_t>(leaf->GetLen()));
   UInt_t rawId = 0;
@@ -345,6 +357,7 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
       std::fill(fpn.begin(), fpn.end(), 0.0);
       int nFpn = 0;
       for (int fc : kFpn) {
+        if (useTable) break;  // ZS では FPN も抑制される — common mode は引かない(run_metrics.C と同じ)
         const Short_t *w = aget + fc * kCells;
         if (runmetrics::allZero(w)) continue;
         ++nFpn;
@@ -360,8 +373,17 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
         if (!read[static_cast<size_t>(k)]) continue;
         signalRead = true;
         double ped = 0;
-        for (int t = kPedLo; t <= kPedHi; ++t) ped += w[t] - fpn[t];
-        ped /= (kPedHi - kPedLo + 1);
+        if (useTable) {
+          ped = pedTable[static_cast<size_t>(b) * kChannels + map.strips[static_cast<size_t>(k)].channel];
+          if (std::isnan(ped)) {  // 表に無い ch は飛ばして数える(黙って別の ped を使わない)
+            ++r.ped_missing;
+            read[static_cast<size_t>(k)] = 0;
+            continue;
+          }
+        } else {
+          for (int t = kPedLo; t <= kPedHi; ++t) ped += w[t] - fpn[t];
+          ped /= (kPedHi - kPedLo + 1);
+        }
         double *vk = &v[static_cast<size_t>(k) * kCells];
         for (int t = 0; t < kCells; ++t) vk[t] = w[t] - fpn[t] - ped;
         int pt = 0;
@@ -370,7 +392,7 @@ bool computeClosure(const std::string &rawPath, const std::string &mapPath, cons
         peakT[static_cast<size_t>(k)] = pt;
         usable[static_cast<size_t>(k)] = hitChannelsOnly ? isHitChannel(vk) : 1;
       }
-      if (signalRead && nFpn == 0) ++r.agets_without_fpn;
+      if (signalRead && !useTable && nFpn == 0) ++r.agets_without_fpn;
     }
 
     long nUsable = 0;
@@ -462,6 +484,8 @@ std::string toJson(const Result &r)
   s += "  \"tracks_file\": " + str(r.tracks_file) + ",\n";
   s += "  \"events\": " + std::to_string(r.events) + ",\n";
   s += "  \"events_ok\": " + std::to_string(r.events_ok) + ",\n";
+  s += "  \"ped_source\": " + str(r.ped_source) + ",\n";
+  s += "  \"ped_missing\": " + std::to_string(r.ped_missing) + ",\n";
   s += "  \"slice_cells\": " + std::to_string(r.slice_cells) + ",\n";
   s += "  \"cell_range\": [" + std::to_string(kCellMin) + ", " + std::to_string(kCellMax) + "],\n";
   s += "  \"adc_threshold\": " + num(kAdcThreshold) + ",\n";
@@ -539,13 +563,14 @@ bool drawPng(const Result &r, const std::string &path)
 
 // 入口。0 = JSON(と PNG)を書いた、1 = 失敗(理由は stderr)。maxEvents ≤ 0 = 全イベント。
 int uvw_closure(const char *raw, const char *channelMap, const char *tracksRoot, const char *outJson,
-                const char *outPng = nullptr, int maxEvents = 0, bool hitChannelsOnly = true)
+                const char *outPng = nullptr, int maxEvents = 0, bool hitChannelsOnly = true,
+                const char *pedJson = nullptr)
 {
   TStopwatch sw;
   uvwclosure::Result r;
   std::string err;
   if (!uvwclosure::computeClosure(raw, channelMap, tracksRoot, maxEvents, uvwclosure::kSliceCells, r,
-                                  err, hitChannelsOnly)) {
+                                  err, hitChannelsOnly, pedJson ? pedJson : "")) {
     std::fprintf(stderr, "uvw_closure: ERROR %s\n", err.c_str());
     return 1;
   }
@@ -567,6 +592,10 @@ int uvw_closure(const char *raw, const char *channelMap, const char *tracksRoot,
                  "uvw_closure: WARNING %ld (event, AGET) had strip channels but no FPN channel "
                  "read — common mode not subtracted there (isFPNRead=false?)\n",
                  r.agets_without_fpn);
+  if (r.ped_missing > 0)
+    std::fprintf(stderr,
+                 "uvw_closure: WARNING %ld (event, strip channel) not in the pedestal table — skipped\n",
+                 r.ped_missing);
   if (r.slices == 0)
     std::fprintf(stderr,
                  "uvw_closure: WARNING no usable slice (%ld ok of %ld events; dropped %ld missing a view, "
