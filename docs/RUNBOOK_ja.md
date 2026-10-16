@@ -107,3 +107,30 @@
 ### 7.1 の注意(2026-10-16 追記)
 - 非対話 ssh / `setsid nohup` のスクリプトでは `~/.cargo/bin` が PATH に無い → `export PATH=$HOME/.cargo/bin:$PATH` を先頭に。無いと `cargo: command not found` でも先へ進み、古いバイナリのまま再起動してしまう(2026-10-16 に一度やった)。
 - ELITPC に node は無い。UI は Mac で `cd ui && npx ng build` → `scp -r dist/ui/browser/. daq@…:/opt/tpcdaq/ui/`。`/opt/tpcdaq/ui` を先に消さない(cp の失敗で 404 になる)。
+
+## ZS 運用(ゼロサプレッション、2026-10-16、TODO/155)
+ZS を使うと event あたりのデータが大きく減るが、**ch ごとの閾値の表(pedestal)が電子回路の設定に依存する**。
+表と設定がずれると、信号を捨てるかノイズを全部読むかのどちらかになる。
+
+### 手順
+1. **pedestal run** を取る: `triggerMode periodically` + `readout full`、150 events 程度(Parameters タブで Save → run/start)。
+   ZS は **OFF**(full で全セルを読む)。peaking / gain は physics で使う値のままにする。
+2. 表を作って ZS 付き params を生成(Mac / ELITPC のどちらでも。`cargo build --release` で `calib` が要る):
+   ```
+   tools/scan/zs_params.sh --ped-run /data/tpcdaq/run0123 --label 502ns \
+       --base ~/test/scan/base.json --out ~/test/scan/zs_502ns.json
+   ```
+   要約の `base peakingTime_ns / gain` が pedestal run のときの設定と同じか**目で確かめる**(違えば base を直して再実行)。
+   FPN を常に読みたい(共通モード減算用)ときは `--keep-fpn`。
+3. 生成した JSON を Parameters タブ(または scan.py)で適用 → physics run。例外の件数は status バーの `exceptions N`
+   (ch 数と同数になる。logbook に「ZS 閾値表 <label>」と書く)。
+4. 表のファイルは `[system] ped_table` に置く(ZS データの下流再構成が使う)。**peaking / gain を変えたら表を取り直し、
+   `ped_table` を更新して `daq_down.sh` → `daq_up.sh`**(再起動しないと古い表のまま)。
+
+### カウンタの読み方
+- decoder / root_sink / monitor のカウンタ(ログと UI)に ZS の項目が出る。**`zs_frames_no_table` が 0 でない** =
+  ZS のフレームが来ているのに表が読み込まれていない(`ped_table` の未設定・パス違い)。その間の ped は代用値で、波高・電荷は信用しない。
+  表を直して `daq_down/up`、そのときの run は logbook に「ZS 表なし」と書く。
+- `run_metrics.C` の指標 JSON の `ped_source` が `cells_1_20` で `zs_suspected` が立っていたら、ZS データを表なしで解析している
+  (`metrics_for_run.sh --ped <表>` で解析し直す)。
+- ZS を止めるときは base の `zeroSuppression.enabled` を false に戻して Save(閾値の例外は残ってよいが、`exceptions N` の理由を書く)。

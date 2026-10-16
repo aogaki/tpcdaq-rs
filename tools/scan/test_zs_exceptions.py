@@ -49,6 +49,10 @@ class ThresholdTest(unittest.TestCase):
 
 
 class MakeExceptionsTest(unittest.TestCase):
+    def test_keep_fpn_sets_fpn_threshold_zero_only(self):  # TODO/155: FPN(3,3,11)だけ 0、他は不変
+        vals = [e["value"] for e in zs.make_exceptions(TABLE, keep_fpn=True)]
+        self.assertEqual(vals, [430, 520, 0])
+
     def test_one_exception_per_channel_including_fpn(self):
         self.assertEqual(zs.make_exceptions(TABLE), [
             {"knob": "zeroSuppression.threshold", "at": {"asad": 0, "aget": 0, "ch": 3}, "value": 430},

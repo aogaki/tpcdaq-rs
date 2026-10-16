@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """TODO/149 §1 — `calib pedestal` の JSON から ch ごとの ZS 閾値の `exceptions` を作る。
 
-  python3 tools/scan/zs_exceptions.py PED.json [--k 5] [--min-above 20] [--out FILE] [--merge BASE.json]
+  python3 tools/scan/zs_exceptions.py PED.json [--k 5] [--min-above 20] [--out FILE] [--merge BASE.json] [--keep-fpn]
 
 各 ch(FPN 含む)に
   {"knob": "zeroSuppression.threshold", "at": {"asad": a, "aget": g, "ch": c},
@@ -26,12 +26,13 @@ def threshold(mean, rms, k, min_above):
     return max(0, min(ADC_MAX, value))
 
 
-def make_exceptions(table, k=5.0, min_above=20.0):
+def make_exceptions(table, k=5.0, min_above=20.0, keep_fpn=False):
+    """keep_fpn: FPN ch の閾値を 0(= 常に読む。FPN の共通モード減算用)にする。"""
     return [
         {
             "knob": KNOB,
             "at": {"asad": ch["asad"], "aget": ch["aget"], "ch": ch["ch"]},
-            "value": threshold(ch["mean"], ch["rms"], k, min_above),
+            "value": 0 if keep_fpn and ch.get("is_fpn") else threshold(ch["mean"], ch["rms"], k, min_above),
         }
         for ch in table["channels"]
     ]
@@ -55,13 +56,14 @@ def main(argv=None):
     ap.add_argument("pedestal", help="`calib pedestal` の JSON")
     ap.add_argument("--k", type=float, default=5.0, help="σ の倍数(既定 5)")
     ap.add_argument("--min-above", type=float, default=20.0, help="ped からの最小の余裕 [ADC](既定 20)")
+    ap.add_argument("--keep-fpn", action="store_true", help="FPN ch の閾値を 0(常に読む)にする")
     ap.add_argument("--out", help="出力先(既定 標準出力)")
     ap.add_argument("--merge", metavar="BASE.json", help="base params に差し込んだ params JSON を出す")
     args = ap.parse_args(argv)
 
     with open(args.pedestal) as f:
         table = json.load(f)
-    result = make_exceptions(table, args.k, args.min_above)
+    result = make_exceptions(table, args.k, args.min_above, args.keep_fpn)
     if args.merge:
         with open(args.merge) as f:
             result = merge_into(json.load(f), result)

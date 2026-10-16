@@ -204,3 +204,14 @@ tools/scan/metrics_for_run.sh --ped PED.json RUN_DIR OUT_DIR
 - `run_metrics.C` の第 4 引数 / `--ped`: ZS データ(閾値未満のセルと FPN が 0)用に ped = 表の mean、FPN 共通モードは引かない。
   表に無い信号 ch は飛ばして数を WARNING に出す。指標 JSON に `ped_source`(`table` / `cells_1_20`)と `zs_suspected`
   (過半数のイベントで読めた AGET の信号 ch の過半数が cells 1..20 全 0)が入り、表なしで疑いがあれば WARNING を 1 回出す。
+
+## pedestal run → ZS 付き params(TODO/155)
+```
+tools/scan/zs_params.sh (--ped-run RUN_DIR | --ped-json FILE) --base BASE.json --out OUT.json \
+    [--k 5] [--min-above 20] [--label 502ns] [--keep-fpn] [--calib-bin PATH] [--calib-dir DIR]
+```
+- `--ped-run`: `RUN_DIR/*.graw` に `calib pedestal` を走らせ `~/test/scan/calib/pedestal_<label>.json` を作ってから、
+  `zs_exceptions.py --merge BASE` で OUT を作る(`calib` は `cargo build --release`)。`--ped-json` は既存の表を使う。
+- 要約に例外数・閾値の min / median / max・FPN の閾値と、**base の `peakingTime_ns` / `gain`**(表を取った設定と一致しているか見る)。
+  `--keep-fpn` は FPN ch の閾値を 0(常に読む)にする。PUT はしない(UI の Parameters タブか scan.py で適用)。手順は `docs/RUNBOOK_ja.md`「ZS 運用」。
+- テスト: `bash tools/scan/test_zs_params.sh`。
