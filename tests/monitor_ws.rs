@@ -270,6 +270,7 @@ impl Monitor {
             detector: "mini_eTPC_test".to_string(),
             cobos: vec![0],
             slow_sub: slow_sub.map(str::to_string),
+            ped_table: None,
         };
         let (shutdown, shutdown_rx) = broadcast::channel(1);
         let (bound_tx, bound_rx) = oneshot::channel();

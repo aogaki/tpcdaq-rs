@@ -63,16 +63,23 @@ pub fn strip_geometry_json(
     serde_json::to_string(&value)
 }
 
-/// monitor 自身の可視化値(SPEC §10.3 の `status` に足す 3 つ)。
+/// monitor 自身の可視化値(SPEC §10.3 の `status` に足す 3 つ + TODO/152 の ZS 復元 3 つ)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonitorStats {
     pub monitor_gaps: u64,
     pub clients: u64,
     pub ws_dropped: u64,
+    /// [`ConvertCounts::uvw_zs_fragments_restored`](TODO/152)。
+    pub uvw_zs_fragments_restored: u64,
+    /// [`ConvertCounts::uvw_zs_fragments_no_table`](TODO/152)。
+    pub uvw_zs_fragments_no_table: u64,
+    /// [`ConvertCounts::uvw_table_missing_channels`](TODO/152)。
+    pub uvw_table_missing_channels: u64,
 }
 
 /// `status` を JSON 文字列にする(SPEC §10.3: §5.3 の status **そのまま** +
-/// `{monitorGaps, clients, wsDropped}`)。
+/// `{monitorGaps, clients, wsDropped}` + TODO/152 の
+/// `{uvwZsFragmentsRestored, uvwZsFragmentsNoTable, uvwTableMissingChannels}`)。
 pub fn status_json(
     status: &StatusPayload,
     stats: MonitorStats,
@@ -91,6 +98,19 @@ pub fn status_json(
         );
         map.insert("clients".to_string(), serde_json::json!(stats.clients));
         map.insert("wsDropped".to_string(), serde_json::json!(stats.ws_dropped));
+        // TODO/152: 0x02 の ZS 復元。monitor 自身の値なので上の 3 つと同じ camelCase、常に出す。
+        map.insert(
+            "uvwZsFragmentsRestored".to_string(),
+            serde_json::json!(stats.uvw_zs_fragments_restored),
+        );
+        map.insert(
+            "uvwZsFragmentsNoTable".to_string(),
+            serde_json::json!(stats.uvw_zs_fragments_no_table),
+        );
+        map.insert(
+            "uvwTableMissingChannels".to_string(),
+            serde_json::json!(stats.uvw_table_missing_channels),
+        );
     }
     serde_json::to_string(&value)
 }
@@ -182,6 +202,9 @@ mod tests {
                 monitor_gaps: 12,
                 clients: 3,
                 ws_dropped: 45,
+                uvw_zs_fragments_restored: 0,
+                uvw_zs_fragments_no_table: 0,
+                uvw_table_missing_channels: 0,
             },
             None,
         )
@@ -210,6 +233,32 @@ mod tests {
         assert!(value.get("slow").is_none());
     }
 
+    /// TODO/152: 0x02 の ZS 復元カウンタも `status` に載る(monitor 自身の値なので
+    /// `monitorGaps` と同じ camelCase。常に出す — 表なしの `NoTable` こそ見せたい値)。
+    #[test]
+    fn status_json_carries_the_uvw_zs_restore_counters() {
+        let text = status_json(
+            &status_payload(),
+            MonitorStats {
+                monitor_gaps: 0,
+                clients: 1,
+                ws_dropped: 0,
+                uvw_zs_fragments_restored: 31,
+                uvw_zs_fragments_no_table: 5,
+                uvw_table_missing_channels: 2,
+            },
+            None,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["uvwZsFragmentsRestored"], 31);
+        assert_eq!(value["uvwZsFragmentsNoTable"], 5);
+        assert_eq!(value["uvwTableMissingChannels"], 2);
+        // §5.3 の status と monitor の 3 つは不変。
+        assert_eq!(value["run"], 7);
+        assert_eq!(value["monitorGaps"], 0);
+    }
+
     /// slowctl を購読していれば同じ `status` に `slow` が同梱される(SPEC §10.3 v1.31)。
     #[test]
     fn status_json_carries_the_latest_slow_payload_when_there_is_one() {
@@ -236,6 +285,9 @@ mod tests {
                 monitor_gaps: 0,
                 clients: 1,
                 ws_dropped: 0,
+                uvw_zs_fragments_restored: 0,
+                uvw_zs_fragments_no_table: 0,
+                uvw_table_missing_channels: 0,
             },
             Some(&slow),
         )

@@ -4,7 +4,6 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 use super::*;
-use crate::geometry::Geometry;
 use crate::reco::{Reco, RecoGeometry};
 
 // ---------------------------------------------------------------------
@@ -35,10 +34,11 @@ struct Ingest {
 }
 
 impl Ingest {
-    fn new(hub: Arc<Hub>, geometry: Arc<Geometry>, reco: Option<RecoGeometry>) -> Self {
+    /// `converter` は起動時に組んだもの(pedestal 表の前計算込み — TODO/152)。
+    fn new(hub: Arc<Hub>, converter: DisplayConverter, reco: Option<RecoGeometry>) -> Self {
         Self {
             hub,
-            converter: DisplayConverter::new(geometry),
+            converter,
             reco: reco.map(Reco::new),
             reco_no_segment: 0,
             gaps: std::collections::BTreeMap::new(),
@@ -123,6 +123,17 @@ impl Ingest {
                 self.hub.on_event(Arc::clone(&event));
                 self.frames.clear();
                 self.converter.uvw(&event, &mut self.frames);
+                // ZS 復元のカウンタ(TODO/152)を status JSON / 停止ログが読む場所へ写す。
+                let convert = self.converter.counts();
+                counters
+                    .uvw_zs_fragments_restored
+                    .store(convert.uvw_zs_fragments_restored, Ordering::Relaxed);
+                counters
+                    .uvw_zs_fragments_no_table
+                    .store(convert.uvw_zs_fragments_no_table, Ordering::Relaxed);
+                counters
+                    .uvw_table_missing_channels
+                    .store(convert.uvw_table_missing_channels, Ordering::Relaxed);
                 // 0x04 は `uvw` ストリームに含める(SPEC §10.3 — 新しいストリーム名は作らない)。
                 self.push_track(&event);
                 self.hub.publish_live(Stream::Uvw, &mut self.frames);
@@ -158,7 +169,7 @@ pub(super) fn spawn_sub_thread(
     endpoint: String,
     slow_endpoint: Option<String>,
     hub: Arc<Hub>,
-    geometry: Arc<Geometry>,
+    converter: DisplayConverter,
     reco: Option<RecoGeometry>,
     stop: Arc<AtomicBool>,
 ) -> Result<std::thread::JoinHandle<()>, MonitorError> {
@@ -205,7 +216,7 @@ pub(super) fn spawn_sub_thread(
                 );
             }
 
-            let mut ingest = Ingest::new(hub, geometry, reco);
+            let mut ingest = Ingest::new(hub, converter, reco);
             while !stop.load(Ordering::Relaxed) {
                 // **recv の前に必ず poll する**(TODO/013 の fair-queue 飢餓)。libzmq は
                 // `recv` が成功し続ける間 `process_commands()` を 100 通に 1 度しか走らせず、
@@ -275,7 +286,7 @@ mod tests {
             4,
             Arc::clone(&counters),
         );
-        let mut ingest = Ingest::new(hub, geometry, None);
+        let mut ingest = Ingest::new(hub, DisplayConverter::new(geometry), None);
 
         let slow = crate::slowctl::SlowPayload {
             kind: crate::slowctl::SLOW_KIND.to_string(),
@@ -369,7 +380,11 @@ mod tests {
             Arc::new(MonitorCounters::default()),
         );
         let (_id, _streams, _json_rx, live_rx) = hub.register();
-        (Ingest::new(hub, geometry, reco), live_rx, has_reco)
+        (
+            Ingest::new(hub, DisplayConverter::new(geometry), reco),
+            live_rx,
+            has_reco,
+        )
     }
 
     /// U 1–4 / V 1–3 / W 1–4 の全 strip に bucket 200 の山(1000/1500/1000 → q = 3500 ≥ 2000)。
@@ -452,6 +467,58 @@ mod tests {
                 frame.bytes[2]
             );
         }
+    }
+
+    /// TODO/152: 0x02 を作るたびに表示変換の ZS カウンタが `MonitorCounters` へ写る
+    /// (`status` JSON と停止ログはそこを読む)。表なしの monitor に ZS らしいイベント 2 通。
+    #[test]
+    fn zs_counts_of_the_display_conversion_reach_the_monitor_counters() {
+        let geometry = Arc::new(geometry::load(Path::new(MINI_REDUCED)).expect("fixture geometry"));
+        let counters = Arc::new(MonitorCounters::default());
+        let hub = Hub::new(
+            Meta {
+                n_buckets: 512,
+                planes: geometry.max_strip,
+                geometry: MINI_REDUCED.to_string(),
+                angles_deg: None,
+                detector: "mini_eTPC".to_string(),
+                cobos: vec![0],
+                run: 0,
+            },
+            None,
+            16,
+            Arc::clone(&counters),
+        );
+        let mut ingest = Ingest::new(hub, DisplayConverter::new(geometry), None);
+        // U strip2(aget0 raw1)に pre-trigger 外の 1 サンプルだけ = ZS らしい。
+        for seq in 0..2 {
+            let event = built_event(
+                70,
+                seq as u32,
+                true,
+                vec![fragment(0, 0, &[(0, 1, 200, 400)])],
+            );
+            ingest.handle(&envelope(
+                101,
+                70,
+                seq,
+                0,
+                &rmp_serde::to_vec_named(&event).unwrap(),
+            ));
+        }
+
+        assert_eq!(
+            counters.uvw_zs_fragments_no_table.load(Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            counters.uvw_zs_fragments_restored.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            counters.uvw_table_missing_channels.load(Ordering::Relaxed),
+            0
+        );
     }
 
     /// stripGeometry が作れない(DIAMOND SIZE 無し)→ reco を呼ばず 0x04 も送らない。

@@ -37,6 +37,11 @@ pub struct MonitorCounters {
     pub bad_client_messages: AtomicU64,
     /// `GET /api/last-event` の要求数(200 / 404 とも)。
     pub last_event_requests: AtomicU64,
+    /// 表示変換([`ConvertCounts`])の ZS 復元カウンタの写し(TODO/152)。SUB スレッドが
+    /// 0x02 を作るたびに store し、`status` JSON と停止ログが読む。
+    pub uvw_zs_fragments_restored: AtomicU64,
+    pub uvw_zs_fragments_no_table: AtomicU64,
+    pub uvw_table_missing_channels: AtomicU64,
 }
 
 impl MonitorCounters {
@@ -160,6 +165,18 @@ impl Hub {
             monitor_gaps: self.counters.monitor_gaps.load(Ordering::Relaxed),
             clients: self.counters.clients.load(Ordering::Relaxed),
             ws_dropped: self.counters.ws_dropped.load(Ordering::Relaxed),
+            uvw_zs_fragments_restored: self
+                .counters
+                .uvw_zs_fragments_restored
+                .load(Ordering::Relaxed),
+            uvw_zs_fragments_no_table: self
+                .counters
+                .uvw_zs_fragments_no_table
+                .load(Ordering::Relaxed),
+            uvw_table_missing_channels: self
+                .counters
+                .uvw_table_missing_channels
+                .load(Ordering::Relaxed),
         }
     }
 

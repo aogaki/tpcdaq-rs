@@ -5,7 +5,8 @@
 //!
 //! ```text
 //!   root-sink ──PUB(47004)──▶ [SUB 専用 OS スレッド]
-//!                                 │  decode(§5.3)→ ギャップ計数 → 表示変換(§5.4)
+//!                                 │  decode(§5.3)→ ギャップ計数 → 表示変換(§5.4。
+//!                                 │  ZS らしいフラグメントは `[system] ped_table` で復元 — TODO/152)
 //!                                 │  → 同じ格子で飛跡の再構成(`crate::reco`、0x04 — TODO/127)
 //!                                 ▼
 //!                              [Hub]  live = broadcast(有界・drop-oldest)
@@ -39,6 +40,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
 use tracing::{error, info, warn};
 
+use crate::calib::pedestal::PedestalTable;
 use crate::config::Config;
 use crate::geometry::{self, Geometry};
 use crate::reco::RecoGeometry;
@@ -102,6 +104,9 @@ pub struct MonitorParams {
     /// slowctl の status PUB への SUB 接続先(SPEC §3.1 v1.31)。
     /// **`None` = 購読しない**(WS の `status` JSON に `slow` は出ない = 従来と同一)。
     pub slow_sub: Option<String>,
+    /// ZS データ用の pedestal 表(`[system] ped_table` = `calib pedestal` の JSON、TODO/152)。
+    /// **`None` = 表なし**(0x02 は従来どおり。ZS らしいフラグメントは数えて WARN 1 回)。
+    pub ped_table: Option<PathBuf>,
 }
 
 impl MonitorParams {
@@ -114,6 +119,7 @@ impl MonitorParams {
             detector: config.system.experiment.clone(),
             cobos: config.cobo.iter().map(|c| c.id).collect(),
             slow_sub: config.monitor.slow_sub.clone(),
+            ped_table: config.system.ped_table.clone(),
         }
     }
 }
@@ -127,6 +133,16 @@ pub enum MonitorError {
         #[source]
         source: geometry::GeometryError,
     },
+
+    #[error("cannot load the pedestal table ([system] ped_table) {path}: {source}")]
+    PedTable {
+        path: PathBuf,
+        #[source]
+        source: crate::calib::CalibError,
+    },
+
+    #[error("the pedestal table ([system] ped_table) {0} has no channels")]
+    PedTableEmpty(PathBuf),
 
     #[error("cannot bind the WS listener {listen}: {source}")]
     Bind {
@@ -193,6 +209,28 @@ fn strip_geometry_at_startup(geometry: &Geometry) -> (Option<String>, Option<Rec
     (json, reco)
 }
 
+/// 起動時に 1 回: `[system] ped_table`(`calib pedestal` の JSON)を読み、素性をログに出す
+/// (TODO/152)。読めない / ch が無い表は起動エラー(151 の root_sink `--pedestal-table` と同じ —
+/// 黙って表なしに後退すると、ZS データの 0x02 と再構成が壊れたまま走る)。
+fn load_ped_table(path: &std::path::Path) -> Result<PedestalTable, MonitorError> {
+    let table: PedestalTable =
+        crate::calib::read_json(path).map_err(|source| MonitorError::PedTable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if table.channels.is_empty() {
+        return Err(MonitorError::PedTableEmpty(path.to_path_buf()));
+    }
+    info!(
+        ped_table = %path.display(),
+        generated_at = %table.meta.generated_at,
+        channels = table.channels.len(),
+        "monitor: pedestal table loaded — zero-suppressed fragments get their missing cells \
+         restored to round(mean) in the 0x02 grid"
+    );
+    Ok(table)
+}
+
 /// monitor を起動し、`shutdown` が来るまで WS を提供する(SPEC §5.4 / §10)。
 ///
 /// `bound` は実 bind 先を 1 度だけ通知する(ポート 0 を使うテスト用。production は `None`)。
@@ -239,11 +277,24 @@ pub async fn run_monitor(
     );
 
     let stop = Arc::new(AtomicBool::new(false));
+    let converter = match &params.ped_table {
+        Some(path) => {
+            let table = load_ped_table(path)?;
+            DisplayConverter::new(Arc::clone(&geometry)).with_pedestal_table(&table)
+        }
+        None => {
+            info!(
+                "monitor: no [system] ped_table — zero-suppressed fragments are shown as they \
+                 come (missing cells 0) and counted as uvw_zs_fragments_no_table"
+            );
+            DisplayConverter::new(Arc::clone(&geometry))
+        }
+    };
     let sub_thread = spawn_sub_thread(
         params.sub_endpoint.clone(),
         params.slow_sub.clone(),
         Arc::clone(&hub),
-        Arc::clone(&geometry),
+        converter,
         reco_geometry,
         Arc::clone(&stop),
     )?;
@@ -283,6 +334,9 @@ pub async fn run_monitor(
         clients_total = counters.clients_total.load(Ordering::Relaxed),
         clients_dropped_slow = counters.clients_dropped_slow.load(Ordering::Relaxed),
         unmapped_hits = geometry.unmapped_hit_count(),
+        uvw_zs_fragments_restored = counters.uvw_zs_fragments_restored.load(Ordering::Relaxed),
+        uvw_zs_fragments_no_table = counters.uvw_zs_fragments_no_table.load(Ordering::Relaxed),
+        uvw_table_missing_channels = counters.uvw_table_missing_channels.load(Ordering::Relaxed),
         "monitor stopped"
     );
     result
@@ -339,5 +393,51 @@ config_id = "default"
         assert_eq!(params.live_queue, 64);
         assert_eq!(params.detector, "mini_eTPC", "meta.detector = experiment");
         assert_eq!(params.cobos, vec![0, 1], "meta.cobos = [[cobo]] の id");
+        assert_eq!(params.ped_table, None, "[system] ped_table 省略 = 表なし");
+    }
+
+    /// TODO/152: `[system] ped_table`(151 と同じキー)が monitor の起動パラメタに届く。
+    #[test]
+    fn params_carry_the_system_ped_table() {
+        let dir = std::env::temp_dir().join(format!("tpcdaq_152_params_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let table = dir.join("pedestal_502ns.json");
+        // config は存在だけを見る(151)。中身は run_monitor が起動時に読む。
+        std::fs::write(&table, b"{}").unwrap();
+        let toml_str = format!(
+            r#"
+[system]
+experiment = "mini_eTPC"
+output_root = "/data/tpcdaq"
+geometry = "tests/fixtures/geometry_mini_reduced.dat"
+ped_table = "{}"
+
+[[cobo]]
+id = 0
+data_sender_id = "CoBo[0]"
+
+[decoder]
+workers = 1
+
+[root_sink]
+snapshot_hz = 1.0
+event_publish_hz = 20.0
+build_timeout_ms = 1000
+
+[monitor]
+
+[controller]
+passphrase = "change-me"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
+config_id = "default"
+"#,
+            table.display()
+        );
+        let config = crate::config::parse(&toml_str).unwrap();
+        let params = MonitorParams::from_config(&config);
+
+        assert_eq!(params.ped_table, Some(table));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -322,6 +322,7 @@ impl Topology {
             detector: "mini_eTPC_p3".to_string(),
             cobos: vec![0],
             slow_sub: None,
+            ped_table: None,
         };
         let (monitor_shutdown, monitor_rx) = broadcast::channel(1);
         let (monitor_bound_tx, monitor_bound_rx) = oneshot::channel();

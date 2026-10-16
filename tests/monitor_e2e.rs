@@ -12,6 +12,9 @@
 //! ```
 //!
 //! 実 .graw があれば `TPCDAQ_REAL_GRAW` で実データ経路も回る(実 .graw はローカルのみ)。
+//!
+//! 節 3(TODO/152 の `[system] ped_table` の配線)だけは root_sink を使わない —— 表は monitor
+//! だけが読む(root_sink の PUB はフラグメントを素通しする)ので、テスト内 PUB で常に回す。
 
 #![allow(clippy::unwrap_used)]
 
@@ -25,7 +28,9 @@ use serde_bytes::ByteBuf;
 use tokio::sync::{broadcast, oneshot};
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tpcdaq::geometry::{self, ChannelRole, Geometry};
-use tpcdaq::monitor::{self, run_monitor, MonitorParams};
+use tpcdaq::monitor::{
+    self, run_monitor, BuiltEventPayload, MonitorParams, SaturationPayload, StatusPayload,
+};
 use tpcdaq::msg::{self, Batch, Fragment, Fragments, Message};
 
 /// 合成ジオメトリ(リポ内フィクスチャ)。
@@ -169,17 +174,25 @@ struct Monitor {
     handle: tokio::task::JoinHandle<Result<(), monitor::MonitorError>>,
 }
 
+fn monitor_params(sub_endpoint: &str) -> MonitorParams {
+    MonitorParams {
+        sub_endpoint: sub_endpoint.to_string(),
+        ws_listen: "127.0.0.1:0".to_string(),
+        geometry: PathBuf::from(GEOMETRY),
+        live_queue: 256,
+        detector: "mini_eTPC_e2e".to_string(),
+        cobos: vec![0],
+        slow_sub: None,
+        ped_table: None,
+    }
+}
+
 impl Monitor {
     async fn start(sub_endpoint: &str) -> Monitor {
-        let params = MonitorParams {
-            sub_endpoint: sub_endpoint.to_string(),
-            ws_listen: "127.0.0.1:0".to_string(),
-            geometry: PathBuf::from(GEOMETRY),
-            live_queue: 256,
-            detector: "mini_eTPC_e2e".to_string(),
-            cobos: vec![0],
-            slow_sub: None,
-        };
+        Monitor::start_with(monitor_params(sub_endpoint)).await
+    }
+
+    async fn start_with(params: MonitorParams) -> Monitor {
         let (shutdown, shutdown_rx) = broadcast::channel(1);
         let (bound_tx, bound_rx) = oneshot::channel();
         let handle = tokio::spawn(run_monitor(params, shutdown_rx, Some(bound_tx)));
@@ -236,6 +249,26 @@ impl Client {
         panic!("no `{expected_type}` JSON within {timeout:?}");
     }
 
+    /// 指定の msgType + id/plane を持つバイナリが来るまで読む(来なければ `None`)。
+    async fn try_binary_where(
+        &mut self,
+        msg_type: u8,
+        matches: impl Fn(&[u8]) -> bool,
+        timeout: Duration,
+    ) -> Option<Vec<u8>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        while let Some(message) = self.next(deadline - tokio::time::Instant::now()).await {
+            if let WsMessage::Binary(bytes) = message {
+                assert_eq!(&bytes[0..2], b"TP");
+                assert_eq!(bytes[3], 2);
+                if bytes[2] == msg_type && matches(&bytes) {
+                    return Some(bytes.to_vec());
+                }
+            }
+        }
+        None
+    }
+
     /// 指定の msgType + id/plane を持つバイナリが来るまで読む。
     async fn next_binary_where(
         &mut self,
@@ -243,17 +276,10 @@ impl Client {
         matches: impl Fn(&[u8]) -> bool,
         timeout: Duration,
     ) -> Vec<u8> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        while let Some(message) = self.next(deadline - tokio::time::Instant::now()).await {
-            if let WsMessage::Binary(bytes) = message {
-                assert_eq!(&bytes[0..2], b"TP");
-                assert_eq!(bytes[3], 2);
-                if bytes[2] == msg_type && matches(&bytes) {
-                    return bytes.to_vec();
-                }
-            }
+        match self.try_binary_where(msg_type, matches, timeout).await {
+            Some(bytes) => bytes,
+            None => panic!("no matching binary of type {msg_type:#04x} within {timeout:?}"),
         }
-        panic!("no matching binary of type {msg_type:#04x} within {timeout:?}");
     }
 }
 
@@ -526,4 +552,225 @@ async fn real_graw_reaches_the_ws_with_bins_matching_an_independent_recomputatio
     );
 
     monitor.stop().await;
+}
+
+// =====================================================================
+// 3. `[system] ped_table` の配線(TODO/152)—— root_sink 不要(テスト内 PUB)
+// =====================================================================
+
+/// テスト内 PUB。root_sink の monitor_pub.hpp と同じバイト構成(SPEC §2.2 のエンベロープ
+/// positional array(5) + §5.3 の map 形式ペイロード)を手で組む(tests/monitor_ws.rs と同じ)。
+struct Publisher {
+    socket: zmq::Socket,
+    endpoint: String,
+    seq: u64,
+}
+
+impl Publisher {
+    fn bind() -> Publisher {
+        let context = zmq::Context::new();
+        let socket = context.socket(zmq::PUB).unwrap();
+        socket.set_linger(0).unwrap();
+        socket.bind("tcp://127.0.0.1:*").unwrap();
+        let endpoint = socket.get_last_endpoint().unwrap().unwrap();
+        Publisher {
+            socket,
+            endpoint,
+            seq: 0,
+        }
+    }
+
+    fn send(&mut self, payload: &[u8]) {
+        let mut out = vec![0x81]; // fixmap(1)
+        out.extend_from_slice(&[0xa4, b'D', b'a', b't', b'a']); // "Data"
+        out.push(0x95); // fixarray(5)
+        for value in [101, u64::from(RUN_NUMBER), self.seq, self.seq] {
+            out.push(0xcf); // uint64
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        out.extend_from_slice(payload);
+        self.seq += 1;
+        self.socket.send(out, 0).unwrap();
+    }
+}
+
+fn status_payload() -> StatusPayload {
+    let mut saturation = std::collections::BTreeMap::new();
+    for plane in ["U", "V", "W"] {
+        saturation.insert(
+            plane.to_string(),
+            SaturationPayload {
+                saturated: 0,
+                counted: 0,
+            },
+        );
+    }
+    StatusPayload {
+        kind: "status".to_string(),
+        run: RUN_NUMBER,
+        state: "running".to_string(),
+        events_built: 1,
+        events_incomplete: 0,
+        late_fragments: 0,
+        pending_events: 0,
+        frames_per_cobo: std::collections::BTreeMap::new(),
+        bytes_written: 0,
+        saturation,
+        publish_drops: 0,
+    }
+}
+
+/// テスト毎の一時ディレクトリ(終わったら消す)。
+fn temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("tpcdaq_152_{tag}_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// `calib pedestal` の JSON と同じ形(合成)。フィクスチャの U strip1 = (aget0, raw0)、
+/// U strip2 = (aget0, raw1)、V strip1 = (aget1, raw0)。round(mean) = 120 / 251 / 333。
+const PEDESTAL_JSON: &str = r#"{
+  "meta": {"inputs": ["synthetic.graw"], "events": 1,
+           "generated_at": "2026-10-16T00:00:00+00:00", "tool_version": "test"},
+  "channels": [
+    {"asad": 0, "aget": 0, "ch": 0, "mean": 120.4, "rms": 2.0, "runs": 1, "is_fpn": false},
+    {"asad": 0, "aget": 0, "ch": 1, "mean": 250.6, "rms": 2.0, "runs": 1, "is_fpn": false},
+    {"asad": 0, "aget": 1, "ch": 0, "mean": 333.0, "rms": 2.0, "runs": 1, "is_fpn": false}
+  ]
+}"#;
+
+/// `[system] ped_table` と `[monitor] sub_endpoint` だけを差した最小の設定。
+fn config_toml(ped_table: &std::path::Path, sub_endpoint: &str) -> String {
+    format!(
+        r#"
+[system]
+experiment = "mini_eTPC_e2e"
+output_root = "/data/tpcdaq"
+geometry = "{GEOMETRY}"
+ped_table = "{}"
+
+[[cobo]]
+id = 0
+data_sender_id = "CoBo[0]"
+
+[decoder]
+workers = 1
+
+[root_sink]
+snapshot_hz = 1.0
+event_publish_hz = 20.0
+build_timeout_ms = 1000
+
+[monitor]
+sub_endpoint = "{sub_endpoint}"
+ws_listen = "127.0.0.1:0"
+live_queue = 256
+
+[controller]
+passphrase = "change-me"
+ecc_proxy = "Ecc:tcp -h 127.0.0.1 -p 46002"
+config_id = "default"
+"#,
+        ped_table.display()
+    )
+}
+
+/// 設定の `[system] ped_table` → `MonitorParams` → `run_monitor` が表を読み、ZS らしい
+/// イベントの 0x02 の欠けたセルが round(mean) になり、`status` にカウンタが出る。
+#[tokio::test]
+async fn system_ped_table_is_wired_into_the_uvw_grid_and_the_status() {
+    let dir = temp_dir("wired");
+    let table = dir.join("pedestal_502ns.json");
+    std::fs::write(&table, PEDESTAL_JSON).unwrap();
+    let mut publisher = Publisher::bind();
+
+    let config = tpcdaq::config::parse(&config_toml(&table, &publisher.endpoint)).unwrap();
+    let params = MonitorParams::from_config(&config);
+    assert_eq!(
+        params.ped_table.as_deref(),
+        Some(table.as_path()),
+        "[system] ped_table → MonitorParams"
+    );
+    let monitor = Monitor::start_with(params).await;
+    let mut client = Client::connect(&monitor).await;
+    client.next_json("meta", RECV_TIMEOUT).await;
+
+    // ZS らしい 1 フラグメント: U strip2(aget0 raw1)の bucket 300 に 1 サンプルだけ。
+    let event = BuiltEventPayload {
+        kind: "built_event".to_string(),
+        run: RUN_NUMBER,
+        event_idx: 5,
+        complete: true,
+        fragments: vec![fragment_of(5, &[(0, 1, 300, 400)])],
+    };
+    let payload = rmp_serde::to_vec_named(&event).unwrap();
+    // SUB の slow joiner に備えて 0x02 が届くまで送り直す(seq は連番 = ギャップにならない)。
+    let deadline = tokio::time::Instant::now() + RECV_TIMEOUT;
+    let u_plane = loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no 0x02 within {RECV_TIMEOUT:?}"
+        );
+        publisher.send(&payload);
+        let found = client
+            .try_binary_where(
+                0x02,
+                |b| b[13] == 0 && u32_at(b, 9) == 5,
+                Duration::from_millis(300),
+            )
+            .await;
+        if let Some(bytes) = found {
+            break bytes;
+        }
+    };
+    let grid_at =
+        |strip: usize, bucket: usize| u16_at(&u_plane, 18 + ((strip - 1) * 512 + bucket) * 2);
+    assert_eq!(grid_at(1, 0), 120, "U strip1: サンプル無し → round(120.4)");
+    assert_eq!(grid_at(2, 0), 251, "U strip2 の欠けたセル → round(250.6)");
+    assert_eq!(grid_at(2, 300), 400, "在るセルは adc のまま");
+    assert_eq!(grid_at(3, 0), 0, "表に無い U strip3(サンプルも無い)は 0");
+
+    publisher.send(&rmp_serde::to_vec_named(&status_payload()).unwrap());
+    let status = client.next_json("status", RECV_TIMEOUT).await;
+    assert!(
+        status["uvwZsFragmentsRestored"].as_u64().unwrap_or(0) >= 1,
+        "{status}"
+    );
+    assert_eq!(status["uvwZsFragmentsNoTable"], 0);
+    assert_eq!(status["uvwTableMissingChannels"], 0);
+
+    monitor.stop().await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 読めない表・ch の無い表 = 起動エラー(151 の root_sink `--pedestal-table` と同じ流儀)。
+/// 黙って表なしに後退すると、ZS データの 0x02 と再構成が壊れたまま走る。
+#[tokio::test]
+async fn an_unusable_ped_table_stops_the_monitor_at_startup() {
+    let dir = temp_dir("unusable");
+    let broken = dir.join("broken.json");
+    std::fs::write(&broken, b"{ not json").unwrap();
+    let empty = dir.join("empty.json");
+    std::fs::write(
+        &empty,
+        br#"{"meta": {"inputs": [], "events": 0, "generated_at": "x", "tool_version": "t"},
+             "channels": []}"#,
+    )
+    .unwrap();
+
+    for path in [&broken, &empty] {
+        let mut params = monitor_params("tcp://127.0.0.1:1");
+        params.ped_table = Some(path.clone());
+        let (_shutdown, shutdown_rx) = broadcast::channel(1);
+        let result = tokio::time::timeout(RECV_TIMEOUT, run_monitor(params, shutdown_rx, None))
+            .await
+            .expect("an unusable table must fail the startup, not serve");
+        match (path == &broken, result) {
+            (true, Err(monitor::MonitorError::PedTable { path: p, .. })) => assert_eq!(&p, path),
+            (false, Err(monitor::MonitorError::PedTableEmpty(p))) => assert_eq!(&p, path),
+            (_, other) => panic!("{}: unexpected {other:?}", path.display()),
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
