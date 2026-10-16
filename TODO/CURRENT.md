@@ -60,6 +60,7 @@
 - **run 174 = 週末 run 1**(11:26 開始、B = `base_1750.json`、`[system] ped_table` 設定済み、ZS なし、comment「gas 100 ml/s」)。
   ユーザー: **ガスの流量が変わったら新しい run**(12:00 に 100 → 50 ml/s の予定)。合図が来たら `~/test/scan/stop_run.sh` → 同じ形で
   「weekend run 2: gas 100 → 50 ml/s」を開始(`start_W1.sh` の comment を変えたもの)。流量が変わるたびに同じ手順。HV / ガスには触らない。
+  **12:08 実施**: run 174 停止(normal、eos_closed、11:26–12:08 = 42 min)→ **run 175 = 週末 run 2**(B、`elinp__0eb4f039`、comment「gas 100 -> 50 ml/s」、`start_W2.sh`)。次の流量変更も同じ手順(`start_W3.sh` を作る)。
 - **157 完了 → archive**: SPEC **v1.49**(ZS 表モード・0x02 復元・ped_table・decoder カウンタ・§13-9)、WARSAW_PLAN §7 の ZS 行、RUNBOOK のカウンタ名訂正。
 - **159 起票**(Opus): ZS カウンタの run ごとの経路 + PEventTPC 電荷和 + UI 基線。
 - Fable キュー: 空(134 / 135–136 / 133 / v1.46 / 157 まで消化済み)。
