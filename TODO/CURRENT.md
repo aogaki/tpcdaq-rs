@@ -75,6 +75,7 @@
 | ~~155~~ | zs_params.sh + RUNBOOK「ZS 運用」 | 済 → archive(72f0703) | — |
 | ~~156~~ | 検証 α run → S18 | 済 → archive(run 170–173: ZS は品質不変で 1/9〜1/12、FPN は抑制) | — |
 | ~~157~~ | SPEC v1.49 + WARSAW_PLAN | 済 → archive(2026-10-16 Fable) | — |
+| [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |

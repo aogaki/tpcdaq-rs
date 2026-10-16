@@ -82,11 +82,25 @@ archive/069(Phase 2〜4)、archive/073、archive/079(§1.5、Phase 0)、archive/
 | D. RS232 の受動傍受 | MFC1 ↔ PC の TxD/RxD を両方向とも聞くだけ(受信器 2 つ)。FlowDDE の問い合わせと応答を対にして値を復元 | USB-RS232 ×2 + 傍受ケーブル、ProPar の「傍受モード」実装 | バスには一切影響しない。実装がハックで silent failure の温床 | 最後の手段。推奨しない |
 
 ### 残り(現地)
-- [ ] **インターロック線の相手と使用ピン**(BPC の D-sub からどこへ行き、アナログ出力か・リレーか・電源込みか)を担当者に聞く → A の可否。あわせて「ガス異常」の判定(圧力の閾値? 誰が判定?)を記録(SPEC §11 の安全境界の一次資料)
+- [ ] (A をメーターで行うので着手には不要。記録のため)**インターロック線の相手と使用ピン**(BPC の D-sub からどこへ行き、アナログ出力か・リレーか・電源込みか)を担当者に聞く → A の可否。あわせて「ガス異常」の判定(圧力の閾値? 誰が判定?)を記録(SPEC §11 の安全境界の一次資料)
 - [ ] **PT104 / Inlet の D-sub(蓋付き)を開けて確認** — マニュアルで裏取り済み(2026-10-15): 9.17.101 §2.6/§2.7/§2.8.2「9-pin D-sub は側面の標準装備。フィールドバス(FLOW-BUS)接続と**同時に**、側面の D-sub で RS-232 通信ができる」、9.17.027 p.9「機器側は **male**(ピン側)D-sub、RX/TX は pin 6 / pin 1」。ユーザーが見た「ピンの無い D-sub 形の蓋」は未使用の male D-sub に被せた**保護キャップ**で、外せば中にピンがある(嵌め込み式、固ければまっすぐ引く)。→ **A はメーター(node 10 か 12)の D-sub で行い、BPC のインターロック線には触らない**。注意: 機器は FLOW-BUS(RJ45)から給電されているので、D-sub 側に **PiPS(プラグイン電源)付きの T-part を使わない**(二重給電は基板を壊す — 9.17.101 §2.7)。使うのは RS-232 専用ケーブル(7.03.367 相当、電源ピン非接続)+ USB-RS232(9.09.122 相当)。D-sub の通信設定が RS485 側なら無応答 → 多機能スイッチで RS232 へ(§3.6.2)
-- [ ] Windows 機のネットワーク(ELITPC 192.168.144.220 に届くか)→ B の可否
-- [ ] 残り 4 ch(ノード 13–24)の正体、COM6(Modbus)/ COM7(LabVIEW ポンプ制御)の相手
+- [x] Windows 機のネットワーク → 同じネットワーク(2026-10-16)。B は保険
+- [x] 残り 4 ch = Bronkhorst の制御・監視用、同じ FLOW-BUS(2026-10-16、用途は scan 時に UserTag で)。COM6 = 露点計(Modbus RTU)、COM7 = LabVIEW の他のスローコントロール
 - [ ] 入口が決まったら node scan のゴールデンを `reference/Bronkhorst/scan_YYYY-MM-DD.txt` に
+
+### 2026-10-16 ユーザー + ガス担当の回答 → **案 A で確定、着手可**
+- **RS232 ポート(メーターの D-sub)は 1 口使える。ガス担当も同意。** → 案 A(第 2 local host)。B は不要、C は買わない。
+- Windows 機と ELITPC は同じネットワーク、運用時も近接 → B は保険として残す(配線が駄目になったときだけ)。
+- 残り 4 ch(ノード 13–24)= **Bronkhorst の制御・監視用機器で、同じコントローラ(FLOW-BUS)に繋がっている** → node scan で全部見える。読む対象に入れる(ガス担当に用途を聞いて UserTag と突き合わせ)。
+- COM6 = **露点計(Michell Easidew、Modbus RTU)**、COM7 = **LabVIEW の他のスローコントロール**。どちらも Bronkhorst ではないので今回の対象外。露点は将来 Modbus RTU の device 型を足せば読める(079 §6 の Pfeiffer と同じ扱い: 起票は要るとき)。
+
+### 着手手順 → **[160](160_gas_flowbus_second_host.md) に独立させた(2026-10-16)**。以下は起票時の写し。
+### 着手手順(現地、ユーザー作業。手順の本体は docs/NEW_DAQ_SETUP_ja.md §9「現地 Phase 0 = node scan」)
+1. **用意**: USB-RS232 変換(FTDI、9.09.122 相当)+ **Bronkhorst の RS-232 専用ケーブル(7.03.367 相当)**。機器側 D-sub は male で、**RX/TX は pin 6 / pin 1**(9.17.027 §2.2 — PC の 2/3 とは違うので市販のストレート・クロスは使えない)。PiPS 付き T-part は使わない(FLOW-BUS 給電との二重給電で基板破損 — 9.17.101 §2.7)。
+2. **HV OFF・run 無しのときに**メーター(PT104 node 10 か Inlet node 12)のキャップを外して挿す。FlowDDE の `Errors` と FlowView の値が変わらないことを目で確認(2 台目のホストが入る瞬間)。
+3. ELITPC で `nodes = "scan"` の TOML で `target/release/slowctl --config x.toml`(`RUST_LOG=info`)→ IDENT レコードでノード番号・機種・serial・単位を全 8 台分取る → `reference/Bronkhorst/scan_YYYY-MM-DD.txt` に保存(gitignore)。無応答なら D-sub が RS485 設定 → 多機能スイッチで RS232 へ(9.17.101 §3.6.2)。
+4. 確定したら本番 TOML に `nodes = [..]`(8 台)と `expect_serial`(挿した機器の serial)、alarms(下)。`daq_up.sh` で slowctl を上げ、**繋ぐ前後でトリガレートを比較**(NEW_DAQ_SETUP §9: 不良 USB ケーブルで偽トリガが出た前例)。
+5. 結果(scan の表、トリガレート前後、FlowDDE Errors の変化)をこの md に書いて B-1 を ✔。
 
 ### ELITPC 側の設定案(A または C のとき。B は別 device 型)
 ```toml
