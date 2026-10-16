@@ -67,7 +67,7 @@
 | ~~155~~ | zs_params.sh + RUNBOOK「ZS 運用」 | 済 → archive(72f0703) | — |
 | [156](156_zs_validation_runs.md) | 検証 α run(FPN あり / なし)→ S18 | READY(主対話) | 反映後 |
 | [157](157_spec_v149_zs.md) | SPEC v1.49 + WARSAW_PLAN | READY(Fable) | 156 の後 |
-| [158](158_decoder_frametype_counters.md) | decoder: frameType カウンタ + compact サイズ検査 | READY(Sonnet) | 第 1 波 |
+| ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
 
