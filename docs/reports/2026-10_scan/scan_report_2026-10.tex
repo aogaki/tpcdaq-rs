@@ -26,7 +26,7 @@
 \title{mini eTPC パラメータスキャン報告\\[2pt]
 \large ELI-NP、2026年10月14--16日(ELITPC DAQ、α線源)}
 \author{Soichiro Aogaki(整理: Claude)}
-\date{2026年10月16日(v2 — v1 のレビュー反映。対象は run 78--173)}
+\date{2026年10月16日(v3 — レビュー 2 回分を反映。対象は run 78--173)}
 
 \begin{document}
 \maketitle
@@ -95,7 +95,7 @@ S2 & 10-14 & peakingTime 4 点 & 83--86 & 70 ns は飛跡を失う、1014 ns は
 S3 & 10-14 & gain 4+1 点 & 87--90, 112 & E 規則で 502 ns × 240 fC、1 pC は不可 \\
 S4 & 10-14 & パルサー応答核 8 点 & 102--110 & 核は無振動、α の揺れは電子回路由来でない \\
 S5 & 10-14 & pedestal 2 点 & 99, 100 & ch ごとの表(232 / 502 ns) \\
-S6 & 10-14 & ドリフト端 12.5 MHz & 111, 113 & α は陰極に届かない → 宇宙線が要る \\
+S6 & 10-14 & ドリフト端 12.5 MHz & 111, 113 & 今の線源位置では z が伸びない → 線源をチャンバー内に戻してから \\
 S7 & 10-14/15 & 一晩 α run(E) & 114 & 10 h 安定、166k events \\
 S8 & 10-14 & デコンボリューション & 84--88 & 総電荷は peaking に依らず和で取れる \\
 S9 & 10-15 & readout / hit 閾値 / ZS & 115--121 & 現用 partial は全 ch を読み full の 2 倍 \\
@@ -121,9 +121,9 @@ $\mathrm{first} = 508 - \mathrm{delay}/4$(delay は 10 ns 単位)。delay 2000 �
 
 \begin{figure}[h]\centering
 \begin{tikzpicture}
-\begin{axis}[width=0.55\textwidth,height=5.2cm,xlabel={triggerDelay [×10 ns]},ylabel={first hit cell(中央値)},grid=major,legend pos=north east,legend style={font=\scriptsize}]
+\begin{axis}[width=0.55\textwidth,height=5.2cm,xlabel={triggerDelay [$\times$10 ns]},ylabel={first hit cell (median)},grid=major,legend pos=north east,legend style={font=\scriptsize}]
 \addplot[only marks,mark=*,blue] coordinates {(1000,258)(1250,196)(1500,134)(1750,71)(2000,12)};
-\addlegendentry{実測}
+\addlegendentry{measured}
 \addplot[red,domain=1000:2000,samples=2] {508 - x/4};
 \addlegendentry{$508 - \mathrm{delay}/4$}
 \end{axis}
@@ -165,7 +165,7 @@ peaking & run & 幅 [cell] & ヒット ch & 総電荷 & 飽和 & ok & 長さ / I
 \end{table}
 
 総電荷が 1 : 2.3 : 5.2 と peaking に比例して増えるのは、当初「短い整形は信号の一部しか積分していない」と読んだが、これは\textbf{誤り}で面積効果である(S8)。
-AsAd パルサー(全 ch に $-300$ / $-100$ mV)で測った応答核(図~\ref{fig:kernel})は 4 AGET で同一・無振動(1.8 µs 成分 ≤ 0.03 \%)で、ピーク利得比は 232 : 502 : 1014 = 1 : 1.05 : 1.17 である。
+\textbf{パルサー応答核}とは、電子回路(前置増幅器 + 整形器 + SCA)のインパルス応答のことである。AsAd には内蔵パルサーがあり、AGET の全 ch のテスト入力に同じ既知の電荷(階段電圧 $-300$ / $-100$ mV × 試験容量)を同時に注入できる。入力は検出器信号より十分に短い(事実上 δ 関数)ので、各 ch の出力波形をピーク時刻で揃えて平均し、ピークで規格化したものが核(kernel)になる(run 1 本で 68 ch × 4 AGET × 600 events ≈ 15 万波形の平均、図~\ref{fig:kernel})。検出器の波形は「電荷到着の時間分布 ⊗ 核」なので、核が分かれば逆畳み込みで電荷到着の時間分布に戻せる(S8)。測った核は 4 AGET で同一・無振動(1.8 µs 成分 ≤ 0.03 \%)で、ピーク利得比は 232 : 502 : 1014 = 1 : 1.05 : 1.17 である。
 この核で α 波形を逆畳み込みすると(\texttt{deconv.C}、FFTW、λ$_\mathrm{rel}$ = 10$^{-3}$)、電荷比は 1 : 1.05 : 1.21 に戻り、パルサーの利得比と一致する。
 すなわち\textbf{サンプル和の総電荷はどの peaking でも入力電荷を取り切っている}。逆畳み込み後の FWHM は 13.7 / 14.6 / 18.7 cell(0.55--0.75 µs)で検出器側の固有幅に収束する(図~\ref{fig:deconv})。
 ノイズ増幅(S/N × 0.4--0.5)があるので運用には採らず、オフラインの選択肢(λ 10$^{-2}$)として残す。
@@ -215,13 +215,13 @@ peaking × gain & run & ヒット ch & 総電荷 & 飽和 & クリップ 先/末
 
 \begin{figure}[h]\centering
 \begin{tikzpicture}
-\begin{axis}[width=0.6\textwidth,height=6cm,xlabel={GEM ΔV の合計 [V]},ylabel={$\ln(Q/Q_0)$},grid=major,legend pos=north west,legend style={font=\scriptsize},xmin=-33,xmax=3]
+\begin{axis}[width=0.6\textwidth,height=6cm,xlabel={total GEM $\Delta V$ [V]},ylabel={$\ln(Q/Q_0)$},grid=major,legend pos=north west,legend style={font=\scriptsize},xmin=-33,xmax=3]
 \addplot[only marks,mark=*,blue] coordinates {(0,0)(-10,-0.151)(-20,-0.300)(-30,-0.429)};
-\addlegendentry{GEM1 のみ / 3 枚同時(d)}
+\addlegendentry{GEM1 only / all three (d)}
 \addplot[only marks,mark=square*,red] coordinates {(-10,-0.130)};
-\addlegendentry{GEM2 のみ(e)}
+\addlegendentry{GEM2 only (e)}
 \addplot[only marks,mark=triangle*,green!60!black,mark size=3pt] coordinates {(-10,-0.145)};
-\addlegendentry{GEM3 のみ(f)}
+\addlegendentry{GEM3 only (f)}
 \addplot[black,dashed,domain=-32:2,samples=2] {0.0141*x};
 \addlegendentry{$a = 0.0141$ /V}
 \end{axis}
@@ -377,8 +377,8 @@ run & 設定 & kB/event & ヒット ch & 総電荷 & ok & 長さ & $\sigma_z$ & 
 
 \begin{figure}[h]\centering
 \begin{tikzpicture}
-\begin{axis}[ybar,width=0.9\textwidth,height=5.5cm,ylabel={kB/event},symbolic x coords={partial always,hit g4,full,B+ZS FPN残し,hit+ZS FPN残し,B+ZS,hit g4+ZS},xtick=data,x tick label style={font=\scriptsize,rotate=20,anchor=east},nodes near coords,nodes near coords style={font=\scriptsize},ymin=0,ymax=650,bar width=14pt,ymajorgrids=true]
-\addplot[fill=blue!40] coordinates {(partial always,557)(hit g4,241)(full,279)(B+ZS FPN残し,63)(hit+ZS FPN残し,56)(B+ZS,31)(hit g4+ZS,23)};
+\begin{axis}[ybar,width=0.9\textwidth,height=5.5cm,ylabel={kB/event},symbolic x coords={partial always,hit g4,full,B+ZS keep FPN,hit+ZS keep FPN,B+ZS,hit g4+ZS},xtick=data,x tick label style={font=\scriptsize,rotate=20,anchor=east},nodes near coords,nodes near coords style={font=\scriptsize},ymin=0,ymax=650,bar width=14pt,ymajorgrids=true]
+\addplot[fill=blue!40] coordinates {(partial always,557)(hit g4,241)(full,279)(B+ZS keep FPN,63)(hit+ZS keep FPN,56)(B+ZS,31)(hit g4+ZS,23)};
 \end{axis}
 \end{tikzpicture}
 \caption{α 事象 1 イベントあたりのデータ量(S9、S15、S18)。}
@@ -414,11 +414,10 @@ ELITPC(Warsaw、zCoBo 2 枚 × 2 AsAd)の見積もり: 1 枚 544 ch → 読み�
 
 \section{未解決と次の課題}\label{sec:open}
 \begin{itemize}
-\item \textbf{ドリフト端(S6)}: 12.5 MHz・窓 41 µs でも α 飛跡はトリガから 2--4 µs に収まり、陰極(20 cm)に届かない(図~\ref{fig:drift})。$v_\mathrm{drift} = L / t_\mathrm{max}$ の絶対値は宇宙線か陰極側線源で測る。cell 340 付近の山は窓位置に依らず物理ではない(未解明)。
+\item \textbf{ドリフト端(S6)}: 12.5 MHz・窓 41 µs でも α 飛跡はトリガから 2--4 µs に収まる(図~\ref{fig:drift})。現在の線源はチャンバーの外(ガス配管に連結した位置)にあり、立体角の都合で飛跡の z 方向の広がりはほぼ変わらないので、今の配置では陰極(20 cm)側まで届く飛跡は得られない。$v_\mathrm{drift} = L / t_\mathrm{max}$ の絶対値は、線源を再びチャンバー内に入れたときに測る。cell 340 付近の山は窓位置に依らず物理ではない(未解明)。
 \item \textbf{揺れ}: α 波形の周期 1.6--1.8 µs の成分(信号 ch のみ、電荷に比例)。AGET の応答核には無い。検出器側(GEM / 誘導)の可能性。
 \item \textbf{複数飛跡}: 現在の再構成は 1 イベント = 直線 1 本。502 ns で RMS が 1014 ns より大きい(外れ値の出方の違い)の素材でもある。
 \item \textbf{ZS の run ごとのカウンタ}(TODO/159): root\_sink / monitor の ZS カウンタを run\_stop に出す。PEventTPC 側の電荷和の照合も未実施。
-\item \textbf{Warsaw(4 AsAd)}: 取得再開の判定(SPEC v1.48)、ZS の frameType、FW 読み出し時間の実測。
 \end{itemize}
 
 \begin{figure}[h]\centering
