@@ -64,7 +64,7 @@
 | [152](152_monitor_zs_restore.md) | monitor: 0x02 の ZS 復元(ライブ再構成・UI 基線) | READY(Opus、151 の後) | 第 2 波 |
 | [153](153_uvw_closure_pedjson.md) | uvw_closure.C に pedJson(任意) | READY(Sonnet) | 任意 |
 | [154](154_zs_restore_bridge.md) | zs_restore.C(macros 無改造の橋)+ `--zs-fill` | READY(Sonnet) | 第 1 波 |
-| [155](155_zs_params_procedure.md) | zs_params.sh + RUNBOOK「ZS 運用」 | READY(Sonnet) | 第 1 波 |
+| ~~155~~ | zs_params.sh + RUNBOOK「ZS 運用」 | 済 → archive(72f0703) | — |
 | [156](156_zs_validation_runs.md) | 検証 α run(FPN あり / なし)→ S18 | READY(主対話) | 反映後 |
 | [157](157_spec_v149_zs.md) | SPEC v1.49 + WARSAW_PLAN | READY(Fable) | 156 の後 |
 | [158](158_decoder_frametype_counters.md) | decoder: frameType カウンタ + compact サイズ検査 | READY(Sonnet) | 第 1 波 |
