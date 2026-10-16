@@ -103,3 +103,7 @@
 3. 設定後、GECO を閉じる(閉じないとポートの取り合い)。残った `/dev/shm/CAENV_LCK_0_0` は消してよい。
 4. `daq_up.sh`。次の run_start.slow に新しい値が記録される。電圧値を web から変える経路は無い(SPEC §11)。
 5. **LV(AsAd)を入れ直した直後の最初の run/start は configure(AGET レジスタの読み戻しが 0)で失敗することがある** — そのまま run/start をもう一度(archive/149、2026-10-15)。LV が OFF のままだと prepare が「AsAd が電源から切り離されている」で止まる(正常な拒否)。
+
+### 7.1 の注意(2026-10-16 追記)
+- 非対話 ssh / `setsid nohup` のスクリプトでは `~/.cargo/bin` が PATH に無い → `export PATH=$HOME/.cargo/bin:$PATH` を先頭に。無いと `cargo: command not found` でも先へ進み、古いバイナリのまま再起動してしまう(2026-10-16 に一度やった)。
+- ELITPC に node は無い。UI は Mac で `cd ui && npx ng build` → `scp -r dist/ui/browser/. daq@…:/opt/tpcdaq/ui/`。`/opt/tpcdaq/ui` を先に消さない(cp の失敗で 404 になる)。

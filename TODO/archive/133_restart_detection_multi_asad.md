@@ -63,7 +63,11 @@ SPEC v1.46 §1.3 / §2.3 / §6.3 / §9.2、archive/110(実機 run 72–76)。
 - テスト名(§4 の 6 項目 + 追補): `test_a_four_asad_restart_in_asad_major_order_keeps_old_and_new_epochs_apart`、`test_a_restart_is_detected_even_when_every_old_event_is_incomplete`、`test_single_source_oracles_of_run73_and_run76_are_unchanged`、`test_a_dead_asad_holds_the_run_epoch_and_new_events_time_out_incomplete`、`test_new_epoch_ids_already_emitted_by_the_old_epoch_are_dropped_with_four_asads`、decoder `frames_before_restart_is_per_source_and_a_restart_counts_once_every_source_restarted`、logbook `frames_before_restart_reads_both_the_old_number_and_the_per_source_map`、`test_a_fresh_asad_without_a_stale_head_follows_the_new_epoch_by_time`、`test_the_epoch_follow_band_is_inclusive_by_the_restart_gap`、`test_a_fresh_asad_that_comes_first_is_reattached_when_another_asad_restarts`、`test_the_reattach_threshold_is_exclusive`、`test_stale_frames_of_an_already_restarted_asad_are_not_reattached`、`test_a_fragment_is_not_reattached_onto_an_already_emitted_idx`、`test_a_dead_asad_with_a_longer_stale_head_is_not_reattached`、`test_the_reattach_midpoint_is_exclusive`。
 - §2(decoder の全ソース合算)は辞書化で解消。
 
-## 実機反映(未)
+## 実機反映(2026-10-16 07:50–07:58、ユーザー了解「やってください」)
+- 1 回目(07:50): 非対話シェルで `cargo` / `npx` が PATH に無く Rust と UI は未ビルド、root_sink だけ新版 → daq_down/up → 再現 A/B/C(repro110.sh): **run 143 `events_complete=184 events_incomplete=0 late_fragments=0 restarts=1 events_before_restart=19 restart_duplicates=19`**、run 144(通常の stop→start)`restarts=0`。root_sink の新版は 1 AsAd で 110 と同じ形で動く。UI は `rm` 後に cp が失敗して 404 → Mac で `npx ng build` して scp で復旧(ELITPC に node 無し)。
+- 2 回目(07:55、`PATH=$HOME/.cargo/bin:$PATH`): decoder / controller を再ビルド → daq_down/up → 再現: **run 146 `events_complete=183 events_incomplete=0 late_fragments=0 restarts=1 events_before_restart=10 restart_duplicates=0`、`run_stop.counters` = `acquisition_restarts 1, frames_before_restart {"0": 10}`(辞書、SPEC v1.48 §9.2)**、run 147 `restarts=0`、`frames_before_restart {}`。UI / status とも 200。root_sink の events_before_restart(10)と decoder の frames_before_restart["0"](10)が一致(1 ソース)。
+- ELITPC = main `14d58ce` 相当(Rust、root_sink、UI)。4 AsAd の経路は合成テストのみ — Warsaw で実機確認(現地)。
+
 ELITPC への反映(RUNBOOK §7.1: bundle → build → root_sink make → daq_down/up)と 110 と同じ再開の再現(stop せずにスタックを落として run/start、1 AsAd なので close 行が 110 と同じ形になること)は、**一晩 run(134)の後、ユーザー了解を得てから**。Warsaw(4 AsAd)での実機確認は現地。
 
 ## 実行できなかった操作
