@@ -1,0 +1,405 @@
+% mini eTPC パラメータスキャン報告(2026-10-14〜16、ELI-NP)
+% build: lualatex scan_report_2026-10.tex (×2)
+\documentclass[a4paper,11pt]{ltjsarticle}
+\usepackage[top=22mm,bottom=22mm,left=20mm,right=20mm]{geometry}
+\usepackage{luatexja-fontspec}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{siunitx}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{xcolor}
+\usepackage{placeins}
+\usepackage{url}
+\urlstyle{tt}
+\usepackage[colorlinks=true,linkcolor=blue!60!black,urlcolor=blue!60!black]{hyperref}
+\captionsetup{font=small,labelfont=bf}
+\sisetup{detect-all,range-phrase=--,range-units=single}
+\newcommand{\run}[1]{run\,#1}
+\newcommand{\kB}{\si{\kilo\byte}}
+\setlength{\tabcolsep}{4pt}
+\renewcommand{\arraystretch}{1.1}
+
+\title{mini eTPC パラメータスキャン報告\\[2pt]
+\large ELI-NP、2026年10月14--16日(ELITPC DAQ、α線源)}
+\author{Soichiro Aogaki(整理: Claude)}
+\date{2026年10月16日(v1、週末 run 174/175 の前まで)}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+2026年10月14日から16日にかけて、ELI-NP の mini eTPC(GET 電子回路、zCoBo 1 枚、1 AsAd = 272 ch)で
+電子回路・高電圧・読み出し方式のパラメータスキャン 18 本(run 78--173、約 100 run)を行った。
+結論は次の 5 点である。
+(1) \textbf{運用点 B} = GEM 240 V × 3、peaking 502 ns × gain 120 fC、readout full、25 MHz、triggerDelay 1750 を本番運用点として確定した(9.6 時間の一晩 run で指標が安定)。
+(2) 総電荷はどの peaking でもサンプル和で取り切れており、peaking で変わるのはピーク高さと時間幅だけである(デコンボリューションで実証)。
+(3) ゲインは $\ln G = \sum_i a_i \Delta V_i$、$a \approx 0.014\pm0.0015$ /V(箔ごとの差は誤差内、加法性成立)で、GEM 合計 $-30$ V まで電子回路で補える。
+(4) 1 ヒットの精度は $\sigma_z \approx 0.20$ mm(= 1 cell、HV・ドリフト電場に依らず mm で一定)、2D 重心 $\sigma \approx 0.30$ mm/view(232--502 ns)。
+(5) レート上限はネットワークでなく zCoBo FW の読み出し時間(272 ch で 2.94 ms ≈ 340 Hz、読み出し中のトリガは失われる)で決まる。ゼロサプレッション(ch ごと ped+5σ)は品質を落とさずデータを 1/9〜1/12 に縮め、\textbf{ビーム run の既定候補 = hit register partial + ZS(23 kB/event)}とした。
+\end{abstract}
+
+\tableofcontents
+
+\section{条件と方法}
+
+\subsection{装置と共通条件}
+\begin{itemize}
+\item 検出器: mini eTPC(ELI-NP)。ドリフト長 20 cm、三重 GEM、U/V/W ストリップ読み出し。CO$_2$ 91 mbar。
+\item 線源: α 線源(入射壁の外、$x = -370$ mm)。外部トリガ ≈ 4.6 Hz。
+\item 電子回路: GET(AGET × 4 = 272 ch、うち FPN 16 ch)、zCoBo 1 枚(FW 2018-10-31)、25 MHz サンプリング(1 cell = 40 ns)、512 cell。
+\item HV(DT1415ET 直列 8 ch、200 MΩ 抵抗鎖): ch0 TR1(誘導)350 V、ch1/3/5 GEM1--3(GEM1 = 読み出し側)、ch2/4 TR 350 V、ch6/7 DRIFT 600 V × 2。
+  \textbf{S1--S9 は GEM 250 × 3、2026-10-15 12:50 以降(運用点 B)は 240 × 3。}
+\item DAQ: tpcdaq-rs(Rust)+ root\_sink(C++)、ELITPC ホスト。パラメータは JSON(テンプレート + knobs + exceptions)で管理し、各 run の設定と HV は logbook に自動記録。
+\item 1 点 = 1,500 events ≈ 5.5 分(断りがなければ)。データは \texttt{/data/tpcdaq/run00NN/}、指標 JSON は \texttt{\textasciitilde/test/scan/metrics/}。
+\end{itemize}
+
+\subsection{指標の定義}
+指標は \texttt{tools/scan/run\_metrics.C}(TODO/136)で run ごとに計算した。
+\begin{itemize}
+\item ペデスタル: cells 1--20 の平均(ZS データでは ch ごとの表)。FPN の共通モードを減算。ヒット閾値 35 ADC。
+\item \textbf{ヒット ch}: 閾値を超えた ch 数の中央値。\textbf{総電荷}: イベント内の全サンプルの和の中央値。
+\item \textbf{飽和}: 4095 ADC の ch を含むイベントの割合。\textbf{クリップ}: 帯が窓の先頭・末尾に掛かる割合。
+\item \textbf{ok / 長さ / dEdx}: ユーザーの解析マクロ(\texttt{analyzeUVW.C} + \texttt{makeTracks.C})で直線 1 本を当てはめた結果。ok = 当てはめ成功率、長さ = 飛跡長の中央値 [mm]、dEdx = 単位長さあたり電荷の中央値 / IQR。
+\item $\sigma_z$: 直線に対するヒット z 残差の robust σ(1.4826 × MAD、\texttt{hit\_residuals.C})。$\sigma_{2D}$: U+V+W 閉合残差の robust σ / $\sqrt{3}$(\texttt{uvw\_closure.C})。
+\end{itemize}
+
+\subsection{スキャン一覧}
+\begin{table}[h]\centering\small
+\caption{スキャン索引(S 番号は台帳 \texttt{docs/SCANS\_ja.md} と同じ)}
+\begin{tabular}{llllp{72mm}}
+\toprule
+\# & 日付 & スキャン & run & 結論(1 行) \\
+\midrule
+S1 & 10-14 & triggerDelay 5 点 & 78--82 & 帯位置は $508 - \mathrm{delay}/4$ で線形、現用を 1750 に \\
+S2 & 10-14 & peakingTime 4 点 & 83--86 & 70 ns は飛跡を失う、1014 ns は 1/3 飽和 \\
+S3 & 10-14 & gain 4+1 点 & 87--90, 112 & E 規則で 502 ns × 240 fC、1 pC は不可 \\
+S4 & 10-14 & パルサー応答核 8 点 & 102--110 & 核は無振動、α の揺れは電子回路由来でない \\
+S5 & 10-14 & pedestal 2 点 & 99, 100 & ch ごとの表(232 / 502 ns) \\
+S6 & 10-14 & ドリフト端 12.5 MHz & 111, 113 & α は陰極に届かない → 宇宙線が要る \\
+S7 & 10-14/15 & 一晩 α run(E) & 114 & 10 h 安定、166k events \\
+S8 & 10-14 & デコンボリューション & 84--88 & 総電荷は peaking に依らず和で取れる \\
+S9 & 10-15 & readout / hit 閾値 / ZS & 115--121 & 現用 partial は全 ch を読み full の 2 倍 \\
+S10 & 10-15 & GEM 電圧の余裕 & 122--129 & $\ln G \approx 0.014$ /V × ΔV、$-30$ V まで無傷 \\
+S11 & 10-15 & ヒット z 残差 & (解析) & $\sigma_z \approx 0.2$ mm = 1 cell \\
+S12 & 10-15 & ドリフト電圧 3 点 & 130--132 & $v \propto E$、$\sigma_z$ は mm で一定 \\
+S13 & 10-15 & ZS ch ごと閾値 & 133 & 31.8 kB/event(1/8.8)、macros は要対応 \\
+S14 & 10-15 & U/V/W 閉合残差 & (解析) & $\sigma_{2D} = 0.30$ mm/view \\
+S15 & 10-15 & hit register 閾値 6 点 & 135--140 & 閾値は効くが full 比で最大 14 \% 減 \\
+S16 & 10-15/16 & 一晩 α run(B) & 141 & 9.6 h 安定、B を本番運用点に \\
+S17 & 10-16 & 最大レート 2 & 148--169 & 上限 = FW 読み出し 2.94 ms \\
+S18 & 10-16 & ZS 検証 & 170--173 & ZS は品質不変で 1/9〜1/12、FPN は抑制 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{電子回路のパラメータ}
+
+\subsection{triggerDelay(S1)}
+25 MHz、232 ns、120 fC、partial。帯の先頭セル(first hit 中央値)は delay に対して厳密に線形で、
+$\mathrm{first} = 508 - \mathrm{delay}/4$(delay は 10 ns 単位)。delay 2000 では 15 \% のイベントで先頭が切れ、ok が 0.86 に落ちる。
+現用を 1500 から \textbf{1750}(トリガの約 2.8 µs 前に帯の先頭)に変えた。規則: $\mathrm{delay}\,[10\,\mathrm{ns}] = (\text{窓}[\mathrm{ns}] - 2800 - 160)/10$(25 MHz: 1750、12.5 MHz: 3800)。
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}
+\begin{axis}[width=0.55\textwidth,height=5.2cm,xlabel={triggerDelay [×10 ns]},ylabel={first hit cell(中央値)},grid=major,legend pos=north east,legend style={font=\scriptsize}]
+\addplot[only marks,mark=*,blue] coordinates {(1000,258)(1250,196)(1500,134)(1750,71)(2000,12)};
+\addlegendentry{実測}
+\addplot[red,domain=1000:2000,samples=2] {508 - x/4};
+\addlegendentry{$508 - \mathrm{delay}/4$}
+\end{axis}
+\end{tikzpicture}
+\caption{S1: 帯の先頭セルと triggerDelay(run 78--82)。}
+\end{figure}
+
+\begin{table}[h]\centering\small
+\caption{S1 triggerDelay(run 78--82)}
+\begin{tabular}{rrrrrrrr}
+\toprule
+delay & run & first(p10--p90) & last(p90) & 先頭クリップ & ヒット ch & ok & 長さ [mm] \\
+\midrule
+1000 & 78 & 258 (243--264) & 282 (325) & 0 & 121 & 0.997 & 84.4 \\
+1250 & 79 & 196 (182--201) & 220 (263) & 0 & 121 & 0.998 & 84.4 \\
+1500 & 80 & 134 (119--139) & 157 (198) & 0 & 119 & 0.993 & 83.9 \\
+1750 & 81 & 71 (55--76) & 94 (142) & 0.001 & 120 & 0.992 & 84.1 \\
+2000 & 82 & 12 (3--16) & 31 (74) & \textbf{0.154} & 75 & \textbf{0.863} & \textbf{68.1} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{peakingTime(S2)と応答核(S4)、デコンボリューション(S8)}
+delay 1750、120 fC、GEM 250 × 3。長い整形ほど弱いストリップを拾う(ヒット ch 121 → 147)が飽和も増え、1014 ns では 1/3 のイベントが飽和する。
+70 ns は S/N 不足で飛跡の 1/3 を失う。
+
+\begin{table}[h]\centering\small
+\caption{S2 peakingTime(run 83--86)}
+\begin{tabular}{rrrrrrrrrr}
+\toprule
+peaking & run & 幅 [cell] & ヒット ch & 総電荷 & 飽和 & ok & 長さ / IQR & dEdx / IQR & 揺れ A0 [ADC] \\
+\midrule
+70 ns & 83 & 25 & 52 & 0.25 M & 0.0 \% & 0.660 & 45.4 / 46.3 & 4,602 / 855 & 4.4 \\
+232 ns & 84 & 39 & 121 & 1.40 M & 0.3 \% & 0.998 & 85.2 / 58.4 & 12,493 / 6,438 & 12.4 \\
+502 ns & 85 & 62 & 128 & 3.24 M & 4.8 \% & 0.997 & 88.9 / 58.8 & 19,087 / 9,466 & 27.9 \\
+1014 ns & 86 & 106 & 147 & 7.21 M & 33.7 \% & 0.998 & 104.5 / 66.6 & 22,469 / 9,693 & 59.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+総電荷が 1 : 2.3 : 5.2 と peaking に比例して増えるのは、当初「短い整形は信号の一部しか積分していない」と読んだが、これは\textbf{誤り}で面積効果である(S8)。
+AsAd パルサー(全 ch に $-300$ / $-100$ mV)で測った応答核(図~\ref{fig:kernel})は 4 AGET で同一・無振動(1.8 µs 成分 ≤ 0.03 \%)で、ピーク利得比は 232 : 502 : 1014 = 1 : 1.05 : 1.17 である。
+この核で α 波形を逆畳み込みすると(\texttt{deconv.C}、FFTW、λ$_\mathrm{rel}$ = 10$^{-3}$)、電荷比は 1 : 1.05 : 1.21 に戻り、パルサーの利得比と一致する。
+すなわち\textbf{サンプル和の総電荷はどの peaking でも入力電荷を取り切っている}。逆畳み込み後の FWHM は 13.7 / 14.6 / 18.7 cell(0.55--0.75 µs)で検出器側の固有幅に収束する(図~\ref{fig:deconv})。
+ノイズ増幅(S/N × 0.4--0.5)があるので運用には採らず、オフラインの選択肢(λ 10$^{-2}$)として残す。
+
+また α 波形に見える周期 1.6--1.8 µs の「揺れ」(信号 ch のみ、電荷に比例)は、応答核に無いので AGET 整形系の応答ではない(起源は未解明、§\ref{sec:open})。
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.48\textwidth]{fig/kernel2/run0107_kernel.png}\hfill
+\includegraphics[width=0.48\textwidth]{fig/kernel2/run0109_kernel.png}
+\caption{S4: パルサー応答核(左: 502 ns、run 107。右: 1014 ns、run 109)。4 AGET の平均波形をピークで規格化。無振動。}
+\label{fig:kernel}
+\end{figure}
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.6\textwidth]{fig/deconv/run0087_k107_l1e-3.png}
+\caption{S8: run 87(502 ns × 120 fC)の 1 ch 波形の逆畳み込み前後。FWHM 24.5 → 14.6 cell、電荷比 0.048(核の和で規格化)。}
+\label{fig:deconv}
+\end{figure}
+
+\subsection{gain(S3)と E 規則}
+502 ns、GEM 250 × 3。E 規則「飽和 ch を含むイベント < 2 \% の中で最長の peaking とその gain」で \textbf{502 ns × 240 fC}(飽和 0.7 \%)を選んだ(GEM 250 × 3 のとき)。
+1 pC は閾値 35 ADC で飛跡を失う(ok 0.009)。揺れの振幅は出力振幅に比例する(ゲインに乗る)。
+
+\begin{table}[h]\centering\small
+\caption{S3 gain(run 87--90, 112)}
+\begin{tabular}{lrrrrrrrr}
+\toprule
+peaking × gain & run & ヒット ch & 総電荷 & 飽和 & クリップ 先/末 & ok & 長さ / IQR & dEdx / IQR \\
+\midrule
+502 × 120 fC & 87 & 127 & 3.20 M & 4.7 \% & 8.3 / 21.4 \% & 0.997 & 88.2 / 58.8 & 19,352 / 9,283 \\
+\textbf{502 × 240 fC} & 88 & 119 & 1.71 M & \textbf{0.7 \%} & 2.7 / 8.9 \% & 0.991 & 84.0 / 59.3 & 11,946 / 5,896 \\
+502 × 1 pC & 89 & 23 & 0.16 M & 0 \% & 0 / 0.1 \% & 0.009 & --- & --- \\
+1014 × 1 pC & 90 & 43 & 0.53 M & 0 \% & 0 / 0.1 \% & 0.626 & 48.3 / 50.2 & 3,669 / 820 \\
+1014 × 240 fC & 112 & 122 & 3.90 M & 2.1 \% & 0.7 / 4.8 \% & 0.998 & 84.6 / 58.4 & 16,155 / 7,814 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{検出器の高電圧}
+
+\subsection{GEM 電圧の余裕(S10)}
+現地で GEM を 1 枚ずつ、または 3 枚同時に下げ(HV は GECO で手動、run は \texttt{gem\_point.sh})、同じ電子回路(502 ns × 120 fC)で総電荷を比べた。
+図~\ref{fig:gain} のとおり、$\ln(Q/Q_0)$ は 3 枚の ΔV の合計で説明できる。箔ごとの傾きは GEM1 / GEM2 / GEM3 = 0.0148 / 0.0130 / 0.0145 ± 0.0026 /V で差は誤差内、
+単独 3 点の和($-0.423 \pm 0.045$)と 3 枚同時($-0.425 \pm 0.026$)が一致するので加法性が成り立つ。平均の傾き $a = 0.0141 \pm 0.0015$ /V(GEM 合計 $-10$ V ごとに × 0.86)。
+合計 $-30$ V(各 240 V、HIGS 本体と同じ値)まで、電子回路側で補って飛跡の質(ok、ヒット ch、長さ、dEdx の相対幅)は変わらず、トリップ・電流異常もなかった。
+電流は全 ch 約 8.6--8.8 µA で抵抗鎖(200 MΩ)の電圧比どおりに動く。
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}
+\begin{axis}[width=0.6\textwidth,height=6cm,xlabel={GEM ΔV の合計 [V]},ylabel={$\ln(Q/Q_0)$},grid=major,legend pos=north west,legend style={font=\scriptsize},xmin=-33,xmax=3]
+\addplot[only marks,mark=*,blue] coordinates {(0,0)(-10,-0.151)(-20,-0.300)(-30,-0.429)};
+\addlegendentry{GEM1 のみ / 3 枚同時(d)}
+\addplot[only marks,mark=square*,red] coordinates {(-10,-0.130)};
+\addlegendentry{GEM2 のみ(e)}
+\addplot[only marks,mark=triangle*,green!60!black,mark size=3pt] coordinates {(-10,-0.145)};
+\addlegendentry{GEM3 のみ(f)}
+\addplot[black,dashed,domain=-32:2,samples=2] {0.0141*x};
+\addlegendentry{$a = 0.0141$ /V}
+\end{axis}
+\end{tikzpicture}
+\caption{S10: ゲインの法則。誤差は各点 ±0.026(1,500 events の電荷中央値)。}
+\label{fig:gain}
+\end{figure}
+
+\begin{table}[h]\centering\small
+\caption{S10 GEM 電圧(502 ns × 120 fC で比較。a は参照 run 87)}
+\begin{tabular}{llrrrrrrr}
+\toprule
+点 & GEM1 / GEM2 / GEM3 [V] & run & ヒット ch & 総電荷 & 飽和 & ok & 長さ & dEdx / IQR \\
+\midrule
+a & 250 / 250 / 250 & 87 & 127 & 3.20 M & 4.7 \% & 0.997 & 88.2 & 19,352 / 9,283 \\
+b & 240 / 250 / 250 & 122 & 124 & 2.76 M & 2.6 \% & 0.999 & 85.9 & 17,645 / 8,645 \\
+c & 230 / 250 / 250 & 123 & 122 & 2.38 M & 1.1 \% & 0.997 & 84.7 & 15,258 / 7,697 \\
+d & 240 / 240 / 240 & 126 & 121 & 2.09 M & 1.0 \% & 1.000 & 84.3 & 13,637 / 6,617 \\
+e & 250 / 240 / 250 & 128 & 125 & 2.81 M & 2.0 \% & 0.996 & 86.3 & 17,553 / 8,318 \\
+f & 250 / 250 / 240 & 129 & 123 & 2.76 M & 2.3 \% & 0.999 & 84.9 & 17,726 / 8,566 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{ドリフト電圧(S12)}
+運用点 B で DRIFT を 1,000 / 1,200 / 1,400 V(各 500 / 600 / 700 V × 2)にした。帯の時間幅 × V が一定(±6 \%)なので $v_\mathrm{drift} \propto E$ で、公称式 $v = 0.7233 \times E/p$ と矛盾しない。
+パルス幅は 61 → 57 → 54 cell(E +40 \% で −11 \%、拡散の 1/√E に整形幅が足された形)。総電荷・ヒット ch は不変(GEM3 への集束に損失なし)。
+$\sigma_z$ は cell では 1/v に比例するが \textbf{mm では一定(0.207 / 0.208 / 0.208)}。運用は 1,200 V のまま。
+
+\begin{table}[h]\centering\small
+\caption{S12 ドリフト電圧(run 130--132、運用点 B)}
+\begin{tabular}{rrrrrrrrr}
+\toprule
+$V_\mathrm{drift}$ & run & 時間幅 [cell] & 時間幅 × V & パルス幅 [cell] & ヒット ch & 総電荷 & $\sigma_z$ [cell] & $\sigma_z$ [mm] \\
+\midrule
+1,000 & 131 & 28 & 28,000 & 61 & 120 & 2.07 M & 1.30 & 0.207 \\
+1,200 & 130 & 22 & 26,400 & 57 & 121.5 & 2.09 M & 1.09 & 0.208 \\
+1,400 & 132 & 20 & 28,000 & 54 & 123 & 2.09 M & 0.93 & 0.208 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{運用点 B と一晩 run(S7、S16)}
+2026-10-15 12:50 に \textbf{運用点 B}(GEM 240 × 3、502 ns × 120 fC、readout full、25 MHz、delay 1750、DRIFT 600 × 2、TR 350)を採用した。
+GEM が 10 V/枚 低く、readout full で frameType 2(2 B/sample)なのでデータは A(partial、557 kB/event)の半分(278.8 kB/event)になる。
+一晩 run(run 141、9.6 h、149,795 events、4.32 Hz、104 GB)の指標は 5.5 分の確認 run 130 と一致し、A の一晩(run 114、10 h、166,386 events)とも同等である。
+
+\begin{table}[h]\centering\small
+\caption{一晩 run の比較(S7、S16)}
+\scriptsize\setlength{\tabcolsep}{3pt}
+\begin{tabular}{llrrrrrrrrr}
+\toprule
+run & 設定 & events & kB/ev & ヒット ch & 総電荷 & 飽和 & ok & 長さ / IQR & $\sigma_z$ & $\sigma_{2D}$ \\
+\midrule
+114 & A 一晩(250×3、502 ns×240 fC、partial) & 166,386 & 557 & 119 & 1.71 M & 0.62 \% & 0.995 & 83.4 / 59.6 & 0.20 & 0.325 \\
+130 & B 確認(5.5 分) & 1,500 & 278.8 & 121.5 & 2.09 M & 0.60 \% & 0.998 & 84.4 / 58.5 & 0.21 & 0.314 \\
+\textbf{141} & \textbf{B 一晩} & 149,795 & 278.8 & 121 & 2.08 M & 0.92 \% & 0.999 & 84.1 / 58.8 & 0.20 & 0.321 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{ヒットの精度}
+
+\subsection{z 残差(S11)}
+直線に対するヒットの z 残差(図~\ref{fig:resid})の robust σ は 232--502 ns で \textbf{0.19--0.22 mm ≈ 1 cell}(1 cell = 40 ns × 4.77 mm/µs = 0.19 mm)。
+1014 ns で 0.25--0.31 mm(+30--60 \%)、70 ns で 0.27 mm(S/N 不足)。HV(GEM 250 → 230、配分)には依らない(0.20--0.22)。
+S12 とあわせると \textbf{$\sigma_z$ は時間でなく距離の精度で決まっている}(候補: ストリップ幅 × 飛跡の傾き ≈ 0.18 mm)。
+1014 ns の悪化分は電子回路の時間精度が二乗で足されたもの($\sqrt{0.31^2 - 0.21^2} \approx 0.23$ mm)。
+RMS は robust σ の 2--5 倍で裾が重いので、当てはめは robust に行う必要がある。
+\textbf{「パルス幅を z の誤差に使う」のは 10 倍以上過大}(固有幅 14.5 cell = 2.8 mm、生の幅 7--20 mm に対し実測 0.2 mm)。
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.95\textwidth]{fig/resid/run0087_resid.png}
+\caption{S11: run 87(502 ns)のヒット z 残差(左: U/V/W、robust σ 0.21--0.22 mm。右: ストリップ電荷との相関)。}
+\label{fig:resid}
+\end{figure}
+
+\subsection{2D 重心精度 = U/V/W 閉合残差(S14)}
+同じ z スライス(1 cell)で U・V・W それぞれの電荷重心 $s_U + s_V + s_W$ は幾何的に定数になるべきで、そのばらつきから 1 view あたりの 2D 精度を出した(ヒット ch 条件 + 時間窓 |t − t$_\mathrm{peak}$| ≤ 15 cell)。
+\textbf{232 ≈ 502 ns で 0.30 mm/view が最良}、1014 ns は 0.39--0.43(パルスが広く窓からはみ出す)、70 ns は 1.1 mm。HV には依らず(0.30--0.32)、DRIFT 1,000 V でわずかに悪い(0.34)。
+電荷依存が強く(Q1 0.7--0.8 → Q4 0.40--0.45 mm)、2D 精度は S/N で決まる。
+
+まとめ: 運用点 B(502 ns)でのヒット(z スラブ)の誤差は \textbf{$\sigma_s \approx 0.30$ mm(2D、view ごと)、$\sigma_z \approx 0.20$ mm}。
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.95\textwidth]{fig/closure/run0087_closure.png}
+\caption{S14: run 87 の閉合残差(左: 分布、robust σ 0.53 mm → /√3 = 0.31 mm/view。右: スライス電荷との相関)。}
+\label{fig:closure}
+\end{figure}
+
+\section{読み出し方式・レート・ゼロサプレッション}
+
+\subsection{readout と hit register(S9、S15)}
+現用だった partial readout は、テンプレートの \texttt{channel Reading = always} のため全 ch を読んでおり、hit register の閾値は無効だった。
+しかも partial は frameType 1(4 B/sample)で、full(frameType 2、2 B/sample、279 kB/event)の \textbf{2 倍}(557 kB/event)のデータになる。
+\texttt{Reading = only\_if\_hit} のテンプレート(S15)では閾値が効く(global / lsb を上げると 400 → 241 kB)が、4 B/sample のため full 比で最大 14 \% しか減らない。
+よって\textbf{通常運用は full}とし、圧縮は ZS に任せる。
+
+\subsection{最大レート(S17)}
+周期トリガ(信号なし)と AsAd パルサー(全 256 ch に $-300$ mV = 占有率 100 \%)で上限を測った。
+\begin{itemize}
+\item \textbf{上限は zCoBo FW の読み出し時間}: 272 ch で 2.94 ms(≈ 340 Hz、1 AsAd)。full でも ZS でも同じ。事象間隔は「周期 + 2.94 ms」で一定で、網の背圧による乱れはない。
+\item \textbf{読み出し中のトリガは失われる}(キューされない): パルサー 2 ms 周期 → 1 個おき。不感時間 = レート × 読み出し時間(ビーム 100 Hz では full で 29 \%)。
+\item \textbf{読み出し時間 ≈ 0.11 ms + 10.4 µs × 読む ch 数}: hit partial で信号なし(FPN 16 ch)なら 0.28 ms(779 Hz)。α 事象(≈ 136 ch)なら ≈ 1.5 ms → 100 Hz で 15 \%。\textbf{不感時間を縮める手段は hit register partial だけ}。
+\item \textbf{ZS はバイトだけを減らす}(読み出し時間は不変)。全 ch ヒットでも 65 kB。partial + ZS は両立する(frameType 1 + ZS)。
+\item 1 GbE は full なら 340 Hz まで余裕(1 ms パルサーで 86 MB/s、縁)。partial で全 ch ヒットだと 557 kB で 170 Hz 止まり。光 / 10 GbE は zCoBo のリンク(FW の MAC が 1 GbE)には効かない。
+\end{itemize}
+
+\begin{table}[h]\centering\small
+\caption{S17 最大レート(run 148--169)}
+\footnotesize
+\begin{tabular}{llrrrl}
+\toprule
+系列 & 信号 & 達成 [Hz] & 事象間隔の下限 [ms] & kB/event & 限界 \\
+\midrule
+B full(272 ch) & なし / パルサー全 ch & 254 / 310 & 周期 + 2.94 & 279 & FW 読み出し \\
+hit partial g4 & なし(FPN 16 ch) & 779 & 周期 + 0.28 & 33 & FW 読み出し(ch 数に比例) \\
+hit partial g4 & パルサー全 ch(frameType 1) & 170 & 3.0 + stall & 557 & \textbf{1 GbE} \\
+ZS ch ごと & パルサー全 ch & 333 & 3.0 & 65 & FW 読み出し \\
+hit partial + ZS & パルサー全 ch & 333 & 3.0 & 65 & FW 読み出し \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{ゼロサプレッション(S5、S13、S18)}
+pedestal run(periodic トリガ、full、150 events)から ch ごとの平均と σ の表を作り(S5: 信号 ch の ped 中央値 456.5 ADC、σ 中央値 7.6--8.0、FPN σ 3.3)、
+閾値 = ped + 5σ を ch ごとの exceptions として params に入れた(\texttt{zs\_params.sh})。
+ZS データは閾値未満のサンプルが存在しないので、波形からペデスタルを取る従来の算法(TPCReco の \texttt{PedestalCalculatorGRAW} も、ユーザーの macros も)は壊れる。
+DAQ 側では同じ表を \texttt{[system] ped\_table} に置き、root\_sink(PEventTPC の表モード)・monitor(Event Display の復元)・解析マクロ(\texttt{zs\_restore.C} で抑制セルを表の値で埋めた同名 raw を作り macros を無改造で通す)の 3 経路で対応した(SPEC v1.49)。
+
+検証 run(S18、各 1,500 events、運用点 B の電子回路)の結果を表~\ref{tab:zs} に示す。
+\textbf{ZS は品質を落とさない}(ヒット ch、ok、長さ、dEdx IQR、$\sigma_z$、$\sigma_{2D}$ が基準と同じ。総電荷は閾値未満の裾の分 −3 \%)。
+FPN を残しても指標は 1 つも改善せず +32 kB/event なので \textbf{FPN は抑制}する。
+hit partial g4 + ZS は最小(23.1 kB、1/12)で、ヒット ch −4、$\sigma_{2D}$ +12 \% の小さな代償がある。不感時間を縮められるのはこれだけなので、
+\textbf{ビーム run の既定候補 = hit g4 + ZS(FPN 抑制)}、線源 run は B full(現行)か B + ZS とした。
+
+\begin{table}[h]\centering\small
+\caption{S18 ZS 検証(run 170--173、基準 = run 130)}
+\label{tab:zs}
+\footnotesize
+\begin{tabular}{rlrrrrrrr}
+\toprule
+run & 設定 & kB/event & ヒット ch & 総電荷 & ok & 長さ & $\sigma_z$ & $\sigma_{2D}$ \\
+\midrule
+130 & B full(基準) & 278.8 & 121.5 & 2.09 M & 0.998 & 84.4 & 0.21 & 0.314 \\
+\textbf{170} & \textbf{B + ZS} & \textbf{30.9} (1/9) & 121 & 2.02 M & 0.998 & 83.9 & 0.20 & 0.320 \\
+171 & B + ZS、FPN 残し & 63.1 & 120 & 2.03 M & 0.997 & 83.2 & 0.20 & 0.319 \\
+\textbf{172} & \textbf{hit g4 + ZS} & \textbf{23.1} (1/12) & 117 & 2.03 M & 0.996 & 82.9 & 0.19 & 0.357 \\
+173 & hit g4 + ZS、FPN 残し & 55.7 & 116 & 1.99 M & 0.997 & 82.0 & 0.19 & 0.354 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}
+\begin{axis}[ybar,width=0.9\textwidth,height=5.5cm,ylabel={kB/event},symbolic x coords={partial always,hit g4,full,B+ZS FPN残し,hit+ZS FPN残し,B+ZS,hit g4+ZS},xtick=data,x tick label style={font=\scriptsize,rotate=20,anchor=east},nodes near coords,nodes near coords style={font=\scriptsize},ymin=0,ymax=650,bar width=14pt,ymajorgrids=true]
+\addplot[fill=blue!40] coordinates {(partial always,557)(hit g4,241)(full,279)(B+ZS FPN残し,63)(hit+ZS FPN残し,56)(B+ZS,31)(hit g4+ZS,23)};
+\end{axis}
+\end{tikzpicture}
+\caption{α 事象 1 イベントあたりのデータ量(S9、S15、S18)。}
+\end{figure}
+
+\subsection{ビーム run(100 Hz)に向けた設計}
+mini(1 AsAd): hit partial + ZS で不感時間 ≈ 15 \%、23 kB/event × 100 Hz = 2.3 MB/s。
+ELITPC(Warsaw、zCoBo 2 枚 × 2 AsAd)の見積もり: 1 枚 544 ch → 読み出し ≈ 5.8 ms → full では最大 170 Hz・100 Hz で不感 58 \%。partial(占有 25 \%、≈ 150 ch)なら ≈ 1.7 ms → 17 \%。
+帯域は full で 1 GbE の縁(95 MB/s)、partial + ZS なら余裕。\textbf{ビーム 100 Hz の設計 = hit register partial + ZS + 2 本の 1 GbE}。
+FW の読み出し時間が 2 AsAd で本当に 2 倍かは Warsaw で要実測。
+注意: ZS graw はオフラインの grawToEventTPC のペデスタル計算を壊すので、Warsaw で ZS を使うなら「我々の PEventTPC(表で減算済み)を使う」か「TPCReco に表の入力を足す」かを先方と決める必要がある。
+
+\section{未解決と次の課題}\label{sec:open}
+\begin{itemize}
+\item \textbf{ドリフト端(S6)}: 12.5 MHz・窓 41 µs でも α 飛跡はトリガから 2--4 µs に収まり、陰極(20 cm)に届かない(図~\ref{fig:drift})。$v_\mathrm{drift} = L / t_\mathrm{max}$ の絶対値は宇宙線か陰極側線源で測る。cell 340 付近の山は窓位置に依らず物理ではない(未解明)。
+\item \textbf{揺れ}: α 波形の周期 1.6--1.8 µs の成分(信号 ch のみ、電荷に比例)。AGET の応答核には無い。検出器側(GEM / 誘導)の可能性。
+\item \textbf{複数飛跡}: 現在の再構成は 1 イベント = 直線 1 本。502 ns で RMS が 1014 ns より大きい(外れ値の出方の違い)の素材でもある。
+\item \textbf{ZS の run ごとのカウンタ}(TODO/159): root\_sink / monitor の ZS カウンタを run\_stop に出す。PEventTPC 側の電荷和の照合も未実施。
+\item \textbf{Warsaw(4 AsAd)}: 取得再開の判定(SPEC v1.48)、ZS の frameType、FW 読み出し時間の実測。
+\end{itemize}
+
+\begin{figure}[h]\centering
+\includegraphics[width=0.6\textwidth]{fig/drift/run0111_drift.png}
+\caption{S6: run 111(12.5 MHz、delay 3800)の first / last hit cell。last hit は 50--100 cell(トリガから 2--4 µs)に集中し、cell 508 のスパイクは窓端の跳ね。}
+\label{fig:drift}
+\end{figure}
+
+\FloatBarrier
+\appendix
+\section{道具と記録の所在}
+\begin{itemize}
+\item 台帳: \texttt{docs/SCANS\_ja.md}(S1--S18、数字の正)。経緯と判断: \texttt{TODO/archive/135--158}。
+\item 道具: \path{tools/scan/}(\sloppy \texttt{scan.py}、\texttt{run\_metrics.C}、\texttt{metrics\_for\_run.sh}、\texttt{pulser\_kernel.C}、\texttt{deconv.C}、\texttt{drift\_end.C}、\texttt{hit\_residuals.C}、\texttt{uvw\_closure.C}、\texttt{zs\_exceptions.py}、\texttt{zs\_params.sh}、\texttt{zs\_restore.C}、\texttt{ledger.py})。各マクロにテストあり。
+\item 仕様: \texttt{docs/SPEC\_ja.md} v1.49(ZS 表モード、0x02 復元、ped\_table、decoder カウンタ、§13-9)。運用: \texttt{docs/RUNBOOK\_ja.md}「ZS 運用」。
+\item ELITPC: データ \path{/data/tpcdaq/run00NN/}、指標 \path{~/test/scan/metrics/}、図 \path{~/test/scan/}\{resid, closure, kernel2, deconv, drift\}、較正表 \path{~/test/scan/calib/pedestal_232ns.json} / \path{pedestal_502ns.json}。
+\end{itemize}
+
+\section{運用点 B の params}
+\texttt{base\_1750.json}(ELITPC \texttt{\textasciitilde/test/scan/})。knobs: \texttt{writingClockFrequency\_MHz} 25、\texttt{triggerDelay} 1750、\texttt{triggerMode} external、\texttt{peakingTime\_ns} 502、\texttt{gain} 120 fC、\texttt{readout} full、\texttt{fpnRead} true、\texttt{zeroSuppression.enabled} false。
+ビーム候補: テンプレート \texttt{configure-elinp-hit.xcfg}(\texttt{channel Reading only\_if\_hit})、global 4 / lsb 15、ZS 有効 + \texttt{pedestal\_502ns.json} の exceptions(FPN 閾値 4095)。
+\end{document}
