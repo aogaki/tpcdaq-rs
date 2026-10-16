@@ -1,6 +1,6 @@
 # 151 — root_sink: pedestal 表(`[system] ped_table`)と ZS 対応の PEventTPC fill
 
-**Status: READY**(2026-10-16 起票 Fable。ZS 対応計画(plan 2026-10-16、ユーザー承認「全部」)の中核。Opus)
+**Status: COMPLETED**(2026-10-16 起票 Fable。ZS 対応計画の中核。Opus)
 
 ## 0. 問題
 `tools/root_sink/pevent_fill.hpp:304-358` の pedestal(cells 5..25 の平均 − FPN のセル平均、TPCReco `PedestalCalculatorGRAW` の忠実な移植)は、zCoBo の ZS データ(閾値未満のサンプルが**存在しない**。FPN ch も抑制)で offset ≈ 0 / 偏り、FPN 項 0 になり、PEventTPC の chargeMap が生 ADC のまま(= TPCReco でも同じ壊れ方)。archive/149 run 133。
@@ -27,3 +27,8 @@
 変更ファイル(`git show --stat`)、仕様 1–7 と対応するテスト名、赤/緑の実測、オラクル不変の証拠、「実行できなかった操作」(無ければ「なし」)、発注書に無い判断、SPEC §3.1/3.2/§6.4 の文案(編集はしない)。設計上の分岐で迷ったら実装せず報告。
 
 ## 結果
+- 2026-10-16: Opus `86792dd`。`[system] ped_table`(config.rs、存在検査、`ConfigError::PedTableNotFound`)、`daq_up.sh` → `--pedestal-table`、`tools/root_sink/ped_table.hpp`(平坦 JSON 走査、`double mean[4][4][68]`、NaN = 無し)、`pevent_fill.hpp` の述語(FPN 含む 4×68、過半、半数ちょうどは非 ZS)+ 表モード(adc − mean、FPN 項なし、存在サンプルのみ、`pedestalSubtracted`)+ 表なしフォールバック + カウンタ 3 つ(終了 JSON、worker 合算)、`--pedestal-remove 0` との同時指定は起動エラー。テスト: Rust config 3、`test_ped_table` 27、`test_pevent` 163(+64: 仕様 (a)–(e)、述語の境界、`--pedestal-remove 0`、worker 合算)、conformance 一式、`cargo test` 1084(新バイナリ指定)。赤 → 緑の実測あり。
+- **§12-3 不変の証拠**: 旧バイナリ(380e4c5)と新バイナリ + 表で実 graw 3 組(mini 2025 pulser 108 events、ELITPC 2022 4 AsAd 10 events、mini 2026-03-19 1927 events)を実チェーンに通して `compare_pevent` 0 differences、`pevent_zs_*` = 0/0/0。`tests/elitpc_pevent_e2e.rs` の実資産(2026-08-11)はこの Mac に無く未実施(代替で可)。
+- 判断(採用): 表の asad 軸 4 固定・CoBo 無視(多 CoBo は将来の拡張)、表なし WARN は worker ごと run 1 回、`--no-root` でも表を検査。**#11: root_sink の 3 カウンタは終了 JSON / ログに出るが run_stop には届かない(root-sink に REP が無い)→ 157 で経路を決める(close 行は不変)。** 既存フィクスチャが述語上「ZS らしい」ので既存テストが WARN を出すようになった(値は不変)。
+
+**Status: COMPLETED**(2026-10-16、Fable 照合。実 ZS データでの述語発火は 156 で)
