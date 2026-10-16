@@ -128,7 +128,11 @@ ZS を使うと event あたりのデータが大きく減るが、**ch ごと�
    `ped_table` を更新して `daq_down.sh` → `daq_up.sh`**(再起動しないと古い表のまま)。
 
 ### カウンタの読み方
-- decoder / root_sink / monitor のカウンタ(ログと UI)に ZS の項目が出る。**`zs_frames_no_table` が 0 でない** =
+- decoder / root_sink / monitor のカウンタに ZS の項目が出る(名前は実装どおり、SPEC v1.49):
+  decoder = run_stop.counters の `frames_type1` / `frames_type2` / `compact_size_mismatch`(ZS は type1 のみ、type2 と mismatch は 0 が正常)、
+  root_sink = 終了 JSON の `pevent_zs_frames_table` / `pevent_zs_frames_no_table` / `pevent_table_missing_channels`、
+  monitor = status JSON と停止ログの `uvwZsFragmentsRestored` / `uvwZsFragmentsNoTable` / `uvwTableMissingChannels`
+  (run ごとに見える経路 = close 行 / status / run_stop は TODO/159)。**`pevent_zs_frames_no_table` または `uvwZsFragmentsNoTable` が 0 でない** =
   ZS のフレームが来ているのに表が読み込まれていない(`ped_table` の未設定・パス違い)。その間の ped は代用値で、波高・電荷は信用しない。
   表を直して `daq_down/up`、そのときの run は logbook に「ZS 表なし」と書く。
 - `run_metrics.C` の指標 JSON の `ped_source` が `cells_1_20` で `zs_suspected` が立っていたら、ZS データを表なしで解析している

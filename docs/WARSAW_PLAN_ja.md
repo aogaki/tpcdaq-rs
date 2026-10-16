@@ -116,6 +116,8 @@
   入れている値と較正の出どころ — §7 Unfolding の前提)
 - ~~ZS 有効化の意向~~ **解消(2026-08-16 ユーザー回答): 事実上不採用**。実働責任者
   Mikolaj は「1 ビットたりともデータを変えたくない」姿勢であり ZS は自明に否。
+  **2026-10-16 追記**: mini のビーム run(100 Hz)向けに ZS を実装・実測した(§7 の表、SPEC v1.49)。
+  Warsaw への提案は「採るなら PEventTPC の表モードか TPCReco への表入力が要る」の事実共有まで。
   §7 の優先順位(Unfolding 先行・ZS 最後)はこれで確定 — 速度課題は 055 のソフト側
   スピードアップで閉じる前提
 
@@ -138,7 +140,7 @@ ZS は不要になる、がユーザー裁定。Unfolding で信号が峻険に�
 |---|---|---|---|---|
 | Unfolding(strip 毎の生信号復元) | ○(逆問題として定式化) | **TPCReco `StripResponseCalculator`** = 順方向応答(拡散 σ + AGET peaking time + 隣接応答、MC digitizer が使用)。**逆畳み込み自体は TPCReco に無い** | 応答の逆フィルタ設計 + ROOT プロダクトへの追加(または表示ビュー) | ~~実測値合意~~ **解消(2026-08-16): 応答は Mikolaj がストリップとガスの特性から構築済み** — 残タスクは値/応答ファイルの受領のみ |
 | ゲイン正規化(strip 毎) | ○(greenfield) | TPCReco に**無い**。FW 側に AsAd pulser 較正ランプ + configure-pulser.xcfg あり | 較正 run 手順(既存 run 制御で可)+ ゲイン表生成ツール + 適用(ROOT プロダクト/表示) | ~~外部パルサーツールの所在~~ **解消(2026-08-16): ツールは無いようなので内製で行く(ユーザー裁定)** — FW 内蔵の AsAd generator 較正ランプ(configure-pulser.xcfg 系)で較正 run を実施する方針。手順設計は我々のチケット |
-| ゼロサプレッション | ○(FW 対応済み・設定のみ) | zCoBo FW に pipeCtrl bit + AsAd 毎閾値デバイス。現行設定は disabled・閾値 600 種入れ済み | frameType 1 の実データ初検証 / FPN 閾値 0 運用 | 閾値の物理判断 / オフラインのペデスタル戦略(ZS 済みデータでは従来計算が成立しない) |
+| ゼロサプレッション | **○ 実装・実測済み(2026-10-16、SPEC v1.49、TODO/151–158)** | zCoBo FW に pipeCtrl bit + AsAd 毎閾値デバイス。mini で ch ごと mean + 5σ の閾値(`zs_params.sh`)、frameType 1 で到着。B + ZS = 30.9 kB/event(1/9)、hit partial + ZS = 23.1 kB(1/12)で、ヒット ch・飛跡長・σ_z・σ_2D は非 ZS と同じ、総電荷 −3 %(SCANS S18) | ELITPC 4 AsAd で同じ 3 カウンタ(`frames_type2` = 0 等)の確認 | **ZS graw は grawToEventTPC の `PedestalCalculatorGRAW` を壊す**(ペデスタル窓にサンプルが無く offset ≈ 0・FPN 項 0 → chargeMap が生 ADC のまま)。選択肢は 2 つ: ①我々の PEventTPC(`[system] ped_table` で表モード減算済み、同じ形式)をそのまま解析に使う ②TPCReco に pedestal 表の入力を足す。ZS を Warsaw で使うならどちらかを先方と決める。FPN 抑制の可否(mini は抑制で損なし)も ELITPC で再測 |
 
 **トレードオフ(記録)**: ZS は閾値以下(ベースライン・裾)を不可逆に捨て、Unfolding は
 まさにそこを必要とする — 強い ZS と高品質 Unfolding は両立しない。優先順位裁定により

@@ -11,7 +11,7 @@
   - 保存先: データは ZFS `data/tpcdaq`。
   - 記録: ELOG(TPC 用)、InfluxDB(HV / LV)。
   - マニュアル: 日英 PDF が `reference/_manual/`。
-- **実装の正本 = docs/SPEC_ja.md v1.47**。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `d960c44`(134 込み)で稼働(2026-10-14 反映、RUNBOOK §7.1 の手順で。run 77 を停止して入れ替え、新しい run は未開始)。
+- **実装の正本 = docs/SPEC_ja.md v1.49**(2026-10-16、ZS 対応)。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `d960c44`(134 込み)で稼働(2026-10-14 反映、RUNBOOK §7.1 の手順で。run 77 を停止して入れ替え、新しい run は未開始)。
 - **できること**:
   - 保存二系統: graw はロスレス、root-sink は PEventTPC と raw ツリー。
   - 取得の再開: 未停止で落とした後の古いフレームを epoch として扱う(110)。
@@ -56,6 +56,14 @@
 
 守ること: HV / LV / ガスには触らない(web からは不可、方針)。run の開始・停止はこの表の範囲で了承済み(ユーザー「進めてください」)。各 run の設定は台帳の `run_start.params` に自動記録。反映は RUNBOOK §7.1。
 
+### 2026-10-16(週末 run と ZS の締め)
+- **run 174 = 週末 run 1**(11:26 開始、B = `base_1750.json`、`[system] ped_table` 設定済み、ZS なし、comment「gas 100 ml/s」)。
+  ユーザー: **ガスの流量が変わったら新しい run**(12:00 に 100 → 50 ml/s の予定)。合図が来たら `~/test/scan/stop_run.sh` → 同じ形で
+  「weekend run 2: gas 100 → 50 ml/s」を開始(`start_W1.sh` の comment を変えたもの)。流量が変わるたびに同じ手順。HV / ガスには触らない。
+- **157 完了 → archive**: SPEC **v1.49**(ZS 表モード・0x02 復元・ped_table・decoder カウンタ・§13-9)、WARSAW_PLAN §7 の ZS 行、RUNBOOK のカウンタ名訂正。
+- **159 起票**(Opus): ZS カウンタの run ごとの経路 + PEventTPC 電荷和 + UI 基線。
+- Fable キュー: 空(134 / 135–136 / 133 / v1.46 / 157 まで消化済み)。
+
 ## 開いているチケット
 
 | # | 中身 | 状態 | 次の一手 |
@@ -66,7 +74,8 @@
 | ~~154~~ | zs_restore.C(macros 無改造の橋)+ `--zs-fill` | 済 → archive(ba2d332、run 133 で macros 復活: 85.4 mm / σ_z 0.20) | — |
 | ~~155~~ | zs_params.sh + RUNBOOK「ZS 運用」 | 済 → archive(72f0703) | — |
 | ~~156~~ | 検証 α run → S18 | 済 → archive(run 170–173: ZS は品質不変で 1/9〜1/12、FPN は抑制) | — |
-| [157](157_spec_v149_zs.md) | SPEC v1.49 + WARSAW_PLAN | READY(Fable) | 156 の後 |
+| ~~157~~ | SPEC v1.49 + WARSAW_PLAN | 済 → archive(2026-10-16 Fable) | — |
+| [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
