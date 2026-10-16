@@ -53,7 +53,7 @@
 \item 電子回路: GET(AGET × 4 = 272 ch、うち FPN 16 ch)、zCoBo 1 枚(FW 2018-10-31)、25 MHz サンプリング(1 cell = 40 ns)、512 cell。
 \item HV(DT1415ET 直列 8 ch、200 MΩ 抵抗鎖): ch0 TR1(誘導)350 V、ch1/3/5 GEM1--3(GEM1 = 読み出し側)、ch2/4 TR 350 V、ch6/7 DRIFT 600 V × 2。
   \textbf{GEM は S1--S9 が 250 × 3、2026-10-15 12:50 以降(運用点 B)が 240 × 3。}
-\item DAQ: tpcdaq-rs(Rust)+ root\_sink(C++)、ELITPC ホスト。パラメータは JSON(テンプレート + knobs + exceptions)で管理し、各 run の設定と HV は logbook に自動記録。
+\item DAQ: tpcdaq-rs(Rust)+ root\_sink(C++)、ELITPC ホスト(付録 A にリポジトリ)。パラメータは JSON(テンプレート + knobs + exceptions)で管理し、各 run の設定と HV は logbook に自動記録。
 \item スキャンの 1 点 = 1 run(1,500 events ≈ 5.5 分、断りがなければ)。データは ELITPC の \path{/data/tpcdaq/run00NN/}、指標 JSON は \path{~/test/scan/metrics/}。
 \end{itemize}
 
@@ -430,6 +430,7 @@ ELITPC(Warsaw、zCoBo 2 枚 × 2 AsAd)の見積もり: 1 枚 544 ch → 読み�
 \appendix
 \section{道具と記録の所在}
 \begin{itemize}
+\item リポジトリ: \url{https://github.com/aogaki/tpcdaq-rs}。DAQ のソース(Rust + C++)、仕様書、運用手順、スキャン台帳、チケット(設計の経緯と結果)がすべてここにある。開発者向けの文書は日本語だけなので、興味があって英語版が要る場合は Aogaki に言ってもらえれば LLM 翻訳を用意する。
 \item 台帳: \texttt{docs/SCANS\_ja.md}(S1--S18、数字の正)。経緯と判断: \texttt{TODO/archive/135--158}。
 \item 道具: \path{tools/scan/}(\sloppy \texttt{scan.py}、\texttt{run\_metrics.C}、\texttt{metrics\_for\_run.sh}、\texttt{pulser\_kernel.C}、\texttt{deconv.C}、\texttt{drift\_end.C}、\texttt{hit\_residuals.C}、\texttt{uvw\_closure.C}、\texttt{zs\_exceptions.py}、\texttt{zs\_params.sh}、\texttt{zs\_restore.C}、\texttt{ledger.py})。各マクロにテストあり。
 \item 仕様: \texttt{docs/SPEC\_ja.md} v1.49(ZS 表モード、0x02 復元、ped\_table、decoder カウンタ、§13-9)。運用: \texttt{docs/RUNBOOK\_ja.md}「ZS 運用」。
