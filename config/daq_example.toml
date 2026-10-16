@@ -1,11 +1,16 @@
 # daq_example.toml — 本番 DAQ 機の設定雛形(SPEC §3、NEW_DAQ_SETUP §6、tools/deploy/daq_up.sh が読む)。
 # 写して /opt/tpcdaq/daq.toml に置き、<...> を埋める。パスフレーズを書くので chmod 600。
-# daq_up.sh は [system] の output_root / geometry と [root_sink] の build_timeout_ms / raw_tree も読む。
+# daq_up.sh は [system] の output_root / geometry / ped_table と [root_sink] の build_timeout_ms / raw_tree も読む。
 
 [system]
 experiment = "mini_eTPC"
 output_root = "/srv/tpcdaq"
 geometry = "/opt/tpcdaq/assets/<mini の実ジオメトリ>.dat"   # リポ外(実 .dat はリポに入れない)
+# ZS(zeroSuppression.enabled)で取るときの pedestal 表(TODO/151、任意)。`calib pedestal` の JSON
+# (同じ peakingTime の pedestal run から作る)。書けば存在検査され、root_sink の --pedestal-table に渡る:
+# ZS らしいフレームだけ表の mean を引く(FPN 項なし)。full / partial のフレームは従来どおり。
+# 書かないまま ZS で取ると PEventTPC はほぼ生 ADC のまま(終了 JSON の pevent_zs_frames_no_table に出る)。
+# ped_table = "/opt/tpcdaq/assets/pedestal_<peakingTime>.json"
 
 [[cobo]]
 id = 0

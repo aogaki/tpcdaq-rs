@@ -196,6 +196,9 @@ pub enum ConfigError {
     #[error("geometry file not found: {}", .0.display())]
     GeometryNotFound(PathBuf),
 
+    #[error("pedestal table ([system] ped_table) not found: {}", .0.display())]
+    PedTableNotFound(PathBuf),
+
     #[error("invalid [receiver] setting: {0}")]
     InvalidReceiver(String),
 
@@ -324,6 +327,13 @@ pub struct SystemConfig {
     pub experiment: String,
     pub output_root: PathBuf,
     pub geometry: PathBuf,
+    /// ZS(ゼロサプレッション)データ用の pedestal 表 = `calib pedestal` の JSON
+    /// (`src/calib/pedestal.rs`、(asad, aget, ch) キー、1 論理 CoBo)。TODO/151。
+    /// **省略可** —— 省略 = 表なし(既存の実運用 TOML は無変更で読める)。書いた場合は
+    /// `geometry` と同じく parse 時に存在検査(無ければ [`ConfigError::PedTableNotFound`])。
+    /// 読み手: root_sink(`tools/deploy/daq_up.sh` が `--pedestal-table` で渡す)。
+    #[serde(default)]
+    pub ped_table: Option<PathBuf>,
 }
 
 /// 1 CoBo 分の設定(`[[cobo]]`)。`listen` を省略すると
@@ -900,6 +910,9 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     validate_cobo_ids(&config.cobo)?;
     validate_cobo_listen_unique(&config.cobo)?;
     validate_geometry_path(&config.system.geometry)?;
+    if let Some(ped_table) = &config.system.ped_table {
+        validate_ped_table_path(ped_table)?;
+    }
     validate_receiver(&config.receiver)?;
     validate_monitor(&config.monitor)?;
     validate_controller(&config.controller, config.cobo.len())?;
@@ -1146,6 +1159,17 @@ fn validate_geometry_path(path: &Path) -> Result<(), ConfigError> {
         Ok(())
     } else {
         Err(ConfigError::GeometryNotFound(path.to_path_buf()))
+    }
+}
+
+/// `[system] ped_table` の存在検証(TODO/151)。`geometry` と同じ強さ —— 書いたのに
+/// 無い表で走ると、ZS データの PEventTPC が黙って生 ADC のまま残る。
+/// 中身(JSON の形)は読み手(root_sink の `--pedestal-table`)が起動時に検査する。
+fn validate_ped_table_path(path: &Path) -> Result<(), ConfigError> {
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(ConfigError::PedTableNotFound(path.to_path_buf()))
     }
 }
 
@@ -1596,6 +1620,59 @@ config_id = "default"
         let err = parse(&toml_str).unwrap_err();
         assert!(
             matches!(err, ConfigError::GeometryNotFound(ref p) if p == Path::new("/nonexistent/monitor.dat")),
+            "got {err:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    // --- 151 で足した `[system] ped_table`(ZS 用 pedestal 表、`calib pedestal` の JSON)---
+
+    /// `minimal_toml` の `[system]` に `ped_table = "<path>"` を足す。
+    fn toml_with_ped_table(geometry: &Path, ped_table: &Path) -> String {
+        let geometry_line = format!("geometry = \"{}\"", geometry.display());
+        minimal_toml(geometry, "").replace(
+            &geometry_line,
+            &format!("{geometry_line}\nped_table = \"{}\"", ped_table.display()),
+        )
+    }
+
+    /// 省略可(既存の実運用 TOML は無変更で読める)。省略 = 表なし。
+    #[test]
+    fn system_ped_table_is_optional() {
+        let geometry = make_temp_geometry_file();
+        let config = parse(&minimal_toml(&geometry, "")).unwrap();
+
+        assert_eq!(config.system.ped_table, None);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    #[test]
+    fn system_ped_table_is_read_when_the_file_exists() {
+        let geometry = make_temp_geometry_file();
+        let table = geometry.parent().unwrap().join("pedestal_502ns.json");
+        std::fs::write(&table, b"{\"meta\": {}, \"channels\": []}\n").unwrap();
+
+        let config = parse(&toml_with_ped_table(&geometry, &table)).unwrap();
+
+        assert_eq!(config.system.ped_table, Some(table));
+        // `[system] geometry` は動かない。
+        assert_eq!(config.system.geometry, geometry);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// geometry と同じ強さの存在検査: 無い表を書いたまま起動しない(SPEC §3.2)。
+    /// 黙って表なしに後退すると ZS データの PEventTPC が生 ADC のまま残る(TODO/151 §0)。
+    #[test]
+    fn system_ped_table_must_exist() {
+        let geometry = make_temp_geometry_file();
+        let missing = geometry.parent().unwrap().join("no_such_pedestal.json");
+
+        let err = parse(&toml_with_ped_table(&geometry, &missing)).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::PedTableNotFound(ref p) if p == &missing),
             "got {err:?}"
         );
 

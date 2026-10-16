@@ -11,6 +11,7 @@ test_geo
 test_monitor_hist
 test_monitor_pub
 test_raw_tree
+test_ped_table
 compare_pevent
 compare_raw
 # ROOT 辞書(rootcling が LinkDefTPCReco.h から毎ビルド生成する — TODO/020)。

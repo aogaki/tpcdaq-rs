@@ -2,7 +2,7 @@
 #                             + 011/020 PEventTPC TTree 書き出し + 075 raw ツリー)。
 #
 #   make            root_sink をビルド(libzmq + ROOT + TPCReco 参照)
-#   make test       **ROOT 非依存**の単体テスト 7 本をビルドして実行
+#   make test       **ROOT 非依存**の単体テスト 8 本をビルドして実行
 #   make test GOLDEN=/path/to/golden_stream.bin
 #                   適合性テストにフィクスチャを渡す(未指定なら SKIP)
 #   make test-root  Recorder / PEventTPC / raw ツリーのテスト(ROOT リンク)
@@ -13,7 +13,8 @@
 #   make clean
 #
 # 純ヘッダ(tpc_wire.hpp / rs_core.hpp / eb_core.hpp / geo.hpp / monitor_hist.hpp /
-# monitor_pub.hpp)は ZMQ 非依存・**ROOT 非依存** —— `make test` の 7 本は g++ 一発で通る
+# monitor_pub.hpp / ped_table.hpp)は ZMQ 非依存・**ROOT 非依存** —— `make test` の 8 本は
+# g++ 一発で通る
 # (ヘッダテストに ROOT を混ぜない、TODO/011 §3)。
 # ROOT が要るのは `make`(本体)と `make test-root` だけ。
 #
@@ -68,7 +69,7 @@ GOLDEN ?=
 
 HEADERS   = tpc_wire.hpp rs_core.hpp eb_core.hpp check.hpp
 TESTS     = test_tpc_wire test_rs_core test_eb_core test_conformance test_geo \
-            test_monitor_hist test_monitor_pub
+            test_monitor_hist test_monitor_pub test_ped_table
 ROOTTESTS = test_recorder test_pevent test_raw_tree
 
 .PHONY: all test test-root compare clean tpcreco-check
@@ -105,7 +106,7 @@ $(TPCRECO_DICT): LinkDefTPCReco.h $(TPCRECO_HDR) | tpcreco-check
 	  TPCReco/PEventTPC.h $(abspath LinkDefTPCReco.h)
 
 PEVENT_CFLAGS = $(TPCRECO_INC) $(BOOST_CFLAGS)
-PEVENT_DEPS   = pevent_fill.hpp geo.hpp $(TPCRECO_DICT)
+PEVENT_DEPS   = pevent_fill.hpp ped_table.hpp geo.hpp $(TPCRECO_DICT)
 
 root_sink: root_sink.cxx tpc_wire.hpp rs_core.hpp eb_core.hpp root_recorder.hpp \
            raw_tree.hpp monitor_hist.hpp monitor_pub.hpp \
@@ -137,6 +138,10 @@ test_monitor_pub: test_monitor_pub.cpp monitor_pub.hpp monitor_hist.hpp geo.hpp 
                   tpc_wire.hpp check.hpp
 	$(CXX) $(CXXFLAGS) $< -o $@
 
+# ZS 用 pedestal 表(TODO/151)。`calib pedestal` の JSON を読む純ヘッダ。
+test_ped_table: test_ped_table.cpp ped_table.hpp geo.hpp check.hpp
+	$(CXX) $(CXXFLAGS) $< -o $@
+
 test_recorder: test_recorder.cxx root_recorder.hpp eb_core.hpp rs_core.hpp tpc_wire.hpp \
                check.hpp monitor_hist.hpp $(PEVENT_DEPS) | tpcreco-check
 	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) $(PEVENT_CFLAGS) \
@@ -154,7 +159,7 @@ test_pevent: test_pevent.cxx root_recorder.hpp eb_core.hpp rs_core.hpp tpc_wire.
 # root_recorder.hpp の小道具(mkdir_p / run_dir_of / RootFileRecord / 定数)を
 # 再利用する(発注書 A-1)ので、**コンパイル時の include パスだけ** TPCReco が要る。
 test_raw_tree: test_raw_tree.cxx raw_tree.hpp root_recorder.hpp eb_core.hpp rs_core.hpp \
-               tpc_wire.hpp check.hpp monitor_hist.hpp pevent_fill.hpp geo.hpp \
+               tpc_wire.hpp check.hpp monitor_hist.hpp pevent_fill.hpp ped_table.hpp geo.hpp \
                | tpcreco-check
 	$(CXX) $(CXXFLAGS) $(ROOT_CFLAGS) $(PEVENT_CFLAGS) \
 	  test_raw_tree.cxx $(ROOT_LIBS) $(LDFLAGS) -o $@
@@ -179,6 +184,7 @@ test: $(TESTS)
 	./test_geo
 	./test_monitor_hist
 	./test_monitor_pub
+	./test_ped_table
 
 # root_sink 本体も依存に含める: Rust 統合テスト(TPCDAQ_ROOT_SINK_BIN)が参照する
 # バイナリの再ビルド漏れを防ぐ(024 取り込みレビューで stale バイナリの偽 red を実測

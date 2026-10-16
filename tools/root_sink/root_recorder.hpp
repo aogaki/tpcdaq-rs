@@ -191,6 +191,9 @@ struct RecorderConfig {
   // **必須**(strip 射影に要る)。呼び手が寿命を持つこと。
   const tpcgeo::Geometry* geometry = nullptr;       // --geometry
   tpcpevent::FillConfig fill;                       // --pedestal-remove / --*-cell
+  // --pedestal-table(TODO/151): ZS らしいフレームだけに使う pedestal 表。nullptr = 表なし。
+  // ジオメトリと同じく**呼び手が寿命を持ち、worker 間で read-only 共有**。
+  const tpcpevent::PedTable* ped_table = nullptr;
   // --recorder-workers(TODO/064)。1 = 現行と完全同一。**ジオメトリは worker 間で
   // read-only 共有**(Filler と PEventTPC だけが worker 専有)。
   int workers = kDefaultRecorderWorkers;
@@ -250,7 +253,7 @@ class RecorderWorker {
   RecorderWorker(const RecorderConfig& cfg, int index, bool suffixed)
       : cfg_(cfg), index_(index), suffixed_(suffixed) {
     pevent_ = new PEventTPC();
-    filler_.reset(new tpcpevent::Filler(*cfg_.geometry, cfg_.fill));
+    filler_.reset(new tpcpevent::Filler(*cfg_.geometry, cfg_.fill, cfg_.ped_table));
   }
 
   ~RecorderWorker() {
@@ -301,6 +304,7 @@ class RecorderWorker {
     run_id_ = run_id;
     next_part_ = 0;
     run_entries_.store(0, std::memory_order_relaxed);
+    filler_->begin_run(run);  // 「ZS なのに表が無い」の WARN を run 毎 1 回に戻す
   }
 
   // **1 エントリ = 1 ビルド済みイベント**(SPEC §6.4)。分配側(Recorder)が
@@ -365,6 +369,13 @@ class RecorderWorker {
   }
   uint64_t frames_outside_geometry() const {
     return frames_outside_geometry_.load(std::memory_order_relaxed);
+  }
+  uint64_t zs_frames_table() const { return zs_frames_table_.load(std::memory_order_relaxed); }
+  uint64_t zs_frames_no_table() const {
+    return zs_frames_no_table_.load(std::memory_order_relaxed);
+  }
+  uint64_t table_missing_channels() const {
+    return table_missing_channels_.load(std::memory_order_relaxed);
   }
   std::vector<RootFileRecord> files_snapshot() const {
     std::lock_guard<std::mutex> lk(files_mu_);
@@ -521,6 +532,9 @@ class RecorderWorker {
     charge_keys_out_of_range_.store(filler_->keys_out_of_range(), std::memory_order_relaxed);
     frames_outside_geometry_.store(filler_->frames_outside_geometry(),
                                    std::memory_order_relaxed);
+    zs_frames_table_.store(filler_->zs_frames_table(), std::memory_order_relaxed);
+    zs_frames_no_table_.store(filler_->zs_frames_no_table(), std::memory_order_relaxed);
+    table_missing_channels_.store(filler_->table_missing_channels(), std::memory_order_relaxed);
     // 100 イベント毎に basket を吐く(ConvertGrawFile.cpp:85 と同じ)。
     if (part_entries_ % kFlushBasketsEvery == 0) tree_->FlushBaskets();
   }
@@ -624,6 +638,9 @@ class RecorderWorker {
   std::atomic<uint64_t> channels_without_strip_{0};
   std::atomic<uint64_t> charge_keys_out_of_range_{0};
   std::atomic<uint64_t> frames_outside_geometry_{0};
+  std::atomic<uint64_t> zs_frames_table_{0};  // ZS 表モード(TODO/151)
+  std::atomic<uint64_t> zs_frames_no_table_{0};
+  std::atomic<uint64_t> table_missing_channels_{0};
   mutable std::mutex files_mu_;
   std::vector<RootFileRecord> files_;
   std::atomic<const char*> fatal_{nullptr};
@@ -844,6 +861,17 @@ class Recorder {
   }
   uint64_t frames_outside_geometry() const {
     return sum([](const RecorderWorker& w) { return w.frames_outside_geometry(); });
+  }
+  // ZS 表モードのカウンタ(TODO/151、pevent_fill.hpp 冒頭の注記 4)。終了 JSON の
+  // `pevent_zs_frames_table / pevent_zs_frames_no_table / pevent_table_missing_channels`。
+  uint64_t zs_frames_table() const {
+    return sum([](const RecorderWorker& w) { return w.zs_frames_table(); });
+  }
+  uint64_t zs_frames_no_table() const {
+    return sum([](const RecorderWorker& w) { return w.zs_frames_no_table(); });
+  }
+  uint64_t table_missing_channels() const {
+    return sum([](const RecorderWorker& w) { return w.table_missing_channels(); });
   }
   // 全 worker のパート台帳を worker 順に連結(移送チェックリスト④)。
   std::vector<RootFileRecord> files_snapshot() const {

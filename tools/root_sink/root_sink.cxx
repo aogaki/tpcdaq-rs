@@ -258,6 +258,10 @@ void print_counts_json(const Counts& c, const char* fatal) {
       (rec != nullptr) ? rec->charge_keys_out_of_range() : 0;
   const uint64_t frames_outside_geometry =
       (rec != nullptr) ? rec->frames_outside_geometry() : 0;
+  // ZS 表モード(TODO/151、pevent_fill.hpp 冒頭の注記 4)。
+  const uint64_t zs_frames_table = (rec != nullptr) ? rec->zs_frames_table() : 0;
+  const uint64_t zs_frames_no_table = (rec != nullptr) ? rec->zs_frames_no_table() : 0;
+  const uint64_t table_missing_channels = (rec != nullptr) ? rec->table_missing_channels() : 0;
   // Recorder の worker 数(TODO/064)。--no-root では 0(Recorder が居ない)。
   const int recorder_workers = (rec != nullptr) ? rec->workers() : 0;
   // raw ツリー(TODO/075、SPEC §6.7)。--raw-tree が無ければ 0 のまま。
@@ -299,6 +303,8 @@ void print_counts_json(const Counts& c, const char* fatal) {
       ",\"items_out_of_range\":%" PRIu64 ",\"recorder_queue\":%" PRIu64
       ",\"duplicate_event_ids\":%" PRIu64 ",\"channels_without_strip\":%" PRIu64
       ",\"charge_keys_out_of_range\":%" PRIu64 ",\"frames_outside_geometry\":%" PRIu64
+      ",\"pevent_zs_frames_table\":%" PRIu64 ",\"pevent_zs_frames_no_table\":%" PRIu64
+      ",\"pevent_table_missing_channels\":%" PRIu64
       ",\"workers\":%d"
       ",\"raw_tree\":%d,\"raw_entries_written\":%" PRIu64
       ",\"raw_items_out_of_range\":%" PRIu64 ",\"raw_unexpected_fragments\":%" PRIu64
@@ -311,7 +317,8 @@ void print_counts_json(const Counts& c, const char* fatal) {
       c.events_before_restart, c.restart_duplicates, c.heartbeats, c.unknown, c.stale_eos,
       c.unexpected_sources, c.run_number_mismatch, entries_written, items_out_of_range,
       c.recorder_queue, duplicate_event_ids, channels_without_strip,
-      charge_keys_out_of_range, frames_outside_geometry, recorder_workers,
+      charge_keys_out_of_range, frames_outside_geometry, zs_frames_table, zs_frames_no_table,
+      table_missing_channels, recorder_workers,
       (raw != nullptr) ? 1 : 0, raw_entries_written, raw_items_out_of_range,
       raw_unexpected_fragments,
       g_mon.snapshots_published.load(std::memory_order_relaxed),
@@ -364,6 +371,9 @@ struct Options {
   // PEventTPC 出力(TODO/020、SPEC §6.4 v1.8 / v1.17)
   std::string geometry;  // --geometry(TTree を書くなら必須)
   tpcpevent::FillConfig fill;
+  // --pedestal-table(TODO/151): ZS らしいフレームだけに使う `calib pedestal` の JSON。
+  // 空 = 表なし(ZS らしいフレームは従来算法のまま数える)。
+  std::string pedestal_table;
   // --run-id(TODO/021): EventInfo.runId の上書き。0 = run を開いた時刻から生成(既定)。
   // 実データ照合(同 run の grawToEventTPC 出力と比較)と、P4 で controller が正式な
   // run TS を配る経路(SPEC §6.4 実装注記)の受け口。
@@ -383,6 +393,7 @@ void usage(const char* argv0) {
       "       [--geometry FILE.dat] [--pedestal-remove 0|1]\n"
       "       [--min-pedestal-cell N] [--max-pedestal-cell N]\n"
       "       [--min-signal-cell N] [--max-signal-cell N]\n"
+      "       [--pedestal-table FILE.json]\n"
       "       [--pub ENDPOINT] [--snapshot-hz N] [--event-publish-hz N]\n"
       "\n"
       "  --bind ENDPOINT   PULL bind endpoint (default %s)\n"
@@ -420,6 +431,11 @@ void usage(const char* argv0) {
       "                    pedestal time window (default %d..%d)\n"
       "  --min-signal-cell N / --max-signal-cell N\n"
       "                    signal time window (default %d..%d)\n"
+      "  --pedestal-table FILE.json\n"
+      "                    `calib pedestal` table ((asad, aget, ch) -> mean). Used only\n"
+      "                    for zero-suppressed frames: value = adc - mean, no FPN term.\n"
+      "                    Full / partial frames keep the per-event pedestal. Needs\n"
+      "                    --pedestal-remove 1 (default: no table)\n"
       "  --run-id N        override EventInfo.runId (YYYYmmddHHMMSS as one number;\n"
       "                    default 0 = derive from the wall clock when the run opens)\n"
       "  --pub ENDPOINT    monitor PUB bind endpoint (default %s). status is always\n"
@@ -559,6 +575,8 @@ Options parse_args(int argc, char** argv) {
     } else if (a == "--max-pedestal-cell" && has_value) {
       opt.fill.max_pedestal_cell =
           static_cast<int>(parse_nonnegative("--max-pedestal-cell", argv[++i]));
+    } else if (a == "--pedestal-table" && has_value) {
+      opt.pedestal_table = argv[++i];
     } else if (a == "--min-signal-cell" && has_value) {
       opt.fill.min_signal_cell =
           static_cast<int>(parse_nonnegative("--min-signal-cell", argv[++i]));
@@ -590,6 +608,14 @@ Options parse_args(int argc, char** argv) {
   std::string why;
   if (!opt.fill.validate(&why)) {
     std::fprintf(stderr, "root_sink: %s\n", why.c_str());
+    std::exit(kExitUsage);
+  }
+  // 表は「ペデスタルを引く」ときだけ意味を持つ。生 ADC(--pedestal-remove 0)と同時に
+  // 渡されたら、どちらが意図かを黙って決めない(SPEC §3.2「半端な設定で走らない」)。
+  if (!opt.pedestal_table.empty() && !opt.fill.remove_pedestal) {
+    std::fprintf(stderr,
+                 "root_sink: --pedestal-table needs --pedestal-remove 1 (the table is a "
+                 "pedestal subtraction; --pedestal-remove 0 writes raw ADC)\n");
     std::exit(kExitUsage);
   }
   // TODO/064 §7: worker 並列と ROOT のスレッドプールの**二重取りはしない**
@@ -1100,6 +1126,9 @@ int main(int argc, char** argv) {
   // Recorder スレッドが TFile を触るため。--no-root では ROOT に一切触らない。
   // ジオメトリは **PEventTPC 出力とモニタ集計の共有物**(TODO/022)。--no-root でも
   // --geometry があれば読む —— ヒストは ROOT を書かなくても PUB で配れる(SPEC §5.3)。
+  // ZS 用 pedestal 表(TODO/151)。**Recorder より先に宣言** = Recorder より後に破棄
+  // (Filler が非所有ポインタで読む)。
+  std::unique_ptr<tpcpevent::PedTable> ped_table;
   std::unique_ptr<rootsink::Recorder> recorder;
   std::unique_ptr<RecordChannel> rec_chan;
   std::unique_ptr<rootsink::RawTreeWriter> raw_writer;  // --raw-tree(SPEC §6.7)
@@ -1122,6 +1151,22 @@ int main(int argc, char** argv) {
                  static_cast<unsigned>(geometry->max_strip[2]),
                  geometry->duplicate_warnings().size(), geometry->malformed_lines().size());
     g_mon.hist.reset(new rsmon::HistAccumulator(*geometry));
+  }
+  // ZS 用 pedestal 表(TODO/151)。開けない / "channels" が無い = 起動エラー
+  // (SPEC §3.2)。素性(path・生成日時・ch 数)を必ず出す —— 黙って半端な表で走らない。
+  if (!opt.pedestal_table.empty()) {
+    ped_table.reset(new tpcpevent::PedTable());
+    std::string err;
+    if (!tpcpevent::load_ped_table(opt.pedestal_table, ped_table.get(), &err)) {
+      std::fprintf(stderr, "root_sink: --pedestal-table: %s\n", err.c_str());
+      return kExitUsage;
+    }
+    std::fprintf(stderr,
+                 "root_sink: pedestal table %s: generated_at=%s channels=%zu "
+                 "skipped_entries=%zu (used only for zero-suppressed frames)\n",
+                 ped_table->path.c_str(),
+                 ped_table->generated_at.empty() ? "?" : ped_table->generated_at.c_str(),
+                 ped_table->channels, ped_table->entries_skipped);
   }
   g_mon.snapshot_hz = opt.snapshot_hz;
   g_mon.event_hz = opt.event_publish_hz;
@@ -1146,6 +1191,7 @@ int main(int argc, char** argv) {
     rcfg.compression = opt.root_compression;
     rcfg.geometry = geometry.get();
     rcfg.fill = opt.fill;
+    rcfg.ped_table = ped_table.get();  // nullptr = 表なし
     rcfg.run_id_override = opt.run_id;
     rcfg.workers = opt.recorder_workers;
     recorder.reset(new rootsink::Recorder(rcfg));

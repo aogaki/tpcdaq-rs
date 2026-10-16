@@ -27,8 +27,8 @@ CONF=$TPCDAQ_CONF
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # TOML から 1 キーを拾う(最初に出た `key = "value"` / `key = value`)。
-# 拾うのは [system] の output_root / geometry と [root_sink] の数値・真偽だけ
-# (どれも TOML 内で一意なキー)。
+# 拾うのは [system] の output_root / geometry / ped_table と [root_sink] の数値・真偽だけ
+# (どれも TOML 内で一意なキー。`# ped_table = ...` のようにコメントアウトした行は拾わない)。
 toml_get() {
     sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"#]*\)\"\{0,1\}.*/\1/p" "$CONF" \
         | head -1 | sed 's/[[:space:]]*$//'
@@ -63,8 +63,12 @@ OUTPUT_ROOT=$(toml_get output_root)
 GEOMETRY=$(toml_get geometry)
 BUILD_TIMEOUT_MS=$(toml_get build_timeout_ms)
 RAW_TREE=$(toml_get raw_tree)
+# ZS 用 pedestal 表(TODO/151、任意)。書いてあれば root_sink に --pedestal-table で渡す
+# (ZS らしいフレームだけ表の mean を引く。無ければ ZS フレームは従来算法のまま数えられる)。
+PED_TABLE=$(toml_get ped_table)
 [ -n "$OUTPUT_ROOT" ] && [ -d "$OUTPUT_ROOT" ] || fail "output_root '$OUTPUT_ROOT' is not a directory"
 [ -f "$GEOMETRY" ] || fail "missing geometry '$GEOMETRY'"
+[ -z "$PED_TABLE" ] || [ -f "$PED_TABLE" ] || fail "missing pedestal table '$PED_TABLE' ([system] ped_table)"
 for f in "$ROOT_SINK" "$BIN/monitor" "$BIN/graw_writer" "$BIN/decoder" "$BIN/receiver" \
          "$BIN/ecc_bridge" "$BIN/controller" "$GET_BIN/bin/getEccServer"; do
     [ -x "$f" ] || fail "missing binary: $f"
@@ -82,7 +86,7 @@ ulimit -n 65536 || fail "ulimit -n 65536 (hard limit $(ulimit -Hn))"
 # shellcheck disable=SC1090
 source "$ROOT_SETUP" || fail "cannot source $ROOT_SETUP"
 
-echo "config: $CONF  output_root: $OUTPUT_ROOT  logs: $LOGS  root_sink workers: $RECORDER_WORKERS"
+echo "config: $CONF  output_root: $OUTPUT_ROOT  logs: $LOGS  root_sink workers: $RECORDER_WORKERS  ped_table: ${PED_TABLE:-(none)}"
 echo "== starting the stack =="
 
 # 1. root-sink(下流から。monitor PUB を先に上げる — SUB は slow-joiner)
@@ -90,7 +94,8 @@ start root_sink "$ROOT_SINK" --bind "tcp://*:47003" --pub "tcp://*:47004" \
     --geometry "$GEOMETRY" --output-root "$OUTPUT_ROOT" --expect "${ROOT_SINK_EXPECT:-0:0}" \
     ${BUILD_TIMEOUT_MS:+--build-timeout-ms "$BUILD_TIMEOUT_MS"} \
     $( [ "$RECORDER_WORKERS" -gt 1 ] && echo --recorder-workers "$RECORDER_WORKERS" ) \
-    $( [ "$RAW_TREE" = "true" ] && echo --raw-tree )
+    $( [ "$RAW_TREE" = "true" ] && echo --raw-tree ) \
+    ${PED_TABLE:+--pedestal-table "$PED_TABLE"}
 wait_for_line "$LOGS/root_sink.log" "monitor PUB bind" 20 || fail "root_sink did not bind"
 
 # 2. monitor(WS)

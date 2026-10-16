@@ -35,11 +35,25 @@
 //     本家は境界検査をしていない —— 黙って踏むより落として数える(CLAUDE.md)。
 //  3. item の chan フィールドは 7bit(0–127)だが AGET は 68 ch。置き場が無い item は
 //     **落として数える**(`items_out_of_range()`)。我々独自の防御で、本家に対応物は無い。
+//  4. **ZS 表モード(TODO/151)**: zCoBo の ZS データ(閾値未満のサンプルが**存在しない**。
+//     FPN ch も抑制)に本家の算法を掛けると、ペデスタル窓のサンプルがほぼ無いので
+//     offset ≈ 0 / FPN 項 0 になり、chargeMap が生 ADC のまま残る(archive/149 run 133。
+//     grawToEventTPC でも同じ壊れ方)。そこで **ZS らしいフレーム**(`frame_is_zero_suppressed`)
+//     に限り、`calib pedestal` の表(ped_table.hpp)の mean を引く:
+//       correction = 表の mean(asad, aget, raw_ch)、**FPN 項なし**、signal 窓は不変、
+//       存在するサンプルだけ `adc − mean`(欠けたサンプルは埋めない)。
+//     表に無い ch は書かずに数える(`table_missing_channels()`)。表が無ければ従来算法の
+//     まま数える(`zs_frames_no_table()`、WARN は run 毎 1 回 —— 保存は止めない、graw が保険)。
+//     **非 ZS フレームは表があっても従来算法そのもの**(コードパスも同じ)—— §12-3 の
+//     grawToEventTPC 一致オラクルは表の有無で変わらない。`--pedestal-remove 0` では
+//     述語も表も使わない(何も引かない)。
 
 #ifndef TPCDAQ_ROOT_SINK_PEVENT_FILL_HPP
 #define TPCDAQ_ROOT_SINK_PEVENT_FILL_HPP
 
 #include <algorithm>
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -51,6 +65,7 @@
 #include "TPCReco/PEventTPC.h"
 #include "eb_core.hpp"
 #include "geo.hpp"
+#include "ped_table.hpp"
 
 namespace tpcpevent {
 
@@ -136,7 +151,8 @@ inline long run_id_now() {
 // 作業配列はメンバに置いて使い回す —— ホットパスで heap を触らない(CLAUDE.md)。
 class Filler {
  public:
-  Filler(const tpcgeo::Geometry& geometry, FillConfig cfg) : geo_(geometry), cfg_(cfg) {
+  Filler(const tpcgeo::Geometry& geometry, FillConfig cfg, const PedTable* table = nullptr)
+      : geo_(geometry), cfg_(cfg), table_(table) {
     for (int a = 0; a < kAgetChips; ++a) {
       // 実機 mini/ELITPC はフルウィンドウ 512 サンプル/ch。最初のフレームで伸びきって
       // 以後は容量が残る(ホットパスで heap 確保をしない — CLAUDE.md)。
@@ -170,7 +186,29 @@ class Filler {
     }
 
     sort_unsorted_cells();
-    if (cfg_.remove_pedestal) compute_pedestals();
+    // ZS らしいフレーム + 表 = 表モード(冒頭の注記 4)。それ以外は従来算法そのもの。
+    bool table_mode = false;
+    if (cfg_.remove_pedestal) {
+      if (frame_is_zero_suppressed()) {
+        if (table_ != nullptr) {
+          table_mode = true;
+          ++zs_frames_table_;
+        } else {
+          ++zs_frames_no_table_;
+          if (!warned_zs_no_table_) {
+            warned_zs_no_table_ = true;
+            std::fprintf(stderr,
+                         "root_sink: WARN run %u: frame (cobo=%u asad=%u) looks zero-suppressed "
+                         "but no --pedestal-table is set — pedestal from cells %d..%d is "
+                         "biased (offset ~0, no FPN), chargeMap stays near raw ADC; saving "
+                         "continues (graw keeps the data), counted as "
+                         "pevent_zs_frames_no_table (warned once per run)\n",
+                         run_, cobo, asad, cfg_.min_pedestal_cell, cfg_.max_pedestal_cell);
+          }
+        }
+      }
+      if (!table_mode) compute_pedestals();
+    }
 
     // 走査順は **(aget 外・normal chan 内)昇順** = TPCReco `fillEventFromFrame` の
     // ループ順そのもの。
@@ -198,6 +236,23 @@ class Filler {
           ++channels_without_strip_;
           continue;
         }
+        // 表モード: 補正 = 表の mean(FPN 項なし)。表に無い ch は書かずに数える
+        // (strip でない ch は上で既に捨てている —— 表を引くのは書く ch だけ)。
+        double table_mean = 0.0;
+        if (table_mode) {
+          table_mean = table_->mean_of(asad, static_cast<uint32_t>(aget), raw_ch);
+          if (std::isnan(table_mean)) {
+            ++table_missing_channels_;
+            if (table_missing_channels_ == 1) {
+              std::fprintf(stderr,
+                           "root_sink: WARN pedestal table %s has no entry for (asad=%u "
+                           "aget=%d ch=%u) — this zero-suppressed channel is not written, "
+                           "counted as pevent_table_missing_channels\n",
+                           table_->path.c_str(), asad, aget, raw_ch);
+            }
+            continue;
+          }
+        }
         const int dir = static_cast<int>(role.plane);
         const int section = static_cast<int>(role.section);
         const int number = static_cast<int>(role.strip);
@@ -213,7 +268,11 @@ class Filler {
           const int cell = s.bucket;
           if (cell < cfg_.min_signal_cell || cell > cfg_.max_signal_cell) continue;
           double value = s.adc;
-          if (cfg_.remove_pedestal) value -= offset + fpn_signal[cell];
+          if (table_mode) {
+            value -= table_mean;  // 存在するサンプルだけ(欠けたセルは埋めない)
+          } else if (cfg_.remove_pedestal) {
+            value -= offset + fpn_signal[cell];
+          }
           // `myChargeArray[3][3][256][512]` をはみ出す key は書かない(冒頭の注記 2)。
           if (!key_ok || cell < 0 || cell >= static_cast<int>(PEventTPC::max_strip_time_cells)) {
             ++keys_out_of_range_;
@@ -240,6 +299,17 @@ class Filler {
   uint64_t frames_outside_geometry() const { return frames_outside_geometry_; }
   // item の chan が AGET の 68 ch を外れていて置き場が無かった件数(冒頭の注記 3)。
   uint64_t items_out_of_range() const { return items_out_of_range_; }
+  // ZS 表モード(冒頭の注記 4、TODO/151)。ZS らしいフレームのうち表で引いた数 /
+  // 表が無く従来算法のままにした数 / 表に無くて書かなかった strip ch の数(ch × フレーム)。
+  uint64_t zs_frames_table() const { return zs_frames_table_; }
+  uint64_t zs_frames_no_table() const { return zs_frames_no_table_; }
+  uint64_t table_missing_channels() const { return table_missing_channels_; }
+
+  // run の始まり(Recorder が呼ぶ)。「ZS なのに表が無い」の WARN を run 毎 1 回にする。
+  void begin_run(uint32_t run) {
+    run_ = run;
+    warned_zs_no_table_ = false;
+  }
 
   const FillConfig& config() const { return cfg_; }
 
@@ -288,6 +358,34 @@ class Filler {
         unsorted_[a][c] = false;
       }
     }
+  }
+
+  // **ZS らしいフレームの述語**(TODO/151 §1.3)。このフレームで「サンプルが 1 つ以上ある
+  // ch」(FPN 込みの raw 4 × 68 マス)のうち、ペデスタル窓 [min_pedestal_cell,
+  // max_pedestal_cell](既定 5..25 = 21 cell)内のサンプル数が窓幅に満たない ch が
+  // **過半**(半数ちょうどは含まない)なら ZS らしい。
+  //   * full / partial(非 ZS)は読んだ ch が全セル揃う → false
+  //   * ZS は pre-trigger(= ペデスタル窓)のサンプルがほぼ無い → true
+  // `sort_unsorted_cells()` の後で呼ぶこと(各マスが bucket 昇順 = 二分探索で数える)。
+  bool frame_is_zero_suppressed() const {
+    const int lo = cfg_.min_pedestal_cell;
+    const int hi = cfg_.max_pedestal_cell;
+    const std::ptrdiff_t width = hi - lo + 1;
+    int with_samples = 0;
+    int short_of_window = 0;
+    for (int a = 0; a < kAgetChips; ++a) {
+      for (int c = 0; c < kRawChPerAget; ++c) {
+        const std::vector<Sample>& v = grid_[a][c];
+        if (v.empty()) continue;
+        ++with_samples;
+        const auto first = std::lower_bound(
+            v.begin(), v.end(), lo, [](const Sample& s, int cell) { return s.bucket < cell; });
+        const auto last = std::upper_bound(
+            first, v.end(), hi, [](int cell, const Sample& s) { return cell < s.bucket; });
+        if (last - first < width) ++short_of_window;
+      }
+    }
+    return 2 * short_of_window > with_samples;
   }
 
   void clear_grid() {
@@ -359,6 +457,9 @@ class Filler {
 
   const tpcgeo::Geometry& geo_;
   FillConfig cfg_;
+  const PedTable* table_;  // ZS 表モードの表(nullptr = 表なし)。呼び手が寿命を持つ
+  uint32_t run_ = 0;       // WARN 文言用(begin_run が入れる)
+  bool warned_zs_no_table_ = false;
 
   // (aget, raw_ch) の作業マス。1 フレーム分だけ使って毎回 clear する。
   std::vector<Sample> grid_[kAgetChips][kRawChPerAget];
@@ -377,6 +478,9 @@ class Filler {
   uint64_t keys_out_of_range_ = 0;
   uint64_t frames_outside_geometry_ = 0;
   uint64_t items_out_of_range_ = 0;
+  uint64_t zs_frames_table_ = 0;
+  uint64_t zs_frames_no_table_ = 0;
+  uint64_t table_missing_channels_ = 0;
 };
 
 }  // namespace tpcpevent

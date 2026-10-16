@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -410,6 +411,281 @@ void test_frame_outside_geometry() {
 }
 
 // ---------------------------------------------------------------------------
+// 7b. ZS(ゼロサプレッション)フレームと pedestal 表(TODO/151)
+// ---------------------------------------------------------------------------
+//
+// zCoBo の ZS は閾値未満のサンプルを**送らない**(FPN ch も抑制)。そのまま従来算法に
+// 掛けると、ペデスタル窓のサンプルがほぼ無いので offset ≈ 0・FPN 項 0 になり、
+// chargeMap が生 ADC のまま残る(archive/149 run 133)。ZS らしいフレームに限って
+// `calib pedestal` の表の mean を引く(表モード)。
+//
+// 窓(手計算できる幅): ペデスタル [2,4](= 3 cell)/ signal [2,9]。
+tpcpevent::FillConfig zs_windows() {
+  tpcpevent::FillConfig cfg;
+  cfg.remove_pedestal = true;
+  cfg.min_pedestal_cell = 2;
+  cfg.max_pedestal_cell = 4;
+  cfg.min_signal_cell = 2;
+  cfg.max_signal_cell = 9;
+  return cfg;
+}
+
+// pedestal 表(asad 0)。値は非対称、すべて 2 進で厳密に表せる 1/4 刻み。
+//   AGET0 raw0 (U1) = 100.25 / raw1 (U2) = 200.5 / raw2 (U3) = 150.0
+//   AGET1 raw0 (V1) = 300.75
+//   FPN も表にある(AGET0 raw11 = 55.5)—— 表モードは FPN 項を**使わない**ことを試す。
+//   AUX(AGET0 raw4)は表に**無い** —— strip でない ch は表を引く前に捨てる(計数しない)。
+tpcpevent::PedTable zs_table() {
+  tpcpevent::PedTable t;
+  t.mean[0][0][0] = 100.25;
+  t.mean[0][0][1] = 200.5;
+  t.mean[0][0][2] = 150.0;
+  t.mean[0][0][11] = 55.5;
+  t.mean[0][1][0] = 300.75;
+  t.channels = 5;
+  return t;
+}
+
+// ZS の模擬: 各 ch の全波形(cell 0–11)から「表の mean + 10 未満」のセルを除いたもの。
+// FPN は全部無い(ZS で FPN ch も抑制される)。
+//   U1 (AGET0 raw0, mean 100.25 → 閾値 110.25)
+//      全波形 101 99 102 100 98 140 180 150 115 105 101 100
+//      残る = cell5 140 / cell6 180 / cell7 150 / cell8 115
+//   U2 (AGET0 raw1, mean 200.5 → 閾値 210.5)
+//      全波形 201 199 202 215 200 205 260 230 209 201 212 198
+//      残る = cell3 215(ペデスタル窓のノイズ山)/ cell6 260 / cell7 230 / cell10 212
+//   U3 (AGET0 raw2, mean 150.0 → 閾値 160)
+//      全波形 150 151 149 150 152 148 150 151 149 150 150 151 → 全部抑制 = ch ごと無い
+//   V1 (AGET1 raw0, mean 300.75 → 閾値 310.75)
+//      全波形 301 300 302 299 320 350 330 305 301 300 299 301
+//      残る = cell4 320 / cell5 350 / cell6 330
+//   AUX (AGET0 raw4)                     残る = cell6 999
+//
+// 述語(サンプルのある ch のうちペデスタル窓 [2,4] のサンプル数 < 3 が過半か):
+//   サンプルのある ch = U1, U2, V1, AUX の 4 本。窓内の件数 = 0 / 1(cell3)/ 1(cell4)/ 0
+//   → 4 本とも < 3 → 4 × 2 > 4 → **ZS らしい**。
+std::vector<Item> zs_items() {
+  return {
+      {0, 0, 5, 140}, {0, 0, 6, 180}, {0, 0, 7, 150}, {0, 0, 8, 115},
+      {0, 1, 3, 215}, {0, 1, 6, 260}, {0, 1, 7, 230}, {0, 1, 10, 212},
+      {0, 4, 6, 999},
+      {1, 0, 4, 320}, {1, 0, 5, 350}, {1, 0, 6, 330},
+  };
+}
+
+// 全 68 ch × cell 0–11 が揃ったフレーム(フル読み出し = 非 ZS)。値は非対称な式。
+std::vector<Item> full_items(const std::vector<uint32_t>& agets) {
+  std::vector<Item> items;
+  for (uint32_t aget : agets) {
+    for (uint32_t chan = 0; chan < 68; ++chan) {
+      for (uint32_t cell = 0; cell < 12; ++cell) {
+        items.push_back(Item{aget, chan, cell, 200 + 7 * aget + 3 * chan + (cell * cell) % 13});
+      }
+    }
+  }
+  return items;
+}
+
+// chargeMap の完全一致(key 集合と値のビット一致)。
+bool same_charge_map(const PEventTPC& a, const PEventTPC& b) {
+  return a.GetChargeMap() == b.GetChargeMap();
+}
+
+// (a) ZS フラグメント + 表 → 存在するサンプルだけ `adc − mean`(FPN 項なし)。
+//
+// **手計算**(signal 窓 [2,9]):
+//   U1 (0,0,1): cell5 140 − 100.25 = 39.75 / cell6 180 − 100.25 = 79.75
+//               cell7 150 − 100.25 = 49.75 / cell8 115 − 100.25 = 14.75
+//   U2 (0,0,2): cell3 215 − 200.5 = 14.5 / cell6 260 − 200.5 = 59.5 / cell7 230 − 200.5 = 29.5
+//               cell10 = signal 窓の外 → key なし
+//   V1 (1,0,1): cell4 320 − 300.75 = 19.25 / cell5 350 − 300.75 = 49.25
+//               cell6 330 − 300.75 = 29.25
+//   → 4 + 3 + 3 = 10 key。抑制されたセル(例 U1 cell4)と U3 には key を作らない。
+void test_zs_frame_with_table_subtracts_the_table_mean() {
+  const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
+  const tpcpevent::PedTable table = zs_table();
+  tpcpevent::Filler filler(geo, zs_windows(), &table);
+
+  PEventTPC ev;
+  ev.Clear();
+  filler.add_fragment(make_fragment(5, 0, 0, 1, zs_items()), ev);
+
+  CHECK_EQ(ev.GetChargeMap().size(), 10);
+  CHECK_D(charge_at(ev, 0, 0, 1, 5), 39.75);
+  CHECK_D(charge_at(ev, 0, 0, 1, 6), 79.75);
+  CHECK_D(charge_at(ev, 0, 0, 1, 7), 49.75);
+  CHECK_D(charge_at(ev, 0, 0, 1, 8), 14.75);
+  CHECK_D(charge_at(ev, 0, 0, 2, 3), 14.5);
+  CHECK_D(charge_at(ev, 0, 0, 2, 6), 59.5);
+  CHECK_D(charge_at(ev, 0, 0, 2, 7), 29.5);
+  CHECK_D(charge_at(ev, 1, 0, 1, 4), 19.25);
+  CHECK_D(charge_at(ev, 1, 0, 1, 5), 49.25);
+  CHECK_D(charge_at(ev, 1, 0, 1, 6), 29.25);
+  CHECK(!has_key(ev, 0, 0, 1, 4));   // 抑制されたセルは埋めない
+  CHECK(!has_key(ev, 0, 0, 2, 10));  // signal 窓の外
+  CHECK(!has_key(ev, 0, 0, 3, 6));   // U3 は ch ごと抑制
+  CHECK_EQ(filler.zs_frames_table(), 1);
+  CHECK_EQ(filler.zs_frames_no_table(), 0);
+  CHECK_EQ(filler.table_missing_channels(), 0);
+  // AUX は strip でない —— 表に無くても「表に無い ch」とは数えない(先に役割で捨てる)。
+  CHECK_EQ(filler.channels_without_strip(), 1);
+}
+
+// (b) 同じフラグメント、表なし → 従来算法のまま + no_table を数える(保存は止めない)。
+//
+// **手計算**(FPN が 1 本も無いので FPN 平均は全セル 0.0):
+//   U1: ペデスタル窓 [2,4] にサンプル無し → オフセット 0.0 → 生 ADC のまま
+//       cell5 140 / cell6 180 / cell7 150 / cell8 115
+//   U2: 窓内は cell3 215 の 1 点 → オフセット 215.0
+//       cell3 0.0 / cell6 260 − 215 = 45.0 / cell7 230 − 215 = 15.0
+//   V1: 窓内は cell4 320 の 1 点 → オフセット 320.0
+//       cell4 0.0 / cell5 30.0 / cell6 10.0
+void test_zs_frame_without_table_keeps_the_old_algorithm_and_counts() {
+  const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
+  tpcpevent::Filler filler(geo, zs_windows());
+
+  PEventTPC ev;
+  ev.Clear();
+  filler.add_fragment(make_fragment(5, 0, 0, 1, zs_items()), ev);
+
+  CHECK_EQ(ev.GetChargeMap().size(), 10);
+  CHECK_D(charge_at(ev, 0, 0, 1, 5), 140.0);
+  CHECK_D(charge_at(ev, 0, 0, 1, 6), 180.0);
+  CHECK_D(charge_at(ev, 0, 0, 1, 7), 150.0);
+  CHECK_D(charge_at(ev, 0, 0, 1, 8), 115.0);
+  CHECK_D(charge_at(ev, 0, 0, 2, 3), 0.0);
+  CHECK_D(charge_at(ev, 0, 0, 2, 6), 45.0);
+  CHECK_D(charge_at(ev, 0, 0, 2, 7), 15.0);
+  CHECK_D(charge_at(ev, 1, 0, 1, 4), 0.0);
+  CHECK_D(charge_at(ev, 1, 0, 1, 5), 30.0);
+  CHECK_D(charge_at(ev, 1, 0, 1, 6), 10.0);
+  CHECK_EQ(filler.zs_frames_no_table(), 1);
+  CHECK_EQ(filler.zs_frames_table(), 0);
+
+  // 2 フレーム目も数える(WARN は run 毎 1 回 —— 計数は毎フレーム)。
+  ev.Clear();
+  filler.add_fragment(make_fragment(6, 0, 0, 2, zs_items()), ev);
+  CHECK_EQ(filler.zs_frames_no_table(), 2);
+}
+
+// (c) フル読み出し(非 ZS)+ 表 → 述語 false → **表なしと chargeMap がビット一致**
+// (§12-3 の grawToEventTPC 一致オラクルが表の有無で変わらないことの単体版)。
+void test_full_frame_with_table_is_bit_identical_to_without() {
+  const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
+  const tpcpevent::PedTable table = zs_table();
+  tpcpevent::Filler with_table(geo, zs_windows(), &table);
+  tpcpevent::Filler without_table(geo, zs_windows());
+
+  const std::vector<Item> items = full_items({0, 1});
+  // PEventTPC は myChargeArray(4.7 MB)を抱えるので 2 個はヒープに置く(スタック 8 MB)。
+  std::unique_ptr<PEventTPC> a(new PEventTPC());
+  std::unique_ptr<PEventTPC> b(new PEventTPC());
+  a->Clear();
+  b->Clear();
+  with_table.add_fragment(make_fragment(9, 0, 0, 1, items), *a);
+  without_table.add_fragment(make_fragment(9, 0, 0, 1, items), *b);
+
+  // reduced ジオメトリの strip 11 本(U4 + V3 + W4)× signal 窓 [2,9] の 8 cell。
+  CHECK_EQ(a->GetChargeMap().size(), 88);
+  CHECK(same_charge_map(*a, *b));
+  CHECK_EQ(with_table.zs_frames_table(), 0);
+  CHECK_EQ(with_table.zs_frames_no_table(), 0);
+  CHECK_EQ(without_table.zs_frames_no_table(), 0);
+}
+
+// (d) partial 読み出し(非 ZS)—— 読まれた ch は全セル揃い、読まれない ch は丸ごと無い。
+// 述語は「サンプルのある ch」だけを見るので false → 従来算法(表ありでもビット一致)。
+//   読まれた ch = AGET0 の FPN 4 本 + raw0(U1)、AGET1 raw3(W1)の計 6 本、各 cell 0–11。
+void test_partial_non_zs_frame_is_not_zero_suppressed() {
+  const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
+  const tpcpevent::PedTable table = zs_table();
+  tpcpevent::Filler with_table(geo, zs_windows(), &table);
+  tpcpevent::Filler without_table(geo, zs_windows());
+
+  std::vector<Item> items;
+  for (const Item& it : full_items({0, 1})) {
+    const bool read = (it.aget == 0 && (it.chan == 0 || it.chan == 11 || it.chan == 22 ||
+                                        it.chan == 45 || it.chan == 56)) ||
+                      (it.aget == 1 && it.chan == 3);
+    if (read) items.push_back(it);
+  }
+  std::unique_ptr<PEventTPC> a(new PEventTPC());
+  std::unique_ptr<PEventTPC> b(new PEventTPC());
+  a->Clear();
+  b->Clear();
+  with_table.add_fragment(make_fragment(9, 0, 0, 1, items), *a);
+  without_table.add_fragment(make_fragment(9, 0, 0, 1, items), *b);
+
+  CHECK_EQ(a->GetChargeMap().size(), 16);  // U1 + W1 × 8 cell
+  CHECK(same_charge_map(*a, *b));
+  CHECK_EQ(with_table.zs_frames_table(), 0);
+  CHECK_EQ(with_table.zs_frames_no_table(), 0);
+}
+
+// 述語の境界: 「過半」は**半数ちょうどを含まない**。
+//   ① U1 全セル(窓内 3 件 = 揃い)+ V1 cell6 だけ(窓内 0 件)→ 1/2 = 半数 → 非 ZS
+//   ② ①に U2 cell6 だけ(窓内 0 件)を足す → 2/3 = 過半 → ZS らしい
+void test_zs_predicate_needs_a_strict_majority() {
+  const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
+  const tpcpevent::PedTable table = zs_table();
+  tpcpevent::Filler filler(geo, zs_windows(), &table);
+
+  std::vector<Item> half;
+  for (uint32_t cell = 0; cell < 12; ++cell) half.push_back(Item{0, 0, cell, 101 + cell});
+  half.push_back(Item{1, 0, 6, 330});
+  PEventTPC ev;
+  ev.Clear();
+  filler.add_fragment(make_fragment(1, 0, 0, 1, half), ev);
+  CHECK_EQ(filler.zs_frames_table(), 0);
+
+  std::vector<Item> majority = half;
+  majority.push_back(Item{0, 1, 6, 260});
+  ev.Clear();
+  filler.add_fragment(make_fragment(2, 0, 0, 1, majority), ev);
+  CHECK_EQ(filler.zs_frames_table(), 1);
+}
+
+// (e) 表に無い strip ch → その ch は書かずに数える(他の ch は表モードのまま)。
+//   (a) の表から V1(AGET1 raw0)を抜く → V1 の 3 key が消え、U1/U2 の 7 key は (a) と同値。
+void test_zs_channel_missing_from_table_is_skipped_and_counted() {
+  const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
+  tpcpevent::PedTable table = zs_table();
+  table.mean[0][1][0] = std::nan("");
+  tpcpevent::Filler filler(geo, zs_windows(), &table);
+
+  PEventTPC ev;
+  ev.Clear();
+  filler.add_fragment(make_fragment(5, 0, 0, 1, zs_items()), ev);
+
+  CHECK_EQ(ev.GetChargeMap().size(), 7);
+  CHECK_D(charge_at(ev, 0, 0, 1, 5), 39.75);
+  CHECK_D(charge_at(ev, 0, 0, 2, 3), 14.5);
+  CHECK(!has_key(ev, 1, 0, 1, 4));
+  CHECK(!has_key(ev, 1, 0, 1, 5));
+  CHECK_EQ(filler.table_missing_channels(), 1);
+  CHECK_EQ(filler.zs_frames_table(), 1);
+}
+
+// --pedestal-remove 0(生 ADC)では ZS でも何も引かない —— 述語も表も使わない。
+void test_zs_frame_without_pedestal_removal_stays_raw() {
+  const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
+  const tpcpevent::PedTable table = zs_table();
+  tpcpevent::FillConfig cfg = zs_windows();
+  cfg.remove_pedestal = false;
+  tpcpevent::Filler filler(geo, cfg, &table);
+
+  PEventTPC ev;
+  ev.Clear();
+  filler.add_fragment(make_fragment(5, 0, 0, 1, zs_items()), ev);
+
+  CHECK_EQ(ev.GetChargeMap().size(), 10);
+  CHECK_D(charge_at(ev, 0, 0, 1, 5), 140.0);
+  CHECK_D(charge_at(ev, 1, 0, 1, 4), 320.0);
+  CHECK_EQ(filler.zs_frames_table(), 0);
+  CHECK_EQ(filler.zs_frames_no_table(), 0);
+}
+
+// ---------------------------------------------------------------------------
 // 8. runId = run 開始時刻の %Y%m%d%H%M%S(TPCReco RunIdParser と同じ導出)
 // ---------------------------------------------------------------------------
 //
@@ -669,6 +945,52 @@ void test_recorder_run_id_override() {
   }
 }
 
+// TODO/151 §7: ZS カウンタは Recorder が **全 worker 合算**で出す(root_sink の終了 JSON
+// `pevent_zs_frames_table / pevent_zs_frames_no_table / pevent_table_missing_channels` の材料)。
+// workers = 2(round-robin)に ZS イベント 2 件 + フルイベント 1 件:
+//   表あり → zs_frames_table = 2(両 worker に 1 件ずつ)/ no_table 0 / missing 0
+//   書いたファイルの ZS イベントは表モードの値で、pedestalSubtracted = true。
+void test_recorder_sums_zs_counters_over_workers() {
+  const std::string dir = scratch_dir("zs");
+  const tpcgeo::Geometry geo = tpcgeo::load(kFixtureMiniReduced);
+  const tpcpevent::PedTable table = zs_table();
+
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.geometry = &geo;
+    cfg.fill = zs_windows();
+    cfg.ped_table = &table;
+    cfg.workers = 2;
+    rootsink::Recorder rec(cfg);
+
+    const std::vector<std::vector<Item>> frames = {zs_items(), full_items({0, 1}), zs_items()};
+    for (uint32_t i = 0; i < frames.size(); ++i) {
+      rootsink::BuiltEvent ev;
+      ev.run_number = 15;
+      ev.event_idx = i;
+      ev.fragments.push_back(make_fragment(i, 0, 0, 100 + i, frames[i]));
+      rec.write(ev, 0);
+    }
+    rec.close_run(15, 0);  // worker を流し切ってからカウンタを読む
+    CHECK(rec.fatal_reason() == nullptr);
+    CHECK_EQ(rec.zs_frames_table(), 2);
+    CHECK_EQ(rec.zs_frames_no_table(), 0);
+    CHECK_EQ(rec.table_missing_channels(), 0);
+  }
+
+  // worker 0 = event 0, 2(ZS)/ worker 1 = event 1(フル)。
+  const std::vector<ReadEvent> w0 = read_pevent_file(dir + "/run0015/run0015_w0.root");
+  CHECK_EQ(w0.size(), 2);
+  if (w0.size() == 2) {
+    CHECK(w0[0].pedestal_subtracted);
+    CHECK_EQ(w0[0].charge_map.size(), 10);
+    CHECK_D(w0[0].charge_map.at(std::make_tuple(0, 0, 1, 6)), 79.75);
+    CHECK_D(w0[1].charge_map.at(std::make_tuple(1, 0, 1, 6)), 29.25);
+  }
+  remove_tree(dir);
+}
+
 // TODO/053: **1 イベント書く毎にメモリが増え続けない**。
 //
 // 元の実欠陥(031 soak が捕獲、053-A で計測特定)は GDataFrame 中間表現の側にあった:
@@ -831,10 +1153,18 @@ int main() {
   test_same_strip_accumulates();
   test_strip_number_beyond_array_is_dropped();
   test_frame_outside_geometry();
+  test_zs_frame_with_table_subtracts_the_table_mean();
+  test_zs_frame_without_table_keeps_the_old_algorithm_and_counts();
+  test_full_frame_with_table_is_bit_identical_to_without();
+  test_partial_non_zs_frame_is_not_zero_suppressed();
+  test_zs_predicate_needs_a_strict_majority();
+  test_zs_channel_missing_from_table_is_skipped_and_counted();
+  test_zs_frame_without_pedestal_removal_stays_raw();
   test_run_id_from_tm();
   test_fill_config_validation();
   test_recorder_writes_tpcdata_tree();
   test_recorder_run_id_override();
+  test_recorder_sums_zs_counters_over_workers();
   test_frame_buffers_do_not_grow_per_event();
   test_real_pevent_structure();
 
