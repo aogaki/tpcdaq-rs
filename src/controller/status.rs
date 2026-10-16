@@ -79,6 +79,10 @@ pub(super) fn counters_from(params: &ControllerParams, statuses: &[ComponentStat
     let mut acquisition_restarts: Option<u64> = None;
     // ソース別の辞書(TODO/133)。どの decoder も辞書を持たなければ None。
     let mut frames_before_restart: Option<BTreeMap<String, u64>> = None;
+    // frameType 別(TODO/158)。どの decoder も持たなければ None(0 と区別)。
+    let mut frames_type1: Option<u64> = None;
+    let mut frames_type2: Option<u64> = None;
+    let mut compact_size_mismatch: Option<u64> = None;
     for status in statuses {
         match status.kind {
             ComponentKind::Receiver { cobo_id } => {
@@ -90,6 +94,15 @@ pub(super) fn counters_from(params: &ControllerParams, statuses: &[ComponentStat
             }
             ComponentKind::Decoder => {
                 malformed += status.metric_u64("malformed").unwrap_or(0);
+                if let Some(n) = status.metric_u64("frames_type1") {
+                    *frames_type1.get_or_insert(0) += n;
+                }
+                if let Some(n) = status.metric_u64("frames_type2") {
+                    *frames_type2.get_or_insert(0) += n;
+                }
+                if let Some(n) = status.metric_u64("compact_size_mismatch") {
+                    *compact_size_mismatch.get_or_insert(0) += n;
+                }
                 if let Some(n) = status.metric_u64("acquisition_restarts") {
                     *acquisition_restarts.get_or_insert(0) += n;
                 }
@@ -121,6 +134,9 @@ pub(super) fn counters_from(params: &ControllerParams, statuses: &[ComponentStat
         malformed: Some(malformed),
         acquisition_restarts,
         frames_before_restart: frames_before_restart.map(FramesBeforeRestart::PerSource),
+        frames_type1,
+        frames_type2,
+        compact_size_mismatch,
     }
 }
 

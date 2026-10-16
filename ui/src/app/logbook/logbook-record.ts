@@ -224,6 +224,10 @@ function shapeRunStop(raw: Raw): Shaped {
     } else {
       lines.push(`frames_before_restart = ${counterValue(counters['frames_before_restart'])}`);
     }
+    // TODO/158: frameType 別のデータフレーム数と compact のサイズ不一致。旧行はキー無し = 取得不能。
+    lines.push(`frames_type1 = ${counterValue(counters['frames_type1'])}`);
+    lines.push(`frames_type2 = ${counterValue(counters['frames_type2'])}`);
+    lines.push(`compact_size_mismatch = ${counterValue(counters['compact_size_mismatch'])}`);
     details.push({ label: 'counters', lines });
   }
   if (files.length > 0) {

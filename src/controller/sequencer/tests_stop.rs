@@ -453,6 +453,35 @@ fn run_stop_counters_carry_the_decoder_restart_counters() {
     assert_eq!(report.counters.frames_before_restart, None);
 }
 
+/// frameType 別カウンタ + compact サイズ不一致(TODO/158)が `run_stop.counters` に載る。
+/// 非対称な値 type1=7 / type2=3 / mismatch=2。decoder が持たなければ `None`(0 と区別)。
+#[test]
+fn run_stop_counters_carry_the_frame_type_counters() {
+    let params = params_with(&[0]);
+    let mut mock = MockTransport::new(&params).with_eos_closed();
+    mock.metrics.insert(
+        "decoder".to_string(),
+        json!({"eos_in": 1, "eos_out": 1, "malformed": 0,
+               "frames_type1": 7, "frames_type2": 3, "compact_size_mismatch": 2}),
+    );
+    let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+    assert_eq!(report.counters.frames_type1, Some(7));
+    assert_eq!(report.counters.frames_type2, Some(3));
+    assert_eq!(report.counters.compact_size_mismatch, Some(2));
+
+    let json = serde_json::to_value(&report.counters).unwrap();
+    assert_eq!(json["frames_type1"], json!(7));
+    assert_eq!(json["frames_type2"], json!(3));
+    assert_eq!(json["compact_size_mismatch"], json!(2));
+
+    let mut mock = MockTransport::new(&params).with_eos_closed();
+    mock.metrics
+        .insert("decoder".to_string(), json!({"eos_in": 1, "malformed": 0}));
+    let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+    assert_eq!(report.counters.frames_type1, None);
+    assert_eq!(report.counters.compact_size_mismatch, None);
+}
+
 /// 設定にある CoBo が不達でも `frames` の鍵は出す(欠落を隠さない)。
 #[test]
 fn counters_keep_a_key_for_every_configured_cobo() {

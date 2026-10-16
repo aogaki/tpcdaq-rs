@@ -20,6 +20,12 @@ pub const HEADER_MIN_BYTES: usize = 88;
 /// frameType 2 の per-AGET カーソルが一周する周期。
 const RAW_CH_PER_AGET: u16 = 68;
 
+/// full readout の 1 AGET あたり bucket 数(frameType 2 のサイズ期待、TODO/158)。
+const COMPACT_BUCKETS: usize = 512;
+
+/// AGET の最大数(1 AsAd = 4)。
+const MAX_AGETS: usize = 4;
+
 /// CoBo topology frame の frameType(TODO/067)。
 ///
 /// 一次資料 = `reference/20190315_patched/GetBench/src/get/daq/MemRead.cpp:362`
@@ -123,6 +129,12 @@ pub struct Decoder {
     malformed: u64,
     unsupported: u64,
     topology: u64,
+    /// デコードに成功したデータフレームの frameType 別内訳(TODO/158)。`frames` = 和。
+    frames_type1: u64,
+    frames_type2: u64,
+    /// frameType 2 で item 数が full readout(68 ch × 512 bucket × 1..=4 AGET)の
+    /// 整数倍に合わないフレーム数(TODO/158)。フレームは落とさず、デコードも続ける。
+    compact_size_mismatch: u64,
 }
 
 impl Decoder {
@@ -205,6 +217,20 @@ impl Decoder {
 
         self.frames += 1;
         self.items += item_bytes.len() as u64 / 4;
+        if frame_type == 1 {
+            self.frames_type1 += 1;
+        } else {
+            self.frames_type2 += 1;
+            // compact は ch/bucket をカーソルで復元するので、full readout 以外(ZS 等)が
+            // 来ると黙って誤配置する。サイズが合わないフレームを数えて可視化する。
+            let per_aget = usize::from(RAW_CH_PER_AGET) * COMPACT_BUCKETS;
+            if item_count == 0
+                || !item_count.is_multiple_of(per_aget)
+                || item_count / per_aget > MAX_AGETS
+            {
+                self.compact_size_mismatch += 1;
+            }
+        }
 
         Some(Fragment {
             event_idx,
@@ -240,6 +266,21 @@ impl Decoder {
     /// frameType ∉ {1,2}(topology 等の制御フレーム)でスキップした数。
     pub fn unsupported(&self) -> u64 {
         self.unsupported
+    }
+
+    /// frameType 1 でデコードできたデータフレーム数(TODO/158)。
+    pub fn frames_type1(&self) -> u64 {
+        self.frames_type1
+    }
+
+    /// frameType 2(compact)でデコードできたデータフレーム数(TODO/158)。
+    pub fn frames_type2(&self) -> u64 {
+        self.frames_type2
+    }
+
+    /// frameType 2 で item 数が full readout の期待に合わなかったフレーム数(TODO/158)。
+    pub fn compact_size_mismatch(&self) -> u64 {
+        self.compact_size_mismatch
     }
 
     /// そのうち topology frame(frameType 7)だった数。**`unsupported` の内数**
@@ -918,5 +959,52 @@ mod tests {
         assert_eq!(dec.items(), 4);
         assert_eq!(dec.unsupported(), 1);
         assert_eq!(dec.malformed(), 0);
+    }
+
+    /// 158: frameType 別カウンタ。手計算: type1 を 2 枚 + type2 を 1 枚 → 1:2 / 2:1、frames=3。
+    #[test]
+    fn frames_are_counted_per_frame_type() {
+        let h = HeaderFields::default();
+        let t1 = make_cobo_frame(1, false, &h, &[(0, 0, 0, 1)]);
+        let t2 = make_compact_frame(true, &[(0, 5)]);
+        let mut dec = Decoder::new();
+        assert!(dec.decode(&t1).is_some());
+        assert!(dec.decode(&t1).is_some());
+        assert!(dec.decode(&t2).is_some());
+        assert_eq!(dec.frames_type1(), 2);
+        assert_eq!(dec.frames_type2(), 1);
+        assert_eq!(dec.frames(), 3);
+    }
+
+    /// 158: 期待サイズ = 68 × 512 × nAget = 34,816 × n。1 AGET / 4 AGET は合致、
+    /// 1 item 少ない / ZS 風の少数 item / 68 item 多い(整数倍でない)は不一致。フレームは落とさずデコードされる。
+    #[test]
+    fn compact_size_mismatch_counts_frames_off_the_full_readout_size() {
+        let per_aget = 68 * 512; // 34,816
+                                 // AGET を巡回させる(1 AGET に 512 bucket を超えて載せると pack 範囲外になる)。
+        let full = |n: usize| {
+            let items: Vec<(u8, u16)> = (0..n).map(|i| ((i % 4) as u8, 7u16)).collect();
+            make_compact_frame(false, &items)
+        };
+        let mut dec = Decoder::new();
+        assert!(dec.decode(&full(per_aget)).is_some());
+        assert!(dec.decode(&full(4 * per_aget)).is_some());
+        assert_eq!(dec.compact_size_mismatch(), 0);
+        assert!(dec.decode(&full(per_aget - 1)).is_some());
+        assert!(dec.decode(&full(300)).is_some()); // ZS 風
+        assert!(dec.decode(&full(per_aget + 68)).is_some()); // 整数倍でない
+        assert_eq!(dec.compact_size_mismatch(), 3);
+        assert_eq!(dec.frames_type2(), 5);
+        assert_eq!(dec.malformed(), 0);
+    }
+
+    /// 158: frameType 1 は ZS が正常なのでサイズ検査の対象外。
+    #[test]
+    fn frame_type1_never_counts_as_compact_size_mismatch() {
+        let h = HeaderFields::default();
+        let t1 = make_cobo_frame(1, false, &h, &[(0, 0, 0, 1)]);
+        let mut dec = Decoder::new();
+        assert!(dec.decode(&t1).is_some());
+        assert_eq!(dec.compact_size_mismatch(), 0);
     }
 }

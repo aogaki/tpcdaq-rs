@@ -113,6 +113,16 @@ pub struct Counters {
     /// の辞書。旧行の 1 数も読めるよう [`FramesBeforeRestart`] で両形を受ける。
     #[serde(default)]
     pub frames_before_restart: Option<FramesBeforeRestart>,
+    /// decoder が frameType 1 / 2 でデコードできたデータフレーム数(TODO/158)。ZS は frameType 1、
+    /// full readout の compact は 2。decoder が古くて持たない / 不達なら `None`、旧行(キー無し)も `None`。
+    #[serde(default)]
+    pub frames_type1: Option<u64>,
+    #[serde(default)]
+    pub frames_type2: Option<u64>,
+    /// frameType 2 で item 数が full readout(68 ch × 512 bucket × nAget)に合わなかったフレーム数
+    /// (TODO/158)。0 以外なら compact + ZS の誤配置を疑う。
+    #[serde(default)]
+    pub compact_size_mismatch: Option<u64>,
 }
 
 /// `run_stop.counters.frames_before_restart` の値(TODO/133)。
@@ -625,6 +635,9 @@ mod tests {
                 malformed: Some(4),
                 acquisition_restarts: None,
                 frames_before_restart: None,
+                frames_type1: None,
+                frames_type2: None,
+                compact_size_mismatch: None,
             },
             files: vec![
                 OutputFile {
@@ -725,7 +738,7 @@ mod tests {
         let json = serde_json::to_string(&line).unwrap();
         assert_eq!(
             json,
-            r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","forced_eos":true,"eos_closed":true,"counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4,"acquisition_restarts":null,"frames_before_restart":null},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}"#
+            r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","forced_eos":true,"eos_closed":true,"counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4,"acquisition_restarts":null,"frames_before_restart":null,"frames_type1":null,"frames_type2":null,"compact_size_mismatch":null},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}"#
         );
     }
 
@@ -882,11 +895,14 @@ mod tests {
             malformed: None,
             acquisition_restarts: None,
             frames_before_restart: None,
+            frames_type1: None,
+            frames_type2: None,
+            compact_size_mismatch: None,
         };
         let json = serde_json::to_string(&counters).unwrap();
         assert_eq!(
             json,
-            r#"{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{},"overflow_frames":null,"malformed":null,"acquisition_restarts":null,"frames_before_restart":null}"#
+            r#"{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{},"overflow_frames":null,"malformed":null,"acquisition_restarts":null,"frames_before_restart":null,"frames_type1":null,"frames_type2":null,"compact_size_mismatch":null}"#
         );
         let back: Counters = serde_json::from_str(&json).unwrap();
         assert_eq!(back, counters);
@@ -905,11 +921,14 @@ mod tests {
             malformed: Some(55),
             acquisition_restarts: None,
             frames_before_restart: None,
+            frames_type1: Some(66),
+            frames_type2: Some(77),
+            compact_size_mismatch: Some(88),
         };
         let json = serde_json::to_string(&counters).unwrap();
         assert_eq!(
             json,
-            r#"{"events_built":11,"events_incomplete":22,"late_fragments":33,"frames":{},"overflow_frames":44,"malformed":55,"acquisition_restarts":null,"frames_before_restart":null}"#
+            r#"{"events_built":11,"events_incomplete":22,"late_fragments":33,"frames":{},"overflow_frames":44,"malformed":55,"acquisition_restarts":null,"frames_before_restart":null,"frames_type1":66,"frames_type2":77,"compact_size_mismatch":88}"#
         );
         let back: Counters = serde_json::from_str(&json).unwrap();
         assert_eq!(back, counters);

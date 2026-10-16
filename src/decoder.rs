@@ -193,6 +193,8 @@ pub struct RunDecoder {
     /// (前の取得の残りの本数、TODO/133)。再開したソースだけが載る。2 回目以降は変えない。
     frames_before_restart: HashMap<u32, u64>,
     logged_restart: bool,
+    /// compact_size_mismatch の WARN は run あたり初回だけ(TODO/158)。
+    logged_compact_mismatch: bool,
 }
 
 /// 再開ゲート: これより大きい eventIdx を見た後の idx 0 だけを再開候補にする。
@@ -260,6 +262,7 @@ impl RunDecoder {
             acquisition_restarts: 0,
             frames_before_restart: HashMap::new(),
             logged_restart: false,
+            logged_compact_mismatch: false,
         }
     }
 
@@ -300,8 +303,22 @@ impl RunDecoder {
             self.frames_in += 1;
             let malformed_before = self.decoder.malformed();
             let unsupported_before = self.decoder.unsupported();
+            let mismatch_before = self.decoder.compact_size_mismatch();
             match self.decoder.decode(frame) {
                 Some(fragment) => {
+                    if self.decoder.compact_size_mismatch() > mismatch_before
+                        && !self.logged_compact_mismatch
+                    {
+                        self.logged_compact_mismatch = true;
+                        warn!(
+                            source_id,
+                            items = fragment.items.len() / 4,
+                            "decoder: frameType 2 (compact) frame whose item count is not a full \
+                             readout (68 ch x 512 bucket x nAget) — ch/bucket are restored by \
+                             cursor and may be misplaced (zero-suppressed data must be frameType \
+                             1). Frame kept; further occurrences are counted only"
+                        );
+                    }
                     if u32::from(fragment.cobo) != source_id {
                         self.cobo_mismatch += 1;
                         if !self.logged_cobo_mismatch {
@@ -618,6 +635,9 @@ impl RunDecoder {
             "unsupported": self.decoder.unsupported(),
             "topology_frames": self.topology_frames,
             "malformed": self.decoder.malformed(),
+            "frames_type1": self.decoder.frames_type1(),
+            "frames_type2": self.decoder.frames_type2(),
+            "compact_size_mismatch": self.decoder.compact_size_mismatch(),
             "seq_gaps": self.seq_gaps,
             "run_mismatches": self.run_mismatches,
             "eos_in": self.eos_in,
@@ -739,6 +759,7 @@ impl RunDecoder {
         self.source_epochs.clear();
         self.min_epoch = 0;
         // acquisition_restarts / frames_before_restart は戻さない(malformed と同じ run カウンタ)。
+        // frames_type1/2 と compact_size_mismatch も Decoder 内の run カウンタで戻さない(TODO/158)。
         self.logged_restart = false;
         self.clear_pending();
     }
@@ -2116,6 +2137,69 @@ mod tests {
         let m = next.metrics_json();
         assert_eq!(m["acquisition_restarts"].as_u64(), Some(0));
         assert_eq!(m["frames_before_restart"], serde_json::json!({}));
+    }
+
+    // -----------------------------------------------------------------
+    // frameType 別カウンタ + compact サイズ検査(TODO/158)
+    // -----------------------------------------------------------------
+
+    /// frameType 2(blkSize=1、big-endian)の compact フレームを手組みする。aget は巡回。
+    fn compact_frame(cobo: u8, event_idx: u32, n_items: usize) -> ByteBuf {
+        let total = HEADER_BYTES + n_items * 2;
+        let mut b = vec![0u8; total];
+        write_uint(&mut b, 1, total as u64, 3);
+        write_uint(&mut b, 5, 2, 2); // frameType 2
+        write_uint(&mut b, 8, HEADER_BYTES as u64, 2);
+        write_uint(&mut b, 10, 2, 2);
+        write_uint(&mut b, 12, n_items as u64, 4);
+        write_uint(&mut b, 22, u64::from(event_idx), 4);
+        b[26] = cobo;
+        for i in 0..n_items {
+            write_uint(&mut b, HEADER_BYTES + i * 2, ((i % 4) as u64) << 14 | 7, 2);
+        }
+        ByteBuf::from(b)
+    }
+
+    /// 手計算: type1 を 3 枚(idx 0..=2)+ 少数 item の compact を 2 枚(idx 3, 4)
+    /// → frames_type1=3 / frames_type2=2 / compact_size_mismatch=2(フルサイズは 34,816 item)。
+    /// フレームは落とさない(pending=5)・Error にしない・rearm(自分の EOS 後)でも戻らない。
+    #[test]
+    fn frame_type_counters_and_compact_mismatch_reach_metrics_and_survive_rearm() {
+        let mut c = core(5, &[0]);
+        let frames = vec![
+            ByteBuf::from(frame_with_8_items(0, 0)),
+            ByteBuf::from(frame_with_8_items(0, 1)),
+            ByteBuf::from(frame_with_8_items(0, 2)),
+            compact_frame(0, 3, 300),
+            compact_frame(0, 4, 8),
+        ];
+        c.handle_batch(0, 5, 0, &frames, Instant::now());
+        assert_eq!(c.pending().len(), 5);
+        assert!(!c.errored());
+
+        c.handle_eos(0, 5);
+        c.batch_sent();
+        c.eos_sent();
+
+        let m = c.metrics_json();
+        assert_eq!(m["frames_type1"].as_u64(), Some(3));
+        assert_eq!(m["frames_type2"].as_u64(), Some(2));
+        assert_eq!(m["compact_size_mismatch"].as_u64(), Some(2));
+
+        // 次の Start = 新しい RunDecoder: 0 から。
+        let m = core(6, &[0]).metrics_json();
+        assert_eq!(m["frames_type1"].as_u64(), Some(0));
+        assert_eq!(m["compact_size_mismatch"].as_u64(), Some(0));
+    }
+
+    /// フルサイズの compact(1 AGET 分 34,816 item)は不一致に数えない。
+    #[test]
+    fn a_full_size_compact_frame_is_not_a_mismatch() {
+        let mut c = core(5, &[0]);
+        c.handle_batch(0, 5, 0, &[compact_frame(0, 0, 68 * 512)], Instant::now());
+        let m = c.metrics_json();
+        assert_eq!(m["frames_type2"].as_u64(), Some(1));
+        assert_eq!(m["compact_size_mismatch"].as_u64(), Some(0));
     }
 
     // -----------------------------------------------------------------

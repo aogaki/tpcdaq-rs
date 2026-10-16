@@ -743,6 +743,9 @@ mod tests {
                     malformed: Some(4),
                     acquisition_restarts: None,
                     frames_before_restart: None,
+                    frames_type1: None,
+                    frames_type2: None,
+                    compact_size_mismatch: None,
                 },
                 files: vec![
                     OutputFile {
@@ -863,6 +866,9 @@ mod tests {
                         malformed: Some(0),
                         acquisition_restarts: None,
                         frames_before_restart: None,
+                        frames_type1: None,
+                        frames_type2: None,
+                        compact_size_mismatch: None,
                     },
                     files: vec![
                         OutputFile {
@@ -1085,6 +1091,9 @@ mod tests {
                         malformed: Some(0),
                         acquisition_restarts: None,
                         frames_before_restart: None,
+                        frames_type1: None,
+                        frames_type2: None,
+                        compact_size_mismatch: None,
                     },
                     // ctrl プローブ接続のみ(AsAd 区画が無い = asad_graw_ts が None)。
                     files: vec![OutputFile {

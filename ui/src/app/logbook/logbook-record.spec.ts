@@ -160,7 +160,24 @@ describe('run_stop(SPEC §9.2 — ok=false を目立たせる / counters の nul
       // 旧行(キー無し)は 0 ではなく取得不能(TODO/110)。
       'acquisition_restarts = unavailable (null)',
       'frames_before_restart = unavailable (null)',
+      // 旧行(TODO/158 前)も取得不能。
+      'frames_type1 = unavailable (null)',
+      'frames_type2 = unavailable (null)',
+      'compact_size_mismatch = unavailable (null)',
     ]);
+  });
+
+  it('frameType 別カウンタと compact サイズ不一致は数値なら 3 桁区切りで出る(TODO/158)', () => {
+    // 出典: 非対称な合成値 type1 = 1,868 / type2 = 304 / mismatch = 2。
+    const base = RUN_STOP as { counters: Record<string, unknown> };
+    const withTypes = {
+      ...base,
+      counters: { ...base.counters, frames_type1: 1868, frames_type2: 304, compact_size_mismatch: 2 },
+    };
+    const lines = detail(parsed(withTypes), 'counters');
+    expect(lines).toContain('frames_type1 = 1,868');
+    expect(lines).toContain('frames_type2 = 304');
+    expect(lines).toContain('compact_size_mismatch = 2');
   });
 
   it('取得の再開の 2 項目は数値なら 3 桁区切りで出る(TODO/110)', () => {

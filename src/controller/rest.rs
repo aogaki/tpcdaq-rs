@@ -1120,6 +1120,9 @@ mod tests {
                 malformed: Some(2),
                 acquisition_restarts: None,
                 frames_before_restart: None,
+                frames_type1: None,
+                frames_type2: None,
+                compact_size_mismatch: None,
             },
             files: vec![
                 OutputFile {

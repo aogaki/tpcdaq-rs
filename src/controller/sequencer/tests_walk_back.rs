@@ -478,6 +478,9 @@ fn a_fully_running_chain_hands_its_closed_run_back_for_the_run_stop() {
                 malformed: Some(7),
                 acquisition_restarts: None,
                 frames_before_restart: None,
+                frames_type1: None,
+                frames_type2: None,
+                compact_size_mismatch: None,
             },
             files: vec![OutputFile {
                 path: "run0001/CoBo0_AsAd0_ts_0000.graw".to_string(),
