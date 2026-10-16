@@ -215,3 +215,15 @@ tools/scan/zs_params.sh (--ped-run RUN_DIR | --ped-json FILE) --base BASE.json -
 - 要約に例外数・閾値の min / median / max・FPN の閾値と、**base の `peakingTime_ns` / `gain`**(表を取った設定と一致しているか見る)。
   `--keep-fpn` は FPN ch の閾値を 0(常に読む)にする。PUT はしない(UI の Parameters タブか scan.py で適用)。手順は `docs/RUNBOOK_ja.md`「ZS 運用」。
 - テスト: `bash tools/scan/test_zs_params.sh`。
+
+## ZS raw の抑制セルを復元して macros を通す(TODO/154)
+```
+root -l -b -q 'tools/scan/zs_restore.C("run0133_raw.root", "ped.json", "out/run0133_raw.root")'
+tools/scan/metrics_for_run.sh --ped PED.json --zs-fill RUN_DIR OUT_DIR
+```
+- `zs_restore(rawIn, pedJson, rawOut, maxEvents = 0)`: raw ツリー(`eventId` / `eventTime` / `adc[N][68][512]`、N は leaf の長さから)をそのまま書き出し、
+  **cell == 0 かつ ch が表にある → round(mean)**(FPN ch も)。表に無い ch は 0 のまま数えて WARNING を 1 回。`rawOut == rawIn` は拒否(戻り値 1)。
+- 目的: `macros/analyzeUVW.C`(ped = cells 1..20、FPN なし)を**無改造のまま** ZS データに通す。埋めたセルは ped 差 0 ≤ 35 で無視される。
+- `--zs-fill`(`--ped` 必須): 復元 raw を `OUT_DIR/zsfilled/runNNNN_raw.root` に作り(**同名必須** — macros は `_raw.root` → `_uvw.root` の置換で
+  出力名を作る)、`_uvw` / `_tracks` もそこに出る。指標 JSON は `OUT_DIR`(`raw_file` = 復元パス)。`zsfilled/` に復元済みがあれば作り直さない(`--ped` を変えたら消す)。
+- テスト: `root -l -b -q tools/scan/test_zs_restore.C`(終了コード = 失敗数)。
