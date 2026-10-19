@@ -229,3 +229,13 @@ tools/scan/metrics_for_run.sh --ped PED.json --zs-fill RUN_DIR OUT_DIR
 - `--zs-fill`(`--ped` 必須): 復元 raw を `OUT_DIR/zsfilled/runNNNN_raw.root` に作り(**同名必須** — macros は `_raw.root` → `_uvw.root` の置換で
   出力名を作る)、`_uvw` / `_tracks` もそこに出る。指標 JSON は `OUT_DIR`(`raw_file` = 復元パス)。`zsfilled/` に復元済みがあれば作り直さない(`--ped` を変えたら消す)。
 - テスト: `root -l -b -q tools/scan/test_zs_restore.C`(終了コード = 失敗数)。
+
+## run 内の時間推移(ガス流量の比較、TODO/161)
+
+```
+root -l -b -q 'tools/scan/gas_trend.C+("run0175_raw.root", "out/run0175_trend.json", 3600)'
+```
+- raw ツリーを 1 回走査し、`run_metrics.C` と同じ定義(ped cells 1..20 − FPN 共通モード、閾値 35、ピーク ±5 の q ≥ 2000)で
+  イベントごとの電荷・ヒット ch・飽和・帯位置・電荷重心時刻を取り、`binSeconds` ごとの中央値(電荷は 16/84 % も)を JSON と PNG(4 段)に出す。
+  レートはビン内の実スパンから(端の半端なビンでも正しい)。macros 不要。第 4 引数 `maxEvents` で試し走り。
+- テスト: `root -l -b -q tools/scan/test_gas_trend.C`(終了コード = 失敗数、13 チェック)。

@@ -80,6 +80,7 @@
 | [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
+| [161](161_gas_flow_runs_174_175.md) | ガス流量 100 → 50 ml/s の比較(run 174 / 175)。`gas_trend.C` + metrics を ELITPC で実行中 | IN PROGRESS | 175 の処理完了を待って結果節 |
 | [160](160_scan_report_2026-10.md) | スキャン報告書(S1–S18、日本語 PDF、`docs/reports/2026-10_scan/`) | v1 済、ユーザーレビュー待ち | 直し → 英語版は要望次第 |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
