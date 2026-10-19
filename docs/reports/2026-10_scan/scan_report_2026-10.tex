@@ -445,7 +445,7 @@ run & 設定 & kB/event & ヒット ch & 総電荷 & ok & 長さ & $\sigma_z$ & 
 
 \textbf{不感時間の実測が要る。} zCoBo は読み出し中に来たトリガに eventIdx を付けない(受理したトリガだけが連番になる)ので、落とした数はデータから分からず、収量の不感時間補正ができない。外部トリガの生パルスをスケーラで run ごとに数える(zCoBo の SMA OUT1 = ラッチ時のパルスも同じスケーラで数えれば受理数と比較できる)、DAQ 側は「0.11 ms + 10.4 µs × 読み出し ch 数」から τ を推定して run ごとに記録する(TODO/131 B-5)。
 
-\textbf{10 GbE について。} zCoBo(ZC706)の 2 つのポートはどちらも 10 GbE にならない。RJ45 側は Zynq PS の固定 MAC(1 Gb/s まで、FW では 100 Mbit の管理用)。SFP+ 側は GTX トランシーバで HW 的には 10 Gb/s 可能だが、FW が PL に 1G の AXI Ethernet コア(1000BASE-X)を置き、ARM 上の Linux の TCP で送っているため、光モジュールに替えてもリンクしない(FW パッケージの boot log・README で確認)。
+\textbf{10 GbE について。} zCoBo(ZC706)の 2 つのポートはどちらも 10 GbE にならない。RJ45 側は Zynq PS の固定 MAC(1 Gb/s まで、FW では 100 Mbit の管理用)。SFP+ 側は GTX トランシーバで HW 的には 10 Gb/s 可能だが、FW が PL に 1G の AXI Ethernet コア(1000BASE-X、ライン速度 1.25 Gb/s)を置き、ARM 上の Linux の TCP で送っている(FW パッケージの boot log・README で確認)。したがって光モジュール(1000BASE-SX/LX)は銅アダプタと同じく問題なく使えるが速度は 1 GbE のままで、10G 専用のモジュールを挿しても 10G にはならない(1G 非対応品はリンクしない)。
 10G 化には FW の作り直し(有償 10G IP + PL 側 TCP/UDP エンジン)が要り、しかも上限は読み出し時間 2.94 ms の方が先に効く。この 2.94 ms は AGET 仕様(読み出しクロック 25 MHz で 512 cell × 68 ch ≈ 1.4 ms/AGET)の約 2 倍で、読み出し系の FW に余地がある可能性がある — Warsaw に「AGET の読み出しクロック」を聞く価値がある。
 
 ELITPC(Warsaw、zCoBo 2 枚 × 2 AsAd)の見積もり: 1 枚 544 ch → 読み出し ≈ 5.8 ms → full では飽和 170 Hz・100 Hz ランダムで −37 \%。partial(占有 25 \%、≈ 150 ch)なら ≈ 1.7 ms → −15 \%。
