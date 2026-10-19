@@ -26,7 +26,7 @@
 \title{mini eTPC パラメータスキャン報告\\[2pt]
 \large ELI-NP、2026年10月14--16日(ELITPC DAQ、α線源)}
 \author{Soichiro Aogaki(整理: Claude)}
-\date{2026年10月16日(v3 — レビュー 2 回分を反映。対象は run 78--173)}
+\date{2026年10月19日(v4 — ガス流量の節を追加。対象は run 78--176)}
 
 \begin{document}
 \maketitle
@@ -39,7 +39,7 @@
 (2) 総電荷はどの peaking でもサンプル和で取り切れており、peaking で変わるのはピーク高さと時間幅だけである(デコンボリューションで実証)。
 (3) ゲインは $\ln G = \sum_i a_i \Delta V_i$、$a \approx 0.014\pm0.0015$ /V(箔ごとの差は誤差内、加法性成立)で、GEM 合計 $-30$ V まで電子回路で補える。
 (4) 1 ヒットの精度は $\sigma_z \approx 0.20$ mm(= 1 cell、HV・ドリフト電場に依らず mm で一定)、2D 重心 $\sigma \approx 0.30$ mm/view(232--502 ns)。
-(5) レート上限はネットワークでなく zCoBo FW の読み出し時間(272 ch で 2.94 ms ≈ 340 Hz、読み出し中のトリガは失われる)で決まる。ゼロサプレッション(ch ごと ped+5σ)は品質を落とさずデータを 1/9〜1/12 に縮め、\textbf{ビーム run の既定候補 = hit register partial + ZS(23 kB/event)}とした。
+(5) レート上限はネットワークでなく zCoBo FW の読み出し時間(272 ch で 2.94 ms ≈ 340 Hz、読み出し中のトリガは失われる)で決まる。(6) ガス流量を 100 → 50 ml/min にすると総電荷が 3.5 \% 下がり、数時間(= 54 L の体積交換)で新しい平衡に落ち着く。150 ml/min では 100 と同じ。不純物の定常濃度 $c = c_\mathrm{bottle} + S/Q$ の $S/Q$ 項で説明でき、HV は無関係。ゼロサプレッション(ch ごと ped+5σ)は品質を落とさずデータを 1/9〜1/12 に縮め、\textbf{ビーム run の既定候補 = hit register partial + ZS(23 kB/event)}とした。
 \end{abstract}
 
 \tableofcontents
@@ -86,7 +86,7 @@
 \subsection{スキャン一覧}
 \begin{table}[H]\centering\small
 \caption{スキャン索引(S 番号は台帳 \texttt{docs/SCANS\_ja.md} と同じ)}
-\begin{tabular}{llllp{72mm}}
+\begin{tabular}{llllp{68mm}}
 \toprule
 \# & 日付 & スキャン & run & 結論(1 行) \\
 \midrule
@@ -108,6 +108,7 @@ S15 & 10-15 & hit register 閾値 6 点 & 135--140 & 閾値は効くが full 比
 S16 & 10-15/16 & 一晩 α run(B) & 141 & 9.6 h 安定、B を本番運用点に \\
 S17 & 10-16 & 最大レート 2 & 148--169 & 上限 = FW 読み出し 2.94 ms \\
 S18 & 10-16 & ZS 検証 & 170--173 & ZS は品質不変で 1/9〜1/12、FPN は抑制 \\
+S19 & 10-16/19 & ガス流量 100 / 50 / 150 ml/min & 174--176 & 50 で電荷 −3.5 \%、数時間で平衡。150 は 100 と同じ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -283,6 +284,45 @@ run & 設定 & events & kB/ev & ヒット ch & 総電荷 & 飽和 & ok & 長さ 
 \end{tabular}
 \end{table}
 
+\subsection{ガス流量(S19)}
+運用点 B のまま、CO$_2$ の流量だけを 100 → 50 → 150 ml/min と変えた(チャンバー 54 L、91 mbar。run 174 = 100、175 = 50 で 67.7 h、176 = 150)。
+\texttt{gas\_trend.C} で raw ツリーを 1 時間(175)/ 10 分(174、176)ビンに切り、イベント総電荷の中央値などの推移を見た(図~\ref{fig:gas})。
+
+\begin{table}[h]\centering\small
+\caption{S19 ガス流量(run 全体の指標。176 は 3 h 時点の暫定)}
+\begin{tabular}{rlrrrrrrr}
+\toprule
+run & 流量 & events & ヒット ch & 電荷 & 飽和 & ok & 長さ / IQR & dEdx / IQR \\
+\midrule
+174 & 100 ml/min & 11,145 & 120 & 2.077 M & 1.0 \% & 0.999 & 84.1 / 58.9 & 13,532 / 6,508 \\
+175 & 50 ml/min(67.7 h) & 1,057,719 & 120 & \textbf{2.002 M} & 0.9 \% & 0.999 & 83.8 / 58.9 & 12,998 / 6,336 \\
+176 & 150 ml/min(暫定) & 50,335 & 121 & 2.085 M & 1.0 \% & --- & --- & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}
+\begin{axis}[width=0.9\textwidth,height=6cm,xlabel={hours since the flow change},ylabel={event charge, median [$10^3$ ADC]},ymin=1960,ymax=2150,xmin=-1,xmax=24,ymajorgrids=true,legend pos=north east,legend style={font=\scriptsize}]
+\addplot[only marks,mark=square*,gray,mark size=1.5pt] coordinates {(-0.92,2076) (-0.75,2061) (-0.58,2080) (-0.42,2092) (-0.25,2080)};
+\addlegendentry{run 174: 100 ml/min (10 min bins)}
+\addplot[only marks,mark=*,blue,mark size=1.5pt] coordinates {(0.50,2046) (1.50,2037) (2.50,2022) (3.50,2017) (4.50,2006) (5.50,2010) (6.50,1991) (7.50,2003) (8.50,1993) (9.50,2001) (10.50,1999) (11.50,2006) (12.50,1996) (13.50,2003) (14.50,2001) (15.50,2006) (16.50,2002) (17.50,2008) (18.50,2001) (19.50,1994) (20.50,2001) (21.50,2004) (22.50,2000) (23.50,2004)};
+\addlegendentry{run 175: 100 to 50 ml/min (1 h bins, first 24 of 68 h)}
+\addplot[only marks,mark=triangle*,red,mark size=2pt] coordinates {(0.08,2025) (0.25,2032) (0.42,2057) (0.58,2047) (0.75,2048) (0.92,2065) (1.08,2085) (1.25,2070) (1.42,2070) (1.58,2066) (1.75,2085) (1.92,2079) (2.08,2094) (2.25,2074) (2.42,2071) (2.58,2073) (2.75,2100) (2.92,2099) (3.08,2085)};
+\addlegendentry{run 176: 50 to 150 ml/min (10 min bins)}
+\end{axis}
+\end{tikzpicture}
+\caption{S19: 流量変更後の総電荷の推移。1 h ビンの統計精度は ±0.5 \%、10 min ビンは ±1 \%。run 175 は 24 h 以降 68 h まで 2.00 ± 0.01 M で平坦(昼夜の周期なし)。}
+\label{fig:gas}
+\end{figure}
+
+\begin{itemize}
+\item 50 ml/min にすると総電荷は 2.08 → 2.00 M(−3.5 \%)、dEdx も −4 \%。16 \% 点も同じ比で下がり、分布全体が一様に縮む。ヒット ch・飛跡長・ok・帯位置(first 75 / last 98 cell)・パルス幅(56 cell)は不変 = ドリフト速度と拡散は変わらない。HV(InfluxDB の 1 h 平均、69 点)は vmon ±0.05 V、imon ±0.5 \% で無関係。
+\item 新しい平衡までの時間は数時間で、150 ml/min に戻したときの立ち上がりも約 0.5 h。これは 54 L を流量で入れ替える時定数(91 mbar で実流量は常温換算の 11 倍。50 ml/min: 1.6 h、150 ml/min: 0.54 h)に一致し、壁の脱離のような遅い過程は要らない。
+\item 解釈: 不純物(主に H$_2$O、空気のリーク)の定常濃度は $c = c_\mathrm{bottle} + S/Q$($S$ = 系内の発生量、$Q$ = 流量)。ボンベ由来の項は流量に依らず差分に現れない。50 / 100 / 150 ml/min の 2.00 / 2.08 / 2.085 M は $S/Q$ に比例する形と 1 \% 以内で整合し、100 ml/min 以上では利得はほとんど変わらない。流量を変えたら \textbf{数時間は較正を跨がない}、流量を較正条件として記録する、の 2 点が運用の含意。
+\item 付随: 長さ × 電荷の 2D で $^{228}$Th 系列の α 線が分離した(220Rn 6.29 MeV が 85 mm で停止、212Bi 45 mm、224Ra 25 mm、216Po / 212Po は 105 mm で突き抜け)。線源が 315 mm 外にあるため停止線の電荷 FWHM は 19--31 \% と悪い。圧力スキャン(次期)の指標の土台。
+\end{itemize}
+
 \section{ヒットの精度}
 
 \subsection{z 残差(S11)}
@@ -415,6 +455,7 @@ ELITPC(Warsaw、zCoBo 2 枚 × 2 AsAd)の見積もり: 1 枚 544 ch → 読み�
 \section{未解決と次の課題}\label{sec:open}
 \begin{itemize}
 \item \textbf{ドリフト端(S6)}: 12.5 MHz・窓 41 µs でも α 飛跡はトリガから 2--4 µs に収まる(図~\ref{fig:drift})。現在の線源はチャンバーの外(ガス配管に連結した位置)にあり、立体角の都合で飛跡の z 方向の広がりはほぼ変わらないので、今の配置では陰極(20 cm)側まで届く飛跡は得られない。$v_\mathrm{drift} = L / t_\mathrm{max}$ の絶対値は、線源を再びチャンバー内に入れたときに測る。cell 340 付近の山は窓位置に依らず物理ではない(未解明)。
+\item \textbf{ガスの不純物源}: 流量依存(S19)の $S$ がリークか壁の脱離かは未分離。温度・圧力の記録(環境センサ)と、線源を中に入れてからの電荷 vs ドリフト時間で切り分ける。
 \item \textbf{揺れ}: α 波形の周期 1.6--1.8 µs の成分(信号 ch のみ、電荷に比例)。AGET の応答核には無い。検出器側(GEM / 誘導)の可能性。
 \item \textbf{複数飛跡}: 現在の再構成は 1 イベント = 直線 1 本。502 ns で RMS が 1014 ns より大きい(外れ値の出方の違い)の素材でもある。
 \item \textbf{ZS の run ごとのカウンタ}(TODO/159): root\_sink / monitor の ZS カウンタを run\_stop に出す。PEventTPC 側の電荷和の照合も未実施。

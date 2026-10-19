@@ -1,0 +1,7 @@
+{"raw_file":"/data/tpcdaq/run0174/run0174_raw.root","events":11145,"bin_s":600,"bins":[
+  {"t_h":0.083,"events":2617,"rate_hz":4.3608,"charge_med":2075563,"charge_q16":1389131,"charge_q84":3267954,"hit_med":120.0,"sat_frac":0.00994,"first_med":75.0,"last_med":98.0,"width_med":56.0,"tcent_med":90.4},
+  {"t_h":0.250,"events":2701,"rate_hz":4.5020,"charge_med":2061492,"charge_q16":1380343,"charge_q84":3269301,"hit_med":120.0,"sat_frac":0.00963,"first_med":75.0,"last_med":98.0,"width_med":56.0,"tcent_med":90.1},
+  {"t_h":0.417,"events":2580,"rate_hz":4.3017,"charge_med":2080091,"charge_q16":1395613,"charge_q84":3271749,"hit_med":121.0,"sat_frac":0.01047,"first_med":75.0,"last_med":99.0,"width_med":56.0,"tcent_med":90.5},
+  {"t_h":0.583,"events":2698,"rate_hz":4.4979,"charge_med":2092095,"charge_q16":1435540,"charge_q84":3268658,"hit_med":121.0,"sat_frac":0.01075,"first_med":76.0,"last_med":99.0,"width_med":56.0,"tcent_med":90.7},
+  {"t_h":0.750,"events":549,"rate_hz":4.4614,"charge_med":2080149,"charge_q16":1383739,"charge_q84":3308592,"hit_med":119.0,"sat_frac":0.00911,"first_med":76.0,"last_med":99.0,"width_med":56.0,"tcent_med":91.4}
+]}
