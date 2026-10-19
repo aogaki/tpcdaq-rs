@@ -70,6 +70,7 @@
 - run 175 を 07:52 に停止(67.7 h、1.06 M events、732 GB)。**161 完了 → archive / SCANS S19**: 流量 50 ml/min で電荷 −3.5 %、6 h で平衡、以後 60 h 平坦。HV 不変。
 - 次の計画(ユーザー): **圧力スキャン 300 mbar まで、線源は端置き(中心から 70 mm、ケージ内)**。飛程表(TPCReco SRIM)と MC で、収納は 220–300 mbar、5 線(5.42–6.29)が 300 mbar で各 10–20 %、216Po 7 %、8.78 は常に突き抜け。GEM は Warsaw の圧力ごとの運用点(130: 245–255 / 190: 260 / 250: 270 → 300 で ≈ 280–295 V)を出発点に E 規則で決め直す。DRIFT は 2 kV 上限(E/p は 150 mbar まで維持)、12.5 MHz(6.25 は無い)。→ 票(162: 計画 + `alpha_lines.C` 発注)を起こす。
 - **10:38 run 176 開始**(B、`elinp__116479fa`、comment「gas 50 -> 150 ml/min」、`start_W3.sh`)。ユーザーが流量を 150 ml/min に変更(161 の可逆性 + 感度係数の確認。**単位訂正: 流量は ml/min、チャンバー 54 L** → 体積交換 τ ≈ 0.54 h @150、平衡は 2 h 以内。期待 2.10–2.12 M。logbook の run 174–176 の comment は「ml/s」表記のまま = 誤記、正は ml/min)。停止は `stop_run.sh`、解析は `gas_trend.C`(1 h ビン)+ `metrics_for_run.sh --pressure 91`。
+- **15:21:25 HV インターロック**(InfluxDB 1 s サンプル): 直前まで全 8 ch の vmon / imon は 1 LSB も動かず(GEM 8.68–8.86 µA、DRIFT 3.70 / 5.91 µA)。15:21:25 に **board の `bdilk` = 1 と同時に全 ch が KILL(status 2053 = ON+RDW+KILL)**で ≈ 10 V/s のランプダウン。電流スパイク・OVC・TRIP なし = 検出器の放電ではなく **外部インターロック入力**(ガス系 → HiVolta の線、131 B-1 / 2022 logbook「Interlock for HiVolta set to 80 mbar」)。15:49:54 に bdilk 解除(status 6144 = KILL+ILK → 1024 DIS → 0)。run 176 は 15:44 停止(176 の平衡値は 1.5 h 以降 2.08–2.10 M で確定)。原因はガス系側の記録(BPC / FlowView のアラーム)で確認する。
 - 気づき: `/api/status` の `slow` が null(slowctl 稼働・Influx 書き込みあり)。要確認(別票)。
 
 ## 開いているチケット
