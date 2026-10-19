@@ -85,6 +85,7 @@
 | [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
+| [162](162_pressure_scan_plan.md) | 圧力スキャン(≤ 300 mbar、線源端置き、z 中間、x 位置可変)の計画 + `alpha_lines.C` 発注 | READY | 線源の設置後。alpha_lines は Sonnet へ |
 | ~~161~~ | ガス流量 100 → 50 ml/s(run 174 / 175)→ SCANS S19 | 済 → archive(2026-10-19: 電荷 −3.5 %、6 h で平衡、以後平坦) | — |
 | [160](160_scan_report_2026-10.md) | スキャン報告書(S1–S18、日本語 PDF、`docs/reports/2026-10_scan/`) | v1 済、ユーザーレビュー待ち | 直し → 英語版は要望次第 |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
