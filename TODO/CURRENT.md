@@ -66,6 +66,11 @@
 - Fable キュー: 空(134 / 135–136 / 133 / v1.46 / 157 まで消化済み)。
 - **160 起票**: スキャン報告書 v1(`docs/reports/2026-10_scan/scan_report_2026-10.pdf`、11 ページ、日本語)。ユーザー「自分用 + mini TPC メンバー、来月 Warsaw の資料にも」。
 
+### 2026-10-19(月)
+- run 175 を 07:52 に停止(67.7 h、1.06 M events、732 GB)。**161 完了 → archive / SCANS S19**: 流量 50 ml/s で電荷 −3.5 %、6 h で平衡、以後 60 h 平坦。HV 不変。
+- 次の計画(ユーザー): **圧力スキャン 300 mbar まで、線源は端置き(中心から 70 mm、ケージ内)**。飛程表(TPCReco SRIM)と MC で、収納は 220–300 mbar、5 線(5.42–6.29)が 300 mbar で各 10–20 %、216Po 7 %、8.78 は常に突き抜け。GEM は Warsaw の圧力ごとの運用点(130: 245–255 / 190: 260 / 250: 270 → 300 で ≈ 280–295 V)を出発点に E 規則で決め直す。DRIFT は 2 kV 上限(E/p は 150 mbar まで維持)、12.5 MHz(6.25 は無い)。→ 票(162: 計画 + `alpha_lines.C` 発注)を起こす。
+- 気づき: `/api/status` の `slow` が null(slowctl 稼働・Influx 書き込みあり)。要確認(別票)。
+
 ## 開いているチケット
 
 | # | 中身 | 状態 | 次の一手 |
@@ -80,7 +85,7 @@
 | [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
-| [161](161_gas_flow_runs_174_175.md) | ガス流量 100 → 50 ml/s の比較(run 174 / 175)。`gas_trend.C` + metrics を ELITPC で実行中 | IN PROGRESS | 175 の処理完了を待って結果節 |
+| ~~161~~ | ガス流量 100 → 50 ml/s(run 174 / 175)→ SCANS S19 | 済 → archive(2026-10-19: 電荷 −3.5 %、6 h で平衡、以後平坦) | — |
 | [160](160_scan_report_2026-10.md) | スキャン報告書(S1–S18、日本語 PDF、`docs/reports/2026-10_scan/`) | v1 済、ユーザーレビュー待ち | 直し → 英語版は要望次第 |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
