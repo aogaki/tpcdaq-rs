@@ -25,22 +25,23 @@
 \renewcommand{\arraystretch}{1.1}
 
 \title{mini eTPC パラメータスキャン報告\\[2pt]
-\large ELI-NP、2026年10月14--16日(ELITPC DAQ、α線源)}
+\large ELI-NP、2026年10月14--19日(ELITPC DAQ、α線源)}
 \author{Soichiro Aogaki(整理: Claude)}
-\date{2026年10月19日(v4 — ガス流量の節を追加。対象は run 78--176)}
+\date{2026年10月20日(v4.3 — 対象は run 78--176)}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-2026年10月14日から16日にかけて、ELI-NP の mini eTPC(GET 電子回路、zCoBo 1 枚、1 AsAd = 272 ch)で
-電子回路・高電圧・読み出し方式のパラメータスキャン 18 本(run 78--173、約 100 run)を行った。
-結論は次の 5 点である。
+2026年10月14日から19日にかけて、ELI-NP の mini eTPC(GET 電子回路、zCoBo 1 枚、1 AsAd = 272 ch)で
+電子回路・高電圧・読み出し方式・ガス流量のパラメータスキャン 19 本(run 78--176、約 100 run)を行った。
+結論は次の 6 点である。
 (1) \textbf{運用点 B} = GEM 240 V × 3、peaking 502 ns × gain 120 fC、readout full、25 MHz、triggerDelay 1750 を本番運用点として確定した(9.6 時間の一晩 run で指標が安定)。
 (2) 総電荷はどの peaking でもサンプル和で取り切れており、peaking で変わるのはピーク高さと時間幅だけである(デコンボリューションで実証)。
 (3) ゲインは $\ln G = \sum_i a_i \Delta V_i$、$a \approx 0.014\pm0.0015$ /V(箔ごとの差は誤差内、加法性成立)で、GEM 合計 $-30$ V まで電子回路で補える。
 (4) 1 ヒットの精度は $\sigma_z \approx 0.20$ mm(= 1 cell、HV・ドリフト電場に依らず mm で一定)、2D 重心 $\sigma \approx 0.30$ mm/view(232--502 ns)。
-(5) レート上限はネットワークでなく zCoBo FW の読み出し時間(272 ch で 2.94 ms ≈ 340 Hz、読み出し中のトリガは失われる)で決まる。(6) ガス流量を 100 → 50 ml/min にすると総電荷が 3.5 \% 下がり、数時間(= 54 L の体積交換)で新しい平衡に落ち着く。150 ml/min では 100 と同じ。不純物の定常濃度 $c = c_\mathrm{bottle} + S/Q$ の $S/Q$ 項で説明でき、HV は無関係。ゼロサプレッション(ch ごと ped+5σ)は品質を落とさずデータを 1/9〜1/12 に縮め、\textbf{ビーム run の既定候補 = hit register partial + ZS(23 kB/event)}とした。
+(5) レート上限はネットワークでなく zCoBo FW の読み出し時間(272 ch で 2.94 ms ≈ 340 Hz、読み出し中のトリガは失われる)で決まる。ゼロサプレッション(ch ごと ped+5σ)は品質を落とさずデータを 1/9〜1/12 に縮め、\textbf{ビーム run の既定候補 = hit register partial + ZS(23 kB/event)}とした。
+(6) ガス流量を 100 → 50 ml/min にすると総電荷が 3.5 \% 下がり、数時間(= 54 L の体積交換)で新しい平衡に落ち着く。150 ml/min では 100 と同じ。不純物の定常濃度 $c = c_\mathrm{bottle} + S/Q$ の $S/Q$ 項で説明でき、HV は無関係。
 \end{abstract}
 
 \tableofcontents

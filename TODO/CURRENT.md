@@ -89,6 +89,7 @@
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
 | [162](162_pressure_scan_plan.md) | 圧力スキャン(≤ 300 mbar、線源端置き、z 中間、x 位置可変)の計画 + `alpha_lines.C` 発注 | READY | 線源の設置後。alpha_lines は Sonnet へ |
 | ~~161~~ | ガス流量 100 → 50 ml/min(run 174 / 175)→ SCANS S19 | 済 → archive(2026-10-19: 電荷 −3.5 %、6 h で平衡、以後平坦) | — |
+| [163](163_scan_report_en.md) | スキャン報告書の英語版(S1–S19、mini TPC + Warsaw 向け、非公式) | IN PROGRESS | — |
 | [160](160_scan_report_2026-10.md) | スキャン報告書(S1–S18、日本語 PDF、`docs/reports/2026-10_scan/`) | v1 済、ユーザーレビュー待ち | 直し → 英語版は要望次第 |
 | [131](131_onsite_and_hardware.md) | 現地・機器・ELITPC 実機でやること(069 / 073 / 079 / 084 / 101 / 107 の残り) | READY | やれるときに 1 項目ずつ |
 | 130(未起票) | 複数飛跡の再構成(strip ごとの複数パルス、view ごとの直線探索、view 間の対応付け、N 本のフィット — 3α まで) | 前段の 126–129 は完了。**2026-10-13 ユーザー: 後回し** | 設計は Fable。データ = 128 の重ね合わせ + gas-pressure-test の反応生成(真値つき) |
