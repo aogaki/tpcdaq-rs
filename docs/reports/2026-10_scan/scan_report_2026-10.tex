@@ -545,10 +545,10 @@ ELITPC(Warsaw、zCoBo 2 枚 × 2 AsAd)の見積もり: 1 枚 544 ch → 読み�
 \appendix
 \section{道具と記録の所在}
 \begin{itemize}
-\item リポジトリ: \url{https://github.com/aogaki/tpcdaq-rs}。DAQ のソース(Rust + C++)、仕様書、運用手順、スキャン台帳、チケット(設計の経緯と結果)がすべてここにある。開発者向けの文書は日本語だけなので、興味があって英語版が要る場合は Aogaki に言ってもらえれば LLM 翻訳を用意する。
-\item 台帳: \texttt{docs/SCANS\_ja.md}(S1--S19、数字の正)。経緯と判断: \texttt{TODO/archive/135--161}。
+\item リポジトリ: \url{https://github.com/aogaki/tpcdaq-rs}。DAQ のソース(Rust + C++)、仕様書、運用手順、スキャン台帳、チケット(設計の経緯と結果)がすべてここにある。開発者向けの文書は日本語。\textbf{下に挙げた文書の英語版(LLM 翻訳)は \path{docs/en/} にある}(索引 \path{docs/en/README.md}、日本語が正)。それ以外で英語版が要る場合は Aogaki に言ってもらえれば LLM 翻訳を用意する。
+\item 台帳: \texttt{docs/SCANS\_ja.md}(S1--S19、数字の正。英語版 \path{docs/en/SCANS_en.md})。経緯と判断: \texttt{TODO/archive/135--161}(英語版 \path{docs/en/tickets/})。
 \item 道具: \path{tools/scan/}(\sloppy \texttt{scan.py}、\texttt{run\_metrics.C}、\texttt{metrics\_for\_run.sh}、\texttt{pulser\_kernel.C}、\texttt{deconv.C}、\texttt{drift\_end.C}、\texttt{hit\_residuals.C}、\texttt{uvw\_closure.C}、\texttt{zs\_exceptions.py}、\texttt{zs\_params.sh}、\texttt{zs\_restore.C}、\texttt{ledger.py})。各マクロにテストあり。
-\item 仕様: \texttt{docs/SPEC\_ja.md} v1.49(ZS 表モード、0x02 復元、ped\_table、decoder カウンタ、§13-9)。運用: \texttt{docs/RUNBOOK\_ja.md}「ZS 運用」。
+\item 仕様: \texttt{docs/SPEC\_ja.md} v1.49(ZS 表モード、0x02 復元、ped\_table、decoder カウンタ、§13-9。英語版 \path{docs/en/SPEC_en.md})。運用: \texttt{docs/RUNBOOK\_ja.md}「ZS 運用」(英語版 \path{docs/en/RUNBOOK_en.md})。
 \item ELITPC: データ \path{/data/tpcdaq/run00NN/}、指標 \path{~/test/scan/metrics/}、図 \path{~/test/scan/}\{resid, closure, kernel2, deconv, drift\}、較正表 \path{~/test/scan/calib/pedestal_232ns.json} / \path{pedestal_502ns.json}。
 \end{itemize}
 

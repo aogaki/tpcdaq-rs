@@ -959,7 +959,7 @@ TrackTree はオフライン解析(minitpc-analysis、Higs 側リポ)が持ち�
 
 ### 6.3 イベントビルダ(新規、eventIdx ベース)
 
-- 期待フラグメント集合 = 設定 + ジオメトリから导出した `{(cobo, asad)}` の集合(mini: {(0,0)}、
+- 期待フラグメント集合 = 設定 + ジオメトリから導出した `{(cobo, asad)}` の集合(mini: {(0,0)}、
   ELITPC: **{(0,0),(0,1),(0,2),(0,3)}**(v1.7 実データ確認 — 1 論理 CoBo × 4 AsAd)。
   .dat の実配置に従う)。
 - キー = `(run_number, event_idx)`。全期待フラグメント到達で complete、`build_timeout_ms`

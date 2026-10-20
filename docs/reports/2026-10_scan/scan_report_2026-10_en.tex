@@ -548,10 +548,10 @@ Note: ZS graw files break the pedestal calculation of the offline grawToEventTPC
 \appendix
 \section{Tools and records}
 \begin{itemize}
-\item Repository: \url{https://github.com/aogaki/tpcdaq-rs}. The DAQ source (Rust + C++), the specification, the operating procedures, the scan ledger and the tickets (design history and results) are all there. The developer documents are in Japanese only; if you are interested and need an English version, ask S.~Aogaki and an LLM translation will be prepared.
-\item Scan ledger: \texttt{docs/SCANS\_ja.md} (S1--S19, the reference for all numbers). History and decisions: \texttt{TODO/archive/135--161}.
+\item Repository: \url{https://github.com/aogaki/tpcdaq-rs}. The DAQ source (Rust + C++), the specification, the operating procedures, the scan ledger and the tickets (design history and results) are all there. The developer documents are in Japanese. \textbf{English LLM translations of the documents listed below are in \path{docs/en/}} (index: \path{docs/en/README.md}); the Japanese originals are authoritative. For any other document, ask S.~Aogaki and an LLM translation will be prepared.
+\item Scan ledger: \texttt{docs/SCANS\_ja.md} (S1--S19, the reference for all numbers; English: \path{docs/en/SCANS_en.md}). History and decisions: \texttt{TODO/archive/135--161} (English: \path{docs/en/tickets/}).
 \item Tools: \path{tools/scan/} (\sloppy \texttt{scan.py}, \texttt{run\_metrics.C}, \texttt{metrics\_for\_run.sh}, \texttt{pulser\_kernel.C}, \texttt{deconv.C}, \texttt{drift\_end.C}, \texttt{hit\_residuals.C}, \texttt{uvw\_closure.C}, \texttt{gas\_trend.C}, \texttt{zs\_exceptions.py}, \texttt{zs\_params.sh}, \texttt{zs\_restore.C}, \texttt{ledger.py}); every macro has tests.
-\item Specification: \texttt{docs/SPEC\_ja.md} v1.49 (ZS table mode, display restoration, ped\_table, decoder counters). Operation: \texttt{docs/RUNBOOK\_ja.md}, section on ZS operation.
+\item Specification: \texttt{docs/SPEC\_ja.md} v1.49 (ZS table mode, display restoration, ped\_table, decoder counters; English: \path{docs/en/SPEC_en.md}). Operation: \texttt{docs/RUNBOOK\_ja.md}, section on ZS operation (English: \path{docs/en/RUNBOOK_en.md}).
 \end{itemize}
 
 \section{Parameters of operating point B}
