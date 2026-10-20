@@ -9,6 +9,7 @@
 \usepackage{caption}
 \usepackage{siunitx}
 \usepackage{pgfplots}
+\usetikzlibrary{calc}
 \pgfplotsset{compat=1.18}
 \usepackage{xcolor}
 \usepackage{placeins}
@@ -328,7 +329,76 @@ run & 流量 & events & ヒット ch & 電荷 & 飽和 & ok & 長さ / IQR & dEd
 
 \section{ヒットの精度}
 
-\subsection{z 残差(S11)}
+\subsection{ヒットと 2 種類の残差の定義}\label{sec:residual-def}
+この章の「精度」は、飛跡の再構成をしない人にも追えるよう、次の 3 段で定義する。
+
+\paragraph{1. ヒット(1 ストリップ = 1 点)}
+解析マクロ \texttt{analyzeUVW.C} は、各ストリップ ch の波形(ペデスタル減算後)から 1 個だけ点を作る。
+波形の最大のセル $t_\mathrm{peak}$ の前後 ±5 cell で閾値(35 ADC)を超えたサンプルを取り、
+電荷 $q = \sum v_t$、時刻 $\bar t = \sum v_t\, t / q$(電荷重心)とする。
+$z = \bar t \times 40\,\mathrm{ns} \times v_\mathrm{drift}$(1 cell = 0.19 mm)。ストリップの位置 $s$ [mm] はチャンネル表から。
+つまりヒット = (view, $s$, $z$, $q$)で、view ごとに「ストリップ位置 × ドリフト方向」の 2 次元の点になる。
+$q < 2000$ のストリップ(飛跡の時刻に全ストリップに乗る弱い誘導 = halo)は捨てる。
+
+\paragraph{2. z 残差(§\ref{sec:zres})— 飛跡の直線に対するずれ}
+\texttt{makeTracks.C} が 3 view のヒットから 3 次元の直線を 1 本当てはめる(xy の向きは U/V/W の広がりから、
+z は飛跡に沿った長さ $l$ に対する直線)。各ヒットのストリップ位置を飛跡の xy 方向へ投影して $l$ を求めると、
+直線はその $l$ での $z(l)$ を予言する。\textbf{z 残差 $r = z_\mathrm{hit} - z(l)$}(図~\ref{fig:resdef} 左)。
+全ヒットの $r$ の分布の幅(robust σ)が「ヒット 1 本の z がどれだけ正確に決まるか」になる。
+直線は同じヒットで当てはめているので σ はわずかに小さめに出る(1 view に約 50 本あるので 1 \% 程度)。
+
+\paragraph{3. 閉合残差(§\ref{sec:closure})— 飛跡のモデルを使わない 2D の精度}
+U・V・W のストリップは互いに 60° ずつ傾いていて、ストリップ座標を測る方向(ピッチ方向)の単位ベクトルは 120° ずつ開いているので、3 本の和はゼロになる。
+したがって xy 面の\textbf{どんな点でも} 3 つのストリップ座標の和 $s_U + s_V + s_W$ は同じ定数 $c$ になる(図~\ref{fig:resdef} 右)。
+同じ時刻(1 cell = 同じ z の薄い層)で 3 view それぞれの電荷重心 $s_U, s_V, s_W$ を取れば、
+それらは同じ点を指しているはずなので、\textbf{閉合残差 $r = s_U + s_V + s_W - c$} は重心の誤差だけでできている。
+3 view の誤差が独立で同じ大きさ $\sigma_s$ なら $\sigma_r = \sqrt{3}\,\sigma_s$ なので、$\sigma_s = \sigma_r / \sqrt{3}$ を
+「1 view あたり」の 2D 精度と呼ぶ。直線を仮定しないので、曲がった飛跡や再構成の失敗に影響されない。
+
+いずれも分布の裾が重い(複数飛跡・ノイズ・飽和の外れ値)ため、幅は RMS ではなく
+\textbf{robust σ = 1.4826 × MAD}(中央値からの絶対偏差の中央値。正規分布なら σ と一致)で表す。
+
+\begin{figure}[h]\centering
+\begin{tikzpicture}[scale=0.9,>=stealth]
+% left: z residual
+\begin{scope}
+\draw[->] (0,0) -- (6.2,0);
+\node[font=\small] at (3.1,-0.4) {$l$:飛跡に沿った xy の長さ};
+\draw[->] (0,0) -- (0,4.6) node[left,font=\small] {$z$};
+\draw[thick,blue] (0.4,1.5) -- (5.8,4.1) node[right,font=\small] {直線 $z(l)$};
+\foreach \x/\d in {0.8/0.25,1.4/-0.2,2.0/0.15,2.6/-0.3,3.2/0.1,3.8/0.3,4.4/-0.15,5.0/0.2,5.5/-0.1} {
+  \pgfmathsetmacro{\zl}{1.5+(\x-0.4)*2.6/5.4}
+  \draw[red,thin] (\x,\zl) -- (\x,\zl+\d);
+  \fill[black] (\x,\zl+\d) circle (1.6pt);
+}
+\draw[<->,red] (6.0,3.2) -- (6.0,3.6);
+\node[red,font=\small,right] at (6.0,3.4) {$r$};
+\node[font=\small,align=left,anchor=south east] at (6.1,0.1) {点 = 1 ストリップのヒット\\($z$ = 電荷重心の時刻 × $v_\mathrm{drift}$)};
+\end{scope}
+% right: closure
+\begin{scope}[xshift=9.8cm,yshift=2.1cm,scale=1.25]
+\draw[->,gray] (180:-2.0) -- (180:2.1) node[left,font=\small,black] {$s_U$ 軸};
+\draw[->,gray] (60:-1.6) -- (60:2.0) node[above,font=\small,black] {$s_V$ 軸};
+\draw[->,gray] (-60:-1.6) -- (-60:2.0) node[below,font=\small,black] {$s_W$ 軸};
+\coordinate (P) at (10:1.7);
+\coordinate (FU) at ($(180:-2)!(P)!(180:2)$);
+\coordinate (FV) at ($(60:-2)!(P)!(60:2)$);
+\coordinate (FW) at ($(-60:-2)!(P)!(-60:2)$);
+\draw[dashed,red!70] (P) -- (FU); \draw[dashed,red!70] (P) -- (FV); \draw[dashed,red!70] (P) -- (FW);
+\fill[blue] (FU) circle (1.3pt) node[below,font=\small,blue] {$s_U$};
+\fill[blue] (FV) circle (1.3pt) node[left,font=\small,blue] {$s_V$};
+\fill[blue] (FW) circle (1.3pt) node[left,font=\small,blue,yshift=-2pt] {$s_W$};
+\fill[red] (P) circle (2pt) node[above right,font=\small,red] {同じ z の重心};
+\node[font=\small,align=center] at (0.2,-2.55) {3 軸の単位ベクトルの和 $= 0$ なので\\$s_U + s_V + s_W = c$(点に依らない)};
+\end{scope}
+\end{tikzpicture}
+\caption{2 種類の残差の考え方。左: z 残差 = 各ヒットの z と、当てはめた直線がそのヒットの位置で予言する z との差。
+右: 閉合残差 = 同じ時刻の 3 view の重心座標の和が幾何の定数 $c$ からどれだけずれるか(直線を使わない)。}
+\label{fig:resdef}
+\end{figure}
+
+
+\subsection{z 残差(S11)}\label{sec:zres}
 直線に対するヒットの z 残差(図~\ref{fig:resid})の robust σ は 232--502 ns で \textbf{0.19--0.22 mm ≈ 1 cell}(1 cell = 40 ns × 4.77 mm/µs = 0.19 mm)。
 1014 ns で 0.25--0.31 mm(+30--60 \%)、70 ns で 0.27 mm(S/N 不足)。HV(GEM 250 → 230、配分)には依らない(0.20--0.22)。
 S12 とあわせると \textbf{$\sigma_z$ は時間でなく距離の精度で決まっている}(候補: ストリップ幅 × 飛跡の傾き ≈ 0.18 mm)。
@@ -343,7 +413,7 @@ RMS は robust σ の 2--5 倍で裾が重いので、当てはめは robust に
 \end{figure}
 
 \subsection{2D 重心精度 = U/V/W 閉合残差(S14)}\label{sec:closure}
-同じ z スライス(1 cell)で、U・V・W の各ストリップ面(view)ごとに電荷重心のストリップ位置 $s_U$, $s_V$, $s_W$ を取ると、3 方向が 60° ずつなので和 $s_U + s_V + s_W$ は幾何的に定数になるべきである。そのばらつき(閉合残差)の robust σ を $\sqrt{3}$ で割ったものが「1 view あたり」= 1 方向のストリップ群で測った重心の精度である(ヒット ch 条件 + 時間窓 |t − t$_\mathrm{peak}$| ≤ 15 cell)。
+定義は §\ref{sec:residual-def} の 3。重心に使うのはヒット ch(§\ref{sec:residual-def} の 1 の条件を満たすストリップ)の、自分のピーク時刻から ±15 cell 以内のサンプルだけ(遠い時刻の尾や halo を外すため)。3 view とも 1 塊になった z スライスだけを数える。
 \textbf{232 ≈ 502 ns で 0.30 mm/view が最良}、1014 ns は 0.39--0.43(パルスが広く窓からはみ出す)、70 ns は 1.1 mm。HV には依らず(0.30--0.32)、DRIFT 1,000 V でわずかに悪い(0.34)。
 電荷依存が強く(Q1 0.7--0.8 → Q4 0.40--0.45 mm)、2D 精度は S/N で決まる。
 
