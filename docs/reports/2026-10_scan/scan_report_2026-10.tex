@@ -289,37 +289,40 @@ run & 設定 & events & kB/ev & ヒット ch & 総電荷 & 飽和 & ok & 長さ 
 \texttt{gas\_trend.C} で raw ツリーを 1 時間(175)/ 10 分(174、176)ビンに切り、イベント総電荷の中央値などの推移を見た(図~\ref{fig:gas})。
 
 \begin{table}[h]\centering\small
-\caption{S19 ガス流量(run 全体の指標。176 は 3 h 時点の暫定)}
+\caption{S19 ガス流量(run 全体の指標。176 は最初の 1.5 h の立ち上がりを含む。平衡値は 2.087 M)}
 \begin{tabular}{rlrrrrrrr}
 \toprule
 run & 流量 & events & ヒット ch & 電荷 & 飽和 & ok & 長さ / IQR & dEdx / IQR \\
 \midrule
 174 & 100 ml/min & 11,145 & 120 & 2.077 M & 1.0 \% & 0.999 & 84.1 / 58.9 & 13,532 / 6,508 \\
 175 & 50 ml/min(67.7 h) & 1,057,719 & 120 & \textbf{2.002 M} & 0.9 \% & 0.999 & 83.8 / 58.9 & 12,998 / 6,336 \\
-176 & 150 ml/min(暫定) & 50,335 & 121 & 2.085 M & 1.0 \% & --- & --- & --- \\
+176 & 150 ml/min(4.7 h) & 73,652 & 121 & 2.078 M & 1.0 \% & 0.997 & 84.2 / 58.7 & 13,493 / 6,539 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{figure}[h]\centering
 \begin{tikzpicture}
-\begin{axis}[width=0.9\textwidth,height=6cm,xlabel={hours since the flow change},ylabel={event charge, median [$10^3$ ADC]},ymin=1960,ymax=2150,xmin=-1,xmax=24,ymajorgrids=true,legend pos=north east,legend style={font=\scriptsize}]
+\begin{axis}[width=0.9\textwidth,height=6cm,xlabel={hours since the flow change},ylabel={event charge, median [$10^3$ ADC]},ymin=1960,ymax=2200,xmin=-1,xmax=24,ymajorgrids=true,legend pos=north east,legend style={font=\scriptsize}]
 \addplot[only marks,mark=square*,gray,mark size=1.5pt] coordinates {(-0.92,2076) (-0.75,2061) (-0.58,2080) (-0.42,2092) (-0.25,2080)};
 \addlegendentry{run 174: 100 ml/min (10 min bins)}
 \addplot[only marks,mark=*,blue,mark size=1.5pt] coordinates {(0.50,2046) (1.50,2037) (2.50,2022) (3.50,2017) (4.50,2006) (5.50,2010) (6.50,1991) (7.50,2003) (8.50,1993) (9.50,2001) (10.50,1999) (11.50,2006) (12.50,1996) (13.50,2003) (14.50,2001) (15.50,2006) (16.50,2002) (17.50,2008) (18.50,2001) (19.50,1994) (20.50,2001) (21.50,2004) (22.50,2000) (23.50,2004)};
 \addlegendentry{run 175: 100 to 50 ml/min (1 h bins, first 24 of 68 h)}
-\addplot[only marks,mark=triangle*,red,mark size=2pt] coordinates {(0.08,2025) (0.25,2032) (0.42,2057) (0.58,2047) (0.75,2048) (0.92,2065) (1.08,2085) (1.25,2070) (1.42,2070) (1.58,2066) (1.75,2085) (1.92,2079) (2.08,2094) (2.25,2074) (2.42,2071) (2.58,2073) (2.75,2100) (2.92,2099) (3.08,2085)};
-\addlegendentry{run 176: 50 to 150 ml/min (10 min bins)}
+\addplot[only marks,mark=triangle*,red,mark size=2pt] coordinates {(0.08,2025) (0.25,2032) (0.42,2057) (0.58,2047) (0.75,2048) (0.92,2065) (1.08,2085) (1.25,2070) (1.42,2070) (1.58,2066) (1.75,2085) (1.92,2079) (2.08,2094) (2.25,2074) (2.42,2071) (2.58,2073) (2.75,2100) (2.92,2099) (3.08,2085) (3.25,2104) (3.42,2098) (3.58,2101) (3.75,2058) (3.92,2105) (4.08,2071) (4.25,2077) (4.42,2077) (4.58,2109) (4.71,2114)};
+\addlegendentry{run 176: 50 to 150 ml/min (10 min bins, 4.7 h)}
+\addplot[gray,dashed,forget plot,domain=-1:24,samples=2] {2077};
+\addplot[blue,dashed,forget plot,domain=-1:24,samples=2] {2002};
+\addplot[red,dashed,forget plot,domain=-1:24,samples=2] {2087};
 \end{axis}
 \end{tikzpicture}
-\caption{S19: 流量変更後の総電荷の推移。1 h ビンの統計精度は ±0.5 \%、10 min ビンは ±1 \%。run 175 は 24 h 以降 68 h まで 2.00 ± 0.01 M で平坦(昼夜の周期なし)。}
+\caption{S19: 流量変更後の総電荷の推移。破線は各流量の平衡値(灰 100 ml/min 2.077 M、青 50 ml/min 2.002 M、赤 150 ml/min 2.087 M)。1 h ビンの統計精度は ±0.5 \%、10 min ビンは ±1 \%。run 175 は 24 h 以降 68 h まで 2.00 ± 0.01 M で平坦(昼夜の周期なし)。run 176 は 4.7 h で HV の外部インターロック(ガス系側、電圧・電流に前兆なし)により終了。}
 \label{fig:gas}
 \end{figure}
 
 \begin{itemize}
 \item 50 ml/min にすると総電荷は 2.08 → 2.00 M(−3.5 \%)、dEdx も −4 \%。16 \% 点も同じ比で下がり、分布全体が一様に縮む。ヒット ch・飛跡長・ok・帯位置(first 75 / last 98 cell)・パルス幅(56 cell)は不変 = ドリフト速度と拡散は変わらない。HV(InfluxDB の 1 h 平均、69 点)は vmon ±0.05 V、imon ±0.5 \% で無関係。
 \item 新しい平衡までの時間は数時間で、150 ml/min に戻したときの立ち上がりも約 0.5 h。これは 54 L を流量で入れ替える時定数(91 mbar で実流量は常温換算の 11 倍。50 ml/min: 1.6 h、150 ml/min: 0.54 h)に一致し、壁の脱離のような遅い過程は要らない。
-\item 解釈: 不純物(主に H$_2$O、空気のリーク)の定常濃度は $c = c_\mathrm{bottle} + S/Q$($S$ = 系内の発生量、$Q$ = 流量)。ボンベ由来の項は流量に依らず差分に現れない。50 / 100 / 150 ml/min の 2.00 / 2.08 / 2.085 M は $S/Q$ に比例する形と 1 \% 以内で整合し、100 ml/min 以上では利得はほとんど変わらない。流量を変えたら \textbf{数時間は較正を跨がない}、流量を較正条件として記録する、の 2 点が運用の含意。
+\item 解釈: 不純物(主に H$_2$O、空気のリーク)の定常濃度は $c = c_\mathrm{bottle} + S/Q$($S$ = 系内の発生量、$Q$ = 流量)。ボンベ由来の項は流量に依らず差分に現れない。50 / 100 / 150 ml/min の 2.002 / 2.077 / 2.087 ± 0.004 M(150 は 1.5--4.7 h の 10 min ビン 20 本の平均)は $S/Q$ に比例する形と 1 \% 以内で整合し、100 ml/min 以上では利得はほとんど変わらない。流量を変えたら \textbf{数時間は較正を跨がない}、流量を較正条件として記録する、の 2 点が運用の含意。
 \item 付随: 長さ × 電荷の 2D で $^{228}$Th 系列の α 線が分離した(220Rn 6.29 MeV が 85 mm で停止、212Bi 45 mm、224Ra 25 mm、216Po / 212Po は 105 mm で突き抜け)。線源が 315 mm 外にあるため停止線の電荷 FWHM は 19--31 \% と悪い。圧力スキャン(次期)の指標の土台。
 \end{itemize}
 
