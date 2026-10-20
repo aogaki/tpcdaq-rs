@@ -12,7 +12,7 @@
 \usetikzlibrary{calc}
 \pgfplotsset{compat=1.18}
 \usepackage{xcolor}
-\usepackage{placeins}
+\usepackage[section]{placeins}
 \usepackage{float}
 \usepackage{url}
 \urlstyle{tt}
@@ -218,7 +218,7 @@ and the sum of the three single-foil points ($-0.423 \pm 0.045$) equals the all-
 Down to $-30$ V in total ($240$ V each, the same value as the full-size HIGS detector), the electronics compensate and the track quality (ok, hit channels, length, relative dEdx width) does not change; no trips or current anomalies occurred.
 The currents are about 8.6--8.8\uA on all channels and follow the voltage ratio when the GEMs are lowered. The 200 M$\Omega$ resistor chain on the HV side, as Traian explained earlier from the circuit diagram, is also clearly confirmed by the present V--I data: the summed voltage of ch0--5, 1,770 V at $240 \times 3$, divided by 200 M$\Omega$ gives 8.85\uA against a measured 8.63--8.80\uA; at $250 \times 3$, 1,800 V gives 9.0\uA against 8.80\uA.
 
-\begin{figure}[h]\centering
+\begin{figure}[H]\centering
 \begin{tikzpicture}
 \begin{axis}[width=0.6\textwidth,height=6cm,xlabel={total GEM $\Delta V$ [V]},ylabel={$\ln(Q/Q_0)$},grid=major,legend pos=north west,legend style={font=\scriptsize},xmin=-33,xmax=3]
 \addplot[only marks,mark=*,blue] coordinates {(0,0)(-10,-0.151)(-20,-0.300)(-30,-0.429)};
@@ -235,7 +235,7 @@ The currents are about 8.6--8.8\uA on all channels and follow the voltage ratio 
 \label{fig:gain}
 \end{figure}
 
-\begin{table}[h]\centering\small
+\begin{table}[H]\centering\small
 \caption{S10 GEM voltages (compared at 502 ns $\times$ 120 fC; point a = reference run 87).}
 \footnotesize
 \begin{tabular}{llrrrrrrr}
@@ -257,7 +257,7 @@ At operating point B the drift voltage was set to 1,000 / 1,200 / 1,400 V ($500 
 The pulse width goes $61 \to 57 \to 54$ cells ($-11$\,\% for $+40$\,\% in E: the $1/\sqrt{E}$ of diffusion plus the shaping width). Total charge and hit channels do not change (no loss in focusing into GEM3).
 $\sigma_z$ scales as $1/v$ in cells but is \textbf{constant in mm (0.207 / 0.208 / 0.208)}. Routine running stays at 1,200 V.
 
-\begin{table}[h]\centering\small
+\begin{table}[H]\centering\small
 \caption{S12 drift voltage (runs 130--132, operating point B).}
 \begin{tabular}{rrrrrrrrr}
 \toprule
@@ -275,7 +275,7 @@ $V_\mathrm{drift}$ & run & time width [cell] & width $\times$ V & pulse width [c
 The GEMs run 10 V per foil lower, and full readout uses frameType 2 (2 B/sample), so the data size is half of that of setting A (partial, 557 kB/event): 278.8 kB/event.
 The metrics of the overnight run 141 (9.6 h, 149,795 events, 4.32 Hz, 104 GB) agree with the 5.5 min check run 130 and with the overnight run of setting A (run 114, 10 h, 166,386 events).
 
-\begin{table}[h]\centering\small
+\begin{table}[H]\centering\small
 \caption{Overnight runs (S7, S16).}
 \scriptsize\setlength{\tabcolsep}{3pt}
 \begin{tabular}{llrrrrrrrrr}
@@ -293,7 +293,7 @@ run & setting & events & kB/ev & hit ch & charge & sat. & ok & length / IQR & $\
 Keeping operating point B, only the CO$_2$ flow was changed, 100 $\to$ 50 $\to$ 150 ml/min (54 L chamber, 91 mbar; run 174 at 100, run 175 at 50 for 67.7 h, run 176 at 150).
 \texttt{gas\_trend.C} splits the raw tree into 1 h (run 175) or 10 min (runs 174, 176) bins and follows the median event charge and other quantities (Fig.~\ref{fig:gas}).
 
-\begin{table}[h]\centering\small
+\begin{table}[H]\centering\small
 \caption{S19 gas flow (whole-run metrics; run 176 includes the first 1.5 h of rise, its equilibrium value is 2.087 M).}
 \begin{tabular}{rlrrrrrrr}
 \toprule
@@ -306,7 +306,7 @@ run & flow & events & hit ch & charge & sat. & ok & length / IQR & dEdx / IQR \\
 \end{tabular}
 \end{table}
 
-\begin{figure}[h]\centering
+\begin{figure}[tbp]\centering
 \begin{tikzpicture}
 \begin{axis}[width=0.9\textwidth,height=6cm,xlabel={hours since the flow change},ylabel={event charge, median [$10^3$ ADC]},ymin=1960,ymax=2200,xmin=-1,xmax=24,ymajorgrids=true,legend pos=north east,legend style={font=\scriptsize}]
 \addplot[only marks,mark=square*,gray,mark size=1.5pt] coordinates {(-0.92,2076) (-0.75,2061) (-0.58,2080) (-0.42,2092) (-0.25,2080)};

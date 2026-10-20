@@ -12,7 +12,7 @@
 \usetikzlibrary{calc}
 \pgfplotsset{compat=1.18}
 \usepackage{xcolor}
-\usepackage{placeins}
+\usepackage[section]{placeins}
 \usepackage{float}
 \usepackage{url}
 \urlstyle{tt}
@@ -216,7 +216,7 @@ peaking × gain & run & ヒット ch & 総電荷 & 飽和 & クリップ 先/末
 合計 $-30$ V(各 240 V、HIGS 本体と同じ値)まで、電子回路側で補って飛跡の質(ok、ヒット ch、長さ、dEdx の相対幅)は変わらず、トリップ・電流異常もなかった。
 電流は全 ch 約 8.6--8.8 µA で、GEM の電圧を下げると電圧比どおりに下がる。HV 側の抵抗鎖(200 MΩ)は以前 Traian が回路図から説明したとおりで、今回の V--I の関係からも明確に言える: ch0--5 の合計電圧 1,770 V(240 × 3 時)/ 200 MΩ = 8.85 µA に対し実測 8.63--8.80 µA、250 × 3 時は 1,800 V → 9.0 µA に対し 8.80 µA。
 
-\begin{figure}[h]\centering
+\begin{figure}[H]\centering
 \begin{tikzpicture}
 \begin{axis}[width=0.6\textwidth,height=6cm,xlabel={total GEM $\Delta V$ [V]},ylabel={$\ln(Q/Q_0)$},grid=major,legend pos=north west,legend style={font=\scriptsize},xmin=-33,xmax=3]
 \addplot[only marks,mark=*,blue] coordinates {(0,0)(-10,-0.151)(-20,-0.300)(-30,-0.429)};
@@ -233,7 +233,7 @@ peaking × gain & run & ヒット ch & 総電荷 & 飽和 & クリップ 先/末
 \label{fig:gain}
 \end{figure}
 
-\begin{table}[h]\centering\small
+\begin{table}[H]\centering\small
 \caption{S10 GEM 電圧(502 ns × 120 fC で比較。a は参照 run 87)}
 \begin{tabular}{llrrrrrrr}
 \toprule
@@ -254,7 +254,7 @@ f & 250 / 250 / 240 & 129 & 123 & 2.76 M & 2.3 \% & 0.999 & 84.9 & 17,726 / 8,56
 パルス幅は 61 → 57 → 54 cell(E +40 \% で −11 \%、拡散の 1/√E に整形幅が足された形)。総電荷・ヒット ch は不変(GEM3 への集束に損失なし)。
 $\sigma_z$ は cell では 1/v に比例するが \textbf{mm では一定(0.207 / 0.208 / 0.208)}。運用は 1,200 V のまま。
 
-\begin{table}[h]\centering\small
+\begin{table}[H]\centering\small
 \caption{S12 ドリフト電圧(run 130--132、運用点 B)}
 \begin{tabular}{rrrrrrrrr}
 \toprule
@@ -272,7 +272,7 @@ $V_\mathrm{drift}$ & run & 時間幅 [cell] & 時間幅 × V & パルス幅 [cel
 GEM が 10 V/枚 低く、readout full で frameType 2(2 B/sample)なのでデータは A(partial、557 kB/event)の半分(278.8 kB/event)になる。
 一晩 run(run 141、9.6 h、149,795 events、4.32 Hz、104 GB)の指標は 5.5 分の確認 run 130 と一致し、A の一晩(run 114、10 h、166,386 events)とも同等である。
 
-\begin{table}[h]\centering\small
+\begin{table}[H]\centering\small
 \caption{一晩 run の比較(S7、S16)}
 \scriptsize\setlength{\tabcolsep}{3pt}
 \begin{tabular}{llrrrrrrrrr}
@@ -290,7 +290,7 @@ run & 設定 & events & kB/ev & ヒット ch & 総電荷 & 飽和 & ok & 長さ 
 運用点 B のまま、CO$_2$ の流量だけを 100 → 50 → 150 ml/min と変えた(チャンバー 54 L、91 mbar。run 174 = 100、175 = 50 で 67.7 h、176 = 150)。
 \texttt{gas\_trend.C} で raw ツリーを 1 時間(175)/ 10 分(174、176)ビンに切り、イベント総電荷の中央値などの推移を見た(図~\ref{fig:gas})。
 
-\begin{table}[h]\centering\small
+\begin{table}[H]\centering\small
 \caption{S19 ガス流量(run 全体の指標。176 は最初の 1.5 h の立ち上がりを含む。平衡値は 2.087 M)}
 \begin{tabular}{rlrrrrrrr}
 \toprule
@@ -303,7 +303,7 @@ run & 流量 & events & ヒット ch & 電荷 & 飽和 & ok & 長さ / IQR & dEd
 \end{tabular}
 \end{table}
 
-\begin{figure}[h]\centering
+\begin{figure}[tbp]\centering
 \begin{tikzpicture}
 \begin{axis}[width=0.9\textwidth,height=6cm,xlabel={hours since the flow change},ylabel={event charge, median [$10^3$ ADC]},ymin=1960,ymax=2200,xmin=-1,xmax=24,ymajorgrids=true,legend pos=north east,legend style={font=\scriptsize}]
 \addplot[only marks,mark=square*,gray,mark size=1.5pt] coordinates {(-0.92,2076) (-0.75,2061) (-0.58,2080) (-0.42,2092) (-0.25,2080)};
