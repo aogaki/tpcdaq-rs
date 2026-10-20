@@ -528,7 +528,7 @@ ELITPC(Warsaw、zCoBo 2 枚 × 2 AsAd)の見積もり: 1 枚 544 ch → 読み�
 \section{未解決と次の課題}\label{sec:open}
 \begin{itemize}
 \item \textbf{ドリフト端(S6)}: 12.5 MHz・窓 41 µs でも α 飛跡はトリガから 2--4 µs に収まる(図~\ref{fig:drift})。現在の線源はチャンバーの外(ガス配管に連結した位置)にあり、立体角の都合で飛跡の z 方向の広がりはほぼ変わらないので、今の配置では陰極(20 cm)側まで届く飛跡は得られない。$v_\mathrm{drift} = L / t_\mathrm{max}$ の絶対値は、線源を再びチャンバー内に入れたときに測る。cell 340 付近の山は窓位置に依らず物理ではない(未解明)。
-\item \textbf{ガスの不純物源}: 流量依存(S19)の $S$ がリークか壁の脱離かは未分離。温度・圧力の記録(環境センサ)と、線源を中に入れてからの電荷 vs ドリフト時間で切り分ける。
+\item \textbf{ガスの不純物源}: 流量依存(S19)の $S$ がリークか壁の脱離かは未分離。湿度も効く(配管・O リングの水蒸気透過は部屋の湿度に比例、基板・Kapton・GEM 箔に吸着した水の放出、リークで入る空気の水分)。\textbf{チャンバーガスの露点は既に測っているので、これが直接の指標になる}: 水の分圧は露点で決まり、−40 °C 付近では露点 +5〜6 K で水が 2 倍。流量 100 → 50 ml/min で $S/Q$ が 2 倍になった原因が水なら、そのとき露点が数 K 上がっているはずで、動いていなければ原因は水以外(リークで入る O$_2$ など)になる。流量を切り替えた時刻(10-16 12:08、10-19 10:38)の露点の記録を電荷の推移(図~\ref{fig:gas})と並べて確かめる。ppm に直すには測定点の全圧が要り、ボンベ由来の水が支配的なら変化は小さい。あわせて環境センサ(部屋の温度・湿度・気圧)と、線源を中に入れてからの電荷 vs ドリフト時間でも切り分ける。
 \item \textbf{揺れ}: α 波形の周期 1.6--1.8 µs の成分(信号 ch のみ、電荷に比例)。AGET の応答核には無い。検出器側(GEM / 誘導)の可能性。
 \item \textbf{複数飛跡}: 現在の再構成は 1 イベント = 直線 1 本。502 ns で RMS が 1014 ns より大きい(外れ値の出方の違い)の素材でもある。
 \item \textbf{ZS の run ごとのカウンタ}(TODO/159): root\_sink / monitor の ZS カウンタを run\_stop に出す。PEventTPC 側の電荷和の照合も未実施。
@@ -545,7 +545,7 @@ ELITPC(Warsaw、zCoBo 2 枚 × 2 AsAd)の見積もり: 1 枚 544 ch → 読み�
 \section{道具と記録の所在}
 \begin{itemize}
 \item リポジトリ: \url{https://github.com/aogaki/tpcdaq-rs}。DAQ のソース(Rust + C++)、仕様書、運用手順、スキャン台帳、チケット(設計の経緯と結果)がすべてここにある。開発者向けの文書は日本語だけなので、興味があって英語版が要る場合は Aogaki に言ってもらえれば LLM 翻訳を用意する。
-\item 台帳: \texttt{docs/SCANS\_ja.md}(S1--S18、数字の正)。経緯と判断: \texttt{TODO/archive/135--158}。
+\item 台帳: \texttt{docs/SCANS\_ja.md}(S1--S19、数字の正)。経緯と判断: \texttt{TODO/archive/135--161}。
 \item 道具: \path{tools/scan/}(\sloppy \texttt{scan.py}、\texttt{run\_metrics.C}、\texttt{metrics\_for\_run.sh}、\texttt{pulser\_kernel.C}、\texttt{deconv.C}、\texttt{drift\_end.C}、\texttt{hit\_residuals.C}、\texttt{uvw\_closure.C}、\texttt{zs\_exceptions.py}、\texttt{zs\_params.sh}、\texttt{zs\_restore.C}、\texttt{ledger.py})。各マクロにテストあり。
 \item 仕様: \texttt{docs/SPEC\_ja.md} v1.49(ZS 表モード、0x02 復元、ped\_table、decoder カウンタ、§13-9)。運用: \texttt{docs/RUNBOOK\_ja.md}「ZS 運用」。
 \item ELITPC: データ \path{/data/tpcdaq/run00NN/}、指標 \path{~/test/scan/metrics/}、図 \path{~/test/scan/}\{resid, closure, kernel2, deconv, drift\}、較正表 \path{~/test/scan/calib/pedestal_232ns.json} / \path{pedestal_502ns.json}。
