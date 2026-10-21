@@ -87,6 +87,7 @@
 | [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
+| [165](165_environment_monitoring.md) | 環境モニタ: 露点(Easidew、ドライバ新規)・室温湿度気圧(arduino_env)・チャンバー温度(センサー選定)・チャンバー圧(bronkhorst)を slowctl → InfluxDB → run の `slow` へ | READY | ガス PC の LabVIEW / FlowPlot に 10-16〜21 の室温・圧力ログがあるか確認(ユーザー)|
 | [162](162_pressure_scan_plan.md) | 圧力スキャン(≤ 300 mbar、線源端置き、z 中間、x 位置可変)の計画 + `alpha_lines.C` 発注 | READY | 線源の設置後。alpha_lines は Sonnet へ |
 | ~~161~~ | ガス流量 100 → 50 ml/min(run 174 / 175)→ SCANS S19 | 済 → archive(2026-10-19: 電荷 −3.5 %、6 h で平衡、以後平坦) | — |
 | ~~161~~ 追記 | run 178(200 ml/min、17.2 h): 差は流量でなく**温度 +1.3 K(密度 −0.45 %)**— 止まる α 線 3 本が 1.5–1.9 mm 奥へ、利得 ≈ +2 %。利得の温度感度 ≈ 1.5 %/K。SCANS S19・報告書(日英)に反映 | 済(2026-10-21) | 露点の記録で水の変化を確認(ユーザー)|
