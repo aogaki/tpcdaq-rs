@@ -29,9 +29,14 @@
 //   histograms:  hCharge (strip-hit charge, all views), hWidth_U/V/W
 //   canvases:    UVW hit maps of the first NDISPLAY events
 //
-// Usage:  root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root")'          (100 mbar)
-//         root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root", 120)'     (run pressure
-//         [mbar]: it sets the drift velocity, i.e. the z scale)
+// Usage:  root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root", 120)'
+//         2nd argument = run pressure [mbar], REQUIRED (no default: it sets
+//         the drift velocity, i.e. the z scale; a silent default gave a wrong
+//         z scale once, TODO/168).
+//         Optional: first, n = entry range [first, first+n) (n < 0: to the
+//         end), outFile = output path (default: _raw.root -> _uvw.root).
+//         Events are independent, so par_analyzeUVW.sh runs N ranges in
+//         parallel and merges them with hadd (TODO/169).
 // =============================================================================
 #include <TCanvas.h>
 #include <TFile.h>
@@ -52,8 +57,6 @@
 // ---- analysis constants -----------------------------------------------------
 const double DRIFT_HV_V = 1200.0;  // drift cage voltage [V]
 const double DRIFT_LEN_CM = 20.0;  // drift length [cm]
-const double PRESSURE_MBAR =
-    100.0;  // CO2 pressure [mbar], default of the 2nd argument
 const double SAMPLING_MHZ = 25.0;   // AGET sampling rate
 const double ADC_THRESHOLD = 35.0;  // keep cells above pedestal + this
 const int PED_LO = 1, PED_HI = 20;  // pedestal window [time cells]
@@ -92,7 +95,8 @@ double driftVelocityCmUs(double hvVolt, double lenCm, double pMbar)
   return MOBILITY * eOverP;
 }
 
-void analyzeUVW(const char *rawFile, double pressureMbar = PRESSURE_MBAR)
+void analyzeUVW(const char *rawFile, double pressureMbar, Long64_t first = 0,
+                Long64_t n = -1, const char *outFile = "")
 {
   // --- channel map (aget, raw channel -> view, strip position) ---------------
   int chView[4][68];
@@ -154,8 +158,29 @@ void analyzeUVW(const char *rawFile, double pressureMbar = PRESSURE_MBAR)
   tree->SetBranchAddress("eventId", &eventId);
   tree->SetBranchAddress("adc", adc);
 
-  TString outName(rawFile);
-  outName.ReplaceAll("_raw.root", "_uvw.root");
+  // --- entry range [first, last) and output name: checked BEFORE any file is
+  // created, so a bad call leaves nothing behind -------------------------------
+  const Long64_t nTotal = tree->GetEntries();
+  if (first < 0 || first >= nTotal || n == 0) {
+    std::cout << "ERROR: bad entry range first=" << first << " n=" << n
+              << " (tree has " << nTotal << " entries); nothing written"
+              << std::endl;
+    return;
+  }
+  const Long64_t last = (n < 0) ? nTotal : std::min(nTotal, first + n);
+
+  TString outName(outFile);
+  if (outName.IsNull()) {
+    outName = rawFile;
+    outName.ReplaceAll("_raw.root", "_uvw.root");
+  }
+  if (outName == TString(rawFile)) {
+    std::cout << "ERROR: output name equals the input name (" << rawFile
+              << "): the input needs '_raw.root' in its name or an explicit "
+                 "outFile; refusing to overwrite the input"
+              << std::endl;
+    return;
+  }
   TFile out(outName, "RECREATE");
   TTree utree("uvw", "per-view analysis + band-selected strip hits");
   float qview[3], width[3];
@@ -180,7 +205,7 @@ void analyzeUVW(const char *rawFile, double pressureMbar = PRESSURE_MBAR)
         new TH1F(Form("hWidth_%s", vn[v]),
                  Form("signal width %s;width [mm];events", vn[v]), 60, 0, 15);
 
-  for (Long64_t i = 0; i < tree->GetEntries(); ++i) {
+  for (Long64_t i = first; i < last; ++i) {
     tree->GetEntry(i);
 
     // 0. build hits: pedestal subtraction + mapping + one hit per strip
@@ -302,5 +327,7 @@ void analyzeUVW(const char *rawFile, double pressureMbar = PRESSURE_MBAR)
   hCharge.Write();
   for (int v = 0; v < 3; ++v) hWidth[v]->Write();
   out.Close();
+  printf("processed entries [%lld, %lld) = %lld of %lld\n", first, last,
+         last - first, nTotal);
   printf("wrote %s\n", outName.Data());
 }

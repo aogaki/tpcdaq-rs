@@ -73,6 +73,10 @@
 - **15:21:25 HV インターロック**(InfluxDB 1 s サンプル): 直前まで全 8 ch の vmon / imon は 1 LSB も動かず(GEM 8.68–8.86 µA、DRIFT 3.70 / 5.91 µA)。15:21:25 に **board の `bdilk` = 1 と同時に全 ch が KILL(status 2053 = ON+RDW+KILL)**で ≈ 10 V/s のランプダウン。電流スパイク・OVC・TRIP なし = 検出器の放電ではなく **外部インターロック入力**(ガス系 → HiVolta の線、131 B-1 / 2022 logbook「Interlock for HiVolta set to 80 mbar」)。15:49:54 に bdilk 解除(status 6144 = KILL+ILK → 1024 DIS → 0)。run 176 は 15:44 停止(176 の平衡値は 1.5 h 以降 2.08–2.10 M で確定)。原因はガス系側の記録(BPC / FlowView のアラーム)で確認する。
 - 気づき: `/api/status` の `slow` が null(slowctl 稼働・Influx 書き込みあり)。要確認(別票)。
 
+### 2026-10-21
+- **167 完了 → archive**: DRIFT の電流差(ch6 3.70 / ch7 5.91 µA)は **ch6 の電流モニタのゼロ点 −2.38 µA**(OFF 時、10 日間一定)でほぼ全部説明できる。補正後は 6.08 / 6.09 µA で ±0.07 µA 一致、500–700 V で I ∝ V(≈ 99 MΩ / 600 V)= ドリフトケージは健全。ch6 は vmon も OFF で +1.85 V、600 設定で 596 V。漏れの監視は ch ごとにゼロ点を引いてから。**現地試験(131 B-6 ②、ビーム前)で ch6 の入力・出力を外しても読みが不変 → ずれは HiVolta ch6 の測定回路そのものと確定**。
+- **168 起票(IN PROGRESS)**: mini TPC 動作実証レポート(読み手 = mini TPC メンバー、Warsaw は最終段階だけ)。§2 線の同定: run 175 / 178 で **止まる 3 本 = ²¹²Bi / ²²⁰Rn / ²¹⁶Po(100 が正しい)、161 / S19 の名前は 1 本ずれ**(中間 : 深い = 1.02、²¹²Bi が予言 +0.4 mm、E は表 +0.02 MeV・FWHM 1.5 %)。訂正はユーザーの独立解析の後。
+
 ## 開いているチケット
 
 | # | 中身 | 状態 | 次の一手 |
@@ -87,6 +91,9 @@
 | [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
+| ~~170~~ | macros/README.md の更新(SAMPLING_MHZ / DRIFT_HV_V の定数、頭尻の記述、stoppedAlphas の手順) | 済 → archive | — |
+| ~~169~~ | macros: analyzeUVW の並列化(`par_analyzeUVW.sh -p 91`)+ 圧力・線源位置の引数を必須に | 済 → archive(run 175: 90 s vs 直列 ≈ 14 分 = 9.4 倍、直列 == 並列をビット一致で確認、15 / 15 PASS) | — |
+| [168](168_minitpc_working_report.md) | mini TPC 動作実証レポート(α 3 本・分岐比・直線再構成・飛程 → E)。読み手 = mini TPC メンバー | IN PROGRESS(§2 同定済み: ²¹²Bi / ²²⁰Rn / ²¹⁶Po) | ユーザーの独立解析 → 照合 → 161 / S19 / 160・163 / 162 の名前の訂正 → 本文 |
 | [166](166_cf252_fission_fragments.md) | ²⁵²Cf 破片の長さ(飛程)分布で軽 / 重の 2 山を見る(250 mbar、低利得の別運用点、内向き 1 本) | DRAFT | 線源は密閉型(Si で使用実績)。過去の Si スペクトル(破片 2 山の位置)と放射能の確認(ユーザー)|
 | [165](165_environment_monitoring.md) | 環境モニタ: 露点(Easidew、ドライバ新規)・室温湿度気圧(arduino_env)・チャンバー温度(センサー選定)・チャンバー圧(bronkhorst)を slowctl → InfluxDB → run の `slow` へ | READY | ガス PC の LabVIEW / FlowPlot に 10-16〜21 の室温・圧力ログがあるか確認(ユーザー)|
 | [162](162_pressure_scan_plan.md) | 圧力スキャン(≤ 300 mbar、線源端置き、z 中間、x 位置可変)の計画 + `alpha_lines.C` 発注 | READY | 線源の設置後。alpha_lines は Sonnet へ |

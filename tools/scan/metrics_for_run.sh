@@ -2,7 +2,7 @@
 #
 # TODO/136 — run 1 本 → 指標 JSON。
 #
-#   tools/scan/metrics_for_run.sh [--macros DIR] [--pressure MBAR] [--ped FILE [--zs-fill]] RUN_DIR OUT_DIR
+#   tools/scan/metrics_for_run.sh --pressure MBAR [--macros DIR] [--ped FILE [--zs-fill]] RUN_DIR OUT_DIR
 #
 #   RUN_DIR     root-sink の run ディレクトリ(`<output_root>/run0077/`)。中の `run0077_raw.root` を読む
 #   OUT_DIR     出力先。`run0077_metrics.json` と、macros が作る `run0077_uvw.root` /
@@ -11,7 +11,7 @@
 #               置き換えて出力するので、出力はリンクの隣 = OUT_DIR に出る)
 #   --macros    analyzeUVW.C / makeTracks.C / channel_map.csv のあるディレクトリ
 #               (既定 ~/test/ana/ana_107。読むだけ・そこで実行するだけで、書き換えない)
-#   --pressure  analyzeUVW.C の第 2 引数 [mbar](ドリフト速度 = z の換算。既定 100 = macros の既定)
+#   --pressure  必須。analyzeUVW.C の第 2 引数 [mbar](ドリフト速度 = z の換算。既定値なし — TODO/168 の罠)
 #
 #   --ped       `calib pedestal` の JSON(TODO/149)。ZS 取得のデータ用: ped = 表の mean、FPN 共通モードは引かない。
 #               無ければ従来どおり(cells 1..20 の ped + FPN 減算。ZS の疑いがあれば WARNING)
@@ -27,12 +27,12 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 [--macros DIR] [--pressure MBAR] [--ped FILE [--zs-fill]] RUN_DIR OUT_DIR" >&2
+  echo "usage: $0 --pressure MBAR [--macros DIR] [--ped FILE [--zs-fill]] RUN_DIR OUT_DIR" >&2
   exit 2
 }
 
 macros="${HOME}/test/ana/ana_107"
-pressure=100
+pressure=""
 ped=""
 zs_fill=0
 while [[ $# -gt 0 ]]; do
@@ -47,6 +47,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ $# -eq 2 ]] || usage
+if [[ -z "${pressure}" ]]; then
+  echo "ERROR: --pressure MBAR is required (no default)" >&2
+  usage
+fi
 if [[ "${zs_fill}" == 1 && -z "${ped}" ]]; then
   echo "ERROR: --zs-fill needs --ped FILE" >&2
   exit 2

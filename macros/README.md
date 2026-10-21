@@ -5,9 +5,21 @@ Self-contained analysis chain for mini-eTPC GRAW data. Needs **only ROOT**
 
 ```
 root -l -b -q 'graw2root.C("CoBo_xxx_0000.graw", -1)'   # 1. graw -> ONE raw tree
-root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root")'       # 2. UVW plots, charge, width
+root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root", 91)'   # 2. UVW plots, charge, width (2nd arg = pressure [mbar], required)
 root -l -b -q 'makeTracks.C("CoBo_xxx_uvw.root")'       # 3. 3D tracks
 ```
+
+Step 2 in parallel (events are independent; N processes on entry ranges,
+merged with `hadd`, same output name as the serial run; TODO/169):
+
+```
+./par_analyzeUVW.sh -p 91 [-j N] [-o out_uvw.root] [--tracks] CoBo_xxx_raw.root
+```
+
+N defaults to the number of cores - 2; `--tracks` runs makeTracks.C on the
+merged file. run 175 (1.06 M events): 90 s with N = 12 vs ~14 min serial.
+`./test_par_analyzeUVW.sh <raw.root> <workdir>` checks serial == parallel
+(`compareUVW.C`, every entry / branch / bin).
 
 graw2root.C merges a whole run into one ROOT file: give it the first chunk
 and the following `_0001, _0002, ...` chunks are picked up automatically,
@@ -83,6 +95,36 @@ invocation with `SDKROOT=$(xcrun --sdk macosx --show-sdk-path)`, e.g.
 |---|---|---|---|
 | pulserScan.C | 2 CSV from `calib scan --csv-channels ... --csv-waveform ...` | `pulserScan.png` | D-3 pulser amplitude scan (TODO/091 §1): per-channel response vs amplitude (FPN vs signal), residual-fraction distribution vs amplitude, average waveform per amplitude (signal ch mean), rise(10-90%)/peak/FWHM table (stdout + on-canvas, units = ADC sample buckets) |
 
+## Alpha lines with stoppedAlphas.C (228Th source)
+
+```
+root -l -b -q 'stoppedAlphas.C("run0175_tracks.root", -386, 91)'   # source x [mm], pressure [mbar]
+```
+
+- Both arguments are required. Pass the **real run pressure**: with 100 mbar
+  instead of 91 the energies still look plausible, but only with the source
+  moved to about -350 (TODO/168).
+- Current setup (source outside the entrance wall, x ~ -370, CO2 91 mbar):
+  three lines stop inside the cage - **212Bi** (shallowest; its short side is
+  cut by the trigger threshold, ~0.33 MeV of charge), **220Rn** and **216Po**;
+  212Po crosses. Expect 220Rn : 216Po ~ 1 and 212Bi / 220Rn a bit below the
+  branching ratio 0.359 (run 175: -28.2 / -8.2 / +37.8 mm, 220Rn : 216Po = 1.02,
+  212Bi / 220Rn = 0.30).
+- Each line is fitted within +-9 mm of its ASTAR prediction. At the nominal
+  density (p, 20 C) the prediction for x = -370 misses the lines by ~9 mm, so
+  start from **-386** (TODO/100). The macro then solves the gas density and the
+  source distance from the lines, e.g. `density fit (2 lines): rho = ... nominal
+  x 1.023 ... source distance d = 323 mm (x_src = -376)`; the residual of the
+  line not used in the fit is an independent check (+0.4 mm for 212Bi).
+  Re-run with the fitted values (e.g. `-376, 93.1`) for the energy at emission
+  (run 175: table + 0.02 MeV, FWHM 1.5 % for all three lines).
+- **Density and source distance are degenerate** in the energies (the energy
+  lost before the wall depends on density x distance). The spacing between
+  lines (220Rn -> 216Po ~ 46 mm) fixes the density; a wrong density shows up as
+  an energy offset that grows with the line energy. The density excess left
+  over (x 1.02 of nominal) is temperature or pressure-gauge offset - a
+  thermometer would separate them.
+
 ## Assumptions / caveats
 
 - Data format: CoBo full readout, single AsAd; **frameType 1 (4-byte items) and
@@ -93,16 +135,21 @@ invocation with `SDKROOT=$(xcrun --sdk macosx --show-sdk-path)`, e.g.
   regenerate it if the pad plane or cabling changes.
 - The z scale uses a drift velocity **computed from the run conditions**
   (`DRIFT_HV_V`, `DRIFT_LEN_CM` at the top of analyzeUVW.C; the pressure is the
-  2nd argument, default `PRESSURE_MBAR` = 100 - pass the real run pressure, and
-  the same value to stoppedAlphas.C)
+  2nd argument, required - pass the real run pressure, and the same value to
+  stoppedAlphas.C, whose source x and pressure are also required)
   via the CO2 mobility law v = 0.7233 x (E/p) [cm/us per V/(cm*mbar)],
   interpolated from the HIGS/ELITPC operating-point table (valid for
   E/p = 0.54-1.05). It is table-derived, NOT measured: confirm with the
   z-edge method before trusting absolute lengths and angles involving z.
-- **Head/tail is a coin flip**: mini-eTPC alphas cross the detector without
-  stopping, so there is no Bragg peak and the charge-asymmetry orientation in
-  makeTracks.C carries no real information. Use `|direction|` or fix the sign
-  from your source geometry.
+- **`SAMPLING_MHZ` (25) and `DRIFT_HV_V` (1200) are constants** at the top of
+  analyzeUVW.C, not read from the data. Runs up to 56 were taken at 100 MHz
+  (z comes out 4x too long with 25), and drift-voltage scans (TODO/147) need
+  `DRIFT_HV_V` set to the run's value. Check both before analysing an old run.
+- **Head/tail is not determined**: the charge-asymmetry orientation in
+  makeTracks.C carries no reliable information. Alphas that cross the cage
+  have no Bragg peak inside; alphas that stop inside do (see below), but no
+  Bragg-based orientation is implemented. Use `|direction|` or fix the sign
+  from your source geometry (stoppedAlphas.C aligns tracks to +x).
 - Every event is fitted as ONE straight track; events where U, V or W has
   fewer than 3 strip hits get `ok == 0`.
 

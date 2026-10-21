@@ -42,10 +42,13 @@
 // (M_i = ASTAR mass range): the line spacing gives rho (a thermometer when
 // the pressure is known), the absolute position gives d.
 //
-// Usage:  root -l 'stoppedAlphas.C("CoBo_xxx_tracks.root", -470, 100)'
-//         (3rd argument: run pressure [mbar]; it sets the gas density and the
-//          z window. Use the same value as for analyzeUVW.C.)
-//         (srcX: -470 for the 2026-09-25 run, about -386 for 2026-09-29)
+// Usage:  root -l 'stoppedAlphas.C("CoBo_xxx_tracks.root", -370, 100)'
+//         ALL arguments are required (no defaults: a silent default pressure
+//         gave a wrong analysis once, TODO/168).
+//         srcX: source x [mm] (current layout about -370; -470 was the
+//         2026-09-25 run, about -386 2026-09-29)
+//         pressureMbar: run pressure [mbar]; it sets the gas density and the
+//         z window. Use the same value as for analyzeUVW.C.
 
 double PRESSURE_MBAR = 100.0;  // run pressure, set from the 3rd argument
 const double TEMP_K = 293.15;
@@ -119,8 +122,7 @@ double energyFromRange(double rMm)
   return -1;  // beyond the table (10 MeV)
 }
 
-void stoppedAlphas(const char *trackFile, double srcX = -470.0,
-                   double pressureMbar = 100.0)
+void stoppedAlphas(const char *trackFile, double srcX, double pressureMbar)
 {
   PRESSURE_MBAR = pressureMbar;
   // drift window: 89 mm at 100 mbar (v_drift ~ 1/p, analyzeUVW.C)
