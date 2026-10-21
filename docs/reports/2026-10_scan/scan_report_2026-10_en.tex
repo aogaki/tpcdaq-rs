@@ -42,7 +42,7 @@ The six conclusions are:
 (3) The gain follows $\ln G = \sum_i a_i \Delta V_i$ with $a \approx 0.014 \pm 0.0015$/V (the three foils agree within errors and the effects add up); up to $-30$ V in total on the GEMs can be compensated by the electronics.
 (4) A single hit is measured to $\sigma_z \approx 0.20$ mm in drift direction (one time bin; constant in mm, independent of the HV and of the drift field) and to $\sigma \approx 0.30$ mm per view in the strip plane (232--502 ns).
 (5) The rate limit is set by the zCoBo firmware readout time (2.94 ms for 272 channels, $\approx 340$ Hz; triggers arriving during readout are lost), not by the network. Zero suppression with per-channel thresholds (pedestal $+5\sigma$) reduces the data by 1/9--1/12 without any loss of quality; \textbf{the default candidate for beam runs is hit-register partial readout + ZS (23 kB/event)}.
-(6) Halving the gas flow from 100 to 50 ml/min lowers the total charge by 3.5\,\%, settling within a few hours (the volume exchange time of the 54 L chamber); 150 ml/min gives the same as 100. This is explained by the $S/Q$ term of the steady-state impurity concentration $c = c_\mathrm{bottle} + S/Q$; the HV is not involved.
+(6) Halving the gas flow from 100 to 50 ml/min lowers the total charge by 3.5\,\%, settling within a few hours (the volume exchange time of the 54 L chamber); 150 and 200 ml/min give the same as 100 (the difference seen at 200 is a density change from a temperature rise of $\approx 1.3$ K). This is explained by the $S/Q$ term of the steady-state impurity concentration $c = c_\mathrm{bottle} + S/Q$; the HV is not involved.
 \end{abstract}
 
 \tableofcontents
@@ -111,7 +111,7 @@ S15 & 10-15 & hit-register threshold, 6 points & 135--140 & Threshold works, but
 S16 & 10-15/16 & overnight $\alpha$ run (B) & 141 & Stable over 9.6 h; B adopted \\
 S17 & 10-16 & maximum rate & 148--169 & Limit = FW readout time 2.94 ms \\
 S18 & 10-16 & ZS validation & 170--173 & No quality loss, 1/9--1/12 of the data; suppress FPN \\
-S19 & 10-16/19 & gas flow 100 / 50 / 150 ml/min & 174--176 & $-3.5$\,\% charge at 50, settles in hours; 150 same as 100 \\
+S19 & 10-16/21 & gas flow, 4 points & 174--178 & $-3.5$\,\% charge at 50, settles in hours; 150 and 200 same as 100 (the 200 difference is temperature) \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -290,7 +290,7 @@ run & setting & events & kB/ev & hit ch & charge & sat. & ok & length / IQR & $\
 \end{table}
 
 \subsection{Gas flow (S19)}
-Keeping operating point B, only the CO$_2$ flow was changed, 100 $\to$ 50 $\to$ 150 ml/min (54 L chamber, 91 mbar; run 174 at 100, run 175 at 50 for 67.7 h, run 176 at 150).
+Keeping operating point B, only the CO$_2$ flow was changed, 100 $\to$ 50 $\to$ 150 $\to$ 200 ml/min (54 L chamber, 91 mbar; run 174 at 100, run 175 at 50 for 67.7 h, run 176 at 150, run 178 at 200 for 17.2 h).
 \texttt{gas\_trend.C} splits the raw tree into 1 h (run 175) or 10 min (runs 174, 176) bins and follows the median event charge and other quantities (Fig.~\ref{fig:gas}).
 
 \begin{table}[H]\centering\small
@@ -302,6 +302,7 @@ run & flow & events & hit ch & charge & sat. & ok & length / IQR & dEdx / IQR \\
 174 & 100 ml/min & 11,145 & 120 & 2.077 M & 1.0\,\% & 0.999 & 84.1 / 58.9 & 13,532 / 6,508 \\
 175 & 50 ml/min (67.7 h) & 1,057,719 & 120 & \textbf{2.002 M} & 0.9\,\% & 0.999 & 83.8 / 58.9 & 12,998 / 6,336 \\
 176 & 150 ml/min (4.7 h) & 73,652 & 121 & 2.078 M & 1.0\,\% & 0.997 & 84.2 / 58.7 & 13,493 / 6,539 \\
+178 & 200 ml/min (17.2 h) & 265,185 & 124 & 2.106 M & 0.9\,\% & 0.999 & \textbf{86.3} / 56.8 & 13,929 / 6,621 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -328,6 +329,7 @@ run & flow & events & hit ch & charge & sat. & ok & length / IQR & dEdx / IQR \\
 \item At 50 ml/min the total charge drops from 2.08 to 2.00 M ($-3.5$\,\%) and dEdx by $-4$\,\%. The 16\,\% quantile drops by the same ratio: the whole distribution shrinks uniformly. Hit channels, track length, ok, band position (first 75 / last 98 cells) and pulse width (56 cells) are unchanged, so the drift velocity and diffusion are unchanged. The HV (1 h means from InfluxDB, 69 points) stayed within $\pm 0.05$ V and $\pm 0.5$\,\% in current: not involved.
 \item The new equilibrium is reached within a few hours, and the rise after returning to 150 ml/min takes about 0.5 h. This matches the time constant for flushing 54 L at the given flow (at 91 mbar the actual volume flow is 11 times the normal flow: 1.6 h at 50 ml/min, 0.54 h at 150 ml/min); no slow process such as wall outgassing is needed.
 \item Interpretation: the steady-state impurity concentration (mainly H$_2$O and air from leaks) is $c = c_\mathrm{bottle} + S/Q$ ($S$ = production inside the system, $Q$ = flow). The bottle term does not depend on the flow and drops out of the difference. The values 2.002 / 2.077 / 2.087 $\pm$ 0.004 M at 50 / 100 / 150 ml/min (150: mean of twenty 10 min bins between 1.5 and 4.7 h) are consistent within 1\,\% with a dependence on $S/Q$; above 100 ml/min the gain hardly changes. Practical consequences: \textbf{do not let a calibration span the few hours after a flow change}, and record the flow as part of the calibration conditions.
+\item \textbf{The difference in run 178 (200 ml/min) is temperature, not flow.} The charge is flat for 17 h at 2.106 M ($+0.9$\,\% over 150), but the 16\,\% quantile rises by 6\,\%, hit channels by 3 and the track length by 2.5\,\%: not a uniform gain change. All three stopping $\alpha$ lines stop 1.5--1.9 mm further in ($^{224}$Ra 25.5 $\to$ 27.0, $^{212}$Bi 43.7 $\to$ 45.5, $^{220}$Rn 85.5 $\to$ 87.2 mm); relative to the full range including the 315 mm dead path, all three give the same \textbf{density change of $-0.45$\,\%}. Crossing tracks keep their length and gain 1.4\,\% in charge, so the gain is up by $\approx 2$\,\%. A $-0.45$\,\% density change corresponds to $+1.3$ K, consistent with the experimental area having been open during the day (more water in the gas would lower the gain instead). \textbf{The gain changes by $\approx 1.5$\,\%/K}, the same size as the flow effect, so comparisons need temperature and pressure records. The stopping positions of the $\alpha$ lines act as a densitometer and separate density from gain (applied to run 175, most of its $-3.5$\,\% remains a flow effect).
 \item By-product: in the length $\times$ charge plane the $\alpha$ lines of the $^{228}$Th chain separate ($^{220}$Rn 6.29 MeV stops at 85 mm, $^{212}$Bi at 45 mm, $^{224}$Ra at 25 mm; $^{216}$Po and $^{212}$Po cross the active volume at 105 mm). Because the source sits 315 mm outside, the charge FWHM of the stopping lines is poor (19--31\,\%). This is the starting point for the metrics of the coming pressure scan.
 \end{itemize}
 

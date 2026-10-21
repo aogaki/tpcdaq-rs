@@ -89,6 +89,7 @@
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
 | [162](162_pressure_scan_plan.md) | 圧力スキャン(≤ 300 mbar、線源端置き、z 中間、x 位置可変)の計画 + `alpha_lines.C` 発注 | READY | 線源の設置後。alpha_lines は Sonnet へ |
 | ~~161~~ | ガス流量 100 → 50 ml/min(run 174 / 175)→ SCANS S19 | 済 → archive(2026-10-19: 電荷 −3.5 %、6 h で平衡、以後平坦) | — |
+| ~~161~~ 追記 | run 178(200 ml/min、17.2 h): 差は流量でなく**温度 +1.3 K(密度 −0.45 %)**— 止まる α 線 3 本が 1.5–1.9 mm 奥へ、利得 ≈ +2 %。利得の温度感度 ≈ 1.5 %/K。SCANS S19・報告書(日英)に反映 | 済(2026-10-21) | 露点の記録で水の変化を確認(ユーザー)|
 | ~~164~~ | 付録 A が指す日本語文書の英訳(`docs/en/`: SCANS / SPEC / RUNBOOK / チケット 135–161) | 済 → archive(2026-10-20、7 担当並列、照合全 OK) | — |
 | [163](163_scan_report_en.md) | スキャン報告書の英語版(S1–S19、mini TPC + Warsaw 向け、非公式) | IN PROGRESS | — |
 | [160](160_scan_report_2026-10.md) | スキャン報告書(S1–S18、日本語 PDF、`docs/reports/2026-10_scan/`) | v1 済、ユーザーレビュー待ち | 直し → 英語版は要望次第 |
