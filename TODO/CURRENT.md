@@ -100,7 +100,7 @@
 | [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
-| ~~172~~ | UI: status の ZS 復元カウンタ 3 キー(152 で monitor に追加)を受け取り、ステータスバーに表示(「unknown status keys」の解消) | 済 → archive(ng test 401 / 10 skipped、build・適合 OK) | ELITPC への反映(UI の入れ替え)はユーザーと相談 |
+| ~~172~~ | UI: status の ZS 復元カウンタ 3 キー(152 で monitor に追加)を受け取り、ステータスバーに表示(「unknown status keys」の解消) | 済 → archive(ng test 401 / 10 skipped、build・適合 OK)。**ELITPC 反映済み(2026-10-22 14:27、ユーザー了解、ガス圧待ちの Idle 中)**: Mac で ng build → `/opt/tpcdaq/ui/` に上書き(main-OWBLVQ7U.js、8080 で 200)、`~/tpcdaq-rs` を bundle(04c9ad1..d73740d)で ff。04c9ad1 以降 src / root_sink の変更なし = バイナリ再ビルド・再起動不要 | ブラウザはリロードで新 UI |
 | [171](171_slow_view_age_delivery_lag.md) | Slow control 画面の age が巨大になる(長時間ほかのページの後、リロードで直る)。時計・ドライバ・slowctl・monitor キューは否定、残る候補 = 配送の遅れ | DRAFT(優先度低) | 直すなら age = 配信時刻 − 取得時刻 + 受信遅れの別表示(Sonnet)|
 | ~~170~~ | macros/README.md の更新(SAMPLING_MHZ / DRIFT_HV_V の定数、頭尻の記述、stoppedAlphas の手順) | 済 → archive | — |
 | ~~169~~ | macros: analyzeUVW の並列化(`par_analyzeUVW.sh -p 91`)+ 圧力・線源位置の引数を必須に | 済 → archive(run 175: 90 s vs 直列 ≈ 14 分 = 9.4 倍、直列 == 並列をビット一致で確認、15 / 15 PASS) | — |
