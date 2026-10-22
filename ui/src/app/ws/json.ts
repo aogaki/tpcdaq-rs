@@ -74,6 +74,12 @@ export interface StatusMessage {
   readonly clients: number;
   /** monitor が足す(camelCase): live キューの drop-oldest 数。 */
   readonly wsDropped: number;
+  /** ZS フラグメントをペデスタル表で復元した数(152〜)。152 より前の monitor はキー無し = `undefined`。 */
+  readonly uvwZsFragmentsRestored?: number;
+  /** ZS フラグメントが来たが表が無く復元できなかった数(152〜)。0 でなければ問題。 */
+  readonly uvwZsFragmentsNoTable?: number;
+  /** 表に無い ch に当たった数(152〜)。0 でなければ問題。 */
+  readonly uvwTableMissingChannels?: number;
   /** slowctl の最新ペイロード(v1.31)。`[monitor] slow_sub` 未設定なら**キー自体が無い**
    * (省略、`undefined`)—— 従来の status と同一に見える。 */
   readonly slow?: SlowPayload;
@@ -388,6 +394,9 @@ const STATUS_KEYS = [
   'monitorGaps',
   'clients',
   'wsDropped',
+  'uvwZsFragmentsRestored',
+  'uvwZsFragmentsNoTable',
+  'uvwTableMissingChannels',
   'slow',
 ] as const;
 
@@ -505,6 +514,13 @@ function parseStatus(object: Record<string, unknown>): JsonParseResult {
   if (clients === null) return fail('bad-field', 'status.clients');
   if (wsDropped === null) return fail('bad-field', 'status.wsDropped');
 
+  const zsRestored = optionalNumberAt(object, 'uvwZsFragmentsRestored');
+  const zsNoTable = optionalNumberAt(object, 'uvwZsFragmentsNoTable');
+  const zsMissing = optionalNumberAt(object, 'uvwTableMissingChannels');
+  if (zsRestored === BAD) return fail('bad-field', 'status.uvwZsFragmentsRestored');
+  if (zsNoTable === BAD) return fail('bad-field', 'status.uvwZsFragmentsNoTable');
+  if (zsMissing === BAD) return fail('bad-field', 'status.uvwTableMissingChannels');
+
   const slow = slowAt(object);
   if (slow.bad) return fail('bad-field', 'status.slow');
 
@@ -525,6 +541,9 @@ function parseStatus(object: Record<string, unknown>): JsonParseResult {
       monitorGaps,
       clients,
       wsDropped,
+      ...(zsRestored !== undefined ? { uvwZsFragmentsRestored: zsRestored } : {}),
+      ...(zsNoTable !== undefined ? { uvwZsFragmentsNoTable: zsNoTable } : {}),
+      ...(zsMissing !== undefined ? { uvwTableMissingChannels: zsMissing } : {}),
       ...(slow.value !== undefined ? { slow: slow.value } : {}),
     },
     unknownKeys: unknownKeysOf(object, STATUS_KEYS),

@@ -80,6 +80,45 @@ describe('SPEC §10.3 status', () => {
   });
 });
 
+describe('TODO/172 status の ZS 復元カウンタ 3 キー(任意の数値)', () => {
+  it('3 キーつきは unknownKeys 空で値がそのまま載る', () => {
+    const parsed = parseJsonMessage(
+      statusText({
+        uvwZsFragmentsRestored: 12,
+        uvwZsFragmentsNoTable: 3,
+        uvwTableMissingChannels: 5,
+      }),
+    );
+    if (parsed.kind !== 'status') throw new Error('expected status');
+    expect(parsed.status.uvwZsFragmentsRestored).toBe(12);
+    expect(parsed.status.uvwZsFragmentsNoTable).toBe(3);
+    expect(parsed.status.uvwTableMissingChannels).toBe(5);
+    expect(parsed.unknownKeys).toEqual([]);
+  });
+
+  it('3 キー無し(152 より前の monitor)も通り、フィールドは undefined', () => {
+    const parsed = parseJsonMessage(statusText());
+    if (parsed.kind !== 'status') throw new Error('expected status');
+    expect(parsed.status.uvwZsFragmentsRestored).toBeUndefined();
+    expect(parsed.status.uvwZsFragmentsNoTable).toBeUndefined();
+    expect(parsed.status.uvwTableMissingChannels).toBeUndefined();
+  });
+
+  it('どれか 1 つが文字列なら bad-field(status.<key>)', () => {
+    for (const key of [
+      'uvwZsFragmentsRestored',
+      'uvwZsFragmentsNoTable',
+      'uvwTableMissingChannels',
+    ]) {
+      const parsed = parseJsonMessage(statusText({ [key]: '7' }));
+      expect(parsed.kind, key).toBe('error');
+      if (parsed.kind !== 'error') continue;
+      expect(parsed.reason).toBe('bad-field');
+      expect(parsed.detail).toContain(`status.${key}`);
+    }
+  });
+});
+
 describe('SPEC §10.3 v1.31 status.slow — slowctl → monitor PUB(§2.3)の同梱', () => {
   it('slow キーが無ければ従来と同一(undefined、既存テスト無変更で green の裏取り)', () => {
     const parsed = parseJsonMessage(statusText());

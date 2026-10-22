@@ -30,6 +30,26 @@
   <span class="item" matTooltip="Messages dropped by the monitor live queue (drop-oldest)">
     <span class="key">wsDropped</span>{{ format(wsDropped()) }}
   </span>
+  <span
+    class="item"
+    matTooltip="ZS fragments restored with the pedestal table (normal; grows in ZS runs)"
+  >
+    <span class="key">zsRestored</span>{{ format(zsRestored()) }}
+  </span>
+  <span
+    class="item"
+    [class.bad]="(zsNoTable() ?? 0) > 0"
+    matTooltip="ZS fragments that arrived without a pedestal table and could not be restored (non-zero = problem)"
+  >
+    <span class="key">zsNoTable</span>{{ format(zsNoTable()) }}
+  </span>
+  <span
+    class="item"
+    [class.bad]="(zsTableMissing() ?? 0) > 0"
+    matTooltip="Hits on channels missing from the pedestal table (non-zero = problem)"
+  >
+    <span class="key">zsTableMissing</span>{{ format(zsTableMissing()) }}
+  </span>
   <span class="item" matTooltip="WS clients connected to this monitor">
     <span class="key">clients</span>{{ format(clients()) }}
   </span>

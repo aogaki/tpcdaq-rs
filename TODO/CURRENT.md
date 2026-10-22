@@ -77,6 +77,15 @@
 - **167 完了 → archive**: DRIFT の電流差(ch6 3.70 / ch7 5.91 µA)は **ch6 の電流モニタのゼロ点 −2.38 µA**(OFF 時、10 日間一定)でほぼ全部説明できる。補正後は 6.08 / 6.09 µA で ±0.07 µA 一致、500–700 V で I ∝ V(≈ 99 MΩ / 600 V)= ドリフトケージは健全。ch6 は vmon も OFF で +1.85 V、600 設定で 596 V。漏れの監視は ch ごとにゼロ点を引いてから。**現地試験(131 B-6 ②、ビーム前)で ch6 の入力・出力を外しても読みが不変 → ずれは HiVolta ch6 の測定回路そのものと確定**。
 - **168 起票(IN PROGRESS)**: mini TPC 動作実証レポート(読み手 = mini TPC メンバー、Warsaw は最終段階だけ)。§2 線の同定: run 175 / 178 で **止まる 3 本 = ²¹²Bi / ²²⁰Rn / ²¹⁶Po(100 が正しい)、161 / S19 の名前は 1 本ずれ**(中間 : 深い = 1.02、²¹²Bi が予言 +0.4 mm、E は表 +0.02 MeV・FWHM 1.5 %)。訂正はユーザーの独立解析の後。
 
+### 2026-10-22
+- **HiVolta の較正(167 / 131 B-6)**: DMM(HMP2020 で 3.5 / 30 V 検定済み)で ch6 / ch7 単体 5–50 V の実出力 ≈ **0.934 × 設定**(ch6 はさらに −1.2 V)、vmon は設定どおり。GEM の ch と 600 V は未確認。
+  **棚上げ**(ユーザー: 隣のビームライン・同じ部屋で U ターゲット実験 → 中性子で何か見るため、しばらく TPC を使う)。再開時は 131 B-6 ② GEM ch 単体 50 V → ③ 定格リード(未入手)で 600 V → CAEN。それまで HV の値は「設定値(実出力は未較正)」として扱う。
+- **PC–zCoBo を光ファイバに(ユーザー)**: ELITPC の `enp26s0f0`(ixgbe、1 Gb/s)に NM 接続 `zcobo-fiber` = 192.168.4.1/24・MTU 9000・ゲートウェイなし(旧 `Wired connection 2` の DHCP を書き換え、sudo はユーザー)。銅線側 `netplan-enp179s0f0`(107)は autoconnect no で保存。
+  確認(読み出しのみ): ping 192.168.4.81 3/3 0.19 ms、DF 1472 / 8972 とも 3/3(0.46 ms)、4.x のデフォルト経路なし、DAQ 各部 Idle・到達可、スタック再起動なし。ECC → zCoBo の制御は次の run 開始で確認(共有スタックなので run はユーザー)。
+  **パルサーで確認(ユーザー依頼)**: 11:09 の 1 回目は LV OFF(HMP2020 を DMM 検定に使った後)で ECC prepare 失敗「AsAd … disconnected from its power supply」→ 設定復元・token 解放。ユーザーが LV ON(ch1 3.6 V、ch2 は未接続で 3.0 V のまま問題なし)。
+  **run 179**(11:12:07–11:12:31、template `configure-elinp-pulser.xcfg`、−300 mV / 50 ms、onSlowControl、delay 1750、他は B のまま): 403 frames(type 2)、EOS 正常、graw 112 MB、256 信号 ch × 403 = 103,168 波形・飽和 0。
+  振幅中央値 999 ADC・立ち上がり 7.46 cell・FWHM 19.8 cell・peak cell 183 = 138 の run 107(989 / 7.4 / 19.7 / 182)と同じ。LV ch1 は prepare で 0.017 → 1.24 A。**光ファイバでの取得は問題なし**。設定は `elinp__116479fa`(B)に復元、token 解放。保存した直前設定 `~/test/scan/before_pulser_check_20261022_*.json`。
+
 ## 開いているチケット
 
 | # | 中身 | 状態 | 次の一手 |
@@ -91,6 +100,8 @@
 | [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
+| ~~172~~ | UI: status の ZS 復元カウンタ 3 キー(152 で monitor に追加)を受け取り、ステータスバーに表示(「unknown status keys」の解消) | 済 → archive(ng test 401 / 10 skipped、build・適合 OK) | ELITPC への反映(UI の入れ替え)はユーザーと相談 |
+| [171](171_slow_view_age_delivery_lag.md) | Slow control 画面の age が巨大になる(長時間ほかのページの後、リロードで直る)。時計・ドライバ・slowctl・monitor キューは否定、残る候補 = 配送の遅れ | DRAFT(優先度低) | 直すなら age = 配信時刻 − 取得時刻 + 受信遅れの別表示(Sonnet)|
 | ~~170~~ | macros/README.md の更新(SAMPLING_MHZ / DRIFT_HV_V の定数、頭尻の記述、stoppedAlphas の手順) | 済 → archive | — |
 | ~~169~~ | macros: analyzeUVW の並列化(`par_analyzeUVW.sh -p 91`)+ 圧力・線源位置の引数を必須に | 済 → archive(run 175: 90 s vs 直列 ≈ 14 分 = 9.4 倍、直列 == 並列をビット一致で確認、15 / 15 PASS) | — |
 | [168](168_minitpc_working_report.md) | mini TPC 動作実証レポート(α 3 本・分岐比・直線再構成・飛程 → E)。読み手 = mini TPC メンバー | IN PROGRESS(§2 同定済み: ²¹²Bi / ²²⁰Rn / ²¹⁶Po) | ユーザーの独立解析 → 照合 → 161 / S19 / 160・163 / 162 の名前の訂正 → 本文 |

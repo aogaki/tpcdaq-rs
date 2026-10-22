@@ -39,6 +39,12 @@ export class StatusBar implements OnDestroy {
   readonly eventsBuilt = computed(() => this.status()?.events_built ?? null);
   readonly monitorGaps = computed(() => this.status()?.monitorGaps ?? null);
   readonly wsDropped = computed(() => this.status()?.wsDropped ?? null);
+  // ZS 復元カウンタ(キー名との対応): zsRestored = uvwZsFragmentsRestored、
+  // zsNoTable = uvwZsFragmentsNoTable、zsTableMissing = uvwTableMissingChannels。
+  // キーが無い(152 より前の monitor)ときは null = 画面では「—」。
+  readonly zsRestored = computed(() => this.status()?.uvwZsFragmentsRestored ?? null);
+  readonly zsNoTable = computed(() => this.status()?.uvwZsFragmentsNoTable ?? null);
+  readonly zsTableMissing = computed(() => this.status()?.uvwTableMissingChannels ?? null);
   readonly clients = computed(() => this.status()?.clients ?? null);
 
   /** SPEC §5.2: `saturated / counted * 100`。`counted == 0` は `—`。 */

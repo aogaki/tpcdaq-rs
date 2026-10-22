@@ -26,7 +26,7 @@ const PARAMS_INFO: ParamsInfo = {
 };
 
 /** 実物の WS シグナルの形だけ真似た最小 fake(health バッジ等は既定でも壊れない値にする)。 */
-function fakeWs(): Partial<WsClientService> {
+function fakeWs(statusValue: unknown = null): Partial<WsClientService> {
   return {
     health: signal('offline') as unknown as WsClientService['health'],
     link: signal('idle') as unknown as WsClientService['link'],
@@ -44,7 +44,7 @@ function fakeWs(): Partial<WsClientService> {
       reconnects: 0,
     }) as unknown as WsClientService['counters'],
     lastIssue: signal(null) as unknown as WsClientService['lastIssue'],
-    status: signal(null) as unknown as WsClientService['status'],
+    status: signal(statusValue) as unknown as WsClientService['status'],
     url: (() => 'ws://localhost:9000') as unknown as WsClientService['url'],
     reconnectNow: () => {},
   };
@@ -131,5 +131,66 @@ describe('StatusBar — params <id> · exceptions N', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('StatusBar — TODO/172 ZS 復元カウンタ', () => {
+  let fixture: ComponentFixture<StatusBar>;
+
+  function build(status: unknown): void {
+    const api = { getParams: () => Promise.resolve(null) };
+    TestBed.configureTestingModule({
+      providers: [
+        { provide: ParamsApiService, useValue: api as unknown as ParamsApiService },
+        { provide: WsClientService, useValue: fakeWs(status) as WsClientService },
+      ],
+    });
+    fixture = TestBed.createComponent(StatusBar);
+    fixture.detectChanges();
+  }
+
+  function item(key: string): HTMLElement {
+    const keys = Array.from(
+      (fixture.nativeElement as HTMLElement).querySelectorAll<HTMLElement>('.item .key'),
+    );
+    const found = keys.find((k) => k.textContent?.trim() === key);
+    if (!found?.parentElement) throw new Error(`no item ${key}`);
+    return found.parentElement;
+  }
+
+  afterEach(() => fixture?.destroy());
+
+  it('3 つの値を表示する(非対称値)', () => {
+    build({ uvwZsFragmentsRestored: 1234, uvwZsFragmentsNoTable: 0, uvwTableMissingChannels: 7 });
+    expect(item('zsRestored').textContent).toContain((1234).toLocaleString());
+    expect(item('zsNoTable').textContent).toContain('0');
+    expect(item('zsTableMissing').textContent).toContain('7');
+  });
+
+  it('キーが無ければ 3 つとも「—」(0 と書かない)', () => {
+    build({ run: 1 });
+    for (const key of ['zsRestored', 'zsNoTable', 'zsTableMissing']) {
+      expect(item(key).textContent, key).toContain('—');
+      expect(item(key).classList.contains('bad'), key).toBe(false);
+    }
+  });
+
+  it('zsNoTable > 0 または zsTableMissing > 0 で bad、両方 0 なら付かない。zsRestored は常に普通', () => {
+    build({ uvwZsFragmentsRestored: 9, uvwZsFragmentsNoTable: 2, uvwTableMissingChannels: 0 });
+    expect(item('zsNoTable').classList.contains('bad')).toBe(true);
+    expect(item('zsTableMissing').classList.contains('bad')).toBe(false);
+    expect(item('zsRestored').classList.contains('bad')).toBe(false);
+    fixture.destroy();
+    TestBed.resetTestingModule();
+
+    build({ uvwZsFragmentsRestored: 9, uvwZsFragmentsNoTable: 0, uvwTableMissingChannels: 4 });
+    expect(item('zsNoTable').classList.contains('bad')).toBe(false);
+    expect(item('zsTableMissing').classList.contains('bad')).toBe(true);
+    fixture.destroy();
+    TestBed.resetTestingModule();
+
+    build({ uvwZsFragmentsRestored: 9, uvwZsFragmentsNoTable: 0, uvwTableMissingChannels: 0 });
+    expect(item('zsNoTable').classList.contains('bad')).toBe(false);
+    expect(item('zsTableMissing').classList.contains('bad')).toBe(false);
   });
 });
