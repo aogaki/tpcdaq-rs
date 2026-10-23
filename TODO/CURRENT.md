@@ -11,7 +11,7 @@
   - 保存先: データは ZFS `data/tpcdaq`。
   - 記録: ELOG(TPC 用)、InfluxDB(HV / LV)。
   - マニュアル: 日英 PDF が `reference/_manual/`。
-- **実装の正本 = docs/SPEC_ja.md v1.49**(2026-10-16、ZS 対応)。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `d960c44`(134 込み)で稼働(2026-10-14 反映、RUNBOOK §7.1 の手順で。run 77 を停止して入れ替え、新しい run は未開始)。
+- **実装の正本 = docs/SPEC_ja.md v1.50**(2026-10-23、status カウンタを run ごとに = 175。v1.49 = 2026-10-16 ZS 対応)。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `93baac0` で稼働(2026-10-23 11:51 反映 = 175 の root_sink 再ビルド、RUNBOOK §7.1。Rust は 04c9ad1 以降変更なし、UI は 172 を 10-22 に反映)。
 - **できること**:
   - 保存二系統: graw はロスレス、root-sink は PEventTPC と raw ツリー。
   - 取得の再開: 未停止で落とした後の古いフレームを epoch として扱う(110)。
@@ -111,7 +111,7 @@
 | [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
-| [175](175_status_events_built_per_run.md) | UI の EVENTS(status の events_built)が run 開始でリセットされない = root_sink 起動からの累計。SPEC §5.3 は範囲が未定義 | IN PROGRESS(ユーザー「ランごとにリセットしてほしい」→ スポット Fable 確定 → **SPEC v1.50** 反映済み、実装 Sonnet implementer) | 照合 → ELITPC 反映(root_sink 再ビルド + daq_down/up、run の合間にユーザー合図)→ 実機確認 → archive |
+| ~~175~~ | UI の EVENTS(status の events_built)を run ごとに(SPEC v1.50、スポット Fable 確定) | 済 → archive(ELITPC 反映 11:51、run 191 / 192 で開始 0 から・閉じた後 = close 行 470 / 463 と完全一致) | — |
 | [174](174_common_mode_burst_scan.md) | 共通モードのオシレーション(バースト)が信号と独立か: `tools/scan/burst_scan.C`(FPN の中央値で検出、位置の一様性 KS、周期、FPN / 信号比、時刻に対する率)+ 合成テスト | IN PROGRESS(道具は完成・照合済み: 合成 49 ok / 0 失敗、run 175 の先頭 10 万事象でバースト 0.0 % = 当時は ±150 ADC 級の振動なし) | run 180(今晩ビームのオン → オフ)に適用、オフの時刻はユーザーが翌朝 |
 | [173](173_neutron_u_target_estimate.md) | 隣のビームライン(U ターゲット)の中性子を 100 mbar で見る見積もり: C/O 反跳 1–3 cm、¹⁶O(n,α)¹³C の 2 本の飛跡で E_n 再構成の可能性、E_n < 3 MeV の反跳はトリガ下限の近く | DRAFT | 測定条件(GEM・しきい値・線源)をユーザーが決めたら解析を起票 |
 | ~~172~~ | UI: status の ZS 復元カウンタ 3 キー(152 で monitor に追加)を受け取り、ステータスバーに表示(「unknown status keys」の解消) | 済 → archive(ng test 401 / 10 skipped、build・適合 OK)。**ELITPC 反映済み(2026-10-22 14:27、ユーザー了解、ガス圧待ちの Idle 中)**: Mac で ng build → `/opt/tpcdaq/ui/` に上書き(main-OWBLVQ7U.js、8080 で 200)、`~/tpcdaq-rs` を bundle(04c9ad1..d73740d)で ff。04c9ad1 以降 src / root_sink の変更なし = バイナリ再ビルド・再起動不要 | ブラウザはリロードで新 UI |

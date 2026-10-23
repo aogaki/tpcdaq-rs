@@ -1,6 +1,6 @@
 # 175 — status の `events_built`(UI の EVENTS)が run 開始でリセットされない
 
-**Status: IN PROGRESS**(2026-10-23 起票 Opus。ユーザー「あの EVENTS はランを開始してもリセットされません」「できればランごとにリセットしてほしい」。
+**Status: COMPLETED**(2026-10-23 起票・同日完了 Opus。ユーザー「あの EVENTS はランを開始してもリセットされません」「できればランごとにリセットしてほしい」。
 スポット Fable が確定、SPEC v1.50 は主対話が反映済み、実装は Sonnet implementer)
 
 ## Fable 裁定(2026-10-23、要約)
@@ -57,3 +57,19 @@
 - 主対話の照合: `git diff --stat -- tools/root_sink/` が上の 4 ファイルのみ、T1–T3 の関数名がファイルに存在、test_rs_core / test_monitor_pub を再実行して同じ件数、diff を目視(差の取り方・範囲が裁定どおり)。
 - 実行できなかった操作: なし。
 - **残り**: ELITPC 反映(bundle → `~/tpcdaq-rs` ff → root_sink を `make -j` → daq_down / daq_up、run の合間にユーザー合図)→ 実機確認(run 開始直後に EVENTS ≈ 0、stop 直前の status events_built = close 行の complete + incomplete)→ COMPLETED → archive。
+
+## 結果(実機、2026-10-23 11:50–11:53、ELITPC、ユーザー「止めました。全部やっちゃってください」)
+- 反映(RUNBOOK §7.1): コミット `93baac0` を push、bundle `d73740d..93baac0` で `~/tpcdaq-rs` を ff(`git merge --ff-only <bundle>` は不可、`git pull --ff-only <bundle> main` で可)、
+  `cargo build --release`(変更なし 0.46 s)、root_sink `make TPCDAQ_TPCRECO_DIR=/opt/tpcdaq/assets/TPCReco-HIGS2026_online -j` + `make … -j test`
+  (tpc_wire 68 / rs_core 98 / eb_core 391 / geo 426 / monitor_hist 202 / monitor_pub 92 / ped_table 27、すべて 0 failed)、`tools/deploy/daq_down.sh` → `daq_up.sh`。
+  反映後: `/api/status` 200・`/` 200、target/release 7 プロセス + getEccServer + root_sink、ログに WARN / ERROR なし。
+- 確認(パルサー 20 s × 2、設定は保存 → `elinp__d9742fda` に復元、status は monitor の WS を Python 標準ライブラリの小さなクライアントで直接読む):
+  | | 開始 3 s 後 | パルスの終わり | 閉じた後(idle) | close 行 complete + incomplete |
+  |---|---|---|---|---|
+  | 起動直後(run なし) | — | — | run 0・events_built 0 | — |
+  | run 191 | 57 | 416 | **470** | **470** |
+  | run 192 | **61**(前の run の 470 を引き継がない) | 423 | **463** | **463** |
+  → **run 開始で 0 から数え、閉じた後は直近の run の値を保持し、close 行と完全一致**。events_incomplete / late_fragments 0。
+  monitor の WS status に `acquisition_restarts` は無い(SPEC §5.3: monitor は今は読み飛ばす)。
+- 付記: パルサー用テンプレートで configure すると、`asad-pulser-start` を送る前から発生器が動いている(開始 3 s で 57 事象)。174 のパルサー解析には影響なし(パルスの数は解析に使っていない)。
+- スキップ: なし。実行できなかった操作: なし(git merge の書式違いは pull で代替)。
