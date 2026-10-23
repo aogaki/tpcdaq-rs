@@ -318,7 +318,67 @@ static void test_first_late_of_run_is_per_run() {
   CHECK(!first_late_of_run(total, at_open));  // run 2 の 2 件目
 }
 
+static void test_run_delta_is_per_run() {
+  // status の events_built 等は run_delta(now, at_open) = その run の分(TODO/175)。
+  // 出典 = 手計算: 上の close 行テストと同じ数列。run 12 = 139/3/2(built 142)、
+  // run 13 = 8595/7/5(built 8602)。通算 8734 は出ない。
+  RunCounts total;
+  RunCounts at_open = total;
+  total.events_complete += 139;
+  total.events_incomplete += 3;
+  total.late_fragments += 2;
+  RunCounts d = run_delta(total, at_open);
+  CHECK_EQ(d.events_complete, 139);
+  CHECK_EQ(d.events_incomplete, 3);
+  CHECK_EQ(d.late_fragments, 2);
+  CHECK_EQ(d.events_complete + d.events_incomplete, 142);
+
+  at_open = total;
+  total.events_complete += 8595;
+  total.events_incomplete += 7;
+  total.late_fragments += 5;
+  d = run_delta(total, at_open);
+  CHECK_EQ(d.events_complete, 8595);
+  CHECK_EQ(d.events_incomplete, 7);
+  CHECK_EQ(d.late_fragments, 5);
+  CHECK_EQ(d.events_complete + d.events_incomplete, 8602);
+  CHECK(d.events_complete != 8734);
+}
+
+static void test_run_delta_before_first_run_is_zero() {
+  const RunCounts now;
+  const RunCounts at_open;
+  const RunCounts d = run_delta(now, at_open);
+  CHECK_EQ(d.batches, 0);
+  CHECK_EQ(d.events_complete, 0);
+  CHECK_EQ(d.events_incomplete, 0);
+  CHECK_EQ(d.late_fragments, 0);
+  CHECK_EQ(d.acquisition_restarts, 0);
+  CHECK_EQ(d.events_before_restart, 0);
+  CHECK_EQ(d.restart_duplicates, 0);
+}
+
+static void test_run_delta_restarts_per_run() {
+  // 出典 = 手計算(TODO/110 run 29): 通算 restarts 1 / before 5 / dup 2 のあと run 内で
+  // +1 / +19 / +19 → run 分は 1 / 19 / 19。
+  RunCounts total;
+  total.acquisition_restarts = 1;
+  total.events_before_restart = 5;
+  total.restart_duplicates = 2;
+  const RunCounts at_open = total;
+  total.acquisition_restarts += 1;
+  total.events_before_restart += 19;
+  total.restart_duplicates += 19;
+  const RunCounts d = run_delta(total, at_open);
+  CHECK_EQ(d.acquisition_restarts, 1);
+  CHECK_EQ(d.events_before_restart, 19);
+  CHECK_EQ(d.restart_duplicates, 19);
+}
+
 int main() {
+  test_run_delta_is_per_run();
+  test_run_delta_before_first_run_is_zero();
+  test_run_delta_restarts_per_run();
   test_run_closed_line_reports_restarts_per_run();
   test_first_late_of_run_is_per_run();
   test_channel_is_fifo();

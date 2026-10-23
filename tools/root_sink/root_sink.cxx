@@ -976,13 +976,15 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
 void update_status_material(const rootsink::RunState& run, const Counts& c) {
   std::lock_guard<std::mutex> lk(g_mon.hist_mutex);
   // idle のときの run は「直近クローズした run」(RunState は閉じても番号を持つ)。
+  // カウンタも同じ範囲 = その run の分(TODO/175、SPEC v1.50)。
+  const rootsink::RunCounts d = rootsink::run_delta(run_counts(c), c.run_at_open);
   g_mon.status.run = run.run_number();
   g_mon.status.running = run.is_open();
-  g_mon.status.events_built = c.events_complete + c.events_incomplete;
-  g_mon.status.events_incomplete = c.events_incomplete;
-  g_mon.status.late_fragments = c.late_fragments;
+  g_mon.status.events_built = d.events_complete + d.events_incomplete;
+  g_mon.status.events_incomplete = d.events_incomplete;
+  g_mon.status.late_fragments = d.late_fragments;
   g_mon.status.pending_events = c.pending_events;
-  g_mon.status.acquisition_restarts = c.acquisition_restarts;
+  g_mon.status.acquisition_restarts = d.acquisition_restarts;
   g_mon.status.sources_behind = c.sources_behind;
   std::memcpy(g_mon.status.frames_per_cobo, c.frames_per_cobo,
               sizeof(g_mon.status.frames_per_cobo));

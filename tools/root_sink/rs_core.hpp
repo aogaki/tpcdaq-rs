@@ -286,6 +286,19 @@ struct RunCounts {
   uint64_t restart_duplicates = 0;
 };
 
+// その run の分 = now − at_open(全フィールド)。close 行と status(TODO/175)で共有。
+inline RunCounts run_delta(const RunCounts& now, const RunCounts& at_open) {
+  RunCounts d;
+  d.batches = now.batches - at_open.batches;
+  d.events_complete = now.events_complete - at_open.events_complete;
+  d.events_incomplete = now.events_incomplete - at_open.events_incomplete;
+  d.late_fragments = now.late_fragments - at_open.late_fragments;
+  d.acquisition_restarts = now.acquisition_restarts - at_open.acquisition_restarts;
+  d.events_before_restart = now.events_before_restart - at_open.events_before_restart;
+  d.restart_duplicates = now.restart_duplicates - at_open.restart_duplicates;
+  return d;
+}
+
 inline std::string format_run_closed(uint32_t run_number, const RunCounts& now,
                                      const RunCounts& at_open) {
   char buf[384];

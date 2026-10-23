@@ -51,15 +51,15 @@ constexpr size_t kMaxCobo = 256;
 struct Status {
   uint32_t run = 0;        // 走行中はその run、idle なら直近クローズした run(無ければ 0)
   bool running = false;    // ワイヤ上は "running" / "idle"
-  uint64_t events_built = 0;       // emit 済みイベント総数(complete + incomplete)
-  uint64_t events_incomplete = 0;
-  uint64_t late_fragments = 0;
+  uint64_t events_built = 0;       // emit 済みイベント総数(complete + incomplete)。run ごと(v1.50)
+  uint64_t events_incomplete = 0;  // run ごと(v1.50)
+  uint64_t late_fragments = 0;     // run ごと(v1.50)
   // ビルダ組み上げ中の瞬間値(SPEC §5.3 v1.10、R-P2-5)。pending ≈ レート ×
   // build_timeout に比例するため常時可視化する(hard limit は設けない — 下の
   // kPendingWarnThreshold は warn するだけ)。
   uint64_t pending_events = 0;
   // 取得の再開(TODO/110)。`pending_events` の次のキー(12 キー目)。
-  uint64_t acquisition_restarts = 0;
+  uint64_t acquisition_restarts = 0;  // run ごと(v1.50)
   // 世代が最小に留まって他のソースより遅れている期待ソース(AsAd)の数(TODO/133)。
   // 全ソースが同じ世代なら 0。`acquisition_restarts` の次のキー(13 キー目)。
   uint64_t sources_behind = 0;

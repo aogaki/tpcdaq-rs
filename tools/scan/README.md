@@ -239,3 +239,4 @@ root -l -b -q 'tools/scan/gas_trend.C+("run0175_raw.root", "out/run0175_trend.js
   イベントごとの電荷・ヒット ch・飽和・帯位置・電荷重心時刻を取り、`binSeconds` ごとの中央値(電荷は 16/84 % も)を JSON と PNG(4 段)に出す。
   レートはビン内の実スパンから(端の半端なビンでも正しい)。macros 不要。第 4 引数 `maxEvents` で試し走り。
 - テスト: `root -l -b -q tools/scan/test_gas_trend.C`(終了コード = 失敗数、13 チェック)。
+- `burst_scan.C`(TODO/174): 共通モードのオシレーション(バースト)が信号と独立かを調べる。FPN の ch 中央値波形の移動 RMS(窓 2 µs)でバーストを検出し、位置・周期・振幅と信号ピークとの差、位置の一様性(KS)を `<prefix>_burst.{root,json,png}` に出す。`root -l -b -q 'burst_scan.C+("run0180_raw.root","out/run0180",12.5)'`(署名 `burst_scan(raw, outPrefix, samplingMHz, maxEvents=-1, kThr=5.0, minAmpPP=50.0)`、samplingMHz は必須)。判定 = 移動 RMS > kThr·σ_ref **かつ** 窓内 pp ≥ minAmpPP **かつ** ゼロ交差 ≥ 3(§3a — 信号連動の小さな段差を除く)。5σ だけ超えて落ちた数は JSON `events_over_kthr_only`。テスト: `root -l -b -q tools/scan/test_burst_scan.C`。
