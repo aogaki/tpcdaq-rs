@@ -929,6 +929,65 @@ fn monitor_root_is_written_within_ten_seconds_of_the_eos() {
     let _ = std::fs::remove_dir_all(&out_root);
 }
 
+/// TODO/183 T1: `--no-root --raw-tree --geometry` でも run 終わりに `run{N}_monitor.root` が
+/// 出る(raw 側が書く)。PEventTPC の `run{N}.root` は出ない。raw ツリーは出る。
+#[test]
+fn no_root_with_raw_tree_still_writes_monitor_root() {
+    let Some(bin) = sink_bin() else {
+        eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set");
+        return;
+    };
+    let out_root = scratch_dir("noroot_raw");
+    let mut sink = Sink::spawn(
+        &bin,
+        &[
+            "--no-root",
+            "--raw-tree",
+            "--geometry",
+            GEOMETRY,
+            "--output-root",
+            &out_root.to_string_lossy(),
+        ],
+    );
+    let data_ep = sink.data_ep.clone();
+    let ctx = zmq::Context::new();
+    let push = connect_push(&ctx, &data_ep);
+    std::thread::sleep(Duration::from_millis(300));
+    for (seq, fragments) in synthetic_events().iter().enumerate() {
+        push.send(batch_of(seq as u64, fragments.clone()), 0)
+            .expect("send batch");
+    }
+    push.send(end_of_stream(), 0).expect("send EndOfStream");
+
+    let run_dir = out_root.join(format!("run{RUN_NUMBER:04}"));
+    let monitor_root = run_dir.join(format!("run{RUN_NUMBER:04}_monitor.root"));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && !monitor_root.is_file() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        monitor_root.is_file(),
+        "{} が無い(dir={:?})",
+        monitor_root.display(),
+        names_starting_with(&run_dir, "")
+    );
+    assert!(monitor_root.metadata().expect("stat").len() > 0);
+    assert!(
+        run_dir
+            .join(format!("run{RUN_NUMBER:04}_raw.root"))
+            .is_file(),
+        "raw ツリーが無い: {:?}",
+        names_starting_with(&run_dir, "")
+    );
+    assert!(
+        !run_dir.join(format!("run{RUN_NUMBER:04}.root")).exists(),
+        "--no-root なのに PEventTPC の run.root がある"
+    );
+    let counts = sink.terminate(Duration::from_secs(20));
+    assert_eq!(counts["fatal"], "", "counts={counts}");
+    let _ = std::fs::remove_dir_all(&out_root);
+}
+
 // ---------------------------------------------------------------------
 // 6. 実データ E2E(env `TPCDAQ_REAL_GRAW` gate)
 // ---------------------------------------------------------------------

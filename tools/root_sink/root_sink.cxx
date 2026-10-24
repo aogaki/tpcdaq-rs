@@ -420,7 +420,8 @@ void usage(const char* argv0) {
       "                    parallel ROOT writers, each with its own TTree (default %d).\n"
       "                    1 = one file per part (run0001.root, run0001_0001.root, ...).\n"
       "                    N > 1 = one file set per worker (run0001_w0.root, ...)\n"
-      "  --no-root         do not write a TTree, only count (fast path for tests)\n"
+      "  --no-root         do not write the PEventTPC (TPCReco) TTree. With --raw-tree\n"
+      "                    run{N}_monitor.root is written by the raw side; alone: count only\n"
       "  --raw-tree        also write raw ADC to run{run:04}_raw.root (tree \"raw\",\n"
       "                    the macros/graw2root.C format). Independent of --no-root\n"
       "                    and of --geometry (SPEC 6.7). Default off\n"
@@ -650,6 +651,17 @@ uint64_t now_unix_ns() {
       std::chrono::duration_cast<std::chrono::nanoseconds>(since_epoch).count());
 }
 
+// run 終了時の最終ヒストを 1 回コピーする(--geometry 無しなら nullptr)。
+// **確保はロック外**で、ロック中は memcpy だけ(SPEC §5.1)。
+std::unique_ptr<rsmon::HistSnapshot> snapshot_final_hists() {
+  if (!g_mon.data_enabled()) return nullptr;
+  std::unique_ptr<rsmon::HistSnapshot> h(new rsmon::HistSnapshot());
+  g_mon.hist->prepare(*h);
+  std::lock_guard<std::mutex> lk(g_mon.hist_mutex);
+  g_mon.hist->copy_into(*h);
+  return h;
+}
+
 // 集計スレッド → Recorder スレッドの荷物。イベントに **in-band 制御マーカー**
 // (RunClose)を混ぜる delila-rs の流儀(SPEC §6.1)—— run の finalize を別経路の
 // フラグでやると、キューに残ったイベントより先に閉じてしまう。
@@ -674,6 +686,9 @@ struct RawItem {
   Kind kind = Kind::Event;
   uint32_t run_number = 0;     // Kind::RunClose のとき有効
   rootsink::BuiltEvent event;  // Kind::Event のとき有効
+  // Kind::RunClose かつ PEventTPC 側が居ないとき(--no-root --raw-tree)の最終ヒスト
+  // (TODO/183)。raw ツリー finalize の後に `run{N}_monitor.root` へ書く。
+  std::unique_ptr<rsmon::HistSnapshot> hists;
 };
 
 using RawChannel = rootsink::Channel<RawItem>;
@@ -914,14 +929,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
           RecordItem item;
           item.kind = RecordItem::Kind::RunClose;
           item.run_number = run.run_number();
-          if (g_mon.data_enabled()) {
-            // 最終ヒストを同梱する(run 毎 1 回のコピー)。**確保はロック外**で、
-            // ロック中は memcpy だけ(SPEC §5.1)。
-            item.hists.reset(new rsmon::HistSnapshot());
-            g_mon.hist->prepare(*item.hists);
-            std::lock_guard<std::mutex> lk(g_mon.hist_mutex);
-            g_mon.hist->copy_into(*item.hists);
-          }
+          item.hists = snapshot_final_hists();
           // push は満杯なら**待つ**(背圧)。ロックは上のスコープで既に手放している ——
           // 保存側の詰まりで Publisher を巻き込まない(SPEC §5.1)。
           rec->push(std::move(item));
@@ -933,6 +941,9 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
           RawItem item;
           item.kind = RawItem::Kind::RunClose;
           item.run_number = run.run_number();
+          // PEventTPC 側(rec)が居ないときだけ、monitor.root を raw スレッドが書く
+          // (TODO/183)。rec が居れば Recorder が書くので二重に書かない。
+          if (rec == nullptr) item.hists = snapshot_final_hists();
           raw->push(std::move(item));
         }
         const std::string line = rootsink::format_run_closed(
@@ -1320,6 +1331,8 @@ int main(int argc, char** argv) {
         if (pr == rootsink::PopResult::Value) {
           if (item.kind == RawItem::Kind::RunClose) {
             raw_writer->close_run(item.run_number);
+            // raw ツリー finalize の**後**(R10)。hists があるのは --no-root のときだけ。
+            if (item.hists) raw_writer->write_monitor_root(item.run_number, *item.hists);
           } else {
             raw_writer->write(item.event, now_ms());
           }

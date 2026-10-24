@@ -27,11 +27,25 @@ CONF=$TPCDAQ_CONF
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # TOML から 1 キーを拾う(最初に出た `key = "value"` / `key = value`)。
-# 拾うのは [system] の output_root / geometry / ped_table と [root_sink] の数値・真偽だけ
+# 拾うのは [system] の output_root / geometry / ped_table と [root_sink] の数値・真偽(pevent / raw_tree を含む)だけ
 # (どれも TOML 内で一意なキー。`# ped_table = ...` のようにコメントアウトした行は拾わない)。
 toml_get() {
     sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\"\{0,1\}\([^\"#]*\)\"\{0,1\}.*/\1/p" "$CONF" \
         | head -1 | sed 's/[[:space:]]*$//'
+}
+
+# [root_sink] pevent(TODO/183): PEventTPC(TPCReco 形式、Warsaw 向け)の TTree を書くか。
+# 無ければ true(従来どおり)。false なら root_sink に --no-root を渡す(raw ツリー + graw だけ)。
+# 何も書かない設定(pevent = false かつ raw_tree != true)は黙って許さない。
+# 出力: 渡す引数(空なら何も渡さない)。不正なら 1 を返して理由を stderr に出す。
+pevent_args() {  # pevent_args <pevent値> <raw_tree値>
+    case "${1:-true}" in
+        true) ;;
+        false)
+            [ "$2" = "true" ] || { echo "FAIL: pevent = false needs raw_tree = true" >&2; return 1; }
+            echo --no-root ;;
+        *) echo "FAIL: [root_sink] pevent must be true or false (got '$1')" >&2; return 1 ;;
+    esac
 }
 
 wait_for_line() {  # wait_for_line <file> <pattern> <timeout_s>
@@ -63,6 +77,9 @@ OUTPUT_ROOT=$(toml_get output_root)
 GEOMETRY=$(toml_get geometry)
 BUILD_TIMEOUT_MS=$(toml_get build_timeout_ms)
 RAW_TREE=$(toml_get raw_tree)
+PEVENT=$(toml_get pevent)
+PEVENT=${PEVENT:-true}
+PEVENT_ARGS=$(pevent_args "$PEVENT" "$RAW_TREE") || exit 1
 # ZS 用 pedestal 表(TODO/151、任意)。書いてあれば root_sink に --pedestal-table で渡す
 # (ZS らしいフレームだけ表の mean を引く。無ければ ZS フレームは従来算法のまま数えられる)。
 PED_TABLE=$(toml_get ped_table)
@@ -86,7 +103,7 @@ ulimit -n 65536 || fail "ulimit -n 65536 (hard limit $(ulimit -Hn))"
 # shellcheck disable=SC1090
 source "$ROOT_SETUP" || fail "cannot source $ROOT_SETUP"
 
-echo "config: $CONF  output_root: $OUTPUT_ROOT  logs: $LOGS  root_sink workers: $RECORDER_WORKERS  ped_table: ${PED_TABLE:-(none)}"
+echo "config: $CONF  output_root: $OUTPUT_ROOT  logs: $LOGS  root_sink workers: $RECORDER_WORKERS  ped_table: ${PED_TABLE:-(none)}  pevent: $PEVENT"
 echo "== starting the stack =="
 
 # 1. root-sink(下流から。monitor PUB を先に上げる — SUB は slow-joiner)
@@ -95,7 +112,8 @@ start root_sink "$ROOT_SINK" --bind "tcp://*:47003" --pub "tcp://*:47004" \
     ${BUILD_TIMEOUT_MS:+--build-timeout-ms "$BUILD_TIMEOUT_MS"} \
     $( [ "$RECORDER_WORKERS" -gt 1 ] && echo --recorder-workers "$RECORDER_WORKERS" ) \
     $( [ "$RAW_TREE" = "true" ] && echo --raw-tree ) \
-    ${PED_TABLE:+--pedestal-table "$PED_TABLE"}
+    ${PED_TABLE:+--pedestal-table "$PED_TABLE"} \
+    $PEVENT_ARGS
 wait_for_line "$LOGS/root_sink.log" "monitor PUB bind" 20 || fail "root_sink did not bind"
 
 # 2. monitor(WS)

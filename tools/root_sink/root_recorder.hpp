@@ -206,6 +206,72 @@ inline std::string run_dir_of(const std::string& output_root, uint32_t run) {
   return output_root + "/" + buf;
 }
 
+// モニタヒスト 9 枚を `<run_dir>/run{run:04}_monitor.root` に書く(SPEC §5.2/§6.5、TODO/022)。
+// Recorder(PEventTPC 側)と RawTreeWriter(--no-root --raw-tree 側、TODO/183)の共通部。
+// 失敗は reason(nullptr = 成功)+ detail で返す —— 呼び手が自分の set_fatal に渡す。
+struct MonitorRootResult {
+  const char* reason = nullptr;
+  std::string detail;
+};
+
+inline MonitorRootResult write_monitor_root_file(const std::string& dir, uint32_t run,
+                                                 const rsmon::HistSnapshot& hists,
+                                                 int compression) {
+  MonitorRootResult res;
+  if (!mkdir_p(dir)) {
+    res.reason = "monitor-root-mkdir";
+    res.detail = dir + ": " + std::strerror(errno);
+    return res;
+  }
+  char name[64];
+  std::snprintf(name, sizeof(name), "/run%04u_monitor.root", run);
+  const std::string path = dir + name;
+  TFile* out = TFile::Open(path.c_str(), "RECREATE", "", compression);
+  if (out == nullptr || out->IsZombie()) {
+    delete out;
+    res.reason = "monitor-root-open";
+    res.detail = path;
+    return res;
+  }
+  out->cd();
+  for (const rsmon::HistBuffer& h : hists) {
+    if (h.nx == 0) {
+      // ジオメトリにその面のストリップが 1 本も無い(Nstrip = 0)。ビン 0 本の
+      // ヒストは作れないので飛ばす —— 黙ってではなく 1 行出す(CLAUDE.md)。
+      std::fprintf(stderr, "root_sink: monitor hist %s has 0 bins (no strips) — skipped\n",
+                   h.name);
+      continue;
+    }
+    if (h.ny > 1) {
+      // x = strip(1..N+1)、y = bucket(0..512)。SPEC §5.2 の軸。
+      TH2D* th = new TH2D(h.name, h.name, static_cast<Int_t>(h.nx), 1.0,
+                          1.0 + static_cast<double>(h.nx), static_cast<Int_t>(h.ny), 0.0,
+                          static_cast<double>(h.ny));
+      for (uint32_t x = 0; x < h.nx; ++x) {
+        for (uint32_t y = 0; y < h.ny; ++y) {
+          // 添字は (strip-1)*512 + bucket(SPEC §5.3)。ROOT のビンは 1 起点。
+          th->SetBinContent(static_cast<Int_t>(x) + 1, static_cast<Int_t>(y) + 1,
+                            h.bins[static_cast<size_t>(x) * h.ny + y]);
+        }
+      }
+      th->SetDirectory(out);
+    } else {
+      // x = 波高 [0, 4096) 固定(オートレンジ禁止 — SPEC §5.2)。
+      TH1D* th = new TH1D(h.name, h.name, static_cast<Int_t>(h.nx), 0.0, kChargeAxisMax);
+      for (uint32_t x = 0; x < h.nx; ++x) {
+        th->SetBinContent(static_cast<Int_t>(x) + 1, h.bins[x]);
+      }
+      th->SetDirectory(out);
+    }
+  }
+  out->Write();
+  out->Close();
+  delete out;  // ヒストは TFile のディレクトリが所有(道連れで消える)
+  std::fprintf(stderr, "root_sink: wrote %s (%" PRIu64 " bytes)\n", path.c_str(),
+               file_size_bytes(path));
+  return res;
+}
+
 // worker スレッドが AutoSave の期限判定に使う単調時計。**N=1 では読まない**
 // (呼び手が now_ms を注入する現行の作法を崩さない —— テストが sleep 無しで書ける)。
 // N>1 の worker はキューの向こう側で自走するので、自分で時計を読むしかない
@@ -746,56 +812,9 @@ class Recorder {
       std::fprintf(stderr, "root_sink: run %u had no events — no monitor.root\n", run);
       return;
     }
-    const std::string dir = run_dir(run);
-    if (!mkdir_p(dir)) {
-      set_fatal("monitor-root-mkdir", dir + ": " + std::strerror(errno));
-      return;
-    }
-    char name[64];
-    std::snprintf(name, sizeof(name), "/run%04u_monitor.root", run);
-    const std::string path = dir + name;
-    TFile* out = TFile::Open(path.c_str(), "RECREATE", "", cfg_.compression);
-    if (out == nullptr || out->IsZombie()) {
-      delete out;
-      set_fatal("monitor-root-open", path);
-      return;
-    }
-    out->cd();
-    for (const rsmon::HistBuffer& h : hists) {
-      if (h.nx == 0) {
-        // ジオメトリにその面のストリップが 1 本も無い(Nstrip = 0)。ビン 0 本の
-        // ヒストは作れないので飛ばす —— 黙ってではなく 1 行出す(CLAUDE.md)。
-        std::fprintf(stderr, "root_sink: monitor hist %s has 0 bins (no strips) — skipped\n",
-                     h.name);
-        continue;
-      }
-      if (h.ny > 1) {
-        // x = strip(1..N+1)、y = bucket(0..512)。SPEC §5.2 の軸。
-        TH2D* th = new TH2D(h.name, h.name, static_cast<Int_t>(h.nx), 1.0,
-                            1.0 + static_cast<double>(h.nx), static_cast<Int_t>(h.ny), 0.0,
-                            static_cast<double>(h.ny));
-        for (uint32_t x = 0; x < h.nx; ++x) {
-          for (uint32_t y = 0; y < h.ny; ++y) {
-            // 添字は (strip-1)*512 + bucket(SPEC §5.3)。ROOT のビンは 1 起点。
-            th->SetBinContent(static_cast<Int_t>(x) + 1, static_cast<Int_t>(y) + 1,
-                              h.bins[static_cast<size_t>(x) * h.ny + y]);
-          }
-        }
-        th->SetDirectory(out);
-      } else {
-        // x = 波高 [0, 4096) 固定(オートレンジ禁止 — SPEC §5.2)。
-        TH1D* th = new TH1D(h.name, h.name, static_cast<Int_t>(h.nx), 0.0, kChargeAxisMax);
-        for (uint32_t x = 0; x < h.nx; ++x) {
-          th->SetBinContent(static_cast<Int_t>(x) + 1, h.bins[x]);
-        }
-        th->SetDirectory(out);
-      }
-    }
-    out->Write();
-    out->Close();
-    delete out;  // ヒストは TFile のディレクトリが所有(道連れで消える)
-    std::fprintf(stderr, "root_sink: wrote %s (%" PRIu64 " bytes)\n", path.c_str(),
-                 file_size_bytes(path));
+    const MonitorRootResult r =
+        write_monitor_root_file(run_dir(run), run, hists, cfg_.compression);
+    if (r.reason != nullptr) set_fatal(r.reason, r.detail);
   }
 
   // 停止(SIGTERM / 異常)。全 worker のキューを流し切ってから、開いているパートを

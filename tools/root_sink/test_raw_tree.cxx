@@ -23,6 +23,8 @@
 #include <vector>
 
 #include <TFile.h>
+#include <TH1D.h>
+#include <TH2D.h>
 #include <TLeaf.h>
 #include <TObjArray.h>
 #include <TROOT.h>
@@ -627,6 +629,93 @@ void test_raw_tree_writes_the_epoch_filtered_stream_as_is() {
   remove_tree(dir);
 }
 
+// ---------------------------------------------------------------------------
+// run{N}_monitor.root を raw 側で書く(TODO/183: --no-root --raw-tree でも出る)
+// ---------------------------------------------------------------------------
+
+// test_recorder.cxx の make_known_snapshot と同じ形(2D = Nstrip x 512 / 1D = 512)。
+// 値は非対称に手で置く。添字は SPEC §5.3: 2D = (strip-1)*512 + bucket。
+rsmon::HistSnapshot make_known_snapshot() {
+  static const char* kNames[9] = {"StripTimeU", "StripTimeV", "StripTimeW",
+                                  "ChargeU",    "ChargeV",    "ChargeW",
+                                  "ChargeMaxU", "ChargeMaxV", "ChargeMaxW"};
+  rsmon::HistSnapshot s;
+  for (size_t i = 0; i < rsmon::kHistCount; ++i) {
+    s[i].id = static_cast<uint8_t>(i + 1);
+    s[i].name = kNames[i];
+    if (i < 3) {
+      s[i].nx = static_cast<uint32_t>(2 + i);  // U2 / V3 / W4
+      s[i].ny = rsmon::kBuckets;
+    } else {
+      s[i].nx = rsmon::kChargeBins;
+      s[i].ny = 1;
+    }
+    s[i].bins.assign(static_cast<size_t>(s[i].nx) * s[i].ny, 0.0);
+  }
+  s[0].bins[(2 - 1) * 512 + 7] = 4095.0;  // StripTimeU strip2 bucket7
+  s[2].bins[(4 - 1) * 512 + 9] = 42.0;    // StripTimeW strip4 bucket9
+  s[3].bins[31] = 2.0;                    // ChargeU bin 31
+  return s;
+}
+
+// T1: raw 側が monitor.root を書く。PEventTPC の run{N}.root は(Recorder が居ないので)無い。
+void test_raw_side_writes_monitor_root_without_pevent() {
+  const std::string dir = scratch_dir("rawmon");
+  const uint32_t kRun = 41;
+  {
+    rootsink::RawTreeConfig cfg;
+    cfg.output_root = dir;
+    cfg.expect = {{0, 0}};
+    rootsink::RawTreeWriter w(cfg);
+    w.write(make_event(kRun, 0, 0, 0), 1000);
+    w.close_run(kRun);
+    w.write_monitor_root(kRun, make_known_snapshot());
+    CHECK(w.fatal_reason() == nullptr);
+  }
+  CHECK(exists(dir + "/run0041/run0041_raw.root"));
+  CHECK(exists(dir + "/run0041/run0041_monitor.root"));
+  CHECK(!exists(dir + "/run0041/run0041.root"));
+  TFile* in = TFile::Open((dir + "/run0041/run0041_monitor.root").c_str(), "READ");
+  CHECK(in != nullptr && !in->IsZombie());
+  if (in != nullptr && !in->IsZombie()) {
+    TH2D* stu = dynamic_cast<TH2D*>(in->Get("StripTimeU"));
+    CHECK(stu != nullptr);
+    if (stu != nullptr) {
+      CHECK_EQ(stu->GetNbinsX(), 2);
+      CHECK_EQ(stu->GetNbinsY(), 512);
+      CHECK(stu->GetBinContent(2, 8) == 4095.0);  // strip2 -> x ビン 2、bucket7 -> y ビン 8
+    }
+    TH2D* stw = dynamic_cast<TH2D*>(in->Get("StripTimeW"));
+    CHECK(stw != nullptr && stw->GetNbinsX() == 4 && stw->GetBinContent(4, 10) == 42.0);
+    TH1D* chu = dynamic_cast<TH1D*>(in->Get("ChargeU"));
+    CHECK(chu != nullptr);
+    if (chu != nullptr) {
+      CHECK_EQ(chu->GetNbinsX(), 512);
+      CHECK(chu->GetXaxis()->GetXmax() == 4096.0);
+      CHECK(chu->GetBinContent(32) == 2.0);  // 添字 31 -> ROOT ビン 32
+    }
+  }
+  delete in;
+  remove_tree(dir);
+}
+
+// T2: 0 イベントの run には書かない(raw 側でも)。
+void test_raw_side_zero_event_run_writes_no_monitor_root() {
+  const std::string dir = scratch_dir("rawmonempty");
+  const uint32_t kRun = 42;
+  {
+    rootsink::RawTreeConfig cfg;
+    cfg.output_root = dir;
+    cfg.expect = {{0, 0}};
+    rootsink::RawTreeWriter w(cfg);
+    w.close_run(kRun);
+    w.write_monitor_root(kRun, make_known_snapshot());
+    CHECK(w.fatal_reason() == nullptr);
+  }
+  CHECK(!exists(dir + "/run0042/run0042_monitor.root"));
+  remove_tree(dir);
+}
+
 int main() {
   gROOT->SetBatch(kTRUE);
 
@@ -639,5 +728,7 @@ int main() {
   test_out_of_range_and_unexpected_are_counted_not_written();
   test_compare_raw_detects_a_one_adc_difference();
   test_raw_tree_writes_the_epoch_filtered_stream_as_is();
+  test_raw_side_writes_monitor_root_without_pevent();
+  test_raw_side_zero_event_run_writes_no_monitor_root();
   return tpccheck::report("test_raw_tree");
 }

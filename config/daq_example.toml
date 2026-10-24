@@ -1,6 +1,6 @@
 # daq_example.toml — 本番 DAQ 機の設定雛形(SPEC §3、NEW_DAQ_SETUP §6、tools/deploy/daq_up.sh が読む)。
 # 写して /opt/tpcdaq/daq.toml に置き、<...> を埋める。パスフレーズを書くので chmod 600。
-# daq_up.sh は [system] の output_root / geometry / ped_table と [root_sink] の build_timeout_ms / raw_tree も読む。
+# daq_up.sh は [system] の output_root / geometry / ped_table と [root_sink] の build_timeout_ms / raw_tree / pevent も読む。
 
 [system]
 experiment = "mini_eTPC"
@@ -25,6 +25,7 @@ snapshot_hz = 1.0
 event_publish_hz = 20.0
 build_timeout_ms = 1000
 raw_tree = true                    # run{N}_raw.root(macros 直結、075)
+pevent = true   # PEventTPC(TPCReco 形式、Warsaw 向け)。false = raw ツリー + graw だけ(mini の本番、TODO/183)
 
 [monitor]
 ws_listen = "0.0.0.0:9000"

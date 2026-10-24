@@ -1,6 +1,6 @@
 # 177 — tpcsim(旧 gas-pressure-test)へ渡すもの一式
 
-**Status: IN PROGRESS**(2026-10-24 起票 Opus。ユーザー: tpcsim の `TODO/14_user_tasks.md`(Fable 起票)の宿題のうち tpcdaq-rs 側で引き取れるものを「進めてください」)
+**Status: COMPLETED**(2026-10-24。起票 Opus。ユーザー: tpcsim の `TODO/14_user_tasks.md`(Fable 起票)の宿題のうち tpcdaq-rs 側で引き取れるものを「進めてください」)
 
 ## 0. 背景
 - tpcsim(`~/test/gas-pressure-test`、リポ名は `tpcsim` に決定 2026-10-24)の TODO/13・15〜17 が、ユーザー経由で tpcdaq-rs の材料を要求(176 §4b の「渡すもの」)。
@@ -32,5 +32,5 @@
   **12.5 MHz のペデスタル run は未取得 → README で 1 本取ることを推奨**。周期トリガの窓 run 148–152 は ELITPC のパスのみ。
 - **データのパス**(実在を確認): run 175 raw 122 GB(+ Mac の写し)、パルサー 179・187–192、線源抜き 180・185–194(181–184・195 は raw 無し / 取得中)、周期 148–152。
 - **macros/**(2026-10-24、178 の後): `git archive 95e52b5 macros`(push 済み)+ `macros/COMMIT`。README §6 に新しい署名(圧力・サンプリング・ドリフト電圧が必須)、run の定数の TParameter、stoppedAlphas の z 窓、`channel_map.csv` は内部資料なので入れていない(パスだけ)ことを記載。
-- 残り: **12.5 MHz のペデスタル run**(run 196 は 12.5 MHz・周期 4 s・240 fC・partial で物理と gain が違う → ユーザーが 179 のノブで取り直す)。取れたら raw を empty_windows/ に、README §4 を更新。
+- **12.5 MHz のペデスタル**(2026-10-24 18:33): `empty_windows/run0198_raw.root`(4,665 事象、eventId 0..4664 抜けなし、575 MB、物理と同じ設定 + 周期 10 ms、HV オン)を scp。README §4 に表の行と、大きいが抜けのある run 197(24,042 事象、181)・同条件の 199–201 のパス。run 196(240 fC・partial・4 s 周期)は使わない。
 - tpcsim の TODO/14 はユーザーに完了項目を報告(向こうのファイルは書き換えない)。

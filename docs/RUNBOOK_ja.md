@@ -87,6 +87,7 @@
 - [ ] コード: Mac の main を `git bundle` → ELITPC `~/tpcdaq-rs` で `git merge --ff-only` → `cargo build --release`
 - [ ] root_sink: `make TPCDAQ_TPCRECO_DIR=/opt/tpcdaq/assets/TPCReco-HIGS2026_online -j`(reference/ はリポの外)。`make … -j test` も通す
 - [ ] UI: `ui/dist/ui/browser` の**中身**を `/opt/tpcdaq/ui` へ(旧版は `ui.prevNNN` に退避)。dist/ui ごと置くと `/` が 404
+- [ ] daq.toml `[root_sink] pevent`(既定 true)。`false` なら PEventTPC(TPCReco 形式)を書かない(raw ツリー + graw + monitor.root だけ、`raw_tree = true` 必須。TODO/183)。PEventTPC が要るときは grawToEventTPC で graw から作る
 - [ ] 停止・起動は **`~/tpcdaq-rs/tools/deploy/daq_{down,up}.sh`**(古い写しを使わない。slowctl も扱う版)
 - [ ] 反映後: `/api/status` が 200 **と** `/` が 200(`curl -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/`)、`/srv/tpcdaq/logs/*.log` に WARN / ERROR なし、`pgrep -a -f target/release` に 8 プロセス + root_sink
 - [ ] 試験で run を壊したら(stop せずに落とす等)、ログブックに comment を書き、`run_inprogress_*.root` の扱い(残す / 消す)を決める

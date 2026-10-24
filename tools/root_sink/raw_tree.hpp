@@ -156,6 +156,20 @@ class RawTreeWriter {
     run_active_ = false;
   }
 
+  // `run{run:04}_monitor.root` を raw 側で書く(--no-root --raw-tree 用、TODO/183)。
+  // 呼ぶのは close_run() の直後(Recorder::write_monitor_root と同じ規則): 0 イベントの
+  // run / 別 run には書かない。ROOT 化は共通の write_monitor_root_file()。
+  void write_monitor_root(uint32_t run, const rsmon::HistSnapshot& hists) {
+    if (fatal_reason() != nullptr) return;
+    if (run_ != run || run_entries() == 0) {
+      std::fprintf(stderr, "root_sink: run %u had no events — no monitor.root\n", run);
+      return;
+    }
+    const MonitorRootResult r =
+        write_monitor_root_file(run_dir_of(cfg_.output_root, run), run, hists, cfg_.compression);
+    if (r.reason != nullptr) set_fatal(r.reason, r.detail);
+  }
+
   // 停止: 開いていれば **inprogress のまま**閉じる(SPEC §6.5)。何度呼んでも安全。
   void shutdown() {
     if (file_ != nullptr) close_part(/*finalize=*/false);
