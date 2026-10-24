@@ -405,6 +405,16 @@ pub struct RootSinkConfig {
     /// TOML CLI 起動器はまだ無く、このキーは仕様どおりの受け口 — 075 B-1)。
     #[serde(default)]
     pub raw_tree: bool,
+    /// PEventTPC(TPCReco 形式、Warsaw 向け)の TTree を書くか(SPEC §3.1 / §6.4 v1.52、TODO/183)。
+    /// 省略可、既定 true。false なら daq_up.sh が root-sink に `--no-root` を渡す。
+    /// Rust 側は値を使わないが、`deny_unknown_fields` なので受け口が要る(無いと daq.toml に
+    /// 書いた時点で全コンポーネントが起動できない — 2026-10-24 ELITPC で実際に起きた)。
+    #[serde(default = "default_pevent")]
+    pub pevent: bool,
+}
+
+fn default_pevent() -> bool {
+    true
 }
 
 /// monitor 固有の設定(`[monitor]`)。すべて省略可で、SPEC §3.2 の既定が入る(026 で追記)。
@@ -1455,6 +1465,65 @@ config_id = "default"
         let config = parse(&toml_str).unwrap();
 
         assert!(config.root_sink.raw_tree);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    // --- 183 で足した `[root_sink] pevent`(SPEC §3.1 / §6.4 v1.52)---
+
+    /// minimal_toml の `[root_sink]` に pevent は無い → 既定 true(PEventTPC を書く = 従来)。
+    #[test]
+    fn root_sink_pevent_defaults_to_true_when_omitted() {
+        let geometry = make_temp_geometry_file();
+        let config = parse(&minimal_toml(&geometry, "")).unwrap();
+
+        assert!(config.root_sink.pevent);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    #[test]
+    fn root_sink_pevent_false_is_read() {
+        let geometry = make_temp_geometry_file();
+        let toml_str = minimal_toml(&geometry, "").replace(
+            "build_timeout_ms = 1000\n",
+            "build_timeout_ms = 1000\nraw_tree = true\npevent = false\n",
+        );
+
+        let config = parse(&toml_str).unwrap();
+
+        assert!(!config.root_sink.pevent);
+
+        let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
+    }
+
+    /// 雛形 `config/daq_example.toml` の `[root_sink]` 節がそのまま読めること。
+    /// 2026-10-24(TODO/183)、daq_up.sh だけが読む `pevent` を ELITPC の daq.toml に書いたら、
+    /// `deny_unknown_fields` で monitor 以下が起動できなかった。キーを足すときは両方に。
+    #[test]
+    fn example_root_sink_section_is_accepted() {
+        let example = include_str!("../config/daq_example.toml");
+        let section: String = example
+            .lines()
+            .skip_while(|line| line.trim() != "[root_sink]")
+            .skip(1)
+            .take_while(|line| !line.trim_start().starts_with('['))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        assert!(
+            section.contains("pevent"),
+            "雛形の [root_sink] 節: {section}"
+        );
+        let geometry = make_temp_geometry_file();
+        let toml_str = minimal_toml(&geometry, "").replace(
+            "[root_sink]\nsnapshot_hz = 1.0\nevent_publish_hz = 20.0\nbuild_timeout_ms = 1000\n",
+            &format!("[root_sink]\n{section}"),
+        );
+
+        let config = parse(&toml_str).unwrap();
+
+        assert!(config.root_sink.raw_tree);
+        assert!(config.root_sink.pevent);
 
         let _ = std::fs::remove_dir_all(geometry.parent().unwrap());
     }

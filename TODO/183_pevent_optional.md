@@ -56,5 +56,16 @@
 - **主対話の再実行(Mac、2026-10-24 18:45)**: `make -j` OK、`make -j test-root`: test_recorder 174 / test_pevent 163 / test_raw_tree 107 passed・0 failed、`make -j test`: tpc_wire 68 / rs_core 98 / eb_core 391 / geo 426 / monitor_hist 202 / monitor_pub 92 / ped_table 27 passed・0 failed。
   `cargo fmt --check` / `clippy --tests -D warnings` OK、`TPCDAQ_ROOT_SINK_BIN=… cargo test` **1109 passed / 0 failed / 1 ignored**(新しい e2e を含む — 単独でも 1 passed)。`test_daq_up_args.sh` 全 ok。
 - 実行できなかった操作: なし(implementer 報告)。残ったプロセスなし(主対話が確認)。
-### ELITPC への反映
-(未 — ユーザー了解後: commit → bundle → build(Rust 不変、root_sink の make)→ daq.toml `pevent = false` → daq_down / up → 182 の V5 計測)
+### ELITPC への反映 1 回目(2026-10-24 19:05–19:20、ユーザー「了承します。進めてください」)— **失敗して戻した**
+- `cffcbdb` を bundle → ff → cargo build(Rust 不変)→ root_sink の make / make test / make test-root(全 0 failed)→ daq.toml の `[root_sink]` に `pevent = false`(退避 `daq.toml.bak-2026-10-24-183`)→ 計測スクリプト `~/test/bench183/`(V5 10 ms / V6 3 ms / V7 1 ms)。
+- **daq_up で monitor が起動しなかった**: `unknown field 'pevent', expected one of snapshot_hz, event_publish_hz, build_timeout_ms, raw_tree` —
+  Rust の `RootSinkConfig` は `deny_unknown_fields` で、implementer は daq_up.sh と雛形だけに `pevent` を足し Rust の設定構造に足していなかった(発注書も Rust の config に触れていなかった = **発注書の不備**)。
+  cargo test が雛形 `config/daq_example.toml` を読むテストを持たなかったので見逃した。計測は 3 本とも `set_variant failed`、最後の restore も controller 不在で params を戻せなかった。
+- 復旧(19:2x): daq.toml を退避から戻す(失敗版は `daq.toml.failed-pevent-2026-10-24`)→ daq_down / up → status 200・`/` 200・Idle・8 + root_sink(PEventTPC あり = 従来)。
+  params を物理に(API、operator claude: `triggerMode external`、12.5 MHz・120 fC・full・delay 2500、id `elinp__818acd22`)。**DAQ が使えなかったのは ≈ 19:11–19:2x**。
+### 修正(主対話 Opus、TDD)
+- `src/config.rs` `RootSinkConfig` に `pevent: bool`(`#[serde(default = "default_pevent")]` = true)。Rust 側は値を使わない受け口。
+- テスト(先に red = `no field pevent` のコンパイルエラーを確認): `root_sink_pevent_defaults_to_true_when_omitted`、`root_sink_pevent_false_is_read`、
+  **`example_root_sink_section_is_accepted`**(`include_str!("../config/daq_example.toml")` の `[root_sink]` 節をそのまま最小構成に差し込んで parse — daq_up.sh だけが知っているキーを足したら赤になる)。
+- root_sink の起動ログ: `--no-root` + `--raw-tree` のとき「no PEventTPC TTree (the raw tree and run{N}_monitor.root are still written)」(以前は「counting only, no TTree is written」で誤解を招いた)。
+- Mac: `cargo fmt --check` / `clippy --tests -D warnings` OK、`TPCDAQ_ROOT_SINK_BIN=… cargo test` **1112 passed / 0 failed / 1 ignored**、root_sink `make -j test-root` 0 failed。

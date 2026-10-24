@@ -1261,7 +1261,10 @@ int main(int argc, char** argv) {
                "SIGINT/SIGTERM to stop.\n",
                opt.bind.c_str(), opt.rcvhwm, opt.queue, opt.throttle_ms);
   if (opt.no_root) {
-    std::fprintf(stderr, "root_sink: --no-root: counting only, no TTree is written\n");
+    std::fprintf(stderr, opt.raw_tree
+                             ? "root_sink: --no-root: no PEventTPC TTree (the raw tree and "
+                               "run{N}_monitor.root are still written, TODO/183)\n"
+                             : "root_sink: --no-root: counting only, no TTree is written\n");
   } else {
     std::fprintf(stderr,
                  "root_sink: writing PEventTPC TTree \"%s\" under %s (max-root-bytes=%" PRIu64
