@@ -46,7 +46,8 @@ cp "${raw}" "${work}/src_raw.root"
 
 cd "${work}"
 for base in src mix; do
-  "${root_bin}" -l -b -q "analyzeUVW.C(\"${base}_raw.root\")" >"${base}_analyze.log" 2>&1
+  # 圧力・サンプリング・ドリフト電圧は src と mix で同じなら何でもよい(旧 macros の既定値 = 100 mbar / 25 MHz / 1200 V、TODO/178)
+  "${root_bin}" -l -b -q "analyzeUVW.C(\"${base}_raw.root\", 100, 25, 1200)" >"${base}_analyze.log" 2>&1
   "${root_bin}" -l -b -q "makeTracks.C(\"${base}_uvw.root\")" >"${base}_tracks.log" 2>&1
 done
 "${root_bin}" -l -b -q 'mixReport.C("mix_raw.root","src_tracks.root","mix_tracks.root")'

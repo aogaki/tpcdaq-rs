@@ -2,31 +2,37 @@
 #
 # TODO/169 — analyzeUVW.C をイベント範囲で N 本に分けて並列実行し、hadd で合併する。
 #
-#   par_analyzeUVW.sh -p <pressure_mbar> [-j N] [-o <out_uvw.root>] [--tracks] <run_raw.root>
+#   par_analyzeUVW.sh -p <pressure_mbar> -s <samplingMHz> -d <driftHvVolt> [-j N] [-o <out_uvw.root>] [--tracks] <run_raw.root>
 #
 #   -p        必須。圧力 [mbar](ドリフト速度 = z の換算。既定値なし)
+#   -s        必須。サンプリング周波数 [MHz](100 / 50 / 25 / 12.5。z の換算。既定値なし)
+#   -d        必須。ドリフト電圧 [V](既定値なし)
 #   -j N      並列数(既定 = コア数 - 2、最小 1。エントリ数を超えれば エントリ数)
 #   -o OUT    出力(既定 = 入力の `_raw.root` → `_uvw.root`。入力と同名になる場合はエラー)
 #   --tracks  合併後に makeTracks.C を 1 本で実行
 #
 # 各分割は macros(このスクリプトのあるディレクトリ)で
-# `root -l -b -q 'analyzeUVW.C(raw, p, first, n, part_KK.root)'` として動かす。
+# `root -l -b -q 'analyzeUVW.C(raw, p, s, d, first, n, part_KK.root)'` として動かす。
 # 1 本でも失敗したら tmp を残して exit 1(合併出力は書かない)。
 # 終了コード: 0 = 成功、1 = 実行時の失敗、2 = 使い方の誤り。
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 -p <pressure_mbar> [-j N] [-o <out_uvw.root>] [--tracks] <run_raw.root>" >&2
+  echo "usage: $0 -p <pressure_mbar> -s <samplingMHz> -d <driftHvVolt> [-j N] [-o <out_uvw.root>] [--tracks] <run_raw.root>" >&2
   exit 2
 }
 
 pressure=""
+sampling=""
+drifthv=""
 njobs=""
 out=""
 tracks=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -p) [[ $# -ge 2 ]] || usage; pressure="$2"; shift 2 ;;
+    -s) [[ $# -ge 2 ]] || usage; sampling="$2"; shift 2 ;;
+    -d) [[ $# -ge 2 ]] || usage; drifthv="$2"; shift 2 ;;
     -j) [[ $# -ge 2 ]] || usage; njobs="$2"; shift 2 ;;
     -o) [[ $# -ge 2 ]] || usage; out="$2"; shift 2 ;;
     --tracks) tracks=1; shift ;;
@@ -38,6 +44,14 @@ done
 [[ $# -eq 1 ]] || usage
 if [[ -z "${pressure}" ]]; then
   echo "ERROR: -p <pressure_mbar> is required (no default)" >&2
+  usage
+fi
+if [[ -z "${sampling}" ]]; then
+  echo "ERROR: -s <samplingMHz> is required (no default)" >&2
+  usage
+fi
+if [[ -z "${drifthv}" ]]; then
+  echo "ERROR: -d <driftHvVolt> is required (no default)" >&2
   usage
 fi
 
@@ -78,7 +92,7 @@ if [[ -z "${total}" || "${total}" -le 0 ]]; then
 fi
 ((njobs <= total)) || njobs=${total}
 
-echo "par_analyzeUVW: pressure=${pressure} mbar  N=${njobs}  entries=${total}"
+echo "par_analyzeUVW: pressure=${pressure} mbar  sampling=${sampling} MHz  drift_hv=${drifthv} V  N=${njobs}  entries=${total}"
 echo "  input : ${raw}"
 echo "  output: ${out}"
 
@@ -94,7 +108,7 @@ for ((k = 0; k < njobs; ++k)); do
   firsts+=("${first}")
   counts+=("${cnt}")
   part="$(printf '%s/part_%02d' "${tmp}" "${k}")"
-  "${root_bin}" -l -b -q "analyzeUVW.C(\"${raw}\", ${pressure}, ${first}, ${cnt}, \"${part}.root\")" \
+  "${root_bin}" -l -b -q "analyzeUVW.C(\"${raw}\", ${pressure}, ${sampling}, ${drifthv}, ${first}, ${cnt}, \"${part}.root\")" \
     >"${part}.log" 2>&1 &
   pids+=($!)
   first=$((first + cnt))

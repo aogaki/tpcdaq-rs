@@ -29,10 +29,14 @@
 //   histograms:  hCharge (strip-hit charge, all views), hWidth_U/V/W
 //   canvases:    UVW hit maps of the first NDISPLAY events
 //
-// Usage:  root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root", 120)'
-//         2nd argument = run pressure [mbar], REQUIRED (no default: it sets
-//         the drift velocity, i.e. the z scale; a silent default gave a wrong
-//         z scale once, TODO/168).
+// Usage:  root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root", 120, 25, 1200)'
+//         2nd..4th arguments = run pressure [mbar], sampling rate [MHz]
+//         (100 / 50 / 25 / 12.5) and drift cage voltage [V], ALL REQUIRED (no
+//         defaults: they set the drift velocity and the cell length, i.e. the
+//         z scale; a silent default gave a wrong z scale once, TODO/168).
+//         They are written to the output as TParameter<double> (pressure_mbar,
+//         sampling_MHz, drift_hv_V, drift_v_cm_us, mm_per_cell, z_window_mm)
+//         and copied on by makeTracks.C (TODO/178).
 //         Optional: first, n = entry range [first, first+n) (n < 0: to the
 //         end), outFile = output path (default: _raw.root -> _uvw.root).
 //         Events are independent, so par_analyzeUVW.sh runs N ranges in
@@ -42,6 +46,7 @@
 #include <TFile.h>
 #include <TH1F.h>
 #include <TH2F.h>
+#include <TParameter.h>
 #include <TString.h>
 #include <TTree.h>
 
@@ -55,9 +60,7 @@
 #include <vector>
 
 // ---- analysis constants -----------------------------------------------------
-const double DRIFT_HV_V = 1200.0;  // drift cage voltage [V]
-const double DRIFT_LEN_CM = 20.0;  // drift length [cm]
-const double SAMPLING_MHZ = 25.0;   // AGET sampling rate
+const double DRIFT_LEN_CM = 20.0;   // drift length [cm] (geometry)
 const double ADC_THRESHOLD = 35.0;  // keep cells above pedestal + this
 const int PED_LO = 1, PED_HI = 20;  // pedestal window [time cells]
 const int PEAK_HALF_CELLS = 5;      // z / q window around the peak cell
@@ -95,9 +98,31 @@ double driftVelocityCmUs(double hvVolt, double lenCm, double pMbar)
   return MOBILITY * eOverP;
 }
 
-void analyzeUVW(const char *rawFile, double pressureMbar, Long64_t first = 0,
-                Long64_t n = -1, const char *outFile = "")
+void analyzeUVW(const char *rawFile, double pressureMbar, double samplingMHz,
+                double driftHvVolt, Long64_t first = 0, Long64_t n = -1,
+                const char *outFile = "")
 {
+  // --- run constants: checked BEFORE anything is read or created --------------
+  const double SAMPLING_OK[4] = {100.0, 50.0, 25.0, 12.5};  // GET sampling rates
+  bool samplingOk = false;
+  for (double s : SAMPLING_OK)
+    if (samplingMHz == s) samplingOk = true;
+  if (!samplingOk) {
+    std::cout << "ERROR: samplingMHz = " << samplingMHz
+              << " is not one of 100, 50, 25, 12.5; nothing written"
+              << std::endl;
+    return;
+  }
+  if (!(driftHvVolt > 0)) {
+    std::cout << "ERROR: driftHvVolt = " << driftHvVolt
+              << " must be > 0; nothing written" << std::endl;
+    return;
+  }
+  if (!(pressureMbar > 0)) {
+    std::cout << "ERROR: pressureMbar = " << pressureMbar
+              << " must be > 0; nothing written" << std::endl;
+    return;
+  }
   // --- channel map (aget, raw channel -> view, strip position) ---------------
   int chView[4][68];
   float chPos[4][68];
@@ -135,12 +160,13 @@ void analyzeUVW(const char *rawFile, double pressureMbar, Long64_t first = 0,
     }
   const double PITCH = 1.5;  // mm, uniform in channel_map.csv (all views)
   const double driftV =
-      driftVelocityCmUs(DRIFT_HV_V, DRIFT_LEN_CM, pressureMbar);
+      driftVelocityCmUs(driftHvVolt, DRIFT_LEN_CM, pressureMbar);
   std::cout << "drift velocity " << driftV
-            << " cm/us  (E = " << DRIFT_HV_V / DRIFT_LEN_CM
-            << " V/cm, E/p = " << DRIFT_HV_V / DRIFT_LEN_CM / pressureMbar
-            << " V/(cm*mbar))" << std::endl;
-  const double mmPerCell = driftV / SAMPLING_MHZ * 10.0;
+            << " cm/us  (E = " << driftHvVolt / DRIFT_LEN_CM
+            << " V/cm, E/p = " << driftHvVolt / DRIFT_LEN_CM / pressureMbar
+            << " V/(cm*mbar), sampling " << samplingMHz << " MHz)"
+            << std::endl;
+  const double mmPerCell = driftV / samplingMHz * 10.0;
 
   // --- input / output ---------------------------------------------------------
   TFile in(rawFile);
@@ -323,6 +349,15 @@ void analyzeUVW(const char *rawFile, double pressureMbar, Long64_t first = 0,
     }
   }
   out.cd();
+  // run constants for the downstream macros (makeTracks copies them on).
+  // Merge mode 'f' (keep the first): hadd of the parallel parts must not SUM
+  // them (the default mode did: 4 parts -> 4x mm_per_cell)
+  TParameter<double>("pressure_mbar", pressureMbar, 'f').Write();
+  TParameter<double>("sampling_MHz", samplingMHz, 'f').Write();
+  TParameter<double>("drift_hv_V", driftHvVolt, 'f').Write();
+  TParameter<double>("drift_v_cm_us", driftV, 'f').Write();
+  TParameter<double>("mm_per_cell", mmPerCell, 'f').Write();
+  TParameter<double>("z_window_mm", 512 * mmPerCell, 'f').Write();
   utree.Write();
   hCharge.Write();
   for (int v = 0; v < 3; ++v) hWidth[v]->Write();

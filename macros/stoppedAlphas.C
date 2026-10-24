@@ -3,6 +3,7 @@
 #include <TFile.h>
 #include <TH1D.h>
 #include <TH2D.h>
+#include <TParameter.h>
 #include <TProfile.h>
 #include <TString.h>
 #include <TTree.h>
@@ -47,15 +48,17 @@
 //         gave a wrong analysis once, TODO/168).
 //         srcX: source x [mm] (current layout about -370; -470 was the
 //         2026-09-25 run, about -386 2026-09-29)
-//         pressureMbar: run pressure [mbar]; it sets the gas density and the
-//         z window. Use the same value as for analyzeUVW.C.
+//         pressureMbar: run pressure [mbar]; it sets the gas density.
+//         Use the same value as for analyzeUVW.C (a difference
+//         of 0.5 mbar or more from the tracks file's pressure_mbar warns).
+//         The z window comes from the tracks file (z_window_mm, TODO/178).
 
 double PRESSURE_MBAR = 100.0;  // run pressure, set from the 3rd argument
 const double TEMP_K = 293.15;
 const double PHI_MAX_DEG = 15.0;
 const double CAGE_XLO = -53.0, CAGE_XHI = 53.0;  // from fastqa
 const double CAGE_YLO = -58.0, CAGE_YHI = 48.0;
-const double Z_LO = 0.0, Z_HI = 89.0;  // 512 cells x mm/cell at 100 mbar
+const double Z_LO = 0.0;  // the upper end comes from the tracks file (z_window_mm)
 const double EDGE_MM = 10.0, Z_EDGE_MM = 10.0;
 // a track whose outermost hit is within this of the exit wall is taken as
 // leaving the cage (the last strip of a crossing track sits at x = 51-52)
@@ -125,13 +128,25 @@ double energyFromRange(double rMm)
 void stoppedAlphas(const char *trackFile, double srcX, double pressureMbar)
 {
   PRESSURE_MBAR = pressureMbar;
-  // drift window: 89 mm at 100 mbar (v_drift ~ 1/p, analyzeUVW.C)
-  const double zHi = Z_HI * 100.0 / pressureMbar;
   auto file = TFile::Open(trackFile);
   if (!file || file->IsZombie()) {
     std::cerr << "Failed to open file: " << trackFile << std::endl;
     return;
   }
+  // drift window = 512 cells x mm/cell, recorded by analyzeUVW.C (TODO/178)
+  auto zPar = (TParameter<double> *)file->Get("z_window_mm");
+  if (!zPar) {
+    std::cerr << "ERROR: no z_window_mm in " << trackFile
+              << " - old tracks file. Re-run analyzeUVW -> makeTracks."
+              << std::endl;
+    return;
+  }
+  const double zHi = zPar->GetVal();
+  auto pPar = (TParameter<double> *)file->Get("pressure_mbar");
+  if (pPar && std::fabs(pPar->GetVal() - pressureMbar) >= 0.5)
+    std::cout << "WARNING: pressure argument " << pressureMbar
+              << " mbar differs from the tracks file's " << pPar->GetVal()
+              << " mbar; the gas density uses the argument" << std::endl;
   auto tree = (TTree *)file->Get("tracks");
   if (!tree) {
     std::cerr << "No TTree 'tracks' in " << trackFile << std::endl;

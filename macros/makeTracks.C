@@ -39,6 +39,7 @@
 // Usage:  root -l -b -q 'makeTracks.C("CoBo_xxx_uvw.root")'
 // =============================================================================
 #include <TFile.h>
+#include <TParameter.h>
 #include <TString.h>
 #include <TTree.h>
 
@@ -244,6 +245,23 @@ void makeTracks(const char *uvwFile)
     ttree.Fill();
   }
   out.cd();
+  // run constants of analyzeUVW.C (TODO/178), copied on unchanged
+  const char *runPars[6] = {"pressure_mbar", "sampling_MHz", "drift_hv_V",
+                            "drift_v_cm_us", "mm_per_cell", "z_window_mm"};
+  int nMissing = 0;
+  for (const char *name : runPars) {
+    auto *par = (TParameter<double> *)in.Get(name);
+    if (!par) {
+      ++nMissing;
+      continue;
+    }
+    TParameter<double>(name, par->GetVal(), 'f').Write();  // 'f': hadd keeps the first
+  }
+  if (nMissing > 0)
+    printf(
+        "WARNING: %d of 6 run constants missing in %s (old uvw file): not "
+        "copied; re-run analyzeUVW.C\n",
+        nMissing, uvwFile);
   ttree.Write();
   out.Close();
   printf("wrote %s\n", outName.Data());

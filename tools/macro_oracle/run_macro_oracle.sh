@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # TODO/125 改訂 2 レーン D — macros オラクル。
-# **本物の** macros/analyzeUVW.C(既定 100 mbar)と makeTracks.C を一時ディレクトリにコピーして実行し、
+# **本物の** macros/analyzeUVW.C(100 mbar / 25 MHz / 1200 V = src/reco の定数、TODO/178 で引数必須)と makeTracks.C を一時ディレクトリにコピーして実行し、
 # dumpMacroOracle.C で raw の adc・uvw の strip ヒット・tracks の全ブランチを JSON に書き出す。
 # Rust の env-gated テスト(tests/reco_macro_oracle.rs — TODO/127)がこの JSON を読む。
 #
@@ -55,8 +55,8 @@ cp "${macros_dir}/analyzeUVW.C" "${macros_dir}/makeTracks.C" "${macros_dir}/chan
 cp "${raw}" "${work}/oracle_raw.root"
 
 cd "${work}"
-echo "[1/3] analyzeUVW.C (real macro, default 100 mbar)"
-"${root_bin}" -l -b -q 'analyzeUVW.C("oracle_raw.root")'
+echo "[1/3] analyzeUVW.C (real macro, 100 mbar / 25 MHz / 1200 V = src/reco)"
+"${root_bin}" -l -b -q 'analyzeUVW.C("oracle_raw.root", 100, 25, 1200)'
 echo "[2/3] makeTracks.C (real macro)"
 "${root_bin}" -l -b -q 'makeTracks.C("oracle_uvw.root")'
 echo "[3/3] dumpMacroOracle.C -> ${out}"

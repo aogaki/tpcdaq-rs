@@ -5,7 +5,7 @@ Self-contained analysis chain for mini-eTPC GRAW data. Needs **only ROOT**
 
 ```
 root -l -b -q 'graw2root.C("CoBo_xxx_0000.graw", -1)'   # 1. graw -> ONE raw tree
-root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root", 91)'   # 2. UVW plots, charge, width (2nd arg = pressure [mbar], required)
+root -l -b -q 'analyzeUVW.C("CoBo_xxx_raw.root", 91, 25, 1200)'   # 2. UVW plots, charge, width (args: pressure [mbar], sampling [MHz], drift HV [V]; all required)
 root -l -b -q 'makeTracks.C("CoBo_xxx_uvw.root")'       # 3. 3D tracks
 ```
 
@@ -13,7 +13,7 @@ Step 2 in parallel (events are independent; N processes on entry ranges,
 merged with `hadd`, same output name as the serial run; TODO/169):
 
 ```
-./par_analyzeUVW.sh -p 91 [-j N] [-o out_uvw.root] [--tracks] CoBo_xxx_raw.root
+./par_analyzeUVW.sh -p 91 -s 25 -d 1200 [-j N] [-o out_uvw.root] [--tracks] CoBo_xxx_raw.root
 ```
 
 N defaults to the number of cores - 2; `--tracks` runs makeTracks.C on the
@@ -80,7 +80,7 @@ and `qview` sums peak-window charges of halo-cut strips, so both are NOT
 comparable with `*_uvw.root` files written before TODO/094.
 
 All tunable constants (thresholds, pedestal window, peak window, halo cut,
-drift velocity, sampling rate, band width) sit at the top of analyzeUVW.C -
+drift velocity, band width) sit at the top of analyzeUVW.C -
 re-tuning never requires re-reading the GRAW file. Raw files are ~130 KB/event.
 
 **Shell note**: always single-quote the macro call - unquoted parentheses
@@ -134,17 +134,26 @@ root -l -b -q 'stoppedAlphas.C("run0175_tracks.root", -386, 91)'   # source x [m
   generated from TPCReco's `geometry_mini_eTPC.dat` (tools/eventdisplay/mapDump);
   regenerate it if the pad plane or cabling changes.
 - The z scale uses a drift velocity **computed from the run conditions**
-  (`DRIFT_HV_V`, `DRIFT_LEN_CM` at the top of analyzeUVW.C; the pressure is the
-  2nd argument, required - pass the real run pressure, and the same value to
-  stoppedAlphas.C, whose source x and pressure are also required)
+  (`DRIFT_LEN_CM` at the top of analyzeUVW.C; the pressure, sampling rate and
+  drift voltage are the 2nd-4th arguments, all required - pass the real run
+  values, and the same pressure to stoppedAlphas.C, whose source x and
+  pressure are also required)
   via the CO2 mobility law v = 0.7233 x (E/p) [cm/us per V/(cm*mbar)],
   interpolated from the HIGS/ELITPC operating-point table (valid for
   E/p = 0.54-1.05). It is table-derived, NOT measured: confirm with the
   z-edge method before trusting absolute lengths and angles involving z.
-- **`SAMPLING_MHZ` (25) and `DRIFT_HV_V` (1200) are constants** at the top of
-  analyzeUVW.C, not read from the data. Runs up to 56 were taken at 100 MHz
-  (z comes out 4x too long with 25), and drift-voltage scans (TODO/147) need
-  `DRIFT_HV_V` set to the run's value. Check both before analysing an old run.
+- **Sampling rate and drift voltage are arguments** of analyzeUVW.C (TODO/178),
+  not read from the data and with no default: sampling in {100, 50, 25, 12.5}
+  MHz, drift HV > 0 V (else an error and no output). Runs up to 56 were taken
+  at 100 MHz (z comes out 4x too long if you pass 25); run 180 on is 12.5 MHz
+  at 1600 V. The run's constants are recorded in the output as
+  `TParameter<double>`: `pressure_mbar`, `sampling_MHz`, `drift_hv_V`,
+  `drift_v_cm_us`, `mm_per_cell`, `z_window_mm` (= 512 x mm_per_cell) - in
+  `*_uvw.root`, copied by makeTracks.C into `*_tracks.root` (an old uvw file
+  without them gives a WARNING). stoppedAlphas.C takes its z window from
+  `z_window_mm` and stops with an error on an older tracks file (re-run
+  analyzeUVW -> makeTracks); it warns if its pressure argument differs from
+  the file's `pressure_mbar` by 0.5 mbar or more.
 - **Head/tail is not determined**: the charge-asymmetry orientation in
   makeTracks.C carries no reliable information. Alphas that cross the cage
   have no Bragg peak inside; alphas that stop inside do (see below), but no

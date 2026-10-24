@@ -14,7 +14,8 @@
 
 ## run 1 本 → 指標 JSON(TODO/136)
 
-- 使い方: `tools/scan/metrics_for_run.sh [--macros DIR] [--pressure MBAR] <output_root>/run0077 OUT_DIR` → `OUT_DIR/run0077_metrics.json`
+- 使い方: `tools/scan/metrics_for_run.sh [--macros DIR] --pressure MBAR --sampling MHZ --drift-hv VOLT <output_root>/run0077 OUT_DIR` → `OUT_DIR/run0077_metrics.json`
+  (`--pressure` / `--sampling` / `--drift-hv` は必須・既定値なしで analyzeUVW.C にそのまま渡す — TODO/168・178。`--macros` の macros は 178 以降の 4 引数版であること)
   (中身は `root -l -b -q 'run_metrics.C("…/run0077_raw.root", "out.json", 100)'`。所要は 1,500 events で約 1 s)。
   `_tracks.root` が OUT_DIR に無ければ `--macros`(既定 `~/test/ana/ana_107` — 読むだけ・そこで実行するだけ)の analyzeUVW.C →
   makeTracks.C で作る。raw は OUT_DIR へのシンボリックリンクで渡すので run ディレクトリは汚さない。macros が無ければ WARNING + `tracks: null`。

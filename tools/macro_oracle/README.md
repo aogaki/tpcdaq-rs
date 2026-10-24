@@ -24,7 +24,7 @@ TPCDAQ_MACRO_ORACLE=/tmp/oracle.json TPCDAQ_MACRO_ORACLE_GEOMETRY=/tmp/strip_geo
 
 | ファイル | 役割 |
 |---|---|
-| `run_macro_oracle.sh` | macros/ の analyzeUVW.C・makeTracks.C・channel_map.csv と raw を一時ディレクトリにコピーして実行(既定 100 mbar)→ `dumpMacroOracle.C` |
+| `run_macro_oracle.sh` | macros/ の analyzeUVW.C・makeTracks.C・channel_map.csv と raw を一時ディレクトリにコピーして実行(100 mbar / 25 MHz / 1200 V = src/reco の定数)→ `dumpMacroOracle.C` |
 | `dumpMacroOracle.C` | raw の `adc`(channel_map の行順、FPN は除く)・uvw の `slView/slZ/slS/slQ`・tracks の全ブランチ・channel_map を JSON に |
 
 照合の中身と許容は `tests/reco_macro_oracle.rs` の冒頭(s を stripGeometry から取る production と、

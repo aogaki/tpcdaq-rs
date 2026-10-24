@@ -2,7 +2,7 @@
 #
 # TODO/136 — run 1 本 → 指標 JSON。
 #
-#   tools/scan/metrics_for_run.sh --pressure MBAR [--macros DIR] [--ped FILE [--zs-fill]] RUN_DIR OUT_DIR
+#   tools/scan/metrics_for_run.sh --pressure MBAR --sampling MHZ --drift-hv VOLT [--macros DIR] [--ped FILE [--zs-fill]] RUN_DIR OUT_DIR
 #
 #   RUN_DIR     root-sink の run ディレクトリ(`<output_root>/run0077/`)。中の `run0077_raw.root` を読む
 #   OUT_DIR     出力先。`run0077_metrics.json` と、macros が作る `run0077_uvw.root` /
@@ -11,6 +11,8 @@
 #               置き換えて出力するので、出力はリンクの隣 = OUT_DIR に出る)
 #   --macros    analyzeUVW.C / makeTracks.C / channel_map.csv のあるディレクトリ
 #               (既定 ~/test/ana/ana_107。読むだけ・そこで実行するだけで、書き換えない)
+#   --sampling  必須。サンプリング周波数 [MHz](100 / 50 / 25 / 12.5)。analyzeUVW.C に渡す(既定値なし — TODO/178)
+#   --drift-hv  必須。ドリフト電圧 [V]。analyzeUVW.C に渡す(既定値なし — TODO/178)
 #   --pressure  必須。analyzeUVW.C の第 2 引数 [mbar](ドリフト速度 = z の換算。既定値なし — TODO/168 の罠)
 #
 #   --ped       `calib pedestal` の JSON(TODO/149)。ZS 取得のデータ用: ped = 表の mean、FPN 共通モードは引かない。
@@ -27,18 +29,22 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 --pressure MBAR [--macros DIR] [--ped FILE [--zs-fill]] RUN_DIR OUT_DIR" >&2
+  echo "usage: $0 --pressure MBAR --sampling MHZ --drift-hv VOLT [--macros DIR] [--ped FILE [--zs-fill]] RUN_DIR OUT_DIR" >&2
   exit 2
 }
 
 macros="${HOME}/test/ana/ana_107"
 pressure=""
+sampling=""
+drift_hv=""
 ped=""
 zs_fill=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --macros) [[ $# -ge 2 ]] || usage; macros="$2"; shift 2 ;;
     --pressure) [[ $# -ge 2 ]] || usage; pressure="$2"; shift 2 ;;
+    --sampling) [[ $# -ge 2 ]] || usage; sampling="$2"; shift 2 ;;
+    --drift-hv) [[ $# -ge 2 ]] || usage; drift_hv="$2"; shift 2 ;;
     --ped) [[ $# -ge 2 ]] || usage; ped="$2"; shift 2 ;;
     --zs-fill) zs_fill=1; shift ;;
     -h | --help) usage ;;
@@ -49,6 +55,14 @@ done
 [[ $# -eq 2 ]] || usage
 if [[ -z "${pressure}" ]]; then
   echo "ERROR: --pressure MBAR is required (no default)" >&2
+  usage
+fi
+if [[ -z "${sampling}" ]]; then
+  echo "ERROR: --sampling MHZ is required (no default)" >&2
+  usage
+fi
+if [[ -z "${drift_hv}" ]]; then
+  echo "ERROR: --drift-hv VOLT is required (no default)" >&2
   usage
 fi
 if [[ "${zs_fill}" == 1 && -z "${ped}" ]]; then
@@ -113,8 +127,8 @@ elif [[ ! -f "${macros}/analyzeUVW.C" || ! -f "${macros}/makeTracks.C" ||
 else
   # analyzeUVW.C は channel_map.csv をカレントディレクトリから読む → macros の中で実行する
   if [[ ! -f "${uvw}" ]]; then
-    echo "tracks: analyzeUVW.C (${pressure} mbar) -> ${uvw}"
-    (cd "${macros}" && "${root_bin}" -l -b -q "analyzeUVW.C(\"${link}\", ${pressure})") ||
+    echo "tracks: analyzeUVW.C (${pressure} mbar, ${sampling} MHz, ${drift_hv} V) -> ${uvw}"
+    (cd "${macros}" && "${root_bin}" -l -b -q "analyzeUVW.C(\"${link}\", ${pressure}, ${sampling}, ${drift_hv})") ||
       echo "WARNING: analyzeUVW.C exited non-zero" >&2
   fi
   if [[ -f "${uvw}" ]]; then

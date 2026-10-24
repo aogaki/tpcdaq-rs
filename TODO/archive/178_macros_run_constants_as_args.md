@@ -1,6 +1,6 @@
 # 178 — macros: サンプリング周波数とドリフト電圧を引数に、run の定数を出力ファイルに記録
 
-**Status: IN PROGRESS**(2026-10-24 起票 Opus、実装 Sonnet implementer。tpcsim の TODO/14 §3「analyzeUVW.C の SAMPLING_MHZ / DRIFT_HV_V を引数かカードから取る形に
+**Status: COMPLETED**(2026-10-24。起票 Opus、実装 Sonnet implementer。tpcsim の TODO/14 §3「analyzeUVW.C の SAMPLING_MHZ / DRIFT_HV_V を引数かカードから取る形に
 (12.5 MHz や 1600 V のランを同じマクロで解析するため)」、ユーザー「進めてください」)
 
 ## 0. 問題
@@ -37,4 +37,23 @@
 - ELITPC の `~/test/scan` の写し(scan.py 等の呼び出し)の更新は主対話が後で。
 
 ## 結果
-(記入中)
+### 実装(2026-10-24、Sonnet implementer、主対話 Opus が照合)
+- 変更 7 ファイル(+238 / −44): `macros/{analyzeUVW.C, makeTracks.C, stoppedAlphas.C, par_analyzeUVW.sh, test_par_analyzeUVW.sh, README.md}`、`tools/scan/metrics_for_run.sh`。許可範囲の外は無し。
+- 発注書からの追加: analyzeUVW.C は `pressureMbar > 0` も検査(0 割り防止)。
+- **実装中に見つけた罠**: `TParameter<double>` は既定の merge モードだと **hadd で足し合わされる**(4 分割で mm_per_cell が 4 倍の 0.694368)。analyzeUVW.C は 6 つとも merge モード `'f'`(最初の値を保つ)で書く。
+  主対話で makeTracks.C の写しも `'f'` にそろえた(tracks を hadd しても壊れないように)。
+- テスト(`macros/test_par_analyzeUVW.sh data/run0014_raw.root <W>`、Mac、SDKROOT=MacOSX27.sdk):
+  - T1 同値性(新署名 100 mbar / 25 MHz / 1200 V、直列 = 並列 `-j 4` / `-j 3`、17,596 entries identical)、T2–T4 は意味不変で新署名
+  - T5 samplingMHz = 30 / driftHvVolt = 0 / < 0 → エラー・出力なし、`par_analyzeUVW.sh` の `-s` / `-d` 無し・`metrics_for_run.sh` の `--sampling` / `--drift-hv` 無しは exit 2
+  - T6 `_uvw.root` と `_tracks.root` に 6 つの TParameter(25 MHz / 1200 V / 100 mbar: drift_v 0.43398 cm/µs、mm_per_cell **0.173592**、z_window 88.879 mm)、hadd 後も 0.173592、12.5 MHz / 1600 V で 0.462912(= 0.7233 × 0.8 × 0.8 mm)
+  - T7a z_window_mm の無い tracks でエラー文言、T7b ある tracks で正常(圧力の WARNING なし)、T7c 圧力の引数を 1 mbar ずらすと WARNING
+  - 改修前との同一性: `git show HEAD` の旧 analyzeUVW.C(`(raw, 100, 0, 3000)`)と新(`(raw, 100, 25, 1200, 0, 3000)`)の `uvw` 木が compareUVW で **3,000 entries identical**
+  - red の証拠: 旧マクロ・旧スクリプトの上で新テスト一式 → 15 passed / 25 failed(implementer は実装を先に書き、red は後から確認 — TDD の順番からの逸脱として記録)
+- **主対話の再実行**(2026-10-24 17:15、makeTracks の `'f'` 修正後): `TOTAL: 40 passed, 0 failed`(約 6.5 分)。
+- 実行できなかった操作: なし(implementer 報告。置換の事故で固まった root を pkill して再試験)。
+### 主対話の追加(呼び出し側の残り)
+- 169 から壊れていた 1 引数の呼び出し 2 本を新署名に: `tools/macro_oracle/run_macro_oracle.sh`(`analyzeUVW.C("oracle_raw.root", 100, 25, 1200)` = `src/reco` の定数 100 mbar / 25 MHz / 1200 V)、
+  `tools/event_mix/run_real_check.sh`(src と mix で同じ 100 / 25 / 1200)。README 2 本(`tools/macro_oracle`、`tools/scan` の usage 行)。
+- **macros オラクルの再実行**: run 14 の先頭 300 entries を CopyTree した raw(scratchpad)→ `run_macro_oracle.sh` → `ws_proto_sample --strip-geometry-out`(実 mini ジオメトリ)→
+  `cargo test --release --test reco_macro_oracle`: **7 passed**、production / csv-s とも events 300・ok 297・notOk 3(両側一致)・okMismatch 0・hitSetMismatch 0・hits 30,909、max|dpos| 4.65e-4 mm(production、s の丸め)/ 4.67e-6 mm(csv-s)。
+- ELITPC の `~/test/scan/metrics_for_run.sh` と `~/test/ana/ana_107` は**リポと独立の古い組**(2 引数版どうし)で、そのままでも動く。リポの新しい metrics_for_run.sh を ELITPC で使うときは macros も 178 以降に入れ替えること。
