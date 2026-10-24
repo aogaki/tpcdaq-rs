@@ -11,7 +11,7 @@
   - 保存先: データは ZFS `data/tpcdaq`。
   - 記録: ELOG(TPC 用)、InfluxDB(HV / LV)。
   - マニュアル: 日英 PDF が `reference/_manual/`。
-- **実装の正本 = docs/SPEC_ja.md v1.52**(2026-10-24、PEventTPC をオプションに = 183。v1.51 = params に `triggerPeriod_ms` = 179。v1.50 = 2026-10-23 status カウンタを run ごとに = 175。v1.49 = 2026-10-16 ZS 対応)。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `2911209` で稼働(2026-10-24 19:24 反映 = 183、Rust + root_sink、**daq.toml `pevent = false`**。その前 = 17:10 179 の Rust + UI。その前 = 2026-10-23 11:51 175 の root_sink 再ビルド、RUNBOOK §7.1。Rust は 04c9ad1 以降変更なし、UI は 172 を 10-22 に反映)。
+- **実装の正本 = docs/SPEC_ja.md v1.53**(2026-10-24、保存系 = graw-writer のみ = 181、実装は 184–188 で進行中。v1.52 = PEventTPC をオプションに = 183。v1.51 = params に `triggerPeriod_ms` = 179。v1.50 = 2026-10-23 status カウンタを run ごとに = 175。v1.49 = 2026-10-16 ZS 対応)。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `2911209` で稼働(2026-10-24 19:24 反映 = 183、Rust + root_sink、**daq.toml `pevent = false`**。その前 = 17:10 179 の Rust + UI。その前 = 2026-10-23 11:51 175 の root_sink 再ビルド、RUNBOOK §7.1。Rust は 04c9ad1 以降変更なし、UI は 172 を 10-22 に反映)。
 - **できること**:
   - 保存二系統: graw はロスレス、root-sink は PEventTPC と raw ツリー。
   - 取得の再開: 未停止で落とした後の古いフレームを epoch として扱う(110)。
@@ -63,7 +63,7 @@
   **12:08 実施**: run 174 停止(normal、eos_closed、11:26–12:08 = 42 min)→ **run 175 = 週末 run 2**(B、`elinp__0eb4f039`、comment「gas 100 -> 50 ml/min」、`start_W2.sh`)。次の流量変更も同じ手順(`start_W3.sh` を作る)。
 - **157 完了 → archive**: SPEC **v1.49**(ZS 表モード・0x02 復元・ped_table・decoder カウンタ・§13-9)、WARSAW_PLAN §7 の ZS 行、RUNBOOK のカウンタ名訂正。
 - **159 起票**(Opus): ZS カウンタの run ごとの経路 + PEventTPC 電荷和 + UI 基線。
-- Fable キュー: **181**(高レートでの健全性の設計、2026-10-24)+ 176(ML の方針)。
+- Fable キュー: 176(ML の方針)。181 は 2026-10-24 にスポット Fable でレビュー済み → v1.53。
 - **160 起票**: スキャン報告書 v1(`docs/reports/2026-10_scan/scan_report_2026-10.pdf`、11 ページ、日本語)。ユーザー「自分用 + mini TPC メンバー、来月 Warsaw の資料にも」。
 
 ### 2026-10-19(月)
@@ -111,9 +111,12 @@
 | [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
+| [184](184_receiver_decoder_link_counted_drop.md) | receiver: decoder リンクは待たずに送って数えて落とす(seq 不前進)+ Error 中の `Stop` を実行(receiver / decoder / graw-writer)— SPEC v1.53 §1.4-7 | IN PROGRESS(Opus implementer、本体の作業ツリー) | 照合 → 188 |
+| [185](185_controller_stop_drain_and_link_counts.md) | controller の停止: 中止も静止を待つ、強制 EOS 後は進捗待ち、run_stop にリンクごとの送受と `root_complete`、`/api/status.stopping` | IN PROGRESS(Opus implementer、worktree) | 照合 → マージ → 188 |
+| [186](186_root_sink_close_incomplete_on_new_run.md) | root_sink: EOS 未達のまま次の run が来たら古い run を inprogress のまま閉じて新しい run を開く(exit 6 の置き換え)+ close 行 / status に `fragments` | IN PROGRESS(Sonnet implementer、worktree) | 照合 → マージ |
 | ~~183~~ | root_sink: PEventTPC(TPCReco、Warsaw 向け)をオプションに(`[root_sink] pevent`、off なら `--no-root`、monitor.root は raw 側)、SPEC v1.52 | 済 → [archive/183](archive/183_pevent_optional.md)(1 回目の反映で Rust の config が `pevent` を拒否し DAQ が ≈ 10 分停止 → 復旧・修正 `2911209`、**ELITPC は pevent = false で稼働**) | — |
 | ~~182~~ | root_sink の持続レートを実機で(run 198–204) | 済 → [archive/182](archive/182_root_sink_throughput_bench.md)(PEventTPC あり workers 1 = 16.6 Hz / 4 = ≈ 66 Hz、**PEventTPC なし = 169 Hz に完全追従、上限 ≈ 220 Hz**、raw ツリー 1 本 ≈ 5 ms / 事象) | — |
-| [181](181_root_sink_rate_limit_run197.md) | run 197(周期 10 ms・全 ch ≈ 76 Hz)で root_sink(≈ 18 Hz)が追いつかず receiver の内部キューが溢れ 19,855 フレーム喪失(graw も)、Stop 後も root_sink が残りを書き続け「止まらない」ように見えた | DRAFT(**復旧済み 17:58**: daq_down/up + 手で rename、run0197_raw.root 24,042。論点: 持続レート、周期の下限 / 目安表示、drain 中の UI 表示、**Reset 時の数えられない喪失 ≈ 1,097**、EOS 喪失時の閉じ方) | 当面は周期 ≥ 60 ms、短いペデスタルは 1 分以内に止める |
+| [181](181_root_sink_rate_limit_run197.md) | 高レートで graw まで落ちる件(run 197)の設計 — 保存系 = graw-writer のみ、ROOT 側は数えて落とす(ユーザー裁定)、Fable レビュー済み、**SPEC v1.53 / CLAUDE.md 改訂済み(`a5d37e9`)** | 実装中(184–186 発注、188 監視・187 UI は次) | 184–188 の後に実機で run 197 の再現(§12-14) |
 | ~~180~~ | ELITPC: UI のテンプレートを物理の本番 `configure-elinp.xcfg` 1 本だけに(ユーザー指示) | 済 → [archive/180](archive/180_templates_physics_only.md)(他 25 本 + prepare 16 本を `GetSoftware_config/retired_templates_2026-10-24/` へ移動、current = `elinp__6cf41a72` = run 194–195 と同じ xcfg) | 同日 pulser 用 `configure-elinp-pulser.xcfg` だけ戻した(一覧 = 物理 + pulser の 2 本) |
 | ~~179~~ | params: 周期トリガの周期 `triggerPeriod_ms`(`Module.triggerPeriod`、[1, 21474] ms)をノブに + `triggerPeriod_10ns` のあるテンプレートは render がエラー(SPEC v1.51)。契機 = run 196 のペデスタルが template の 4000 ms で 0.25 Hz | 済 → [archive/179](archive/179_params_trigger_period_knob.md)(`1876f8c`、cargo 1108 / UI 402。**ELITPC 反映 2026-10-24 17:10**: current.json に 4000 を移行、生成 xcfg は run 196 とバイト一致) | 新ノブで run を取る確認(ユーザー) |
 | ~~178~~ | macros: サンプリング周波数とドリフト電圧を引数に、run の定数を `_uvw.root` / `_tracks.root` に記録(hadd でも保つ merge 'f')、stoppedAlphas の z 窓を記録値から | 済 → [archive/178](archive/178_macros_run_constants_as_args.md)(macros 40 / 0、改修前と 3,000 entries 一致、macros オラクル 7 passed。呼び出し側 oracle / event_mix も新署名に) | ELITPC の `~/test/ana` と `~/test/scan` の写しは使うときに入れ替え |
