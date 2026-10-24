@@ -11,7 +11,7 @@
   - 保存先: データは ZFS `data/tpcdaq`。
   - 記録: ELOG(TPC 用)、InfluxDB(HV / LV)。
   - マニュアル: 日英 PDF が `reference/_manual/`。
-- **実装の正本 = docs/SPEC_ja.md v1.50**(2026-10-23、status カウンタを run ごとに = 175。v1.49 = 2026-10-16 ZS 対応)。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `93baac0` で稼働(2026-10-23 11:51 反映 = 175 の root_sink 再ビルド、RUNBOOK §7.1。Rust は 04c9ad1 以降変更なし、UI は 172 を 10-22 に反映)。
+- **実装の正本 = docs/SPEC_ja.md v1.51**(2026-10-24、params に `triggerPeriod_ms` = 179。v1.50 = 2026-10-23 status カウンタを run ごとに = 175。v1.49 = 2026-10-16 ZS 対応)。ゲート(main `22e9284`)は cargo 1078 passed / 0 failed / 1 ignored、UI 393 passed / 10 skipped、root_sink の C++ テスト全 passed(make test / test-root)。適合 402(127 時点)。ELITPC は main `1876f8c` で稼働(2026-10-24 17:10 反映 = 179 の Rust + UI、root_sink は 93baac0 のまま。その前 = 2026-10-23 11:51 175 の root_sink 再ビルド、RUNBOOK §7.1。Rust は 04c9ad1 以降変更なし、UI は 172 を 10-22 に反映)。
 - **できること**:
   - 保存二系統: graw はロスレス、root-sink は PEventTPC と raw ツリー。
   - 取得の再開: 未停止で落とした後の古いフレームを epoch として扱う(110)。
@@ -111,6 +111,10 @@
 | [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
+| ~~179~~ | params: 周期トリガの周期 `triggerPeriod_ms`(`Module.triggerPeriod`、[1, 21474] ms)をノブに + `triggerPeriod_10ns` のあるテンプレートは render がエラー(SPEC v1.51)。契機 = run 196 のペデスタルが template の 4000 ms で 0.25 Hz | 済 → [archive/179](archive/179_params_trigger_period_knob.md)(`1876f8c`、cargo 1108 / UI 402。**ELITPC 反映 2026-10-24 17:10**: current.json に 4000 を移行、生成 xcfg は run 196 とバイト一致) | 新ノブで run を取る確認(ユーザー) |
+| [178](178_macros_run_constants_as_args.md) | macros: サンプリング周波数とドリフト電圧を引数に、run の定数を `_uvw.root` / `_tracks.root` に記録、stoppedAlphas の z 窓を記録値から | IN PROGRESS(Sonnet implementer) | 照合 → 177 の macros の写し |
+| [177](177_handoff_to_tpcsim.md) | tpcsim への受け渡し `~/test/tpcsim_handoff/`(条件カード runs.csv、応答の核、較正表、空の窓、データのパス) | IN PROGRESS(macros の写しと 12.5 MHz ペデスタル run 196 が残り) | 178 の後に macros、run 196 の raw を empty_windows へ |
+| [176](176_ml_event_selection_plan.md) | 機械学習による事象の選別の方針(失敗の型を潰す順番: デジタイザ + 実データの雑音のオーバーレイ → α で答え合わせ → 小さな分類器 → 「わからない」の出口 → 人間の目は最終試験 → 歪みの測定) | DRAFT(**Fable キュー**: 設計の確定) | 確定後にデジタイザの発注書 |
 | ~~175~~ | UI の EVENTS(status の events_built)を run ごとに(SPEC v1.50、スポット Fable 確定) | 済 → archive(ELITPC 反映 11:51、run 191 / 192 で開始 0 から・閉じた後 = close 行 470 / 463 と完全一致) | — |
 | [174](174_common_mode_burst_scan.md) | 共通モードのオシレーション(バースト)が信号と独立か: `tools/scan/burst_scan.C`(FPN の中央値で検出、位置の一様性 KS、周期、FPN / 信号比、時刻に対する率)+ 合成テスト | IN PROGRESS(道具は完成・照合済み: 合成 49 ok / 0 失敗、run 175 の先頭 10 万事象でバースト 0.0 % = 当時は ±150 ADC 級の振動なし) | run 180(今晩ビームのオン → オフ)に適用、オフの時刻はユーザーが翌朝 |
 | [173](173_neutron_u_target_estimate.md) | 隣のビームライン(U ターゲット)の中性子を 100 mbar で見る見積もり: C/O 反跳 1–3 cm、¹⁶O(n,α)¹³C の 2 本の飛跡で E_n 再構成の可能性、E_n < 3 MeV の反跳はトリガ下限の近く | DRAFT | 測定条件(GEM・しきい値・線源)をユーザーが決めたら解析を起票 |

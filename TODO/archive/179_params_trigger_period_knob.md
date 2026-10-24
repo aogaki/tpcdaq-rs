@@ -1,6 +1,6 @@
 # 179 — params: 周期トリガの周期 `triggerPeriod_ms` をノブに
 
-**Status: IN PROGRESS**(2026-10-24 起票 Opus、実装 Sonnet implementer。ユーザー「現在ペデスタルを取ってますが、遅いです。早くしたいですが UI にパラメーターがありません。追加してもらえますか」)
+**Status: COMPLETED**(2026-10-24 ELITPC 反映。起票 Opus、実装 Sonnet implementer。ユーザー「現在ペデスタルを取ってますが、遅いです。早くしたいですが UI にパラメーターがありません。追加してもらえますか」)
 
 ## 0. 問題
 - run 196(12.5 MHz のペデスタル、tpcsim への受け渡し = 177)は template `configure-pedestals.xcfg` の `Module.triggerPeriod = 4000 ms` のまま = 0.25 Hz(6.5 分で 100 事象)。
@@ -79,5 +79,11 @@
   - UI: `knob-spec.spec.ts`「triggerPeriod_ms は int [1, 21474] ms、Module.triggerPeriod、triggerMode の直後(TODO/179)」+ 13 グループ・16 葉、params-api / params-view の spec のフィクスチャ
 - **主対話の再実行(Mac、2026-10-24 17:00)**: `cargo fmt --check` OK、`cargo clippy --tests -- -D warnings` OK、`cargo test` **1108 passed / 0 failed / 1 ignored**、`ng test` **402 passed / 10 skipped**(28 files + 2 skipped)。implementer の ng build 成功。
 - 実行できなかった操作: なし(implementer 報告)。
-### ELITPC への反映
-(未 — ユーザー了解後。手順: commit → bundle → ff → cargo build --release → daq_down → current.json に `"triggerPeriod_ms"` を足す → daq_up → UI 差し替え → GET /api/params で確認)
+### ELITPC への反映(2026-10-24 17:10 頃、ユーザー「反映してください」、run 196 停止後の Idle 中)
+- commit `1876f8c`(179 の 17 ファイルだけ。178 の macros は作業中なので含めない)→ `git bundle 93baac0..main` → ELITPC `~/tpcdaq-rs` で `git pull --ff-only` → `cargo build --release`(PATH に ~/.cargo/bin、17 s)。C++ の変更は無いので root_sink は再ビルドしない。
+- Idle を確かめてから `daq_down.sh` → **current.json の移行**: 退避 `current.json.bak-2026-10-24-179`、`knobs.triggerPeriod_ms = 4000`(template `configure-pedestals.xcfg` の値)を足して serde と同じ形(キー辞書順・空白なし)で書き戻し → `daq_up.sh`。
+- UI: Mac で `ng build` → 旧版を `/opt/tpcdaq/ui.prev179` に退避 → `dist/ui/browser/.` を `/opt/tpcdaq/ui/` に scp(新しいノブは `chunk-DQDknlhy.js`)。
+- 確認: `/api/status` 200・`/` 200・phase Idle、`pgrep -f target/release` 8 + root_sink、今の時間帯のログに WARN / ERROR なし。
+  `GET /api/params` = 200(id `pedestals__71078b40`、`triggerPeriod_ms: 4000`)。`GET /api/params/render` の configure xcfg は **run 196 の `configure-pedestals__2313b063.xcfg` とバイト一致**(移行は生成物を変えない)。
+  `GET /api/params/defaults?template=configure-elinp.xcfg` = `triggerPeriod_ms: 1000`、unset / unsupported なし。
+- 未: 新しいノブで実際に run を取る確認(ユーザーが次のペデスタルで。間隔 = 周期 + 2.9 ms が期待値)。
