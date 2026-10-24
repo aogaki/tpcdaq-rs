@@ -31,4 +31,6 @@
 - **empty_windows/**: ペデスタル run 99 / 100(各 150 事象、17 MB)、12.5 MHz のヒット無し事象 23(run 180: 11、186: 7、190: 5 — 多くは振動でトリガ = 174、`burst174/pick_nohit.C` で同じ raw 形式に抜き出し)。
   **12.5 MHz のペデスタル run は未取得 → README で 1 本取ることを推奨**。周期トリガの窓 run 148–152 は ELITPC のパスのみ。
 - **データのパス**(実在を確認): run 175 raw 122 GB(+ Mac の写し)、パルサー 179・187–192、線源抜き 180・185–194(181–184・195 は raw 無し / 取得中)、周期 148–152。
-- 未: macros の写し(178 の完了後)。tpcsim の TODO/14 はユーザーに完了項目を報告(向こうのファイルは書き換えない)。
+- **macros/**(2026-10-24、178 の後): `git archive 95e52b5 macros`(push 済み)+ `macros/COMMIT`。README §6 に新しい署名(圧力・サンプリング・ドリフト電圧が必須)、run の定数の TParameter、stoppedAlphas の z 窓、`channel_map.csv` は内部資料なので入れていない(パスだけ)ことを記載。
+- 残り: **12.5 MHz のペデスタル run**(run 196 は 12.5 MHz・周期 4 s・240 fC・partial で物理と gain が違う → ユーザーが 179 のノブで取り直す)。取れたら raw を empty_windows/ に、README §4 を更新。
+- tpcsim の TODO/14 はユーザーに完了項目を報告(向こうのファイルは書き換えない)。
