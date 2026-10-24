@@ -3,12 +3,14 @@
 > **実装の正本は [docs/SPEC_ja.md](docs/SPEC_ja.md) v1.0**(2026-08-12 レビュー通過)。
 > PROPOSAL v0.4(日英)は設計背景 + Warsaw 回覧文書(SPEC との差分は SPEC §14)。タスクは [TODO/](TODO/)。
 
-## Absolute Rule — データ保全(tpcdaq 版)
+## Absolute Rule — データ保全(tpcdaq 版、v1.53 改訂 2026-10-24)
 
-**保存系は絶対にデータを落とさない。モニタ系は最新優先で落としてよい。この区別を混ぜない。**
-- 保存系(graw-writer / root-sink): ロスレス。PUSH/PULL の背圧で守る。意図的ドロップ禁止。
+**生データ(graw)は絶対に落とさない。派生物とモニタは数えて落としてよい。この区別を混ぜない。**
+- 保存系 = **graw-writer だけ**: ロスレス。PUSH/PULL の背圧で守る。意図的ドロップ禁止。receiver 内部キューの溢れ(= graw の喪失)は Error + controller の自動異常停止。
+- 派生系(decoder → root-sink): graw から作り直せる(graw_replay / graw2root)。追いつかなければ **receiver が decoder リンクでだけ数えて落とす**(`decoder_link_dropped_frames`)。run は止めない。run_stop に `root_complete:false` の印。**ROOT 側の遅れで graw を巻き添えにしない**(run 197 の教訓、TODO/181)。
 - モニタ系(monitor / UI 配信): PUB/SUB + 間引き。落としてよいが **silent にしない**(ドロップはカウントして可視化)。
 - receiver は drain のみ。下流の遅延がソケットへ逆圧してはならない(never-stop)。
+- 停止は「下流が進んでいる限り待つ」。消えた数はリンクごとの送受の差として run_stop に必ず残す(数えずに消える経路を作らない)。
 - 「保存と可視化の分離」(C++ 版ハードニング C3 の教訓)をコンポーネント境界として維持する。
 
 ## User Profile

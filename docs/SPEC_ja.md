@@ -1,6 +1,6 @@
 # tpcdaq-rs 仕様書(SPEC)
 
-- **status**: **v1.52(2026-10-24 — 実装の正本)**
+- **status**: **v1.53(2026-10-24 — 実装の正本)**
 - **改訂履歴**: v1.0(2026-08-12 ユーザーレビュー通過)/ v1.1(2026-08-13)graw-writer の
   ファイル分割単位を CoBo 毎 → **AsAd 毎**へ訂正、命名を**実機 DataRouter 形式に完全一致**へ変更
   (§1.1・§6.5・§7・§12-2。ユーザー指示 — オフライン解析の既存 bash 資産を無改造で使うため。
@@ -151,7 +151,7 @@
   topology frame は来ない(decoder カウンタ 0)= 確定**、§13-5 実 ECC(20190315)をホストで
   ネイティブ起動し e2e 成立、§13-7 `extra_connections=0` 実測(mini)。初回 configure 7 s
   (261 s コールドスタートは再現せず)。データは frameType 2 rev 5(compact)278,784 B/frame。
-  / **v1.30(2026-09-17)Wave 1 反映(TODO/080)**: §5.4 に **AsAd 電子回路座標パネル**(TODO/077 — monitor タブの Event Display の下、(cobo,asad) 毎 nAget×nCh × nBuckets の 2D、0x03 由来)を追加、§10.3 の 0x03 購読条件を「波形ビュー**または monitor タブ**」に改訂。§6.7 に **raw ツリー契約の共有**(ガス圧シミュレーション gas-pressure-test の Stage 4 が同一契約で `_raw.root` を書き macros を共有 — 契約変更は両リポ同時、合成 raw は §5.5 QA 再構成のフィクスチャ供給元、080 D-8)を明記。 / **v1.31(2026-09-22)slowctl 骨格の契約(TODO/079 Phase 2、監視のみ)**: §2.3 に slowctl → monitor の PUB ペイロード(kind=`slow`)、§3.1 に `[slowctl]` / `[[slowctl.device]]` / `[monitor] slow_sub` の例、§3.2 に slowctl status PUB `47006` と source_id 200 = slowctl(旧 psu)、§9.2 の `psu` レコードを **`slow`** に一般化(IDENT / VALUE / ALARM / RECOVER / ERROR、値は機器の単位文字列つき)し run_start / run_stop に `slow`(直近値、nullable)を追加、§10.3 の status JSON に `slow` を同梱。作動 API は引き続き無し(§11)。 / **v1.32(2026-09-22)パラメータ JSON の契約(TODO/078 レーン A)**: §3.3 を新設 — JSON が正・xcfg は生成物、11 ノブとスコープ、例外は「一様値 + 例外リスト」、**CompoundConfig の継承は粗い例外を発注どおりには解決しない(Search.hpp の backtrack、オラクル実測)ので粗い例外は実在 id の直積へ展開**、生成物名 `<stem>__<sha256 8>`、受け入れは CompoundConfig オラクル(tools/ccfg_resolve、env-gated)。 / **v1.33(2026-09-23)パラメータ REST と run/start 結線(TODO/078 レーン B)**: §8.1 に `GET/PUT /api/params`・`GET /api/params/render`・`/api/status.params`、§3.1 `[controller]` に `ecc_config_dir` / `params_dir`、§9.2 `run_start.params`(nullable)と `audit run/start.params_id`、§3.3 に id の正規化規則(serde_json 辞書順の JSON テキストの sha256)と REST の状態規則(Running 中の PUT は 409、ecc_config_dir 未設定は 503)。 / **v1.34(2026-09-23)UI 2 ビュー(TODO/078 レーン C・079 Phase 4)**: §11 に **Parameters ビュー**(ノブ 11 のフォーム + Exceptions (N) + Preview xcfg + Save、status バーに `params <id> · exceptions N`)と **Slow control ビュー**(旧 Power を置換: 最新値の表 + ECharts トレンド(UI 内 30 min リングバッファ)+ counters、status バーに alarm 数)を追加。作動 UI は無し(安全境界)。 / **v1.35(2026-09-23)ecc-bridge を Rust に(TODO/076 Phase 3)**: §1.1 の ecc-bridge 行を Rust(`src/ecc/`、`src/bin/ecc_bridge.rs`、Ice プロトコル 1.0 / encoding 1.1 を自前実装、Ice ライブラリ非依存)に、§8.2 を「ecc-bridge(Rust)」に改題し C++ 実装の記述を履歴化。JSON REQ/REP 契約は不変(C++ の 457 CHECK を Rust テストに移植、fake ECC の e2e 52 本、実 ECC + 実 zCoBo で walk-back 一致 — 076 結果節)。C++ に残るのは fake_ecc(テストダブル)と e2e クライアントのみ。 / **v1.36(2026-10-10)パラメータの初期値をテンプレートから抽出(TODO/111)**: §3.3 に **抽出(render の逆)** — `src/params/extract.rs`、テンプレートの `*` 連鎖から一様値、明示 id ノードから例外、要素が無い葉は `unset`、型・範囲外や合成ノブが写らないものは `unsupported` として**明示**(黙って既定値を入れない)。ノブを **12(葉 15)**に: `readout` は `isAllChannelRead` だけ(full/partial)、**`fpnRead`(bool、`isFPNRead`)を分離** — mini の現用 xcfg は `isAllChannelRead=false` + `isFPNRead=true` で、2 要素を 1 モードに束ねると表せなかった。§8.1 に `GET /api/params/templates`・`GET /api/params/defaults?template=`。§11 の Parameters ビューは UI の既定値直書き(`DEFAULT_KNOBS`、HIgS の 25 MHz)を廃止し、テンプレート一覧から選んで抽出値で埋める(unset / unsupported は空欄 + バッジ + Save 無効)。受け入れ: 実テンプレート 3 本(mini delay_test / VM pulser / HIgS physics)で抽出 → render がバイト一致、オラクル 4,423 インスタンス一致、ELITPC 実機で抽出 → 無変更保存 → 生成 xcfg がテンプレートとバイト一致 → その id で run(111 結果節)。 / **v1.37(2026-10-11)Parameters の Apply & restart(TODO/112)**: §11 に **Apply & restart** — UI が `run/stop` → `GET /api/status` を 200 ms 間隔で `Idle` まで(上限 30 s、取得失敗は再試行)→ `PUT /api/params` → `run/start` を順に呼ぶ(サーバに新しい状態機械は足さない)。各段の結果を表示し、失敗は以降を実行せず「run は止まったまま」を明示。根拠 = 統合テスト(stop の 200 直後にゼロ待ちで PUT → start を 5 周、100 周の Idle 確認、token 横取り → 401)と ELITPC 実機 10 周(1 周 ≈ 12 s、全 run late_fragments 0、古いフレーム混入なし)。見つかった穴(停止時の Reset 不達で start が失敗し続ける)は TODO/113 で start 側の walk-back として扱う(§1.3 は 113 で改訂)。 / **v1.38(2026-10-11)run/start のコンポーネント歩き戻し(TODO/113)**: §1.3 に上記、§3.3 に `current.json` のアトミック書き込み。cargo 879。 / **v1.39(2026-10-12)歩き戻しで EOS を待つ(TODO/114)**: §1.3 のコンポーネント歩き戻し — 全員 Running なら停止シーケンスと同じ 2 段(静止確認 → 強制 EOS → 伝播待ち)で前の run を閉じ、届かなくても start は止めない(v1.12 終端条項の start 側適用)、一部だけ Running なら待たない、跡の先頭 1 行(eos: closed / did not propagate / not awaited)。Fable 一括レビュー承認。 / **v1.40(2026-10-12)歩き戻しで閉じた前の run の run_stop(TODO/115)**: §1.3 に「前の run の run_stop を書く」(材料は Stop 後・Reset 前、番号は GetStatus.run_number の一致、run_start より前、start 失敗でも書く)、§9.2 に reason `"abort:controller-restart"`(forced_eos:false が常態)と duration_s の nullable(この経路のみ)、audit `run/start.previous_run_stop`。 §1.3 に decoder の `Reset` はスレッド終了を待って応答(TODO/116)。cargo 895。 / **v1.41(2026-10-12)HV / LV の実機読み出しと時系列の保存先(TODO/118–122、ユーザー裁定)**: §1.1 slowctl の行に「HiVolta の USB はポーリングのたびに開閉」と「全サンプルは InfluxDB」、§3.1 に `poll_s`・`status_ignore`(UNV / OVV のみ)・`[slowctl.influx]`、§9.2 の `slow` VALUE は**ログブックに書かない**(controller の直近値 = run_start / run_stop の `slow` にだけ使う)、§9.3 を新設(InfluxDB = モニタ系の位置づけ、line protocol と単位、有界キューと再送)、§2.3 の slow counters に influx_*、§11 Slow control ビューを機器 × ch の表に。cargo 929 / UI 325。 / **v1.42(2026-10-12)HV / LV の ch ごとの ON/OFF を web から(TODO/124、ユーザー裁定)**: §11 安全境界に唯一の例外(HV ON・LV OFF は Idle のみ、HV OFF・LV ON は常時、power コマンドは 1 件ずつで実行中は run/start を 409、token + 画面内確認 + audit、機器側の REMOTE / 前面スイッチが最終許可、HMP は両 ch の before/after)、§3.1 `cmd_bind` / `slow_cmd`(どちらも opt-in)、§3.2 に 47007、§8.1 `POST /api/slow/power`、§9.2 audit `slow/power`。Fable 設計確定。 / **v1.43(2026-10-13)Event Display の XY / XZ / YZ 投影(TODO/125、ユーザー裁定)**: §4.4 の mm 使用範囲を `src/strip_xy.rs` と UI の投影(表示専用)まで拡大、§5.4 の AsAd 電子回路座標パネルを Waveform ビューへ移設し Event Display 2 段目を XY/XZ/YZ 投影に(U/V/W 三面一致、TPCReco `Get2D` method 0 / `MatchCrossPoint` / `rangeXY()` 準拠、閾値はブラウザ毎・既定 50 ADC、radius 2.0 mm、Z = time bucket)、§10.3 に `stripGeometry`、`subscribe` 注記を波形ビューのみに戻す。受け入れ = TPCReco GeometryTPC オラクル(合成 + 実 mini / ELITPC で全線分 3e-14 mm 以内)、MatchCrossPoint 3,706 件の言語をまたぐ一致。Fable 条件付き承認(条件は 125 に反映)。 / **v1.44(2026-10-13)Event Display の投影を macros の移植に(TODO/125 改訂 2、ユーザー指示)**: §5.4 — 三面一致の投影は平らな長い飛跡でゴーストの菱形になり実機で撤回、`macros/analyzeUVW.C` + `makeTracks.C` の移植(1 イベント = 直線 1 本、定数は macros と同じに固定、閾値欄なし)に置き換え。受け入れ = 本物の macros との照合(run70 の 201 イベントで一致)とユーザーの目視。複数飛跡は後続。 / **v1.45(2026-10-13)再構成を monitor へ(TODO/127)**: §5.5 のアルゴリズム項を macros の移植(本物の macros が正)に差し替え、実体 = `src/reco/`、§10.2 に 0x04 Track(13 B ヘッダ + UTF-8 JSON、live 経路)、§10.3 `uvw` に 0x04、§10.4 のサンプルに 0x04(run 7 / event 44)、§4.4・§5.4 を「UI は 0x04 の点を詰めるだけ」に。TODO/074 は superseded。受け入れ = macros オラクル 201 / 201(release)、cargo 1069、UI 392、適合 402。 / **v1.47(2026-10-14)再開判定に時刻後退幅の閾値(TODO/134、Fable レビュー)**: §2.3 / §6.3 の判定に「event_time が epoch の最小より 100 ms 以上前」を追加(両層同値)。偽陽性(遅れた板の event 0、µs の時計ずれ)で新しい取得を捨てる経路を塞いだ。eb_core 284 / decoder +2。 / **v1.46(2026-10-13)Fable キュー一括消化(TODO/110・123・092・132、069 の出口)**: ①**取得の再開(acquisition restart、TODO/110)** — ECC を止めずにスタックを落とすと zCoBo は取得を続け、次の run の頭に前の取得の残りフレームが混ざる(§1.3 に機序: 新しい ECC の `prepare` は FW のポインタだけ戻し、hw node のソフト readPtr は古いまま → `configure` の `daqConnect` で [X, memEnd) をそのまま送る。controller では防げない)。graw はそのまま保全(§7)、decoder は `acquisition_restarts` / `frames_before_restart` を数えて `run_stop.counters` へ(§2.3・§9.2)、root-sink は epoch として扱い、late で捨てず、前の epoch で emit 済みの番号と同じ新しいイベントだけを `restart_duplicates` に数えて書かない(§6.3、ユーザー裁定 Q1)。status PUB に `acquisition_restarts`(§5.3)。実機再現(ELI-NP、2026-10-13、run 72–76): stop せずに落とした run 72 の続き 91 フレームが run 73 の頭に来て `late_fragments=0 restarts=1 events_before_restart=91 restart_duplicates=39`、正規 stop → start の run 74 は混入なし、decoder の rearm がカウンタを戻す不具合を直した後の run 76 で `run_stop.counters` が root-sink と一致。②§10.5 `GET /api/last-event`(TODO/123)。③§2.2 receiver は EOS の後 Heartbeat を出さない(TODO/092)。④§8.1 run/start 応答に `params_id` / `notes`(TODO/132)。⑤§13-2/3/6/8 を実測済みに(TODO/069 の出口: 107 / 109 / 104・106 訂正節 / 118–124)。 / **v1.48(2026-10-15)4 AsAd の取得の再開 — ソースごとの世代(TODO/133、Fable 設計)**: 一次資料(`MemRead::flushData` = 割り込みごとに AsAd 0→3 の順で各リングを全量送出)で、再開の瞬間は「AsAd0 の古い残り → AsAd0 の新 idx 0 → AsAd1 の古い残り → …」の順と確定。§6.3 を (cobo, asad) ごとの世代・鍵 `(run, 世代, idx)`・世代ごとの高水位・時刻帯による追従・再開検出時の付け替え(中点規則)・run の世代 = 全ソースの最小 に改訂、「complete か emit 済み」の条件を撤去。§2.3 decoder は `frames_before_restart` をソース別の辞書に、`acquisition_restarts` は最小 epoch が上がった回数。§5.3 status に 13 キー目 `sources_behind`。§9.2 `run_stop.counters.frames_before_restart` は辞書(旧行の数値も読める)。受け入れ: 合成 4 AsAd(AsAd-major 同一バッチ / 全 incomplete の旧世代 / 古い残りの無い AsAd が後・先 / 死んだ AsAd / 重複番号)で late 0、1 ソースの run 73 / 76 の close 行は不変(`restarts=1 late_fragments=0 restart_duplicates=39` / `17 / 0`)、実機 .graw リプレイ 108 entries。eb_core 391 / conformance 49 / cargo 1081。 / **v1.49(2026-10-16)ゼロサプレッション(ZS)データの下流対応(TODO/151–158、Fable 確定)**: §3.1 / §3.2 に `[system] ped_table`(`calib pedestal` の表、任意、parse 時に存在検査。root-sink `--pedestal-table` と monitor が読む)、§6.4 に **ZS 表モード**(ZS らしいフレームの述語 = サンプルのある ch の過半がペデスタル窓を満たさない、correction = 表の mean、FPN 項なし、存在サンプルのみ、表なしはカウンタ + WARN で保存は止めない、**非 ZS は表があっても従来算法 = §12-3 不変**)、§5.4 / §10.2 に 0x02 の **ZS 復元**(欠けたセルを round(mean) で埋める、0x03 は生のまま)、§5.5 の基線 = 復元後グリッドの cells 1..20、§6.7 raw ツリーは ZS でも 0 詰めのまま(復元は `tools/scan` の `zsfilled` 産物)、§9.2 run_stop.counters に decoder の `frames_type1` / `frames_type2` / `compact_size_mismatch`、§10.3 status に `uvwZsFragmentsRestored` / `uvwZsFragmentsNoTable` / `uvwTableMissingChannels`、§13-9 に実機確認(ZS は frameType 1 のみ、run 170–173 で frameType 2 = 0)。受け入れ = 実 α run(156 / SCANS S18): B + ZS は 1/9 のバイトで指標が非 ZS と同じ(電荷 −3 %)、hit g4 + ZS は 1/12。root_sink / monitor の ZS カウンタの run ごとの経路は TODO/159。 / **v1.50(2026-10-23)status カウンタを run ごとに(TODO/175、ユーザー裁定・Fable 確定)**: §5.3 の `events_built` / `events_incomplete` / `late_fragments` / `acquisition_restarts` を「現在の run の開始時点からの増分」(close 行と同じ `now − at_open`)に。run 外は直近に閉じた run の値、起動直後は 0。通算は終了 JSON のみ。`frames_per_cobo`(もとから run ごと)/ `pending_events`・`sources_behind`(瞬間値)/ `bytes_written`(Recorder の通算)は不変。契機 = 実機 run 190(2026-10-23): 開始 ≈ 200 s・14 フレームで UI EVENTS 3,934 = 朝からの全 run の合計。ワイヤのキー集合・型は不変で monitor / UI は無改修。 / **v1.51(2026-10-24)周期トリガの周期 `triggerPeriod_ms` をノブに(TODO/179)**: §3.3 のノブを **13(葉 16)**に — `Module.triggerPeriod`(ms)、int [1, 21474]。上限の根拠 = GET が `100000 * ms` を int で計算する(`CoBoNode::setTriggerPeriod`、`Int` = `int`)。`Module.triggerPeriod_10ns` を持つテンプレートは GET が `triggerPeriod` を無視するので render が `TemplateShape` エラーにする。契機 = run 196 のペデスタルが template の 4000 ms のまま 0.25 Hz(6.5 分で 100 事象)で、UI から周期を変えられなかった。スキーマ id `tpcdaq-params/1` は不変。 / **v1.52(2026-10-24)PEventTPC(TPCReco 形式)の書き出しをオプションに(TODO/183、ユーザー裁定)**: §3.1 `[root_sink]` に `pevent`(既定 true = 従来どおり)、§6.4 / §6.5 に「`pevent = false` は root_sink の `--no-root`。このとき run の成果物は graw + `run{N}_raw.root` + `run{N}_monitor.root`(monitor.root は raw 側が書く。`pevent = false` は `raw_tree = true` が前提 — daq_up.sh が弁別して拒否)」。PEventTPC が要るときは grawToEventTPC で graw から後から作れる。契機 = 182 の実測(root_sink の律速は PEventTPC の充填 + 直列化 ≈ 60 ms/事象で、raw ツリーの費用は ≈ 0)。on のときの出力はバイトの意味で不変。
+  / **v1.30(2026-09-17)Wave 1 反映(TODO/080)**: §5.4 に **AsAd 電子回路座標パネル**(TODO/077 — monitor タブの Event Display の下、(cobo,asad) 毎 nAget×nCh × nBuckets の 2D、0x03 由来)を追加、§10.3 の 0x03 購読条件を「波形ビュー**または monitor タブ**」に改訂。§6.7 に **raw ツリー契約の共有**(ガス圧シミュレーション gas-pressure-test の Stage 4 が同一契約で `_raw.root` を書き macros を共有 — 契約変更は両リポ同時、合成 raw は §5.5 QA 再構成のフィクスチャ供給元、080 D-8)を明記。 / **v1.31(2026-09-22)slowctl 骨格の契約(TODO/079 Phase 2、監視のみ)**: §2.3 に slowctl → monitor の PUB ペイロード(kind=`slow`)、§3.1 に `[slowctl]` / `[[slowctl.device]]` / `[monitor] slow_sub` の例、§3.2 に slowctl status PUB `47006` と source_id 200 = slowctl(旧 psu)、§9.2 の `psu` レコードを **`slow`** に一般化(IDENT / VALUE / ALARM / RECOVER / ERROR、値は機器の単位文字列つき)し run_start / run_stop に `slow`(直近値、nullable)を追加、§10.3 の status JSON に `slow` を同梱。作動 API は引き続き無し(§11)。 / **v1.32(2026-09-22)パラメータ JSON の契約(TODO/078 レーン A)**: §3.3 を新設 — JSON が正・xcfg は生成物、11 ノブとスコープ、例外は「一様値 + 例外リスト」、**CompoundConfig の継承は粗い例外を発注どおりには解決しない(Search.hpp の backtrack、オラクル実測)ので粗い例外は実在 id の直積へ展開**、生成物名 `<stem>__<sha256 8>`、受け入れは CompoundConfig オラクル(tools/ccfg_resolve、env-gated)。 / **v1.33(2026-09-23)パラメータ REST と run/start 結線(TODO/078 レーン B)**: §8.1 に `GET/PUT /api/params`・`GET /api/params/render`・`/api/status.params`、§3.1 `[controller]` に `ecc_config_dir` / `params_dir`、§9.2 `run_start.params`(nullable)と `audit run/start.params_id`、§3.3 に id の正規化規則(serde_json 辞書順の JSON テキストの sha256)と REST の状態規則(Running 中の PUT は 409、ecc_config_dir 未設定は 503)。 / **v1.34(2026-09-23)UI 2 ビュー(TODO/078 レーン C・079 Phase 4)**: §11 に **Parameters ビュー**(ノブ 11 のフォーム + Exceptions (N) + Preview xcfg + Save、status バーに `params <id> · exceptions N`)と **Slow control ビュー**(旧 Power を置換: 最新値の表 + ECharts トレンド(UI 内 30 min リングバッファ)+ counters、status バーに alarm 数)を追加。作動 UI は無し(安全境界)。 / **v1.35(2026-09-23)ecc-bridge を Rust に(TODO/076 Phase 3)**: §1.1 の ecc-bridge 行を Rust(`src/ecc/`、`src/bin/ecc_bridge.rs`、Ice プロトコル 1.0 / encoding 1.1 を自前実装、Ice ライブラリ非依存)に、§8.2 を「ecc-bridge(Rust)」に改題し C++ 実装の記述を履歴化。JSON REQ/REP 契約は不変(C++ の 457 CHECK を Rust テストに移植、fake ECC の e2e 52 本、実 ECC + 実 zCoBo で walk-back 一致 — 076 結果節)。C++ に残るのは fake_ecc(テストダブル)と e2e クライアントのみ。 / **v1.36(2026-10-10)パラメータの初期値をテンプレートから抽出(TODO/111)**: §3.3 に **抽出(render の逆)** — `src/params/extract.rs`、テンプレートの `*` 連鎖から一様値、明示 id ノードから例外、要素が無い葉は `unset`、型・範囲外や合成ノブが写らないものは `unsupported` として**明示**(黙って既定値を入れない)。ノブを **12(葉 15)**に: `readout` は `isAllChannelRead` だけ(full/partial)、**`fpnRead`(bool、`isFPNRead`)を分離** — mini の現用 xcfg は `isAllChannelRead=false` + `isFPNRead=true` で、2 要素を 1 モードに束ねると表せなかった。§8.1 に `GET /api/params/templates`・`GET /api/params/defaults?template=`。§11 の Parameters ビューは UI の既定値直書き(`DEFAULT_KNOBS`、HIgS の 25 MHz)を廃止し、テンプレート一覧から選んで抽出値で埋める(unset / unsupported は空欄 + バッジ + Save 無効)。受け入れ: 実テンプレート 3 本(mini delay_test / VM pulser / HIgS physics)で抽出 → render がバイト一致、オラクル 4,423 インスタンス一致、ELITPC 実機で抽出 → 無変更保存 → 生成 xcfg がテンプレートとバイト一致 → その id で run(111 結果節)。 / **v1.37(2026-10-11)Parameters の Apply & restart(TODO/112)**: §11 に **Apply & restart** — UI が `run/stop` → `GET /api/status` を 200 ms 間隔で `Idle` まで(上限 30 s、取得失敗は再試行)→ `PUT /api/params` → `run/start` を順に呼ぶ(サーバに新しい状態機械は足さない)。各段の結果を表示し、失敗は以降を実行せず「run は止まったまま」を明示。根拠 = 統合テスト(stop の 200 直後にゼロ待ちで PUT → start を 5 周、100 周の Idle 確認、token 横取り → 401)と ELITPC 実機 10 周(1 周 ≈ 12 s、全 run late_fragments 0、古いフレーム混入なし)。見つかった穴(停止時の Reset 不達で start が失敗し続ける)は TODO/113 で start 側の walk-back として扱う(§1.3 は 113 で改訂)。 / **v1.38(2026-10-11)run/start のコンポーネント歩き戻し(TODO/113)**: §1.3 に上記、§3.3 に `current.json` のアトミック書き込み。cargo 879。 / **v1.39(2026-10-12)歩き戻しで EOS を待つ(TODO/114)**: §1.3 のコンポーネント歩き戻し — 全員 Running なら停止シーケンスと同じ 2 段(静止確認 → 強制 EOS → 伝播待ち)で前の run を閉じ、届かなくても start は止めない(v1.12 終端条項の start 側適用)、一部だけ Running なら待たない、跡の先頭 1 行(eos: closed / did not propagate / not awaited)。Fable 一括レビュー承認。 / **v1.40(2026-10-12)歩き戻しで閉じた前の run の run_stop(TODO/115)**: §1.3 に「前の run の run_stop を書く」(材料は Stop 後・Reset 前、番号は GetStatus.run_number の一致、run_start より前、start 失敗でも書く)、§9.2 に reason `"abort:controller-restart"`(forced_eos:false が常態)と duration_s の nullable(この経路のみ)、audit `run/start.previous_run_stop`。 §1.3 に decoder の `Reset` はスレッド終了を待って応答(TODO/116)。cargo 895。 / **v1.41(2026-10-12)HV / LV の実機読み出しと時系列の保存先(TODO/118–122、ユーザー裁定)**: §1.1 slowctl の行に「HiVolta の USB はポーリングのたびに開閉」と「全サンプルは InfluxDB」、§3.1 に `poll_s`・`status_ignore`(UNV / OVV のみ)・`[slowctl.influx]`、§9.2 の `slow` VALUE は**ログブックに書かない**(controller の直近値 = run_start / run_stop の `slow` にだけ使う)、§9.3 を新設(InfluxDB = モニタ系の位置づけ、line protocol と単位、有界キューと再送)、§2.3 の slow counters に influx_*、§11 Slow control ビューを機器 × ch の表に。cargo 929 / UI 325。 / **v1.42(2026-10-12)HV / LV の ch ごとの ON/OFF を web から(TODO/124、ユーザー裁定)**: §11 安全境界に唯一の例外(HV ON・LV OFF は Idle のみ、HV OFF・LV ON は常時、power コマンドは 1 件ずつで実行中は run/start を 409、token + 画面内確認 + audit、機器側の REMOTE / 前面スイッチが最終許可、HMP は両 ch の before/after)、§3.1 `cmd_bind` / `slow_cmd`(どちらも opt-in)、§3.2 に 47007、§8.1 `POST /api/slow/power`、§9.2 audit `slow/power`。Fable 設計確定。 / **v1.43(2026-10-13)Event Display の XY / XZ / YZ 投影(TODO/125、ユーザー裁定)**: §4.4 の mm 使用範囲を `src/strip_xy.rs` と UI の投影(表示専用)まで拡大、§5.4 の AsAd 電子回路座標パネルを Waveform ビューへ移設し Event Display 2 段目を XY/XZ/YZ 投影に(U/V/W 三面一致、TPCReco `Get2D` method 0 / `MatchCrossPoint` / `rangeXY()` 準拠、閾値はブラウザ毎・既定 50 ADC、radius 2.0 mm、Z = time bucket)、§10.3 に `stripGeometry`、`subscribe` 注記を波形ビューのみに戻す。受け入れ = TPCReco GeometryTPC オラクル(合成 + 実 mini / ELITPC で全線分 3e-14 mm 以内)、MatchCrossPoint 3,706 件の言語をまたぐ一致。Fable 条件付き承認(条件は 125 に反映)。 / **v1.44(2026-10-13)Event Display の投影を macros の移植に(TODO/125 改訂 2、ユーザー指示)**: §5.4 — 三面一致の投影は平らな長い飛跡でゴーストの菱形になり実機で撤回、`macros/analyzeUVW.C` + `makeTracks.C` の移植(1 イベント = 直線 1 本、定数は macros と同じに固定、閾値欄なし)に置き換え。受け入れ = 本物の macros との照合(run70 の 201 イベントで一致)とユーザーの目視。複数飛跡は後続。 / **v1.45(2026-10-13)再構成を monitor へ(TODO/127)**: §5.5 のアルゴリズム項を macros の移植(本物の macros が正)に差し替え、実体 = `src/reco/`、§10.2 に 0x04 Track(13 B ヘッダ + UTF-8 JSON、live 経路)、§10.3 `uvw` に 0x04、§10.4 のサンプルに 0x04(run 7 / event 44)、§4.4・§5.4 を「UI は 0x04 の点を詰めるだけ」に。TODO/074 は superseded。受け入れ = macros オラクル 201 / 201(release)、cargo 1069、UI 392、適合 402。 / **v1.47(2026-10-14)再開判定に時刻後退幅の閾値(TODO/134、Fable レビュー)**: §2.3 / §6.3 の判定に「event_time が epoch の最小より 100 ms 以上前」を追加(両層同値)。偽陽性(遅れた板の event 0、µs の時計ずれ)で新しい取得を捨てる経路を塞いだ。eb_core 284 / decoder +2。 / **v1.46(2026-10-13)Fable キュー一括消化(TODO/110・123・092・132、069 の出口)**: ①**取得の再開(acquisition restart、TODO/110)** — ECC を止めずにスタックを落とすと zCoBo は取得を続け、次の run の頭に前の取得の残りフレームが混ざる(§1.3 に機序: 新しい ECC の `prepare` は FW のポインタだけ戻し、hw node のソフト readPtr は古いまま → `configure` の `daqConnect` で [X, memEnd) をそのまま送る。controller では防げない)。graw はそのまま保全(§7)、decoder は `acquisition_restarts` / `frames_before_restart` を数えて `run_stop.counters` へ(§2.3・§9.2)、root-sink は epoch として扱い、late で捨てず、前の epoch で emit 済みの番号と同じ新しいイベントだけを `restart_duplicates` に数えて書かない(§6.3、ユーザー裁定 Q1)。status PUB に `acquisition_restarts`(§5.3)。実機再現(ELI-NP、2026-10-13、run 72–76): stop せずに落とした run 72 の続き 91 フレームが run 73 の頭に来て `late_fragments=0 restarts=1 events_before_restart=91 restart_duplicates=39`、正規 stop → start の run 74 は混入なし、decoder の rearm がカウンタを戻す不具合を直した後の run 76 で `run_stop.counters` が root-sink と一致。②§10.5 `GET /api/last-event`(TODO/123)。③§2.2 receiver は EOS の後 Heartbeat を出さない(TODO/092)。④§8.1 run/start 応答に `params_id` / `notes`(TODO/132)。⑤§13-2/3/6/8 を実測済みに(TODO/069 の出口: 107 / 109 / 104・106 訂正節 / 118–124)。 / **v1.48(2026-10-15)4 AsAd の取得の再開 — ソースごとの世代(TODO/133、Fable 設計)**: 一次資料(`MemRead::flushData` = 割り込みごとに AsAd 0→3 の順で各リングを全量送出)で、再開の瞬間は「AsAd0 の古い残り → AsAd0 の新 idx 0 → AsAd1 の古い残り → …」の順と確定。§6.3 を (cobo, asad) ごとの世代・鍵 `(run, 世代, idx)`・世代ごとの高水位・時刻帯による追従・再開検出時の付け替え(中点規則)・run の世代 = 全ソースの最小 に改訂、「complete か emit 済み」の条件を撤去。§2.3 decoder は `frames_before_restart` をソース別の辞書に、`acquisition_restarts` は最小 epoch が上がった回数。§5.3 status に 13 キー目 `sources_behind`。§9.2 `run_stop.counters.frames_before_restart` は辞書(旧行の数値も読める)。受け入れ: 合成 4 AsAd(AsAd-major 同一バッチ / 全 incomplete の旧世代 / 古い残りの無い AsAd が後・先 / 死んだ AsAd / 重複番号)で late 0、1 ソースの run 73 / 76 の close 行は不変(`restarts=1 late_fragments=0 restart_duplicates=39` / `17 / 0`)、実機 .graw リプレイ 108 entries。eb_core 391 / conformance 49 / cargo 1081。 / **v1.49(2026-10-16)ゼロサプレッション(ZS)データの下流対応(TODO/151–158、Fable 確定)**: §3.1 / §3.2 に `[system] ped_table`(`calib pedestal` の表、任意、parse 時に存在検査。root-sink `--pedestal-table` と monitor が読む)、§6.4 に **ZS 表モード**(ZS らしいフレームの述語 = サンプルのある ch の過半がペデスタル窓を満たさない、correction = 表の mean、FPN 項なし、存在サンプルのみ、表なしはカウンタ + WARN で保存は止めない、**非 ZS は表があっても従来算法 = §12-3 不変**)、§5.4 / §10.2 に 0x02 の **ZS 復元**(欠けたセルを round(mean) で埋める、0x03 は生のまま)、§5.5 の基線 = 復元後グリッドの cells 1..20、§6.7 raw ツリーは ZS でも 0 詰めのまま(復元は `tools/scan` の `zsfilled` 産物)、§9.2 run_stop.counters に decoder の `frames_type1` / `frames_type2` / `compact_size_mismatch`、§10.3 status に `uvwZsFragmentsRestored` / `uvwZsFragmentsNoTable` / `uvwTableMissingChannels`、§13-9 に実機確認(ZS は frameType 1 のみ、run 170–173 で frameType 2 = 0)。受け入れ = 実 α run(156 / SCANS S18): B + ZS は 1/9 のバイトで指標が非 ZS と同じ(電荷 −3 %)、hit g4 + ZS は 1/12。root_sink / monitor の ZS カウンタの run ごとの経路は TODO/159。 / **v1.50(2026-10-23)status カウンタを run ごとに(TODO/175、ユーザー裁定・Fable 確定)**: §5.3 の `events_built` / `events_incomplete` / `late_fragments` / `acquisition_restarts` を「現在の run の開始時点からの増分」(close 行と同じ `now − at_open`)に。run 外は直近に閉じた run の値、起動直後は 0。通算は終了 JSON のみ。`frames_per_cobo`(もとから run ごと)/ `pending_events`・`sources_behind`(瞬間値)/ `bytes_written`(Recorder の通算)は不変。契機 = 実機 run 190(2026-10-23): 開始 ≈ 200 s・14 フレームで UI EVENTS 3,934 = 朝からの全 run の合計。ワイヤのキー集合・型は不変で monitor / UI は無改修。 / **v1.51(2026-10-24)周期トリガの周期 `triggerPeriod_ms` をノブに(TODO/179)**: §3.3 のノブを **13(葉 16)**に — `Module.triggerPeriod`(ms)、int [1, 21474]。上限の根拠 = GET が `100000 * ms` を int で計算する(`CoBoNode::setTriggerPeriod`、`Int` = `int`)。`Module.triggerPeriod_10ns` を持つテンプレートは GET が `triggerPeriod` を無視するので render が `TemplateShape` エラーにする。契機 = run 196 のペデスタルが template の 4000 ms のまま 0.25 Hz(6.5 分で 100 事象)で、UI から周期を変えられなかった。スキーマ id `tpcdaq-params/1` は不変。 / **v1.52(2026-10-24)PEventTPC(TPCReco 形式)の書き出しをオプションに(TODO/183、ユーザー裁定)**: §3.1 `[root_sink]` に `pevent`(既定 true = 従来どおり)、§6.4 / §6.5 に「`pevent = false` は root_sink の `--no-root`。このとき run の成果物は graw + `run{N}_raw.root` + `run{N}_monitor.root`(monitor.root は raw 側が書く。`pevent = false` は `raw_tree = true` が前提 — daq_up.sh が弁別して拒否)」。PEventTPC が要るときは grawToEventTPC で graw から後から作れる。契機 = 182 の実測(root_sink の律速は PEventTPC の充填 + 直列化 ≈ 60 ms/事象で、raw ツリーの費用は ≈ 0)。on のときの出力はバイトの意味で不変。 / **v1.53(2026-10-24)保存系 = graw-writer のみ(TODO/181、ユーザー裁定・Fable レビュー)**: run 197(周期 10 ms・全 ch・76 Hz)で root-sink(PEventTPC、≈ 18 Hz)の遅れが receiver の送信スレッドごと graw を止め、graw まで 19,855 フレーム喪失・Error は 5.5 分後・EOS 未達で root-sink が run を開いたまま。§1.4 を改訂(項番号は据え置き): ロスレスは receiver → graw-writer だけ、**decoder リンクは待たずに送って数えて落とす(seq は進めない)= §1.4-7**、欠けた ROOT の印 `root_complete` = §1.4-8、溢れ(graw の喪失)は controller の**run 中の監視(2 s)で自動異常停止**。§1.3: 中止も第一段(受信静止)を通す、**Error 中も `Stop` を実行**(EOS を出せるように)、第二段は「下流が進んでいる限り待つ」、run 中の監視、終端条項を「root-sink は次 run で古い run を inprogress のまま閉じる」に。§2.3 decoder リンクの注記、§6.2-5 exit 6 を置き換え、§6.5、§9.2 run_stop の追加キーと `root_complete`、§11 表示 4 件、§12-14。§2.2(EOS)は変えない(`frames_sent` 案は Fable が不採用 — EOS が届けば途中欠落は SeqCheck で不可能、届かないときは役に立たない)。CLAUDE.md の絶対ルールも同時に改訂。実装 = TODO/184–188。
   / **v1.29(2026-09-15)安全境界を明文化(§11、ユーザー裁定 — TODO/079 の発端)**: web 操作面(controller REST / UI)は DAQ の run 制御と監視のみ。**物理的作動(HV・ガス圧 setpoint・バルブ)は web に経路を作らず、ローカル限定**。§1.1 の psu 行を「監視のみ」に改め、名称を slowctl(HV / ガス / 環境の汎用スローコントロール)へ。根拠 = token + passphrase は事故防止であって認証ではない(§3.1)、TLS/認証は自前実装しない。
   / **v1.28(2026-09-14)§6.7 を実装前に精度上げ(TODO/075 着手、Fable)**: adc ブロック数は
   「観測」ではなく**期待フラグメント集合(§6.3 `--expect`)から起動時に確定**(ブランチは最初の
@@ -390,13 +390,24 @@ CoBo k ──TCP:46005+k──▶ [receiver k] ──PUSH──▶ (PULL bind) [
      (既定 **500 ms**、設定可)のあいだ不変。不達の receiver は静止とみなす)」の早い方まで待ち、
      receiver への `Stop` コマンドで **EOS を注入する(これが正規経路)**。`eos_timeout`
      (既定 **5 秒**、設定可)は両段のハード上限。静止検出は ecc stop の flush 済み在飛データを
-     飲み切ってから畳むための待ちであり、ロスレス規約の一部である(v1.12)
+     飲み切ってから畳むための待ちであり、ロスレス規約の一部である(v1.12)。
+     **v1.53(TODO/185)**: 第二段(強制 EOS の後)の待ちは「EOS 完了」**または**「観測カウンタ — receiver の
+     `batches`・graw-writer の `asad[].frames` の合計・decoder の `frames_in` / `batches_out` — が `eos_timeout`
+     のあいだ 1 つも動かない」で打ち切る(**下流が進んでいる限り待つ**。上限のノブは置かない。Heartbeat 系の
+     カウンタはアイドルでも動くので観測に入れない)。待っている間 controller の phase は `Stopping` で、
+     `/api/status` に `stopping: {decoder_backlog, waited_s}` を出す。`POST /api/run/stop` の応答は分単位に
+     なりうる(UI は応答を待たず phase を見る、§11)
   3. root-sink: 全ソース EOS 到達 = in-band バリア → TTree finalize + **run\<N\>_monitor.root 書き出し**(R10)
   4. コンポーネント `Stop`(上流から)、run_stop レコードを JSONL へ
 - **異常中止(abort)の正規経路(v1.6、v1.12 で機序を実装実態に訂正)**: 中止も必ず
   「EOS を流して閉じる」: ecc `stop`(不達でも続行)→ receiver へ `Stop`(強制 EOS)→
   EOS がチェーンを流れて root-sink が run をクローズ(incomplete は可視カウント)→
   その後に各コンポーネントの `Stop`/`Reset`。
+  **v1.53(TODO/184・185)**: ①**中止も第一段(受信静止の検出)を通す** — 即座に強制 EOS を撃つと receiver の
+  drain が畳まれ、カーネル受信バッファの未読分(= graw)が数えられずに消える。中止は reason のラベルだけで、
+  閉じ方は正常停止と同じ。②**Error 中のコンポーネントも `Stop` を実行する**(receiver / decoder / graw-writer
+  共通: `do_stop` を実行して状態は Error のまま。`Reset` で Idle)— Error の receiver が `Stop` を拒否すると
+  強制 EOS を出せず、run 197 と同じく EOS 未達で終わるため。
   **run がクローズする前に decoder を Reset しない**。理由(v1.12 訂正): Reset の送出打ち切りが
   作るのは「同一 run 内の seq ギャップ」ではない(打ち切られるのは末尾バッチで、以後の送出
   なしにスレッドが終了するため §6.2-5 の Gap 検出は発火しない)。実害は **EOS バリアの喪失**で
@@ -412,14 +423,27 @@ CoBo k ──TCP:46005+k──▶ [receiver k] ──PUSH──▶ (PULL bind) [
   ZMQ の送受信キューに居た分(PUSH の未配達・PULL の未読)は送り手側から数えられない(114 SIGSTOP 実機: graw 1219 / ROOT 1041 に対し `batches_abandoned=1`)。
   `eos_closed: false` の run の実損は **run 単位で照合**する — receiver の `frames` と root-sink の entries(inprogress ファイル)の差。per-component の部分カウンタは
   足さない(「数えた分 = 全損」と誤読される)。
+  **v1.53(TODO/185)**: run_stop.counters に**リンクごとの送受**を載せ、controller が差を書く(§9.2): `lost_receiver_to_graw` =
+  receiver `frames − overflow_frames` − graw-writer のフレーム数、`lost_receiver_to_decoder` = 同 − `decoder_link_dropped_frames` − decoder
+  `frames_in`。decoder → root-sink は controller から見えない(root-sink に REP が無い)ので、root-sink の close 行・status の run 内
+  `fragments` と decoder の `fragments_out` を run 単位で照合する(§6.3。EOS が届いた run では SeqCheck 厳格モードにより途中欠落は起きない)。
   例外: root-sink 自体が死んでいる場合のみ上流の Reset は無条件に可(下流不在への abandon は
   可視カウントされ無害)。
 - **EOS が強制でも流れ切らなかったとき(v1.12 追加 — 終端条項)**: 強制 EOS 後も `eos_timeout`
   内に伝播を観測できなければ、controller はそれ以上待たずにコンポーネントを畳んでよい
   (`run_stop` に `ok: false` と `eos_closed: false` を記録 — §9.2)。このとき root-sink の run は
-  開いたままである。**次の run を開始する前に root-sink を再起動(または fatal 死を回収)する
-  こと** — さもなくば次 run の最初の Data が上記の遅発 fatal を踏む(これは正しい検出であり、
-  抑止しない)。run_stop は `ok: false, reason: "abort:..."` または `"error:eos-timeout"`。
+  開いたままである。~~次の run を開始する前に root-sink を再起動すること~~ **v1.53(TODO/186)**: root-sink は次 run の
+  最初の Data(または別 run の EOS)で**古い run を inprogress のまま閉じ(= 未完の印、monitor.root は書かない、
+  `runs_closed_without_eos`)、新しい run を開く**(§6.2-5)。v1.10–v1.52 の遅発 fatal(exit 6)は置き換えた — 未完が
+  分かれば十分(ユーザー裁定 2026-10-24)で、fatal は次の run の ROOT を丸ごと失わせていた。
+  run_stop は `ok: false, reason: "abort:..."` または `"error:eos-timeout"`。
+- **run 中の監視(v1.53、TODO/188)**: controller は phase が `Running` / `Stopping` の間、**2 s ごと**に全コンポーネントへ
+  `GetStatus`(`status_timeout`)を送る(receiver の溢れはコマンドを受けたときに Error へ遷移するので、これで ≤ 2 s で表に出る)。
+  **phase == Running のときだけ**、保存系(receiver / graw-writer)の `Error` を引き金に**自動で異常停止**する
+  (`stop_run_blocking` を共用、operator `"watchdog"`、reason `abort:overload:<component>`、audit に 1 行)。decoder の Error・
+  `decoder_link_dropped_frames` の増加では止めない(§1.4-7、画面に出すだけ)。1 回の不達は引き金にしない(REP は逐次で、
+  decoder の Reset の join 中などは一時不達に見える)。Running → Stopping は `controller.run` の mutex 下で切り替え
+  (`POST /api/run/stop` と取り合ったら負けた側は 409)。
 - **ECC 不在で zCoBo が取得を続けた後の最初の run(v1.46、TODO/110)**: ECC を `stop` させずにスタックを落とす
   (運用ミス・停電・クラッシュ — ECC が SIGTERM で死ぬ)と、**hw node(getHwServer)は `isRunning_` のまま走り続ける**。
   新しく起動した ECC から次の run を建てると、`prepare` は FW の書き・読みポインタの**レジスタ**を memStart に戻すが
@@ -437,23 +461,32 @@ CoBo k ──TCP:46005+k──▶ [receiver k] ──PUSH──▶ (PULL bind) [
 - 起動順(プロセス起動そのもの)は任意(ZMQ connect はリトライされる)。起動スクリプトの推奨順は
   bind 側から: graw-writer → decoder → root-sink → monitor → controller → receivers → ecc-bridge。
 
-### 1.4 過負荷時の縮退規約(ロスレス系の限界の扱い)
+### 1.4 過負荷時の縮退規約(v1.53 — 保存系 = graw-writer のみ。TODO/181 run 197)
 
-「保存系は絶対に落とさない」「receiver はソケットへ逆圧しない」は、ディスクが恒常的に入力より遅い
-状況では同時には満たせない。その場合の規約を仕様として固定する:
+「graw は絶対に落とさない」「receiver はソケットへ逆圧しない」は、下流が恒常的に入力より遅い
+状況では同時には満たせない。その場合の規約を仕様として固定する。**ロスレスなのは receiver →
+graw-writer のリンクだけ**で、decoder → root-sink の経路は graw から作り直せる派生物として
+「数えて落とす」側に置く(ユーザー裁定 2026-10-24。v1.52 までは root-sink も保存系で、run 197 では
+ROOT 側の遅れが receiver の送信スレッドごと graw を止め、graw まで 19,855 フレーム失った)。
+項番号は v1.52 から据え置き、7・8 を追加した(コードのコメントが §1.4-4 / §1.4-6 を参照している)。
 
 1. receiver の受信タスクは常にソケットを drain する(never-stop)。送信タスクとは有界キューで分離。
-2. ロスレスリンクは有限 HWM(既定 1000 メッセージ)+ 受け側有界内部キュー。一時的な停滞
-   (ディスクスパイク等)はバッファが吸収する(既定サイズは目標レート **2 秒分**以上)。
-3. receiver 内部キューが満杯に達したら、それは**システム過負荷 = Error 状態**。以降のフレームは
-   `overflow_frames` としてカウントし(silent 禁止)、コンポーネントは Error を報告、controller は
-   run を異常停止して JSONL に記録する。「静かに間引いて run を続ける」ことはしない。
+2. graw リンク(receiver → graw-writer)は有限 HWM(既定 1000 メッセージ)+ 受け側有界内部キューの
+   背圧で守る。一時的な停滞(ディスクスパイク等)はバッファが吸収する(既定サイズは目標レート
+   **2 秒分**以上)。
+3. receiver 内部キューが満杯に達したら、それは**graw の喪失 = システム過負荷 = Error 状態**。以降の
+   フレームは `overflow_frames` としてカウントし(silent 禁止)、コンポーネントは Error を報告、
+   controller は **run 中の定期監視(既定 2 s、§1.3)でこれを検知して run を異常停止する**(`abort:overload:
+   <component>`、§1.3 の中止経路 = EOS を流して閉じる。Error 中の receiver も `Stop` を受けて EOS を
+   出す)。「静かに間引いて run を続ける」ことはしない。graw-writer の Error も同じ扱い。
 4. モニタ系(root-sink → monitor の PUB)は常時間引き可。ドロップは sequence_number ギャップとして
    受信側で検出し、UI に累積数を表示する。
 5. **契約違反検出時の応答の役割非対称(v1.10 明文化、R-P2-6)**: REP を持つコンポーネント
    (receiver / decoder / graw-writer)は **Error 状態を報告して drain は継続**し、止める判断は
    controller が行う(§1.3)。REP を持たない root-sink は **即 fatal 終了**が唯一の可視な
    失敗表明であり、黙って走り続けるより正しい(§6.2-5/6)。
+   **v1.53**: ただし **run 開放中の別 run_number は fatal にせず、古い run を inprogress のまま閉じて
+   (= EOS 未達・未完の印、`runs_closed_without_eos`)新しい run を開く**(§6.2-5)。
 6. **receiver のデータリンクは同時に 1 本(先勝ち、v1.12)**: 接続保持中に到着した余分な接続は
    accept して即 close し、`extra_connections` としてカウント + 初回 warn(黙って backlog に
    滞留させない — silent stall 禁止)。**1 バイトも運ばなかった接続の終了(EOF / エラー)は
@@ -463,6 +496,19 @@ CoBo k ──TCP:46005+k──▶ [receiver k] ──PUSH──▶ (PULL bind) [
    根拠: 実機のデータリンクは CoBo が configure 時に張る 1 本のみで、ECC は probe を張らない
    (TODO/032 調査)。GET 純正 DataRouter も単一接続(確立後は listen 自体を閉じる)であり、
    本規約はそれを可視化強化した同型。
+
+7. **decoder リンク(receiver → decoder)は送り手側で数えて落としてよい(v1.53)**: receiver は decoder
+   リンクの Data / Heartbeat を待たずに送り(`ZMQ_DONTWAIT`)、HWM 満杯・相手不在ならそのバッチを
+   decoder へは送らず `decoder_link_dropped_frames`(+ `_batches` / `_heartbeats`)に数える(初回 warn、
+   以後カウンタ)。**落としたバッチでは sequence_number を進めない**(decoder の seq 検査は「意図しない
+   喪失」の検出に残す。本物の喪失 — 符号化失敗等 — は従来どおり進めて gap として見せる)。graw リンクは
+   この間もブロックせず進む。run は止めない。EndOfStream はこの規則から除外(§2.2 — 空くまで待つ)。
+   decoder が Error でも run は止めない(3 の自動異常停止は保存系 = receiver / graw-writer のみ)。
+   緩衝 = decoder リンクの PUSH HWM(1000 **バッチ**)+ decoder 側。バッチ数建てなので落とし始める
+   閾値はバッチの大きさで変わる(10 ms バッチ ≈ 1 フレームなら 76 Hz で ≈ 13 s 分)。
+8. **欠けた ROOT の印は run_stop の `root_complete:false`(v1.53)** = `overflow_frames == 0 ∧
+   decoder_link_dropped_frames == 0 ∧ eos_closed ∧ decoder の abandoned == 0` の否定(§9.2)。
+   復元は graw から(graw_replay で流し直す / `macros/graw2root.C`)。
 
 ## 2. ZMQ メッセージ仕様
 
@@ -510,7 +556,7 @@ Batch(positional array(5)):
 | リンク | payload | 中身 |
 |---|---|---|
 | receiver → graw-writer | `RawFrames` | `Vec<Bin>` — MFM フレームのバイト列そのまま(フレーム境界 = 要素境界) |
-| receiver → decoder | `RawFrames` | 同上(同一バッチ内容。送信は独立ソケット・独立 seq) |
+| receiver → decoder | `RawFrames` | 同上(同一バッチ内容。送信は独立ソケット・独立 seq)。**v1.53: 待たずに送り、満杯・相手不在ならバッチ単位で落として数える(seq は進めない)— §1.4-7** |
 | decoder → root-sink | `Fragments` | `Vec<Fragment>`(§2.4) |
 | root-sink → monitor(PUB) | `Snapshot` | §5.3(ヒスト)/ §5.4(built event)/ status。形式は map 形式 msgpack(`to_vec_named` 相当)で自己記述にする(Rust↔C++ 双方向でないため進化容易性優先 — delila-rs の EbMessage と同じ理屈) |
 | 各 → controller(PUSH) | `LogPost` | JSONL 1 レコード分の JSON 文字列(§9。controller が ts/seq を付与) |
@@ -958,6 +1004,12 @@ TrackTree はオフライン解析(minitpc-analysis、Higs 側リポ)が持ち�
    **fatal(exit 6)**。旧「カウンタのみ」は混在 run が完成 run 名のファイルに化ける経路を
    残していた。idle 中の stale EOS(計数して無視)と期待外 source_id(計数して混ぜない)は
    従来どおり fatal にしない。
+   **v1.53(TODO/186)**: run_number 食い違いは fatal にしない。run 開放中に**別 run_number の Data** が来たら、
+   EventBuilder の pending を flush → 古い run を **inprogress のまま閉じる**(PEventTPC / raw とも finalize しない、
+   monitor.root を書かない = 未完の印)→ close 行 `closed without EOS (incomplete)`・`runs_closed_without_eos` +1 →
+   新しい run を Opened と同じ手順で開く(SeqCheck・ヒスト・`run_at_open` を reset)。**別 run_number の EOS** も古い run を
+   同様に未完で閉じ、その EOS は `stale_eos` として数えて無視する。混在経路は作らない(同じ run_number の Data の
+   seq gap・malformed は従来どおり fatal)。
 6. malformed バッチ: warn+skip → **Error 停止**(ロスレス契約では黙って捨てない)。
 7. closed channel への push が silent discard になっている箇所を明示化(assert)。
 8. run 境界(RunOpen/RunClose)でのブロッキング外部 IO 禁止。
@@ -1149,8 +1201,8 @@ PEventTPC が要るときは graw から grawToEventTPC で作る。
 
 | 出力 | 命名 | 備考 |
 |---|---|---|
-| イベント TTree | `run{run:04}.root`(rollover 時 `_0001` 付加) | **オプション(v1.52 `pevent`、既定 on)**。書き込み中は `run_inprogress_<unixtime>.root`、finalize で rename。異常終了は inprogress のまま残す(完全 run に化けない) |
-| モニタヒスト | `run{run:04}_monitor.root` | 全ソース EOS 後に書き出し(PEventTPC off のときは raw ツリー側が finalize 後に書く — v1.52。0 事象の run には書かない)。**EOS から 10 秒以内**(R10「速やかに」の数値化) |
+| イベント TTree | `run{run:04}.root`(rollover 時 `_0001` 付加) | **オプション(v1.52 `pevent`、既定 on)**。書き込み中は `run_inprogress_<unixtime>.root`、finalize で rename。異常終了は inprogress のまま残す(完全 run に化けない)。**EOS 未達のまま次の run が来たときも inprogress のまま閉じる(v1.53、§6.2-5)** |
+| モニタヒスト | `run{run:04}_monitor.root` | 全ソース EOS 後に書き出し(PEventTPC off のときは raw ツリー側が finalize 後に書く — v1.52。0 事象の run と、EOS 未達で閉じた run には書かない — v1.53)。**EOS から 10 秒以内**(R10「速やかに」の数値化) |
 | raw ツリー(オプション) | `run{run:04}_raw.root` | v1.26 §6.7。既定 off。書き込み中は `run_raw_inprogress_<unixtime>.root`、finalize で rename、異常終了は inprogress のまま(規則はイベント TTree と同一、名前空間だけ分ける)。**ロールオーバ無し**(v1.28) |
 | 生 graw | `CoBo{K}_AsAd{A}_{TS}_{idx:04}.graw` | **実機 DataRouter 命名に完全一致**(§7)。run 番号は含まれない — 対応はディレクトリとログブックが持つ |
 | 非 AsAd 制御フレーム | `ctrl/CoBo{K}_{TS}_{idx:04}.graw` | v1.2。run ディレクトリ配下のサブディレクトリ(オフラインの glob からは見えない)。§7 |
@@ -1372,6 +1424,12 @@ fake-ECC servant(C++ 版のテストハーネス)相手の e2e を CI に置く(
 | `comment` | `author`, `text`(自由記述、R11) |
 | `slow` | **v1.31、旧 `psu` を一般化(TODO/079)**。`device`(TOML の `name`)、`node`(機器内アドレス: FLOW-BUS ノード番号 / HV ch 番号 / 無ければ null)、`event`(`"IDENT"` 起動時の識別 / `"VALUE"` 計測値 / `"ALARM"` / `"RECOVER"` / `"ERROR"` 読み出し失敗の集計)、`values`: VALUE/ALARM/RECOVER は `{<param>: {value: f64, unit: "<機器が返した単位文字列>"}}`、IDENT は `{<field>: "<string>"}`、ERROR は `{poll_err, parse_err, reconnects, identity_mismatch}` の増分。**1 Hz の全サンプルは投稿しない**: 前回投稿した値から 2 % 以上動いたか `log_every_s` 経過で VALUE を投稿、ALARM/RECOVER は即時、ERROR は 1 分毎の集計(0 なら書かない)。actor = `slowctl`。**v1.41(TODO/121、ユーザー裁定「ログへは start, stop 時の電圧情報だけ」)**: controller は受け取った **VALUE をログブックに書かない** — 直近値(run_start / run_stop の `slow`)の更新にだけ使い、件数を `/api/status.log_posts.slow_values_not_logged` に数える。ログブックに残る `slow` は IDENT / ALARM / RECOVER / ERROR。全サンプルの時系列は InfluxDB(§9.3) |
 
+- **v1.53 `run_stop.counters` の追加キー(TODO/184・185、すべて nullable — 取れなければ null)**: `decoder_link_dropped_frames`
+  (+ `_batches`、`_heartbeats`)、`graw_frames`(graw-writer の asad 合計 + ctrl)、`decoder_frames_in`、`decoder_fragments_out`、
+  `decoder_abandoned`(batches + eos)、差 `lost_receiver_to_graw` / `lost_receiver_to_decoder`(§1.3)、そして
+  **`root_complete: bool`** = `overflow_frames == 0 ∧ decoder_link_dropped_frames == 0 ∧ eos_closed ∧ decoder_abandoned == 0`
+  (§1.4-8 — false なら「この run の ROOT は欠けあり、graw から作り直す」)。reason に `abort:overload:<component>`(§1.3 の監視)。
+
 例:
 
 ```json
@@ -1494,6 +1552,10 @@ Angular + Angular Material(delila-rs operator UI と同一スタック)。ビュ
 **Run 制御**(R6、token 取得 UI 込み)/ **モニタ**(9 ヒスト、R9 イベント表示: interval・freeze・
 イベント ID 常時表示)/ **波形ビュー**(R13、面/AsAd/AGET 単位、クライアント側間引き)/
 **ログブック**(R11、タイムライン + コメント追記)/ **Power**(P6)。
+**v1.53 の表示(TODO/187)**: ステータスバーに ①`decoder_link_dropped_frames > 0` → 赤「ROOT DROPPED N」(graw は完全、
+ROOT は graw から作り直す)②receiver / graw-writer が Error → 赤「OVERLOAD — run aborted」③phase `Stopping` → 「STOPPING —
+draining(残り N)」(`/api/status.stopping`)④monitor の root-sink status が run を開いたままで controller が Idle →
+「ROOT 書き出し中 run N」。ログブックの run_stop 行で `root_complete:false` に印。
 
 **描画スタック(2026-08-12 決定)**:
 - **9 ヒストグラムの描画 = JSROOT**。§10.2 の WS バイナリスナップショットを受けて、クライアント側で
@@ -1541,6 +1603,7 @@ freeze は表示のみで、run Stop と視覚的に混同させないこと(§5
 | 11 | JSONL 耐性 | run 中 kill -9 後、最終行以外の全行が parse 可能。再起動後 next_run が重複しない |
 | 12 | ジオメトリ | mini/ELITPC/合成 2-CoBo .dat のロード + Rust/C++ ダンプ一致(§4.5)。FPN 表の両参照実装一致 |
 | 13 | receiver 余分接続(v1.12) | 現接続でデータ流通中に余分な接続を張っても、現接続のフレーム列はバイト一致で無影響 + 余分接続は即 close + `extra_connections` 加算 + warn 1 回。0 バイト接続の終了で EOS が出ない(偽 run 境界なし) |
+| 14 | ROOT 側の遅れ(v1.53) | decoder / root-sink を止めても(SIGSTOP・不在)**graw は完全**(`receiver.frames − overflow_frames` = graw のフレーム数)、`decoder_link_dropped_frames > 0`、receiver は Running のまま、run は続く。Stop で `eos_closed:true`・`root_complete:false`。実機: run 197 の再現(PEventTPC on・周期 10 ms・5 分以上)。graw-writer を止めると ≤ 2 s で Error → 自動異常停止 → EOS が流れて閉じる |
 
 リプレイに使う graw_replay(Rust 版新規、005 で実装済み)は `--rate-mbps`(**Mbit/s 単位**の
 ペーシング。例: mini 100 Hz 相当 ≈ 28 MB/s = 224 Mbps)と `--loop` を持つ(C++ 版はペーシング
