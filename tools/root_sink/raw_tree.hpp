@@ -156,6 +156,23 @@ class RawTreeWriter {
     run_active_ = false;
   }
 
+  // EOS が来ないまま次の run が来た(SPEC v1.53 §6.2-5、TODO/186): 開いていれば
+  // **inprogress のまま**閉じる(完成名に rename しない、monitor.root も書かせない)。
+  // プロセスは続くので writer は次の run をそのまま書ける。
+  void close_run_incomplete(uint32_t run) {
+    if (file_ != nullptr) {
+      std::fprintf(stderr,
+                   "root_sink: raw tree run %u closed without EOS — kept inprogress "
+                   "(incomplete)\n",
+                   run);
+      close_part(/*finalize=*/false);
+    } else {
+      std::fprintf(stderr, "root_sink: run %u closed without EOS with no raw ROOT file\n",
+                   run);
+    }
+    run_active_ = false;
+  }
+
   // `run{run:04}_monitor.root` を raw 側で書く(--no-root --raw-tree 用、TODO/183)。
   // 呼ぶのは close_run() の直後(Recorder::write_monitor_root と同じ規則): 0 イベントの
   // run / 別 run には書かない。ROOT 化は共通の write_monitor_root_file()。

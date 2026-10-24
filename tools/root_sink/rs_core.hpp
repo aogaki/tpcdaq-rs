@@ -141,6 +141,7 @@ class Channel {
 enum class DataAction {
   Opened,     // Idle → Writing(この 1 通が run を開けた)
   Continued,  // 既に開いている run の続き
+  Reopened,   // 別 run_number の Data: 古い run を未完で閉じ、新しい run を開け(186)
   Unexpected  // 期待ソース集合の外から来た(数えて可視化する)
 };
 
@@ -148,7 +149,10 @@ enum class DataAction {
 enum class EosAction {
   Closed,   // 期待集合の全 EOS が揃った → Writing → Idle
   Pending,  // まだ揃っていない
-  Ignored   // idle 中の stale EOS、または期待外ソースの EOS
+  Ignored,  // idle 中の stale EOS、または期待外ソースの EOS
+  // 別 run_number の EOS(186): 古い run を未完で閉じる。その EOS 自体は stale_eos に数えて
+  // 無視し、新しい run は開かない。
+  ClosedIncomplete
 };
 
 // **期待ソース集合**(設定由来)で run の開閉を決める。
@@ -169,8 +173,11 @@ class RunState {
   uint64_t stale_eos() const { return stale_eos_; }
   // 期待集合外の source_id から届いた Data / EOS の数。
   uint64_t unexpected_sources() const { return unexpected_sources_; }
-  // 開いている run と違う run_number を載せたメッセージの数(プロトコル違反)。
+  // 開いている run と違う run_number を載せたメッセージの数。186 以降は常に 0
+  // (別 run は Reopened / ClosedIncomplete で扱う。互換のため残す)。
   uint64_t run_number_mismatch() const { return run_number_mismatch_; }
+  // EOS が来ないまま未完で閉じた run の数(SPEC v1.53 §6.2-5)。
+  uint64_t runs_closed_without_eos() const { return runs_closed_without_eos_; }
   // 閉じた run の数。
   uint64_t runs_closed() const { return runs_closed_; }
 
@@ -185,7 +192,14 @@ class RunState {
       eos_.clear();
       return DataAction::Opened;
     }
-    if (run_number != run_number_) ++run_number_mismatch_;
+    if (run_number != run_number_) {
+      // 前の run の EOS が来ないまま次の run の Data が来た: 古い run は未完で閉じ、
+      // 新しい run を開く(SPEC v1.53 §6.2-5)。
+      ++runs_closed_without_eos_;
+      run_number_ = run_number;
+      eos_.clear();
+      return DataAction::Reopened;
+    }
     return DataAction::Continued;
   }
 
@@ -198,9 +212,16 @@ class RunState {
       ++stale_eos_;
       return EosAction::Ignored;
     }
-    // run_number の食い違いは数えるが、EOS 自体は受け取る(EOS を捨てると
-    // writing のまま固まる —— delila-rs の実地事故そのもの。SPEC §2.2)。
-    if (run_number != run_number_) ++run_number_mismatch_;
+    // 別 run の EOS: 古い run を未完で閉じる(186)。EOS 自体は stale として数える
+    // (新しい run は開かない)。EOS を黙って捨てて writing のまま固まらないよう、
+    // 必ず閉じる —— delila-rs の実地事故の再発防止(SPEC §2.2)。
+    if (run_number != run_number_) {
+      open_ = false;
+      eos_.clear();
+      ++stale_eos_;
+      ++runs_closed_without_eos_;
+      return EosAction::ClosedIncomplete;
+    }
     eos_.insert(source_id);
     if (eos_.size() < expected_.size()) return EosAction::Pending;
     open_ = false;
@@ -218,6 +239,7 @@ class RunState {
   uint64_t unexpected_sources_ = 0;
   uint64_t run_number_mismatch_ = 0;
   uint64_t runs_closed_ = 0;
+  uint64_t runs_closed_without_eos_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -284,6 +306,7 @@ struct RunCounts {
   uint64_t acquisition_restarts = 0;
   uint64_t events_before_restart = 0;
   uint64_t restart_duplicates = 0;
+  uint64_t fragments = 0;  // その run で受けたフラグメント数(186)
 };
 
 // その run の分 = now − at_open(全フィールド)。close 行と status(TODO/175)で共有。
@@ -296,24 +319,35 @@ inline RunCounts run_delta(const RunCounts& now, const RunCounts& at_open) {
   d.acquisition_restarts = now.acquisition_restarts - at_open.acquisition_restarts;
   d.events_before_restart = now.events_before_restart - at_open.events_before_restart;
   d.restart_duplicates = now.restart_duplicates - at_open.restart_duplicates;
+  d.fragments = now.fragments - at_open.fragments;
   return d;
+}
+
+// `closed_how` = "closed" / "closed without EOS (incomplete)"(186)。
+inline std::string format_run_line(const char* closed_how, uint32_t run_number,
+                                   const RunCounts& now, const RunCounts& at_open) {
+  const RunCounts d = run_delta(now, at_open);
+  char buf[448];
+  std::snprintf(buf, sizeof(buf),
+                "root_sink: run %u %s (batches=%" PRIu64 " events_complete=%" PRIu64
+                " events_incomplete=%" PRIu64 " late_fragments=%" PRIu64 " restarts=%" PRIu64
+                " events_before_restart=%" PRIu64 " restart_duplicates=%" PRIu64
+                " fragments=%" PRIu64 ")\n",
+                run_number, closed_how, d.batches, d.events_complete, d.events_incomplete,
+                d.late_fragments, d.acquisition_restarts, d.events_before_restart,
+                d.restart_duplicates, d.fragments);
+  return buf;
 }
 
 inline std::string format_run_closed(uint32_t run_number, const RunCounts& now,
                                      const RunCounts& at_open) {
-  char buf[384];
-  std::snprintf(buf, sizeof(buf),
-                "root_sink: run %u closed (batches=%" PRIu64 " events_complete=%" PRIu64
-                " events_incomplete=%" PRIu64 " late_fragments=%" PRIu64 " restarts=%" PRIu64
-                " events_before_restart=%" PRIu64 " restart_duplicates=%" PRIu64 ")\n",
-                run_number, now.batches - at_open.batches,
-                now.events_complete - at_open.events_complete,
-                now.events_incomplete - at_open.events_incomplete,
-                now.late_fragments - at_open.late_fragments,
-                now.acquisition_restarts - at_open.acquisition_restarts,
-                now.events_before_restart - at_open.events_before_restart,
-                now.restart_duplicates - at_open.restart_duplicates);
-  return buf;
+  return format_run_line("closed", run_number, now, at_open);
+}
+
+// EOS が来ないまま閉じた run(SPEC v1.53 §6.2-5)。
+inline std::string format_run_closed_incomplete(uint32_t run_number, const RunCounts& now,
+                                                const RunCounts& at_open) {
+  return format_run_line("closed without EOS (incomplete)", run_number, now, at_open);
 }
 
 // その run で最初の late fragment か。`now` は**この late を数える前**の通算。

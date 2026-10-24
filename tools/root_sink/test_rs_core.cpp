@@ -183,13 +183,40 @@ static void test_unexpected_source_is_counted() {
   CHECK(rs.on_eos(kDecoderSourceId, 7) == EosAction::Closed);
 }
 
-// run 中に run_number が変わるのはプロトコル違反。数えて可視化する(open 中は初回値を保つ)。
-static void test_run_number_change_mid_run_is_counted() {
+// 186(SPEC v1.53 §6.2-5): run 開放中に別 run_number の Data が来たら、古い run を未完で
+// 閉じて新しい run を開く指示(Reopened)。mismatch としては数えない。
+static void test_data_of_another_run_reopens_and_counts_closed_without_eos() {
   RunState rs({kDecoderSourceId});
-  rs.on_data(kDecoderSourceId, 7);
+  CHECK(rs.on_data(kDecoderSourceId, 7) == DataAction::Opened);
+  CHECK(rs.on_data(kDecoderSourceId, 7) == DataAction::Continued);
+  CHECK(rs.on_data(kDecoderSourceId, 8) == DataAction::Reopened);
+  CHECK_EQ(rs.run_number(), 8);
+  CHECK(rs.is_open());
+  CHECK_EQ(rs.runs_closed_without_eos(), 1);
+  CHECK_EQ(rs.run_number_mismatch(), 0);
+  CHECK_EQ(rs.runs_closed(), 0);  // 未完の close は「完了した run」に数えない
+  // 新しい run は普通の run: 続きは Continued、EOS で閉じる(eos_ はクリア済み)。
   CHECK(rs.on_data(kDecoderSourceId, 8) == DataAction::Continued);
-  CHECK_EQ(rs.run_number(), 7);
-  CHECK_EQ(rs.run_number_mismatch(), 1);
+  CHECK(rs.on_eos(kDecoderSourceId, 8) == EosAction::Closed);
+  CHECK_EQ(rs.runs_closed(), 1);
+  CHECK_EQ(rs.runs_closed_without_eos(), 1);
+}
+
+// 186: 別 run_number の EOS は古い run を未完で閉じ、その EOS 自体は stale_eos として
+// 数えて無視する(新しい run は開かない)。
+static void test_eos_of_another_run_closes_incomplete_and_counts_stale() {
+  RunState rs({kDecoderSourceId});
+  CHECK(rs.on_data(kDecoderSourceId, 7) == DataAction::Opened);
+  CHECK(rs.on_eos(kDecoderSourceId, 9) == EosAction::ClosedIncomplete);
+  CHECK(!rs.is_open());
+  CHECK_EQ(rs.stale_eos(), 1);
+  CHECK_EQ(rs.runs_closed_without_eos(), 1);
+  CHECK_EQ(rs.run_number_mismatch(), 0);
+  CHECK_EQ(rs.runs_closed(), 0);
+  // 閉じた後の同じ EOS は idle の stale EOS(従来どおり)。
+  CHECK(rs.on_eos(kDecoderSourceId, 9) == EosAction::Ignored);
+  CHECK_EQ(rs.stale_eos(), 2);
+  CHECK_EQ(rs.runs_closed_without_eos(), 1);
 }
 
 static void test_two_runs_in_a_row() {
@@ -269,7 +296,7 @@ static void test_run_closed_line_reports_per_run_counts() {
   CHECK(format_run_closed(12, total, at_open) ==
         "root_sink: run 12 closed (batches=100 events_complete=139 "
         "events_incomplete=3 late_fragments=2 restarts=0 events_before_restart=0 "
-        "restart_duplicates=0)\n");
+        "restart_duplicates=0 fragments=0)\n");
 
   // run 13: 通算は 239 / 8734 / 10 / 7 だが、行は run 13 分だけ
   at_open = total;
@@ -281,7 +308,29 @@ static void test_run_closed_line_reports_per_run_counts() {
   CHECK(format_run_closed(13, total, at_open) ==
         "root_sink: run 13 closed (batches=8534 events_complete=8595 "
         "events_incomplete=7 late_fragments=5 restarts=0 events_before_restart=0 "
-        "restart_duplicates=0)\n");
+        "restart_duplicates=0 fragments=0)\n");
+}
+
+// 186: close 行に fragments(その run で受けたフラグメント数)。未完の close は
+// 「closed without EOS (incomplete)」。出典 = 手計算: 通算 fragments 41 のあと run 内で +17
+// → 行は 17(通算 58 は出ない)。
+static void test_run_closed_line_reports_fragments_and_incomplete() {
+  RunCounts total;
+  total.fragments = 41;
+  const RunCounts at_open = total;
+  total.batches += 3;
+  total.fragments += 17;
+  total.events_complete += 5;
+  total.events_incomplete += 2;
+  CHECK_EQ(run_delta(total, at_open).fragments, 17);
+  CHECK(format_run_closed(31, total, at_open) ==
+        "root_sink: run 31 closed (batches=3 events_complete=5 events_incomplete=2 "
+        "late_fragments=0 restarts=0 events_before_restart=0 restart_duplicates=0 "
+        "fragments=17)\n");
+  CHECK(format_run_closed_incomplete(31, total, at_open) ==
+        "root_sink: run 31 closed without EOS (incomplete) (batches=3 events_complete=5 "
+        "events_incomplete=2 late_fragments=0 restarts=0 events_before_restart=0 "
+        "restart_duplicates=0 fragments=17)\n");
 }
 
 static void test_run_closed_line_reports_restarts_per_run() {
@@ -299,7 +348,7 @@ static void test_run_closed_line_reports_restarts_per_run() {
   total.restart_duplicates += 19;
   CHECK(format_run_closed(29, total, at_open) ==
         "root_sink: run 29 closed (batches=2402 events_complete=2061 events_incomplete=0 "
-        "late_fragments=0 restarts=1 events_before_restart=19 restart_duplicates=19)\n");
+        "late_fragments=0 restarts=1 events_before_restart=19 restart_duplicates=19 fragments=0)\n");
 }
 
 static void test_first_late_of_run_is_per_run() {
@@ -379,6 +428,7 @@ int main() {
   test_run_delta_is_per_run();
   test_run_delta_before_first_run_is_zero();
   test_run_delta_restarts_per_run();
+  test_run_closed_line_reports_fragments_and_incomplete();
   test_run_closed_line_reports_restarts_per_run();
   test_first_late_of_run_is_per_run();
   test_channel_is_fifo();
@@ -393,7 +443,8 @@ int main() {
   test_run_closes_even_if_a_source_sent_no_data();
   test_stale_eos_while_idle_is_counted_and_ignored();
   test_unexpected_source_is_counted();
-  test_run_number_change_mid_run_is_counted();
+  test_data_of_another_run_reopens_and_counts_closed_without_eos();
+  test_eos_of_another_run_closes_incomplete_and_counts_stale();
   test_two_runs_in_a_row();
 
   test_first_sequence_number_is_the_baseline();

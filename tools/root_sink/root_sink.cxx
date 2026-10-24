@@ -26,9 +26,10 @@
 //   * malformed バッチ → 即 exit 2(SPEC §6.2-6。「warn して捨てる」をしない)。
 //   * sequence_number のギャップ・巻き戻り → 即 exit 3(SPEC §6.2-5)。
 //   * ROOT の書き出し失敗 → 即 exit 5(黙って書けないまま走り続けない)。
-//   * run 中の run_number 食い違い(Data/EOS とも)→ 即 exit 6(SPEC §6.2-5 v1.10、
-//     R-P2-1。decoder は単一ストリームで run を混ぜない契約 —— 混在に「正しく続ける」
-//     方法はない。idle 中の stale EOS・期待外 source_id は従来どおり fatal にしない)。
+//   * run 中に別の run_number が来ても fatal にしない(SPEC §6.2-5 v1.53、TODO/186)。古い run を
+//     **未完のまま**(inprogress の名前で、monitor.root 無し)閉じ、Data なら新しい run を開く。
+//     別 run の EOS は古い run を同様に閉じ、stale_eos に数えて無視する(runs_closed_without_eos)。
+//     idle 中の stale EOS・期待外 source_id も従来どおり fatal にしない。
 //   異常終了時も同じ JSON 1 行を出す("fatal" フィールドに理由が入る)。落ちた瞬間の
 //   カウンタは事故調査で一番効くので捨てない(CLAUDE.md「silent failure を作らない」)。
 
@@ -98,7 +99,7 @@ constexpr int kExitMalformed = 2;  // SPEC §6.2-6
 constexpr int kExitSeq = 3;        // SPEC §6.2-5
 constexpr int kExitZmq = 4;
 constexpr int kExitRootIo = 5;     // ROOT の open / 書き出し失敗(011)
-constexpr int kExitRunMismatch = 6;  // run 中の run_number 食い違い(SPEC §6.2-5 v1.10)
+// exit 6 = 旧 run-number-mismatch(SPEC §6.2-5 v1.10)。v1.53(TODO/186)で fatal をやめた —— 欠番。
 
 // --------------------------------------------------------------------------
 // シグナル
@@ -164,7 +165,8 @@ struct Counts {
   uint64_t unknown = 0;              // 知らない variant 名(前方互換で無視するが数える)
   uint64_t stale_eos = 0;            // idle 中の EOS
   uint64_t unexpected_sources = 0;   // 期待ソース集合外からの Data/EOS
-  uint64_t run_number_mismatch = 0;  // run 中に食い違う run_number
+  uint64_t run_number_mismatch = 0;  // 186 以降は常に 0(別 run は未完で閉じて開き直す)
+  uint64_t runs_closed_without_eos = 0;  // EOS 無しで未完のまま閉じた run(SPEC v1.53)
   uint64_t recorder_queue = 0;       // 集計 → Recorder の在庫(瞬間値、011)
   // CoBo 毎のフラグメント数(status の材料 — SPEC §5.3。Fragment.cobo は u8)。
   uint64_t frames_per_cobo[rsmon::kMaxCobo] = {};
@@ -299,7 +301,8 @@ void print_counts_json(const Counts& c, const char* fatal) {
       ",\"events_before_restart\":%" PRIu64 ",\"restart_duplicates\":%" PRIu64
       ",\"heartbeats\":%" PRIu64
       ",\"unknown\":%" PRIu64 ",\"stale_eos\":%" PRIu64 ",\"unexpected_sources\":%" PRIu64
-      ",\"run_number_mismatch\":%" PRIu64 ",\"entries_written\":%" PRIu64
+      ",\"run_number_mismatch\":%" PRIu64 ",\"runs_closed_without_eos\":%" PRIu64
+      ",\"entries_written\":%" PRIu64
       ",\"items_out_of_range\":%" PRIu64 ",\"recorder_queue\":%" PRIu64
       ",\"duplicate_event_ids\":%" PRIu64 ",\"channels_without_strip\":%" PRIu64
       ",\"charge_keys_out_of_range\":%" PRIu64 ",\"frames_outside_geometry\":%" PRIu64
@@ -315,7 +318,7 @@ void print_counts_json(const Counts& c, const char* fatal) {
       c.events_incomplete, c.late_fragments, c.unexpected_fragments,
       c.duplicate_fragments, c.pending_events, c.acquisition_restarts,
       c.events_before_restart, c.restart_duplicates, c.heartbeats, c.unknown, c.stale_eos,
-      c.unexpected_sources, c.run_number_mismatch, entries_written, items_out_of_range,
+      c.unexpected_sources, c.run_number_mismatch, c.runs_closed_without_eos, entries_written, items_out_of_range,
       c.recorder_queue, duplicate_event_ids, channels_without_strip,
       charge_keys_out_of_range, frames_outside_geometry, zs_frames_table, zs_frames_no_table,
       table_missing_channels, recorder_workers,
@@ -666,7 +669,8 @@ std::unique_ptr<rsmon::HistSnapshot> snapshot_final_hists() {
 // (RunClose)を混ぜる delila-rs の流儀(SPEC §6.1)—— run の finalize を別経路の
 // フラグでやると、キューに残ったイベントより先に閉じてしまう。
 struct RecordItem {
-  enum class Kind : uint8_t { Event, RunClose };
+  // RunCloseIncomplete = EOS 無しで次の run へ(SPEC v1.53 §6.2-5): inprogress のまま閉じる。
+  enum class Kind : uint8_t { Event, RunClose, RunCloseIncomplete };
   Kind kind = Kind::Event;
   uint32_t run_number = 0;         // Kind::RunClose のとき有効
   rootsink::BuiltEvent event;      // Kind::Event のとき有効
@@ -682,7 +686,7 @@ using RecordChannel = rootsink::Channel<RecordItem>;
 // **in-band RunClose** の流儀 —— キューに残ったイベントを追い越して finalize しない。
 // PEventTPC 側とはキューもロックも共有しない(SPEC §5.1 と同じ流儀)。
 struct RawItem {
-  enum class Kind : uint8_t { Event, RunClose };
+  enum class Kind : uint8_t { Event, RunClose, RunCloseIncomplete };
   Kind kind = Kind::Event;
   uint32_t run_number = 0;     // Kind::RunClose のとき有効
   rootsink::BuiltEvent event;  // Kind::Event のとき有効
@@ -703,6 +707,7 @@ rootsink::RunCounts run_counts(const Counts& c) {
   r.acquisition_restarts = c.acquisition_restarts;
   r.events_before_restart = c.events_before_restart;
   r.restart_duplicates = c.restart_duplicates;
+  r.fragments = c.fragments;
   return r;
 }
 
@@ -781,6 +786,32 @@ void absorb(std::vector<rootsink::BuiltEvent>&& built, const rootsink::EventBuil
   }
 }
 
+// EOS が来ないまま別 run が来た(SPEC v1.53 §6.2-5、TODO/186)。古い run を**未完のまま**
+// 閉じる: pending を古い run に吐き切り、in-band の RunCloseIncomplete を流す
+// (PEventTPC / raw とも inprogress のまま、monitor.root は書かない)。
+void close_run_incomplete(uint32_t old_run, const rootsink::RunState& run, Counts& c,
+                          rootsink::EventBuilder& eb, RecordChannel* rec, RawChannel* raw) {
+  absorb(eb.flush(), eb, c, rec, raw);
+  eb.close_run(old_run);
+  if (rec != nullptr) {
+    RecordItem item;
+    item.kind = RecordItem::Kind::RunCloseIncomplete;
+    item.run_number = old_run;
+    rec->push(std::move(item));
+    c.recorder_queue = rec->size();
+  }
+  if (raw != nullptr) {
+    RawItem item;
+    item.kind = RawItem::Kind::RunCloseIncomplete;
+    item.run_number = old_run;
+    raw->push(std::move(item));
+  }
+  c.runs_closed_without_eos = run.runs_closed_without_eos();
+  const std::string line =
+      rootsink::format_run_closed_incomplete(old_run, run_counts(c), c.run_at_open);
+  std::fputs(line.c_str(), stderr);
+}
+
 // 1 メッセージを解釈してカウンタを進める。プロトコル違反はここで即死(戻らない)。
 void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunState& run,
              rootsink::SeqCheck& seq, rootsink::EventBuilder& eb,
@@ -805,22 +836,12 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
         fatal(c, kExitMalformed, "malformed-batch", e.what());
       }
 
-      const uint64_t mismatch_before = run.run_number_mismatch();
+      const uint32_t prev_run = run.run_number();  // Reopened のとき閉じる側の番号
       const DataAction da = run.on_data(h.source_id, h.run_number);
-      if (run.run_number_mismatch() > mismatch_before) {
-        // SPEC §6.2-5 v1.10(R-P2-1): run 中の run_number 食い違いは同格の fatal に
-        // 昇格。旧「カウンタのみ」は、EOS を見ていない旧 run が完成 run 名(rename)に
-        // 化ける経路を残していた(root_recorder.hpp の混在 run 防御は最後の砦として
-        // finalize=false のまま残す)。**idle 中の stale EOS・期待外 source_id は
-        // ここに来ない**(RunState が run を開く前にしか mismatch を数えないため)。
-        // fatal() は戻らない(std::_Exit)ので、JSON に出す前にカウンタを転写する
-        // (落ちた瞬間のカウンタを捨てない、CLAUDE.md)。
-        c.run_number_mismatch = run.run_number_mismatch();
-        char buf[192];
-        std::snprintf(buf, sizeof(buf),
-                      "source_id=%u run_number_open=%u run_number_incoming=%u",
-                      h.source_id, run.run_number(), h.run_number);
-        fatal(c, kExitRunMismatch, "run-number-mismatch", buf);
+      if (da == DataAction::Reopened) {
+        // 別 run_number の Data。fatal(旧 exit 6)にはしない: 古い run を未完で閉じ、
+        // 下で新しい run を Opened と同じ手順で開く。
+        close_run_incomplete(prev_run, run, c, eb, rec, raw);
       }
       if (da == DataAction::Unexpected) {
         // 期待していないソースのデータは混ぜない。数えて可視化する(CLAUDE.md)。
@@ -831,7 +852,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
         c.unexpected_sources = run.unexpected_sources();
         break;
       }
-      if (da == DataAction::Opened) {
+      if (da == DataAction::Opened || da == DataAction::Reopened) {
         seq.reset();  // run 開始で sequence_number は 0 に戻る(SPEC §2.2)
         // ヒストは run start でリセット(SPEC §5.2)。CoBo 毎フレーム数も run 単位。
         if (g_mon.data_enabled()) {
@@ -900,24 +921,22 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
       c.sources_behind = eb.sources_behind(h.run_number);
       absorb(eb.poll(tick), eb, c, rec, raw);
       c.run_number_mismatch = run.run_number_mismatch();
+      c.runs_closed_without_eos = run.runs_closed_without_eos();
       break;
     }
 
     case MsgKind::EndOfStream: {
       ++c.eos;
-      const uint64_t mismatch_before = run.run_number_mismatch();
+      const uint32_t prev_run = run.run_number();
       const EosAction ea = run.on_eos(env.source_id, env.run_number);
-      if (run.run_number_mismatch() > mismatch_before) {
-        // Data 側と同格(SPEC §6.2-5 v1.10、R-P2-1)。run.run_number() は on_eos() が
-        // 閉じていてもまだ書き換わっていない(次の Opened まで不変)ので、開いていた
-        // run 番号がそのまま detail に出る。fatal() は戻らないので、JSON に出す前に
-        // カウンタを転写する(CLAUDE.md)。
-        c.run_number_mismatch = run.run_number_mismatch();
-        char buf[192];
-        std::snprintf(buf, sizeof(buf),
-                      "source_id=%u run_number_open=%u run_number_incoming=%u",
-                      env.source_id, run.run_number(), env.run_number);
-        fatal(c, kExitRunMismatch, "run-number-mismatch", buf);
+      if (ea == EosAction::ClosedIncomplete) {
+        // 別 run の EOS: 古い run を未完で閉じる(新しい run は開かない。この EOS は
+        // stale_eos として run 側が数え済み)。
+        std::fprintf(stderr,
+                     "root_sink: EndOfStream run=%u arrived while run %u was open — "
+                     "counted as stale_eos\n",
+                     env.run_number, prev_run);
+        close_run_incomplete(prev_run, run, c, eb, rec, raw);
       }
       if (ea == EosAction::Closed) {
         c.runs = run.runs_closed();
@@ -959,6 +978,7 @@ void consume(const uint8_t* data, std::size_t size, Counts& c, rootsink::RunStat
       c.stale_eos = run.stale_eos();
       c.unexpected_sources = run.unexpected_sources();
       c.run_number_mismatch = run.run_number_mismatch();
+      c.runs_closed_without_eos = run.runs_closed_without_eos();
       break;
     }
 
@@ -997,6 +1017,8 @@ void update_status_material(const rootsink::RunState& run, const Counts& c) {
   g_mon.status.pending_events = c.pending_events;
   g_mon.status.acquisition_restarts = d.acquisition_restarts;
   g_mon.status.sources_behind = c.sources_behind;
+  g_mon.status.fragments = d.fragments;
+  g_mon.status.runs_closed_without_eos = c.runs_closed_without_eos;
   std::memcpy(g_mon.status.frames_per_cobo, c.frames_per_cobo,
               sizeof(g_mon.status.frames_per_cobo));
 }
@@ -1304,6 +1326,8 @@ int main(int argc, char** argv) {
             recorder->close_run(item.run_number, now_ms());
             // TTree finalize の**後**にモニタヒストを書く(SPEC §6.5 / R10 = §12-9)。
             if (item.hists) recorder->write_monitor_root(item.run_number, *item.hists);
+          } else if (item.kind == RecordItem::Kind::RunCloseIncomplete) {
+            recorder->close_run_incomplete(item.run_number);  // monitor.root は書かない
           } else {
             recorder->write(std::move(item.event), now_ms());
           }
@@ -1336,6 +1360,8 @@ int main(int argc, char** argv) {
             raw_writer->close_run(item.run_number);
             // raw ツリー finalize の**後**(R10)。hists があるのは --no-root のときだけ。
             if (item.hists) raw_writer->write_monitor_root(item.run_number, *item.hists);
+          } else if (item.kind == RawItem::Kind::RunCloseIncomplete) {
+            raw_writer->close_run_incomplete(item.run_number);  // monitor.root は書かない
           } else {
             raw_writer->write(item.event, now_ms());
           }

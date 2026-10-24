@@ -438,6 +438,59 @@ void test_shutdown_without_eos_keeps_the_inprogress_name() {
   remove_tree(dir);
 }
 
+// 186(SPEC v1.53 §6.2-5): EOS が来ないまま次の run へ。close_run_incomplete() は旧 run を
+// run_raw_inprogress_ のまま閉じ(完成名・monitor.root 無し、中身は読める)、writer は
+// 次の run を普通に書いて EOS で finalize できる。
+void test_close_incomplete_keeps_inprogress_and_next_run_finalizes() {
+  const std::string dir = scratch_dir("incomplete");
+  const uint32_t kRunA = 41;
+  const uint32_t kRunB = 42;
+  const std::string dir_a = dir + "/run0041";
+  const std::string dir_b = dir + "/run0042";
+  {
+    rootsink::RawTreeConfig cfg;
+    cfg.output_root = dir;
+    cfg.expect = {{0, 0}};
+    rootsink::RawTreeWriter w(cfg);
+    // run A: 3 事象(idx 0,1,2)、EOS なし。
+    for (uint32_t idx = 0; idx < 3; ++idx) {
+      rootsink::BuiltEvent ev = make_event(kRunA, idx, 0, 0);
+      push_item(ev.fragments[0].items, pack_item(0, 0, 0, 40 + idx));
+      w.write(ev, 1000 + idx);
+    }
+    w.close_run_incomplete(kRunA);
+    CHECK(!w.is_open());
+    CHECK(w.fatal_reason() == nullptr);
+    // run B: 2 事象 + EOS。
+    for (uint32_t idx = 0; idx < 2; ++idx) {
+      rootsink::BuiltEvent ev = make_event(kRunB, idx, 0, 0);
+      push_item(ev.fragments[0].items, pack_item(0, 0, 0, 70 + idx));
+      w.write(ev, 2000 + idx);
+    }
+    w.close_run(kRunB);
+    CHECK(w.fatal_reason() == nullptr);
+  }
+  CHECK(!exists(dir_a + "/run0041_raw.root"));
+  CHECK(!exists(dir_a + "/run0041_monitor.root"));
+  const std::vector<std::string> left = list_prefixed(dir_a, "run_raw_inprogress_");
+  CHECK_EQ(left.size(), 1);
+  if (left.size() == 1) {
+    TFile in((dir_a + "/" + left[0]).c_str(), "READ");
+    TTree* tree = dynamic_cast<TTree*>(in.Get("raw"));
+    CHECK(tree != nullptr);
+    if (tree != nullptr) CHECK_EQ(tree->GetEntries(), 3);
+  }
+  CHECK(exists(dir_b + "/run0042_raw.root"));
+  CHECK_EQ(list_prefixed(dir_b, "run_raw_inprogress_").size(), 0);
+  {
+    TFile in((dir_b + "/run0042_raw.root").c_str(), "READ");
+    TTree* tree = dynamic_cast<TTree*>(in.Get("raw"));
+    CHECK(tree != nullptr);
+    if (tree != nullptr) CHECK_EQ(tree->GetEntries(), 2);
+  }
+  remove_tree(dir);
+}
+
 void test_zero_event_run_writes_no_file() {
   const std::string dir = scratch_dir("zeroev");
   const uint32_t kRun = 25;
@@ -723,6 +776,7 @@ int main() {
   test_two_asad_expectation_sets_the_block_layout();
   test_inprogress_name_until_close_run();
   test_shutdown_without_eos_keeps_the_inprogress_name();
+  test_close_incomplete_keeps_inprogress_and_next_run_finalizes();
   test_zero_event_run_writes_no_file();
   test_existing_final_file_is_not_overwritten();
   test_out_of_range_and_unexpected_are_counted_not_written();

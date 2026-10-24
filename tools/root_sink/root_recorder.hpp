@@ -303,7 +303,7 @@ class RecorderWorker;
 
 // worker への荷物(N>1 のときだけキューに乗る)。
 struct WorkerItem {
-  enum class Kind : uint8_t { Event, BeginRun, CloseRun };
+  enum class Kind : uint8_t { Event, BeginRun, CloseRun, CloseRunIncomplete };
   Kind kind = Kind::Event;
   BuiltEvent event;   // Kind::Event
   uint32_t run = 0;   // Kind::BeginRun
@@ -465,6 +465,9 @@ class RecorderWorker {
             break;
           case WorkerItem::Kind::CloseRun:
             close_run();
+            break;
+          case WorkerItem::Kind::CloseRunIncomplete:
+            shutdown();  // inprogress のまま閉じる。スレッドは続く(次の BeginRun を待つ)
             break;
           case WorkerItem::Kind::Event:
             write(item.event, item.now_ms);
@@ -782,6 +785,29 @@ class Recorder {
     item.event = std::move(ev);
     item.now_ms = now_ms;
     dispatch(std::move(item));
+  }
+
+  // EOS が来ないまま次の run が来た(SPEC v1.53 §6.2-5、TODO/186)。全 worker のキューを
+  // 流し切ってから、開いているパートを **inprogress のまま**閉じる(完成名にしない、
+  // monitor.root も書かせない)。shutdown() と違い worker は生き続け、次の run を書ける。
+  void close_run_incomplete(uint32_t run_number) {
+    if (workers_.size() == 1) {
+      workers_[0]->shutdown();
+    } else {
+      std::vector<std::future<void>> waits;
+      waits.reserve(workers_.size());
+      for (auto& w : workers_) {
+        WorkerItem item;
+        item.kind = WorkerItem::Kind::CloseRunIncomplete;
+        item.done = std::make_shared<std::promise<void>>();
+        waits.push_back(item.done->get_future());
+        w->submit(std::move(item));
+      }
+      for (std::future<void>& f : waits) f.wait();  // 在庫を吐き切るまで待つ(ロスレス)
+    }
+    std::fprintf(stderr, "root_sink: run %u closed without EOS — kept inprogress (incomplete)\n",
+                 run_number);
+    run_active_ = false;
   }
 
   // 全ソース EOS(run が閉じた)→ 全 worker を flush してから finalize。
