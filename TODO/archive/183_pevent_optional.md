@@ -1,6 +1,6 @@
 # 183 — root_sink: PEventTPC(TPCReco 形式)の書き出しをオプションに(mini の本番は off)
 
-**Status: IN PROGRESS**(2026-10-24 起票 Opus、実装 Sonnet implementer。ユーザー「TPCReco はワルシャワ向けで我々には不要です。これはオプション扱いにしたほうが良さそうです」)
+**Status: COMPLETED**(2026-10-24 ELITPC 反映・計測。起票 Opus、実装 Sonnet implementer。ユーザー「TPCReco はワルシャワ向けで我々には不要です。これはオプション扱いにしたほうが良さそうです」)
 
 ## 0. 背景
 - 182 の実測: root_sink の律速は PEventTPC の充填 + 直列化(1 本 ≈ 60 ms CPU / 事象 = 16.6 Hz、raw ツリーの費用 ≈ 0)。PEventTPC のファイルは 555 kB / 事象(graw の 2 倍)。
@@ -69,3 +69,8 @@
   **`example_root_sink_section_is_accepted`**(`include_str!("../config/daq_example.toml")` の `[root_sink]` 節をそのまま最小構成に差し込んで parse — daq_up.sh だけが知っているキーを足したら赤になる)。
 - root_sink の起動ログ: `--no-root` + `--raw-tree` のとき「no PEventTPC TTree (the raw tree and run{N}_monitor.root are still written)」(以前は「counting only, no TTree is written」で誤解を招いた)。
 - Mac: `cargo fmt --check` / `clippy --tests -D warnings` OK、`TPCDAQ_ROOT_SINK_BIN=… cargo test` **1112 passed / 0 failed / 1 ignored**、root_sink `make -j test-root` 0 failed。
+### ELITPC への反映 2 回目(2026-10-24 19:20–19:24)
+- `2911209` を bundle → ff → cargo build --release(15.8 s)→ root_sink の make → daq.toml に `pevent = false`(退避 `daq.toml.bak-2026-10-24-183b`)→ daq_down / up(失敗したら自動で戻す手順 — 不要だった)。
+- 確認: Idle・status 200・`/` 200、`pevent: false`、root_sink のログ「--no-root: no PEventTPC TTree (the raw tree and run{N}_monitor.root are still written)」+「writing raw TTree」、7 プロセス + root_sink(pgrep -f は自分の bash にも当たるので以前の「8」は 7 + bash)。
+- 182 の V5–V7(run 202–204、周期 10 / 3 / 1 ms): 78 / 169 Hz に完全追従、263 Hz で ≈ 220 Hz 頭打ち、溢れ 0、全 run 正常に閉じ、monitor.root は raw 側で書けた(182 の結果節)。
+- 終了時: daq.toml は `pevent = false` のまま(本番の設定)、params は物理(external、12.5 MHz・120 fC・full)。

@@ -1,6 +1,6 @@
 # 182 — root_sink の持続レートを実機で測る(181 の論点 1、2 年以内の 100 Hz 実験に向けて)
 
-**Status: IN PROGRESS**(2026-10-24 起票 Opus。ユーザー「始めてください。11 月も別に本番とまでは言いません。レートも未計算です。ただ、2 年以内に 100 Hz の実験をやる気です」)
+**Status: COMPLETED**(2026-10-24。起票 Opus。ユーザー「始めてください。11 月も別に本番とまでは言いません。レートも未計算です。ただ、2 年以内に 100 Hz の実験をやる気です」)
 
 ## 0. 目的
 - run 197(全 ch・12.5 MHz・≈ 110 Hz)で root_sink が ≈ 18 Hz しか出なかった。064 の「mini 152 events/s(workers 4)」は raw ツリー(v1.28)以前・Mac の数字。
@@ -46,3 +46,15 @@
 2. workers を増やせば比例して伸びる(4 本で ≈ 66 Hz)。ただし PEventTPC のファイル名が `runN_wK.root` になる。
 3. PEventTPC を online で書かない(`--no-root`、raw ツリー + graw だけ。PEventTPC は必要なら grawToEventTPC で後から)なら record スレッドの負荷が消える — 未計測(daq_up.sh が渡せない)。
 4. 速さと別に、**graw が ROOT の遅さの巻き添えになる構造(receiver の送信スレッド共用)は直す必要がある** — 181。
+
+### V5–V7: PEventTPC を書かない(183 の `pevent = false` = root_sink `--no-root --raw-tree`、2026-10-24 19:24–19:28、`~/test/bench183/`)
+| 設定 | 周期 | run | 事象 | 実入力 | 溢れ | 最後の書き込み | root_sink |
+|---|---|---|---|---|---|---|---|
+| V5 | 10 ms | 202 | 4,667 | ≈ 78 Hz(60 s) | 0 | stop と同時 | **入力に完全追従** |
+| V6 | 3 ms | 203 | 10,159 | ≈ 169 Hz(60 s) | 0 | stop と同時 | **入力に完全追従** |
+| V7 | 1 ms | 204 | 7,882 | ≈ 263 Hz(30 s、FW の読み出し 2.94 ms の上限近く) | 0 | stop の ≈ 6 s 後 | ≈ 220 Hz 前後で頭打ち |
+- 全 run `eos_closed true`、`run N closed … incomplete 0 late 0`、`run{N}_raw.root` と **`run{N}_monitor.root`(raw 側で書いた)** がある、`run{N}.root`(PEventTPC)は無い。
+- `top -H`: raw の書き手 1 本が律速 — V5 22 s / 55 s(≈ 5 ms CPU / 事象)、V6 42 s(≈ 4.5 ms / 事象、80 %)、V7 91 %。**raw ツリー 1 本の上限 ≈ 200–220 Hz**(全 ch・mini)。
+- **結論: PEventTPC を書かないと、全 ch・12.5 MHz で 100 Hz を 2 倍の余裕で通る**(PEventTPC あり workers 1 の 16.6 Hz の 10 倍以上)。次の上限は raw ツリーの単一書き手(≈ 200 Hz)と FW の読み出し(≈ 340 Hz)。
+  ELITPC(4 AsAd)は事象あたり 4 倍なので raw 1 本で ≈ 50 Hz 見込み(ELITPC 100 Hz は後回しの裁定のまま)。
+- 構造の問題(graw が ROOT の遅さの巻き添え、Reset の数え漏れ、EOS 喪失)は 181(Fable)に残る。
