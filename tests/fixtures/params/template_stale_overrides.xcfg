@@ -28,6 +28,7 @@
 				<readoutDepth unit="buckets" range="[0, 512]">512</readoutDepth>
 				<enableWriteHittedregister>true</enableWriteHittedregister>
 				<triggerMode range="{external, external_2p, noTrigger, onMultiplicity, onMultiplicity_2p, onRequest, onRequest_2p, onSlowControl, onSlowControl_2p, periodically, periodically_2p}">external</triggerMode>
+				<triggerPeriod unit="ms">1000</triggerPeriod>
 				<triggerDelay unit="10ns">1748</triggerDelay>
 				<writingClockFrequency unit="MHz" range="[1.0, 200.0]">25.0</writingClockFrequency>
 				<enableZeroSuppression>false</enableZeroSuppression>

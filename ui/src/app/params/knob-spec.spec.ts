@@ -24,9 +24,9 @@ function loadFixtureKnobs(): Record<string, unknown> {
 }
 
 describe('KNOB_FIELDS ↔ params_roundtrip.json(過不足なし)', () => {
-  it('12 グループ・15 葉(10 単純 + zeroSuppression 2 + pulser 3)', () => {
-    expect(KNOB_GROUPS).toHaveLength(12);
-    expect(KNOB_FIELDS).toHaveLength(15);
+  it('13 グループ・16 葉(11 単純 + zeroSuppression 2 + pulser 3)', () => {
+    expect(KNOB_GROUPS).toHaveLength(13);
+    expect(KNOB_FIELDS).toHaveLength(16);
   });
 
   it('KNOB_FIELDS のキー集合 = フィクスチャの knobs を平らにしたキー集合(過不足なし)', () => {
@@ -103,6 +103,19 @@ describe('個別ノブの型・範囲(docs/PARAMS_KNOBS_ja.md §7 の写し)', (
       min: 0,
       max: 4095,
     });
+  });
+
+  it('triggerPeriod_ms は int [1, 21474] ms、Module.triggerPeriod、triggerMode の直後(TODO/179)', () => {
+    expect(knobField('triggerPeriod_ms')).toMatchObject({
+      kind: 'int',
+      scopeDepth: 0,
+      unit: 'ms',
+      min: 1,
+      max: 21474,
+      xcfgElements: ['triggerPeriod'],
+    });
+    const keys = KNOB_FIELDS.map((field) => field.key);
+    expect(keys.indexOf('triggerPeriod_ms')).toBe(keys.indexOf('triggerMode') + 1);
   });
 
   it('zeroSuppression.enabled / pulser.enabled / fpnRead は bool', () => {

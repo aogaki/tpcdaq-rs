@@ -47,7 +47,7 @@ export const PEAKING_TIME_NS: readonly number[] = [
   70, 117, 232, 280, 334, 383, 502, 541, 568, 632, 721, 760, 831, 870, 976, 1014,
 ];
 
-/** 12 ノブ(PARAMS_KNOBS_ja.md §7)。葉は 15(`zeroSuppression` 2 + `pulser` 3 + 単純 10)。 */
+/** 13 ノブ(PARAMS_KNOBS_ja.md §7)。葉は 16(`zeroSuppression` 2 + `pulser` 3 + 単純 11)。 */
 export const KNOB_GROUPS: readonly KnobGroup[] = [
   {
     name: 'triggerDelay',
@@ -90,6 +90,23 @@ export const KNOB_GROUPS: readonly KnobGroup[] = [
         scopeDepth: 0,
         choices: ['external', 'noTrigger', 'onRequest', 'onSlowControl', 'periodically'],
         xcfgElements: ['triggerMode'],
+      },
+    ],
+  },
+  {
+    name: 'triggerPeriod_ms',
+    label: 'Trigger period (periodically only)',
+    fields: [
+      {
+        key: 'triggerPeriod_ms',
+        label: 'Trigger period (periodically only)',
+        kind: 'int',
+        scopeDepth: 0,
+        unit: 'ms',
+        // 上限 21474 ms: GET は 100000 * ms を int で計算する(CoBoNode::setTriggerPeriod)。TODO/179。
+        min: 1,
+        max: 21474,
+        xcfgElements: ['triggerPeriod'],
       },
     ],
   },
@@ -251,7 +268,7 @@ export const KNOB_GROUPS: readonly KnobGroup[] = [
   },
 ];
 
-/** 15 の葉(表示・往復用のフラット版)。 */
+/** 16 の葉(表示・往復用のフラット版)。 */
 export const KNOB_FIELDS: readonly KnobField[] = KNOB_GROUPS.flatMap((group) => group.fields);
 
 /** 全 [`KnobField.xcfgElements`] を集めたもの(Preview xcfg のハイライト判定に使う)。 */

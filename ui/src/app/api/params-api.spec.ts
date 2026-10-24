@@ -24,6 +24,7 @@ const PARAMS_JSON: ParamsJson = {
     triggerDelay: 1748,
     writingClockFrequency_MHz: 25.0,
     triggerMode: 'external',
+    triggerPeriod_ms: 1000,
     globalThreshold: 1,
     lsbThreshold: 15,
     gain: '120fC',

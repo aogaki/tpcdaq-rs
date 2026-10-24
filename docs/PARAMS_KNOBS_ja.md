@@ -49,7 +49,7 @@ Node[CoBo].Instance[0].AsAd[1].Aget[2].channel[5].LSBThresholdValue
 - 照合したノブ: **11**(§2 の表 10 個 + §2.1 裁定 2 の `TriggerInhibition`)
 - 初回(2026-09-22 午前)で位置が一致 → そのまま実装: **7**(§3)
 - 表と食い違ったので一旦保留 → **同日のレビュー裁定で位置を確定して実装: 4**(§4)
-- **2026-09-22 時点で 11 ノブすべて実装済み**(当時。2026-10-10 に `fpnRead` が加わり現在は 12 ノブ・葉 15 — §7)(JSON の葉は 13 個 —
+- **2026-09-22 時点で 11 ノブすべて実装済み**(当時。2026-10-10 に `fpnRead`、2026-10-24 に `triggerPeriod_ms` が加わり現在は 13 ノブ・葉 16 — §7)(JSON の葉は 13 個 —
   `zeroSuppression` が 2、`pulser` が 3 に分かれるため)
 
 ## 3. 初回の照合で位置が一致したノブ(7)
@@ -222,7 +222,7 @@ JSON の意味(「AsAd1 全体」)は変わらず、`Params::effective_value` �
 **実機の解決器と合わない**ので、SPEC §3 にはこの節の方式(展開)を写す。
 生成物が大きくなるのは許容(JSON の意味は不変)。
 
-## 7. 実装済みノブ一覧(JSON キー → xcfg。2026-10-10 時点 — 12 ノブ・葉 15)
+## 7. 実装済みノブ一覧(JSON キー → xcfg。2026-10-24 時点 — 13 ノブ・葉 16)
 
 `src/params/schema.rs` の `KNOBS` が唯一の定義。スコープ深さ = CoBo 0 / AsAd 1 / AGET 2 / channel 3。
 `exceptions[].at` はこの深さ**以下**(= 同じか粗い)だけ許され、粗い場合は実在 id の直積に展開される(§6)。
@@ -232,6 +232,7 @@ JSON の意味(「AsAd1 全体」)は変わらず、`Params::effective_value` �
 | `triggerDelay` | CoBo | `Module.triggerDelay` | int ≥ 0(unit 10ns) |
 | `writingClockFrequency_MHz` | CoBo | `Module.writingClockFrequency` | {12.5, 25, 50, 100} |
 | `triggerMode` | CoBo | `Module.triggerMode` | {external, noTrigger, onRequest, onSlowControl, periodically} |
+| `triggerPeriod_ms` | CoBo | `Module.triggerPeriod` | int [1, 21474](unit ms) |
 | `zeroSuppression.enabled` | CoBo | `Module.enableZeroSuppression` | bool |
 | `pulser.enabled` | CoBo | `Generator.periodicModeEnabled` | bool |
 | `pulser.voltage_mV` | CoBo | `Generator.amplitudeStart` | real [-1000, 1000] |
@@ -244,6 +245,12 @@ JSON の意味(「AsAd1 全体」)は変わらず、`Params::effective_value` �
 | `gain` | channel | `Gain` | {10pC, 120fC, 1pC, 240fC} |
 | `triggerInhibition` | channel | `TriggerInhibition` | {inhibit_channel, inhibit_trigger, none} |
 | `zeroSuppression.threshold` | channel | `zeroSuppressionThreshold` | int [0, 4095] |
+
+`triggerPeriod_ms`(2026-10-24、TODO/179)は周期トリガ(`triggerMode=periodically`)の周期。GET は `Module.triggerPeriod_10ns` があればそれを、無ければ
+`100000 * Module.triggerPeriod`(ms → 10 ns)をレジスタ `triggerPeriod_10ns` へ書く(`CoBoNode::setTriggerPeriod`、`getIntValue()` の型 `Int` = `int`)。
+`100000 * ms` が int に収まる **21474 ms が上限**(xcfg に range 属性は無い)。0 は FW の挙動が未確認なので下限は 1。
+テンプレートに `Module.triggerPeriod_10ns` があると GET は `triggerPeriod` を無視するので、render は `TemplateShape` エラーにする(黙って効かないノブを作らない)。
+実際の取得間隔は「周期 + 1 事象の読み出し」(全 ch 読み出しで + 2.931 ms — SPEC §13)。
 
 **管理しない = テンプレート由来のまま**の主なもの(意図的): `Module.enableWriteHittedregister`、
 `channel.Reading`、`Module.zeroSuppressionInverted`、`Global.Reg1.TestModeSelection`、

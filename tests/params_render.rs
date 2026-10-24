@@ -35,9 +35,9 @@ fn params_json(knobs_and_exceptions: &str) -> String {
     )
 }
 
-/// 全ノブ(12 個 = 葉 15 個)をテンプレートの現行値にしたうえで、一部だけ差し替えるための素。
+/// 全ノブ(13 個 = 葉 16 個)をテンプレートの現行値にしたうえで、一部だけ差し替えるための素。
 /// `KNOBS_BODY` は `{}` を含まないので `format!` で包んで使う(`replace("}")` の誤爆を避ける)。
-const KNOBS_BODY: &str = r#""triggerDelay":1748,"writingClockFrequency_MHz":25.0,"triggerMode":"external","globalThreshold":1,"lsbThreshold":15,"gain":"120fC","triggerInhibition":"none","peakingTime_ns":232,"readout":"full","fpnRead":true,"zeroSuppression":{"enabled":false,"threshold":600},"pulser":{"enabled":false,"voltage_mV":-1000.0,"period_ms":1000}"#;
+const KNOBS_BODY: &str = r#""triggerDelay":1748,"writingClockFrequency_MHz":25.0,"triggerMode":"external","triggerPeriod_ms":1000,"globalThreshold":1,"lsbThreshold":15,"gain":"120fC","triggerInhibition":"none","peakingTime_ns":232,"readout":"full","fpnRead":true,"zeroSuppression":{"enabled":false,"threshold":600},"pulser":{"enabled":false,"voltage_mV":-1000.0,"period_ms":1000}"#;
 
 /// `"knobs":{…}` の形。
 fn knobs_template_values() -> String {
@@ -490,7 +490,7 @@ fn an_exception_value_is_range_checked_like_the_uniform_value() {
 /// 期待値の出典:
 /// ```text
 /// $ shasum -a 256 tests/fixtures/params/params_roundtrip.json
-/// 1f04446c4dd2c8f27f02eb08208378537d2f48d9b27598956684f428af4327ba
+/// 2e27d9a063636842aefe69f3fdd4a7ba2217aba7245ee8e97a300c26ef4a8831
 /// ```
 #[test]
 fn the_config_id_is_the_template_stem_plus_the_json_hash() {
@@ -499,14 +499,14 @@ fn the_config_id_is_the_template_stem_plus_the_json_hash() {
 
     let rendered = render(&params, &template).unwrap();
 
-    assert_eq!(rendered.config_id, "mini-fixture__1f04446c");
+    assert_eq!(rendered.config_id, "mini-fixture__2e27d9a0");
     assert_eq!(
         rendered.configure_file_name,
-        "configure-mini-fixture__1f04446c.xcfg"
+        "configure-mini-fixture__2e27d9a0.xcfg"
     );
     assert_eq!(
         rendered.prepare_file_name,
-        "prepare-mini-fixture__1f04446c.xcfg"
+        "prepare-mini-fixture__2e27d9a0.xcfg"
     );
 }
 
@@ -633,6 +633,95 @@ fn readout_and_fpn_read_each_flip_only_their_own_aget_element() {
             "<isFPNRead>false</isFPNRead>"
         )
     );
+}
+
+/// `triggerPeriod_ms`(TODO/179): CoBo スコープの int [1, 21474]。GET は `100000 * ms` を int で
+/// 計算する(CoBoNode::setTriggerPeriod)ので 21474 ms が上限(100000 * 21474 = 2,147,400,000 < 2^31-1)。
+#[test]
+fn trigger_period_ms_is_a_required_int_in_1_to_21474() {
+    let with = |to: &str| {
+        Params::from_json_str(&params_json(&format!(
+            r#"{}, "exceptions":[]"#,
+            knobs_with("\"triggerPeriod_ms\":1000", to)
+        )))
+    };
+
+    // 無い → MissingKnob(",\"triggerPeriod_ms\":1000" ごと消す)。
+    let missing = params_json(&format!(
+        r#"{}, "exceptions":[]"#,
+        knobs_with("\"triggerPeriod_ms\":1000,", "")
+    ));
+    assert!(matches!(
+        Params::from_json_str(&missing).unwrap_err(),
+        ParamsError::MissingKnob { .. }
+    ));
+
+    // 境界: 1 と 21474 は通る。
+    assert!(with("\"triggerPeriod_ms\":1").is_ok());
+    assert!(with("\"triggerPeriod_ms\":21474").is_ok());
+    // 範囲外。
+    assert!(matches!(
+        with("\"triggerPeriod_ms\":0").unwrap_err(),
+        ParamsError::OutOfRange { .. }
+    ));
+    assert!(matches!(
+        with("\"triggerPeriod_ms\":21475").unwrap_err(),
+        ParamsError::OutOfRange { .. }
+    ));
+    // 型違い(小数・文字列)。
+    assert!(matches!(
+        with("\"triggerPeriod_ms\":1.5").unwrap_err(),
+        ParamsError::BadType { .. }
+    ));
+    assert!(matches!(
+        with("\"triggerPeriod_ms\":\"10\"").unwrap_err(),
+        ParamsError::BadType { .. }
+    ));
+}
+
+/// `triggerPeriod_ms` を変えると `Module.triggerPeriod` の**テキストだけ**が変わる(unit="ms" は残る)。
+#[test]
+fn trigger_period_ms_rewrites_only_the_module_trigger_period_text() {
+    let template = template_mini();
+    let json = params_json(&format!(
+        r#"{}, "exceptions":[]"#,
+        knobs_with("\"triggerPeriod_ms\":1000", "\"triggerPeriod_ms\":10")
+    ));
+    let params = Params::from_json_str(&json).unwrap();
+
+    let rendered = render(&params, &template).unwrap();
+
+    assert!(rendered
+        .xml
+        .contains("<triggerPeriod unit=\"ms\">10</triggerPeriod>"));
+    assert_eq!(
+        rendered.xml,
+        template.replace(
+            "<triggerPeriod unit=\"ms\">1000</triggerPeriod>",
+            "<triggerPeriod unit=\"ms\">10</triggerPeriod>"
+        )
+    );
+}
+
+/// `Module.triggerPeriod_10ns` があると GET は `triggerPeriod` を無視する(CoBoNode::setTriggerPeriod)。
+/// 黙って効かないノブを作らない → render をエラーにする。
+#[test]
+fn a_template_with_trigger_period_10ns_is_rejected() {
+    let template = template_mini().replacen(
+        "<triggerPeriod unit=\"ms\">1000</triggerPeriod>",
+        "<triggerPeriod unit=\"ms\">1000</triggerPeriod>\n\t\t\t\t<triggerPeriod_10ns>5000</triggerPeriod_10ns>",
+        1,
+    );
+    assert!(template.contains("triggerPeriod_10ns"));
+    let params = Params::from_json_str(&params_json_template_values()).unwrap();
+
+    let err = render(&params, &template).unwrap_err();
+
+    assert!(
+        matches!(err, ParamsError::TemplateShape { .. }),
+        "unexpected error: {err}"
+    );
+    assert!(err.to_string().contains("triggerPeriod_10ns"), "{err}");
 }
 
 #[test]

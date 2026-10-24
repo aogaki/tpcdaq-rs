@@ -4,18 +4,19 @@
 //! AsAd / AGET / ch だけ違う値は `exceptions` に入る。これは xcfg 自身の継承規則
 //! (`id="*"` が既定、個別 id が上書き)を JSON に写したもの。
 //!
-//! # ノブ集合(12 ノブ・JSON の葉 15)
+//! # ノブ集合(13 ノブ・JSON の葉 16)
 //!
 //! `docs/PARAMS_KNOBS_ja.md` §7 の表が正。**テンプレート xcfg と位置・型・範囲が
 //! 一致したノブだけ**を実装している(078 §2 の表と食い違う項目は同文書の照合結果で確定):
 //!
 //! - CoBo: `triggerDelay` / `writingClockFrequency_MHz` / `triggerMode` /
+//!   `triggerPeriod_ms`(周期トリガの周期、2026-10-24 TODO/179)/
 //!   `zeroSuppression.enabled` / `pulser.{enabled,voltage_mV,period_ms}`
 //! - AGET: `globalThreshold` / `peakingTime_ns` / `readout`(`isAllChannelRead` のみ)/
 //!   `fpnRead`(`isFPNRead`、2026-10-10 TODO/111 §5.4 で追加)
 //! - channel: `lsbThreshold` / `gain` / `triggerInhibition` / `zeroSuppression.threshold`
 //!
-//! 葉が 15 なのは `zeroSuppression` が 2 葉、`pulser` が 3 葉に分かれるため(12 ノブ中 10 は単純な 1 葉)。
+//! 葉が 16 なのは `zeroSuppression` が 2 葉、`pulser` が 3 葉に分かれるため(13 ノブ中 11 は単純な 1 葉)。
 //!
 //! 型と範囲は xcfg の `range` 属性をそのまま写す。`range` が無いもの
 //! (`Module.triggerDelay`)は型と非負だけを見る(GET 側 `CoBoNode::setTriggerDelay` も
@@ -99,6 +100,18 @@ pub const KNOBS: &[KnobSpec] = &[
             "onSlowControl",
             "periodically",
         ]),
+    },
+    // `triggerPeriod_ms` = 周期トリガ(triggerMode=periodically)の周期(TODO/179)。
+    KnobSpec {
+        name: "triggerPeriod_ms",
+        scope: Scope::Cobo,
+        suffix: &["Module", "triggerPeriod"],
+        // xcfg に range 属性なし(unit="ms")。GET は 100000 * ms を int で計算する
+        // (CoBoNode::setTriggerPeriod、Int = int)ので 21474 ms が上限。0 は FW の挙動が未確認。
+        kind: KnobKind::Int {
+            min: Some(1),
+            max: Some(21474),
+        },
     },
     KnobSpec {
         name: "globalThreshold",

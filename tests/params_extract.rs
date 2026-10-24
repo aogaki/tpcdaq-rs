@@ -249,6 +249,23 @@ fn a_missing_leaf_is_listed_as_unset_and_not_filled_with_a_default() {
     assert_eq!(json["unsupported"], json!([]));
 }
 
+/// `Module.triggerPeriod` が無い(TODO/179)→ `unset` に `triggerPeriod_ms`、ほかは読める。
+#[test]
+fn a_template_without_trigger_period_lists_it_as_unset() {
+    let xml = replaced(
+        &fixture("template_mini.xcfg"),
+        "\n\t\t\t\t<triggerPeriod unit=\"ms\">1000</triggerPeriod>",
+        "",
+    );
+
+    let json = extract("t.xcfg", &xml).unwrap().to_json();
+
+    assert_eq!(json["unset"], json!(["triggerPeriod_ms"]));
+    assert_eq!(json["knobs"].get("triggerPeriod_ms"), None);
+    assert_eq!(json["knobs"]["triggerDelay"], json!(1748));
+    assert_eq!(json["unsupported"], json!([]));
+}
+
 /// zCoBo FW が扱えない `onMultiplicity` → `unsupported`(テキストそのまま)、`knobs` に無い。
 #[test]
 fn a_value_outside_the_knob_kind_is_unsupported_with_the_text_found() {
@@ -329,6 +346,12 @@ fn real_templates_round_trip_byte_for_byte_through_extract_and_render() {
         let json = extracted.to_json();
         assert_eq!(json["unset"], json!([]), "{path}: unset");
         assert_eq!(json["unsupported"], json!([]), "{path}: unsupported");
+        // TODO/179: 実テンプレートの triggerPeriod は 100(pedestals)/ 1000(physics・pulser)ms。
+        let period = json["knobs"]["triggerPeriod_ms"].as_i64();
+        assert!(
+            matches!(period, Some(100 | 1000)),
+            "{path}: triggerPeriod_ms = {period:?}"
+        );
 
         let rendered = render(&params_from(&extracted), &template).unwrap();
         assert!(

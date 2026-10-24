@@ -110,6 +110,7 @@ fn the_rendered_xcfg_resolves_to_the_json_values_for_every_instance() {
             "triggerDelay": 2000,
             "writingClockFrequency_MHz": 12.5,
             "triggerMode": "periodically",
+            "triggerPeriod_ms": 10,
             "globalThreshold": 3,
             "lsbThreshold": 12,
             "gain": "240fC",
@@ -136,9 +137,9 @@ fn the_rendered_xcfg_resolves_to_the_json_values_for_every_instance() {
     let path = write_temp("mini_rendered.xcfg", &rendered.xml);
 
     let checked = check_all_instances(&bin, &path, &params, &rendered.xml, &["0", "1"]);
-    // KNOBS のエントリは CoBo 7 / AGET 4(globalThreshold, peakingTime, readout, fpnRead)/ channel 4。
-    // 2 CoBo instance × (7 + 4×(2 AsAd × 2 AGET) + 4×(2 × 2 × 6 ch)) = 2 × (7 + 16 + 96) = 238
-    assert_eq!(checked, 238, "照合したインスタンス数");
+    // KNOBS のエントリは CoBo 8 / AGET 4(globalThreshold, peakingTime, readout, fpnRead)/ channel 4。
+    // 2 CoBo instance × (8 + 4×(2 AsAd × 2 AGET) + 4×(2 × 2 × 6 ch)) = 2 × (8 + 16 + 96) = 240
+    assert_eq!(checked, 240, "照合したインスタンス数");
     eprintln!("params_ccfg_oracle: mini fixture で {checked} インスタンスを照合");
 
     // TODO/111: 生成物から**抽出**した knobs + exceptions の有効値も ECC の解決と全数一致する
@@ -158,7 +159,7 @@ fn the_rendered_xcfg_resolves_to_the_json_values_for_every_instance() {
     )
     .unwrap();
     let checked = check_all_instances(&bin, &path, &extracted_params, &rendered.xml, &["0", "1"]);
-    assert_eq!(checked, 238, "抽出した値で照合したインスタンス数");
+    assert_eq!(checked, 240, "抽出した値で照合したインスタンス数");
     eprintln!("params_ccfg_oracle: 抽出した値で {checked} インスタンスを照合");
 }
 
@@ -236,7 +237,7 @@ fn the_stale_explicit_override_wins_in_the_template_and_is_gone_after_rendering(
 
     // 生成物では一様値に戻る。
     let json = r#"{"schema":"tpcdaq-params/1","template":"configure-mini-fixture.xcfg",
-        "knobs":{"triggerDelay":1748,"writingClockFrequency_MHz":25.0,"triggerMode":"external",
+        "knobs":{"triggerDelay":1748,"writingClockFrequency_MHz":25.0,"triggerMode":"external","triggerPeriod_ms":1000,
         "globalThreshold":1,"lsbThreshold":15,"gain":"120fC","triggerInhibition":"none",
         "peakingTime_ns":232,"readout":"full","fpnRead":true,
         "zeroSuppression":{"enabled":false,"threshold":600},
@@ -274,6 +275,7 @@ fn the_real_template_resolves_to_the_json_values_for_every_instance() {
             "triggerDelay": 1748,
             "writingClockFrequency_MHz": 25.0,
             "triggerMode": "external",
+            "triggerPeriod_ms": 1000,
             "globalThreshold": 1,
             "lsbThreshold": 15,
             "gain": "120fC",
@@ -322,6 +324,7 @@ fn the_real_template_round_trips_byte_for_byte() {
             "triggerDelay": 1748,
             "writingClockFrequency_MHz": 25.0,
             "triggerMode": "external",
+            "triggerPeriod_ms": 1000,
             "globalThreshold": 1,
             "lsbThreshold": 15,
             "gain": "120fC",

@@ -49,6 +49,7 @@ pub fn render(params: &Params, template_xml: &str) -> Result<Rendered, ParamsErr
         // **書き換える前**に集める。
         let ids = TemplateIds::collect(cobo);
         check_exception_targets(&ids, params)?;
+        check_no_trigger_period_10ns(cobo)?;
 
         for spec in KNOBS {
             let value =
@@ -100,6 +101,30 @@ pub fn render(params: &Params, template_xml: &str) -> Result<Rendered, ParamsErr
         config_id,
         xml: serialize(&doc),
     })
+}
+
+/// `Module.triggerPeriod_10ns` があると GET は `triggerPeriod` を無視する
+/// (CoBoNode::setTriggerPeriod)。効かないノブを黙って作らないため、あればエラー(TODO/179)。
+fn check_no_trigger_period_10ns(cobo: &mut Element) -> Result<(), ParamsError> {
+    for index in cobo.child_indices(INSTANCE) {
+        let Some(instance) = cobo.element_at(index) else {
+            continue;
+        };
+        let Some(module) = instance
+            .find_child("Module", None)
+            .and_then(|i| instance.element_at(i))
+        else {
+            continue;
+        };
+        if module.find_child("triggerPeriod_10ns", None).is_some() {
+            return Err(ParamsError::TemplateShape {
+                what: "Module.triggerPeriod_10ns があると GET は triggerPeriod を無視する\
+                       (CoBoNode::setTriggerPeriod)— テンプレートから外してください"
+                    .to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// テンプレートのファイル名 → `<id>` に使う stem。

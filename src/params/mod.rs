@@ -8,7 +8,7 @@
 //! - [`extract`]: その逆 — テンプレート xcfg からノブの値を読む(TODO/111、UI の初期値)。
 //! - [`paths`]: xcfg 上の位置の内部表現(CompoundConfig の `Path` 構文)。
 //!
-//! 実装済みのノブ(12 ノブ・葉 15)と、078 §2 の表と実 xcfg の照合結果は
+//! 実装済みのノブ(13 ノブ・葉 16)と、078 §2 の表と実 xcfg の照合結果は
 //! `docs/PARAMS_KNOBS_ja.md`(§7 が一覧)を参照。
 
 pub mod extract;
