@@ -120,14 +120,11 @@ pub(super) async fn get_status(State(controller): State<Arc<Controller>>) -> Rep
             .transport
             .with_command_timeout(controller.params.status_timeout);
         let mut notes = Vec::new();
-        let components: Vec<Value> = {
+        let statuses = {
             let mut sequencer = Sequencer::new(&controller.params, &mut transport);
-            sequencer
-                .collect_status(&mut notes)
-                .iter()
-                .map(ComponentStatus::to_json)
-                .collect()
+            sequencer.collect_status(&mut notes)
         };
+        let components: Vec<Value> = statuses.iter().map(ComponentStatus::to_json).collect();
         // `ecc_error` は **GET の error フラグ**をそのまま載せるだけ(SPEC §8.2 v1.14 =
         // TODO/043)。controller は解釈も加工もしない —— 表示の判断は UI(P4)の仕事。
         // ecc-bridge に届かなかったときは `state` と同じく `Unknown`: 「聞けていない」を
@@ -149,7 +146,16 @@ pub(super) async fn get_status(State(controller): State<Arc<Controller>>) -> Rep
         let operator = lock(&controller.session)
             .as_ref()
             .map(|s| s.operator.clone());
-        json!({
+        // TODO/185(SPEC §1.3 v1.53): 停止の待ち(分単位になりうる)の間だけ出す。Stopping 以外では
+        // キーごと省略。backlog は上で採った decoder の GetStatus から(停止の待ちは
+        // `controller.run` を握らないので、ここは待ちの間も応答する)。
+        let stopping = (run_state.phase == Phase::Stopping).then(|| {
+            json!({
+                "decoder_backlog": decoder_backlog(&statuses, &mut notes),
+                "waited_s": run_state.stopping_since.map(|since| since.elapsed().as_secs_f64()),
+            })
+        });
+        let mut body = json!({
             "phase": run_state.phase.to_string(),
             "run": run_state.active.as_ref().map(|active| json!({
                 "run": active.run,
@@ -171,7 +177,11 @@ pub(super) async fn get_status(State(controller): State<Arc<Controller>>) -> Rep
                     .load(Ordering::Relaxed),
             },
             "notes": notes,
-        })
+        });
+        if let (Some(stopping), Some(map)) = (stopping, body.as_object_mut()) {
+            map.insert("stopping".to_string(), stopping);
+        }
+        body
     })
     .await;
     match reply {
@@ -785,16 +795,21 @@ pub(super) async fn post_run_stop(
             return err_json(StatusCode::CONFLICT, why);
         }
         run_state.phase = Phase::Stopping;
+        // TODO/185: `/api/status.stopping.waited_s` の起点(phase と同じロック区間で立てる)。
+        run_state.stopping_since = Some(Instant::now());
         run_state.active.clone()
     };
 
     // 停止タスクが panic しても相を Stopping のまま固めない(次の run を出せなくしない)。
+    // 停止の待ち(分単位になりうる、SPEC §1.3 v1.53)の間 `controller.run` は握らない ——
+    // 握るのは上の相の切り替えと下の Idle への戻しだけ(`/api/status` を止めないため)。
     let recovery = Arc::clone(&controller);
     let reply = tokio::task::spawn_blocking(move || {
         let body = stop_run_blocking(&controller, &operator, active);
         let mut run_state = lock(&controller.run);
         run_state.phase = Phase::Idle;
         run_state.active = None;
+        run_state.stopping_since = None;
         ok_json(body)
     })
     .await;
@@ -804,6 +819,7 @@ pub(super) async fn post_run_stop(
             let mut run_state = lock(&recovery.run);
             run_state.phase = Phase::Idle;
             run_state.active = None;
+            run_state.stopping_since = None;
             error!(error = %e, "run stop task died — back to Idle");
             err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1123,6 +1139,16 @@ mod tests {
                 frames_type1: None,
                 frames_type2: None,
                 compact_size_mismatch: None,
+                decoder_link_dropped_frames: None,
+                decoder_link_dropped_batches: None,
+                decoder_link_dropped_heartbeats: None,
+                graw_frames: None,
+                decoder_frames_in: None,
+                decoder_fragments_out: None,
+                decoder_abandoned: None,
+                lost_receiver_to_graw: None,
+                lost_receiver_to_decoder: None,
+                root_complete: None,
             },
             files: vec![
                 OutputFile {

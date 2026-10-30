@@ -67,6 +67,15 @@ pub(super) struct MockTransport {
     /// コンポーネント名 → 応答に載せる `run_number`(115)。未登録 = `null`
     /// (実コンポーネントは run を持っていないとき鍵を null にする)。
     pub(super) run_numbers: BTreeMap<String, u32>,
+    /// 185: (コンポーネント名, metrics のキー) → 仮想時刻(`slept`)がこの値に達する**前**の
+    /// GetStatus 1 回ごとにそのキーが 1 ずつ増える(以後は止まる)。強制 EOS の後も下流が
+    /// 書き出しを続けている姿の模擬。値は [`Self::moving_values`]。
+    pub(super) moving_until: BTreeMap<(String, String), Duration>,
+    pub(super) moving_values: BTreeMap<(String, String), u64>,
+    /// 185: EOS 完了を「仮想時刻(`slept`)がこの値に達した後の GetStatus」にする
+    /// (`eos_after_polls` と同じく decoder / graw-writer への GetStatus で判定。どちらかが
+    /// 成り立てば閉じた形)。GetStatus の回数に依らずに「何秒後に閉じるか」を書くため。
+    pub(super) eos_after_slept: Option<Duration>,
     pub(super) slept: Duration,
 }
 
@@ -120,7 +129,34 @@ impl MockTransport {
             unreachable: Vec::new(),
             states: BTreeMap::new(),
             run_numbers: BTreeMap::new(),
+            moving_until: BTreeMap::new(),
+            moving_values: BTreeMap::new(),
+            eos_after_slept: None,
             slept: Duration::ZERO,
+        }
+    }
+
+    /// 185: `component` の metrics `key` を、仮想時刻 `until` まで GetStatus のたびに 1 ずつ
+    /// 増やす(以後は止まる)。キーが metrics に無ければ足す。
+    pub(super) fn counter_moves_until(
+        mut self,
+        component: &str,
+        key: &str,
+        until: Duration,
+    ) -> Self {
+        self.moving_until
+            .insert((component.to_string(), key.to_string()), until);
+        self
+    }
+
+    /// 185: `component` の metrics の `key` を `value` に置き換える(無ければ足す)。
+    pub(super) fn set_metric(&mut self, component: &str, key: &str, value: Value) {
+        let metrics = self
+            .metrics
+            .entry(component.to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(map) = metrics.as_object_mut() {
+            map.insert(key.to_string(), value);
         }
     }
 
@@ -300,6 +336,25 @@ impl Transport for MockTransport {
         }
 
         let mut metrics = self.metrics.get(&name).cloned().unwrap_or(Value::Null);
+        if matches!(command, Command::GetStatus) {
+            // 185: 動き続けるカウンタ(仮想時刻 `until` まで GetStatus 1 回につき +1)。
+            let moving: Vec<((String, String), Duration)> = self
+                .moving_until
+                .iter()
+                .filter(|((component, _), _)| component == &name)
+                .map(|(key, until)| (key.clone(), *until))
+                .collect();
+            for (key, until) in moving {
+                let value = self.moving_values.entry(key.clone()).or_insert(0);
+                if self.slept < until {
+                    *value += 1;
+                }
+                let value = *value;
+                if let Some(map) = metrics.as_object_mut() {
+                    map.insert(key.1, json!(value));
+                }
+            }
+        }
         if matches!(command, Command::GetStatus) && self.receivers.contains(&name) {
             // 033-E: 受信バイト数の進み方(step == 0 = 静止)。
             // **EOS の進み方(`eos_polls`)には数えない** —— 静止観測は別軸。
@@ -317,7 +372,8 @@ impl Transport for MockTransport {
             self.eos_polls += 1;
             let closed = self
                 .eos_after_polls
-                .is_some_and(|after| self.eos_polls > after);
+                .is_some_and(|after| self.eos_polls > after)
+                || self.eos_after_slept.is_some_and(|at| self.slept >= at);
             if closed {
                 if let Some(map) = metrics.as_object_mut() {
                     if map.contains_key("eos_in") {

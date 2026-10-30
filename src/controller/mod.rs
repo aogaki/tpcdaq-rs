@@ -51,7 +51,9 @@
 //!
 //! # 中止(SPEC §1.3 v1.6)
 //!
-//! 中止も必ず EOS で閉じる: `ecc stop`(不達でも続行)→ receiver へ `Stop`(= 強制 EOS)→
+//! 中止も必ず EOS で閉じる(v1.53 / TODO/185: 閉じ方は正常停止と同じで、第一段の受信静止も
+//! 通す —— 違うのは `reason` のラベルだけ): `ecc stop`(不達でも続行)→ 受信静止 →
+//! receiver へ `Stop`(= 強制 EOS)→ 下流が進んでいる限り待つ →
 //! EOS がチェーンを流れて run がクローズしたことを graw-writer / decoder の `GetStatus` で
 //! 確認 → **その後で**各コンポーネントの `Stop` / `Reset`。run クローズ前に decoder を
 //! `Reset` しない(送出打ち切りの seq ギャップが root-sink を fatal 死させるため)。
@@ -360,6 +362,9 @@ struct ActiveRun {
 struct RunState {
     phase: Phase,
     active: Option<ActiveRun>,
+    /// 停止を始めた時刻(TODO/185: `/api/status.stopping.waited_s` の起点)。phase を `Stopping` に
+    /// するのと同じロック区間で立て、`Idle` に戻すときに消す。
+    stopping_since: Option<Instant>,
     /// 124(Fable B-2): slowctl へ送った power コマンドが返るまでの**占有の印**。
     /// run/start の `Starting` と同じ手口 —— 短いロックで印を立て、REQ(最長 10 s)は
     /// ロックの外で待つ。立っている間は run/start と 2 本目の power を 409 で弾く。
