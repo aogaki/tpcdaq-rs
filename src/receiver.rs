@@ -16,9 +16,16 @@
 //! - **drain タスクは絶対に止めない**。内部キューが満杯なら当該フレームを破棄して
 //!   [`Metrics::overflow_frames`] を進め、コンポーネントを Error として報告する
 //!   (SPEC §1.4-3)。ソケット読みをブロックさせない = 下流の遅延を CoBo へ逆圧しない。
-//! - 送信タスクは **専用 OS スレッド**に置く。ZMQ の送信は HWM 到達でブロックする
-//!   (= ロスレスの背圧そのもの)ので、tokio のワーカを塞がない場所で待たせる。
-//! - `EndOfStream` は間引き規則から除外(SPEC §2.2)。キューが満杯でも捨てず、空くまで待つ。
+//! - 送信タスクは **専用 OS スレッド**に置く。graw-writer リンクの送信は HWM 到達でブロック
+//!   する(= ロスレスの背圧そのもの)ので、tokio のワーカを塞がない場所で待たせる。
+//! - **decoder リンクは待たない**(SPEC §1.4-7 v1.53、TODO/184): Data / Heartbeat は
+//!   `ZMQ_DONTWAIT` で 1 回だけ送り、満杯・相手不在なら `decoder_link_dropped_*` に数えて
+//!   落とす(落としたバッチでは sequence_number を進めない)。decoder → root-sink の遅れが
+//!   送信スレッドごと graw を止めた run 197 の再発防止。
+//! - `EndOfStream` は間引き規則から除外(SPEC §2.2)。キューが満杯でも捨てず、空くまで待つ
+//!   (decoder リンクでも待つ)。
+//! - **Error 中の `Stop` も実行する**(SPEC §1.3 v1.53 ②): 強制 EOS を出せるように。状態は
+//!   Error のまま、脱出は `Reset` だけ。
 //!
 //! # 状態機械(SPEC §1.3)
 //!
@@ -156,6 +163,13 @@ struct Metrics {
     extra_connections: AtomicU64,
     /// 1 バイトも運ばずに終わった接続数(= run 境界を構成しなかった接続、SPEC §1.4-6)。
     empty_connections: AtomicU64,
+    /// decoder リンクが満杯 / 相手不在で落としたバッチのフレーム数の合計(SPEC §1.4-7 v1.53、
+    /// TODO/184)。graw の喪失ではない(graw は `overflow_frames` 側)。
+    decoder_link_dropped_frames: AtomicU64,
+    /// 同じく落としたバッチ数。
+    decoder_link_dropped_batches: AtomicU64,
+    /// 同じく落とした Heartbeat 数。
+    decoder_link_dropped_heartbeats: AtomicU64,
     /// 最後にソケットから 1 バイト以上読めた時刻(unix ns)。**0 = この run では未受信**。
     /// 0 Hz(トリガ無し)と stale link を運用で切り分けるための材料(SPEC §1.4-6)。
     last_read_unix_ns: AtomicU64,
@@ -170,6 +184,8 @@ struct Metrics {
     logged_framer_reset: AtomicBool,
     /// 余分な接続の warn を出したか(同上、TODO/032)。
     logged_extra_connection: AtomicBool,
+    /// decoder リンクの落としの warn を出したか(同上、TODO/184。Data / Heartbeat 共通)。
+    logged_decoder_link_drop: AtomicBool,
 }
 
 impl Metrics {
@@ -184,12 +200,19 @@ impl Metrics {
         self.send_errors.store(0, Ordering::Relaxed);
         self.extra_connections.store(0, Ordering::Relaxed);
         self.empty_connections.store(0, Ordering::Relaxed);
+        self.decoder_link_dropped_frames.store(0, Ordering::Relaxed);
+        self.decoder_link_dropped_batches
+            .store(0, Ordering::Relaxed);
+        self.decoder_link_dropped_heartbeats
+            .store(0, Ordering::Relaxed);
         self.last_read_unix_ns.store(0, Ordering::Relaxed);
         self.set_peer(None);
         self.overflowed.store(false, Ordering::Relaxed);
         self.logged_abandoned.store(false, Ordering::Relaxed);
         self.logged_framer_reset.store(false, Ordering::Relaxed);
         self.logged_extra_connection.store(false, Ordering::Relaxed);
+        self.logged_decoder_link_drop
+            .store(false, Ordering::Relaxed);
     }
 
     /// 現接続の相手アドレスを差し替える(接続確立で `Some`、終了で `None`)。
@@ -288,6 +311,39 @@ impl Metrics {
         );
     }
 
+    /// decoder リンクで落としたバッチ(`frames` フレーム入り)を記録する(SPEC §1.4-7)。
+    /// **初回だけ** warn(以降はカウンタが担う)。戻り値 = このとき warn を出したか。
+    ///
+    /// Error ラッチ(`overflowed`)には触れない: 落としてよいのは派生物(ROOT 側)の経路で、
+    /// graw は無傷 — run は止めない(SPEC §1.4-7)。
+    fn record_decoder_link_dropped_batch(&self, cobo_id: u32, frames: usize) -> bool {
+        self.decoder_link_dropped_frames
+            .fetch_add(frames as u64, Ordering::Relaxed);
+        self.decoder_link_dropped_batches
+            .fetch_add(1, Ordering::Relaxed);
+        self.warn_decoder_link_drop_once(cobo_id, "Data")
+    }
+
+    /// decoder リンクで落とした Heartbeat を記録する(同上。Heartbeat に seq は無い)。
+    fn record_decoder_link_dropped_heartbeat(&self, cobo_id: u32) -> bool {
+        self.decoder_link_dropped_heartbeats
+            .fetch_add(1, Ordering::Relaxed);
+        self.warn_decoder_link_drop_once(cobo_id, "Heartbeat")
+    }
+
+    fn warn_decoder_link_drop_once(&self, cobo_id: u32, kind: &str) -> bool {
+        if self.logged_decoder_link_drop.swap(true, Ordering::Relaxed) {
+            return false;
+        }
+        warn!(
+            cobo_id,
+            kind,
+            "decoder link full or absent — dropping and counting (graw is unaffected, SPEC \
+             §1.4-7); further drops are counted only (metrics.decoder_link_dropped_*)"
+        );
+        true
+    }
+
     /// 符号化失敗を記録する(送れなかった = 喪失なので必ず数える)。
     fn record_encode_error(&self, cobo_id: u32, link: &str, error: &crate::msg::MsgError) {
         self.encode_errors.fetch_add(1, Ordering::Relaxed);
@@ -335,6 +391,9 @@ impl Metrics {
             "send_errors": get(&self.send_errors),
             "extra_connections": get(&self.extra_connections),
             "empty_connections": get(&self.empty_connections),
+            "decoder_link_dropped_frames": get(&self.decoder_link_dropped_frames),
+            "decoder_link_dropped_batches": get(&self.decoder_link_dropped_batches),
+            "decoder_link_dropped_heartbeats": get(&self.decoder_link_dropped_heartbeats),
             "last_read_unix_ns": last_read,
             "peer": self.peer_json(),
         })
@@ -552,6 +611,9 @@ struct Link {
     name: &'static str,
     socket: zmq::Socket,
     sequence_number: u64,
+    /// `true` = ロスレス(graw-writer: 背圧で待つ)、`false` = Data / Heartbeat は待たずに送って
+    /// 数えて落とす(decoder、SPEC §1.4-7 v1.53)。**EndOfStream はどちらのリンクでも待つ**(SPEC §2.2)。
+    lossless: bool,
 }
 
 /// 送信タスクの run 毎パラメタ。
@@ -569,6 +631,10 @@ struct SenderConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SendOutcome {
     Sent,
+    /// 待たずに送れなかった(HWM 満杯 / `ZMQ_IMMEDIATE` で相手不在 = EAGAIN)ので送らなかった。
+    /// decoder リンクの Data / Heartbeat だけに起きる(SPEC §1.4-7)。数えるのは呼び手
+    /// (バッチのフレーム数を知っている)。sequence_number は進めない。
+    Dropped,
     /// 符号化失敗 / 一時的でない send 失敗。**この 1 通は失われた**(カウント + error 済み)が、
     /// リンクとしては生きているので送出は続ける。
     Failed,
@@ -582,11 +648,17 @@ enum SendOutcome {
 ///
 /// 専用 OS スレッドで走る前提。ZMQ 送信のブロック(= 背圧)はここで受け止める。
 ///
+/// # 送出の規則(SPEC §1.4 v1.53、TODO/184)
+///
+/// graw-writer リンクはロスレス(背圧で待つ)。decoder リンクの Data / Heartbeat は待たずに
+/// 1 回だけ送り、満杯・相手不在なら数えて落とす([`send_by_link_rule`])。EndOfStream は
+/// 両リンクとも待つ。スレッドもキューも 1 本のまま(TODO/181 Fable 裁定)。
+///
 /// # 停止設計(TODO/023-2 = R-P2-3。decoder の `send_lossless` と同じ形)
 ///
-/// 送出はロスレス(下流の背圧で待つ)。`abandon` が立つのは **`Reset` とコンポーネント
-/// 畳み込み**のときだけで、そこで初めて送出待ちを打ち切り `messages_abandoned` として
-/// 可視化する。`Stop` では立てない —— receiver の `Stop` は「強制 EOS を流す」経路
+/// 待つ送出(graw-writer の全部と両リンクの EOS)は下流の背圧で待つ。`abandon` が立つのは
+/// **`Reset` とコンポーネント畳み込み**のときだけで、そこで初めて送出待ちを打ち切り
+/// `messages_abandoned` として可視化する。`Stop` では立てない —— receiver の `Stop` は「強制 EOS を流す」経路
 /// (SPEC §1.3 v1.6)であり、ここで打ち切ると下流が run を閉じられなくなる。
 ///
 /// 待ち時間は [`SENDER_POLL_INTERVAL`] で必ず頭打ちにする: `heartbeat_ms` をいくら長く
@@ -699,8 +771,18 @@ fn sender_loop(
                     };
                     let mut alive = true;
                     for link in &mut links {
-                        alive &= send_on(link, &heartbeat, "Heartbeat", &cfg, &metrics, &abandon)
-                            != SendOutcome::Stopped;
+                        let outcome = send_by_link_rule(
+                            link,
+                            &heartbeat,
+                            "Heartbeat",
+                            &cfg,
+                            &metrics,
+                            &abandon,
+                        );
+                        if outcome == SendOutcome::Dropped {
+                            metrics.record_decoder_link_dropped_heartbeat(cfg.source_id);
+                        }
+                        alive &= outcome != SendOutcome::Stopped;
                     }
                     heartbeat_counter += 1;
                     last_send = Instant::now();
@@ -736,7 +818,8 @@ fn sender_loop(
     );
 }
 
-/// 溜まったフレームを 1 バッチとして両リンクへ送る。
+/// 溜まったフレームを 1 バッチとして両リンクへ送る(graw-writer は待つ、decoder は待たない —
+/// [`send_by_link_rule`])。
 ///
 /// リンク毎に sequence_number が違うので符号化もリンク毎(ペイロードは借用で共有し、
 /// バッチのコピーは作らない)。
@@ -762,10 +845,17 @@ fn flush(
             created_ns,
             payload: &*batch,
         });
-        // 送信の成否によらず番号は進める: 失敗はギャップとして下流に見えるべき
-        // (詰めると「落ちていない」と誤認される — silent failure を作らない)。
-        link.sequence_number += 1;
-        let outcome = send_on(link, &message, "Data", cfg, metrics, abandon);
+        let outcome = send_by_link_rule(link, &message, "Data", cfg, metrics, abandon);
+        if outcome == SendOutcome::Dropped {
+            // decoder リンクで数えて落とした: **番号は進めない**(SPEC §1.4-7)。decoder の seq
+            // 検査は「意図しない喪失」の検出に残し、意図した落としはこのカウンタで見せる。
+            metrics.record_decoder_link_dropped_batch(cfg.source_id, batch.len());
+        } else {
+            // それ以外は送信の成否によらず番号は進める: 本物の喪失(符号化 / send 失敗)は
+            // ギャップとして下流に見えるべき(詰めると「落ちていない」と誤認される —
+            // silent failure を作らない)。
+            link.sequence_number += 1;
+        }
         delivered |= outcome == SendOutcome::Sent;
         alive &= outcome != SendOutcome::Stopped;
     }
@@ -779,6 +869,71 @@ fn flush(
     batch.clear();
     *batch_bytes = 0;
     alive
+}
+
+/// Data / Heartbeat をリンクの規則で送る(SPEC §1.4 v1.53): graw-writer = ロスレス
+/// ([`send_on`]、背圧で待つ)、decoder = 待たずに 1 回だけ([`send_now_or_drop`])。
+///
+/// 送信スレッドは 1 本のまま(TODO/181 Fable 裁定)なので、decoder リンクで待たないことが
+/// 「decoder → root-sink の遅れが graw への送信を止めない」の実体である(run 197)。
+/// **EndOfStream はこれを通さない** — 両リンクとも [`send_on`] で空くまで待つ(SPEC §2.2)。
+fn send_by_link_rule<P: Serialize>(
+    link: &mut Link,
+    message: &Message<P>,
+    kind: &'static str,
+    cfg: &SenderConfig,
+    metrics: &Metrics,
+    abandon: &AtomicBool,
+) -> SendOutcome {
+    if link.lossless {
+        send_on(link, message, kind, cfg, metrics, abandon)
+    } else {
+        send_now_or_drop(link, message, kind, cfg, metrics, abandon)
+    }
+}
+
+/// 1 リンクへ 1 メッセージを **`ZMQ_DONTWAIT` で 1 回だけ**送る(decoder リンクの Data /
+/// Heartbeat、SPEC §1.4-7)。
+///
+/// EAGAIN(HWM 満杯 / `ZMQ_IMMEDIATE` で相手不在)は `Dropped` を返すだけ — 数えるのは呼び手。
+/// それ以外は [`send_on`] と同じ扱い: 打ち切り合図 = `messages_abandoned` で `Stopped`、
+/// 符号化失敗 = `encode_errors`、ETERM 以外の send 失敗 = `send_errors`(本物の喪失、`Failed`)、
+/// ETERM = `Stopped`。
+fn send_now_or_drop<P: Serialize>(
+    link: &Link,
+    message: &Message<P>,
+    kind: &'static str,
+    cfg: &SenderConfig,
+    metrics: &Metrics,
+    abandon: &AtomicBool,
+) -> SendOutcome {
+    let bytes = match message.to_msgpack() {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            metrics.record_encode_error(cfg.source_id, link.name, &e);
+            return SendOutcome::Failed;
+        }
+    };
+    if abandon.load(Ordering::Relaxed) {
+        metrics.record_abandoned(cfg.source_id, link.name, kind);
+        return SendOutcome::Stopped;
+    }
+    match link.socket.send(&bytes[..], zmq::DONTWAIT) {
+        Ok(()) => SendOutcome::Sent,
+        Err(zmq::Error::EAGAIN) => SendOutcome::Dropped,
+        Err(zmq::Error::ETERM) => {
+            info!(
+                cobo_id = cfg.source_id,
+                link = link.name,
+                "ZMQ context terminated — sender stopping"
+            );
+            SendOutcome::Stopped
+        }
+        Err(e) => {
+            metrics.record_send_error(cfg.source_id, link.name, e);
+            SendOutcome::Failed
+        }
+    }
 }
 
 /// 1 リンクへ 1 メッセージ送る(ロスレス。EAGAIN では諦めずに待つ)。
@@ -900,6 +1055,29 @@ impl Handler {
 
     fn handle(&mut self, cmd: Command) -> CommandResponse {
         self.latch_overload();
+
+        // Error 中の Stop は実行する(SPEC §1.3 v1.53 ②、TODO/184): drain を畳んで未送の EOS を
+        // 出す。遷移表は変えない(Error → Configured を合法にすると Error が消える)ので状態は
+        // Error のまま、脱出は Reset だけ。run 197 では拒否したため強制 EOS を出せなかった。
+        if self.state == ComponentState::Error && matches!(cmd, Command::Stop) {
+            return match self.do_stop() {
+                Ok(()) => {
+                    warn!(
+                        cobo_id = self.params.cobo_id,
+                        "Stop executed in Error state — forced EndOfStream, state stays Error \
+                         until Reset (SPEC §1.3 v1.53)"
+                    );
+                    self.respond(
+                        true,
+                        "Stop executed in Error state (state stays Error; Reset returns to Idle)",
+                    )
+                }
+                Err(message) => {
+                    error!(cobo_id = self.params.cobo_id, %cmd, "{message}");
+                    self.respond(false, message)
+                }
+            };
+        }
 
         let Some(target) = cmd.target_state() else {
             return self.respond(true, "status"); // GetStatus は遷移しない
@@ -1080,17 +1258,22 @@ impl Handler {
     /// 下流 2 本の PUSH を張る。HWM と `ZMQ_IMMEDIATE` は必ず [`zmq_helper`] 経由
     /// (SPEC §1.4-2 / §1.2 v1.4)。
     ///
-    /// IMMEDIATE により**下流(graw-writer / decoder)が居なければ送信タスクの send は
-    /// ブロックする**(未接続の相手に「送れたことにする」のを禁じる)。これは never-stop と
-    /// 矛盾しない: 詰まるのは送信タスクだけで、drain タスクは有界キューへ `try_send` するだけ
-    /// なので止まらず、溢れは `overflow_frames` + Error として可視化される(SPEC §1.4-1/3)。
+    /// IMMEDIATE により**graw-writer が居なければ送信タスクの send はブロックする**(未接続の
+    /// 相手に「送れたことにする」のを禁じる)。これは never-stop と矛盾しない: 詰まるのは
+    /// 送信タスクだけで、drain タスクは有界キューへ `try_send` するだけなので止まらず、溢れは
+    /// `overflow_frames` + Error として可視化される(SPEC §1.4-1/3)。decoder が居ない / 詰まって
+    /// いるときは、Data / Heartbeat は待たずに `decoder_link_dropped_*` に数えるだけ(SPEC §1.4-7)。
+    /// EndOfStream だけはどちらのリンクでも待つ(SPEC §2.2)。
     fn build_links(&self) -> Result<Vec<Link>, String> {
+        // (名前, 接続先, ロスレスか)。ロスレスなのは graw-writer だけで、decoder リンクの
+        // Data / Heartbeat は待たずに送って数えて落とす(SPEC §1.4-7 v1.53、TODO/184)。
+        // 並びは送出順でもある(EOS は graw-writer が先に受け取る)。
         let specs = [
-            ("graw-writer", &self.params.graw_writer_endpoint),
-            ("decoder", &self.params.decoder_endpoint),
+            ("graw-writer", &self.params.graw_writer_endpoint, true),
+            ("decoder", &self.params.decoder_endpoint, false),
         ];
         let mut links = Vec::with_capacity(specs.len());
-        for (name, endpoint) in specs {
+        for (name, endpoint, lossless) in specs {
             let socket = self
                 .context
                 .socket(zmq::PUSH)
@@ -1116,6 +1299,7 @@ impl Handler {
                 name,
                 socket,
                 sequence_number: 0, // run 開始で 0 リセット(SPEC §2.2)
+                lossless,
             });
         }
         Ok(links)
@@ -1342,6 +1526,39 @@ mod tests {
         );
     }
 
+    /// decoder リンクの落とし(SPEC §1.4-7、TODO/184)は **毎回数え、warn は初回だけ**。
+    /// Data はバッチ数とフレーム数の両方、Heartbeat は回数を数える。warn は Data / Heartbeat
+    /// 共通で 1 回(「decoder リンクが満杯 / 不在」という 1 つの状況なので)。
+    #[test]
+    fn decoder_link_drops_are_counted_every_time_but_warned_only_once() {
+        let m = Metrics::default();
+        // 非対称: 3 フレームのバッチ、1 フレームのバッチ、Heartbeat 2 回
+        assert!(
+            m.record_decoder_link_dropped_batch(4, 3),
+            "初回は warn を出す"
+        );
+        assert!(
+            !m.record_decoder_link_dropped_heartbeat(4),
+            "2 回目以降は Heartbeat でも出さない"
+        );
+        assert!(!m.record_decoder_link_dropped_batch(4, 1));
+        assert!(!m.record_decoder_link_dropped_heartbeat(4));
+
+        let json = m.json();
+        assert_eq!(json["decoder_link_dropped_frames"].as_u64(), Some(4)); // 3 + 1
+        assert_eq!(json["decoder_link_dropped_batches"].as_u64(), Some(2));
+        assert_eq!(json["decoder_link_dropped_heartbeats"].as_u64(), Some(2));
+        assert_eq!(
+            json["overflow_frames"].as_u64(),
+            Some(0),
+            "decoder リンクの落としは graw の喪失(overflow)とは別のカウンタ"
+        );
+        assert!(
+            !m.overflowed.load(Ordering::Relaxed),
+            "decoder リンクの落としで Error ラッチを立てない(SPEC §1.4-7)"
+        );
+    }
+
     /// カウンタは run 毎(`Start` でリセット)。023 で足した 3 本も同じ規約に従う。
     #[test]
     fn start_resets_every_counter_including_the_new_ones() {
@@ -1359,6 +1576,8 @@ mod tests {
         m.record_send_error(0, "decoder", zmq::Error::EINVAL);
         m.note_framer_resets(0, 3);
         m.record_dropped_frame(0, "queue full");
+        m.record_decoder_link_dropped_batch(0, 5);
+        m.record_decoder_link_dropped_heartbeat(0);
 
         m.reset();
 
@@ -1372,6 +1591,9 @@ mod tests {
             "messages_abandoned",
             "encode_errors",
             "send_errors",
+            "decoder_link_dropped_frames",
+            "decoder_link_dropped_batches",
+            "decoder_link_dropped_heartbeats",
         ] {
             assert_eq!(json[key].as_u64(), Some(0), "metrics.{key} が残っている");
         }
@@ -1379,6 +1601,10 @@ mod tests {
         assert!(
             m.record_abandoned(0, "decoder", "Data"),
             "次の run では warn も出し直す"
+        );
+        assert!(
+            m.record_decoder_link_dropped_heartbeat(0),
+            "decoder リンクの落としの warn も次の run では出し直す"
         );
     }
 }

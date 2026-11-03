@@ -12,6 +12,11 @@
 //!   Configured / Armed / Running --Reset--> Idle
 //!   Configured / Armed / Running --(異常)--> Error --Reset--> Idle
 //! ```
+//!
+//! **Error 中の `Stop`(SPEC §1.3 v1.53 ②、TODO/184)**: receiver / decoder / graw-writer は
+//! 通常の Stop の処理を実行し(receiver なら強制 EOS)、**状態は Error のまま**成功を返す。
+//! これは遷移ではない — 下の遷移表に `(Error, Configured)` を足すと Error が消えるので足さず、
+//! 各コンポーネントの `handle()` が遷移判定の前に 1 分岐で扱う。
 
 use std::time::Duration;
 

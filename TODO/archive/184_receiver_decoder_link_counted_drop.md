@@ -1,6 +1,6 @@
 # 184 — receiver: decoder リンクは待たずに送って数えて落とす + Error 中の `Stop` を実行する
 
-**Status: IN PROGRESS**(2026-10-24 起票 Opus、実装 **Opus implementer**。設計 = TODO/181 §5(Fable レビュー済み)、仕様 = SPEC v1.53 §1.4-3 / §1.4-7 / §1.3「異常中止」②)
+**Status: COMPLETED**(2026-11-03 コミット。実機の受け入れ = ELITPC 反映後、185・186 と一緒に — CURRENT)(2026-10-24 起票 Opus、実装 **Opus implementer**。設計 = TODO/181 §5(Fable レビュー済み)、仕様 = SPEC v1.53 §1.4-3 / §1.4-7 / §1.3「異常中止」②)
 
 ## 0. 背景(1 行)
 run 197: receiver の送信スレッド 1 本が graw-writer と decoder の 2 リンクへ順に**ブロック送信**しているため、decoder → root-sink が遅れると graw への送信も止まり、内部キューが溢れて graw まで失った。さらに Error の receiver は `Stop` を拒否し、強制 EOS を出せなかった。
@@ -44,4 +44,24 @@ run 197: receiver の送信スレッド 1 本が graw-writer と decoder の 2 �
 - 終わったら、自分が起動したプロセス(テストの子プロセス等)が残っていないことを確かめて報告に書く。
 
 ## 結果
-(記入中)
+### 実装(2026-10-24 前任 Opus implementer が本体の作業ツリーで実装 → セッション終了で報告なしに中断。2026-10-30 後任 Opus implementer が照合して引き継ぎ、主対話 Opus が照合)
+- 後任の照合: A・B とも発注書どおりに実装済みで欠陥なし → **ソースは無変更**(後任が足したのは赤の採取・反復実行・実データ e2e・最終ゲート)。
+- 本体の作業ツリー(未コミット): `src/command.rs` +5、`src/decoder.rs` +22、`src/graw_writer.rs` +23、`src/receiver.rs` +266 / −23、`tests/receiver_integration.rs` +9、`tests/receiver_overload.rs` +5 / −3、新規 `tests/receiver_decoder_link.rs`(542 行)・`tests/stop_in_error.rs`(436 行)。範囲外(TODO / docs / macros / controller / root_sink / ui)は無変更。
+- 中身: decoder リンクは `ZMQ_DONTWAIT` で送り EAGAIN なら数えて落とす(seq を進めない、Heartbeat も同じ)、graw リンクと EOS は従来どおり待つ、`batches` の意味は不変、カウンタ `decoder_link_dropped_frames` / `_batches` / `_heartbeats`(start で reset)、スレッドとキューは 1 本のまま。receiver / decoder / graw-writer の `handle()` に Error 中の `Stop` を実行する同じ形の 1 分岐(遷移表は不変)。
+- 受け入れテスト(すべて PASS):
+  1. `tests/receiver_decoder_link.rs::an_absent_decoder_is_dropped_and_counted_while_graw_gets_every_frame`(graw 37 フレーム / 13 バッチ = dropped 37 / 13、Running のまま、overflow 0)
+  2. `…::a_stalled_decoder_that_resumes_sees_no_sequence_gap`(総数 70 = decoder 13 + dropped 57、バッチ 27 = 8 + 19、seq は 0 から連続 — PULL 側で連続性を直接見る)
+  3. `…::the_end_of_stream_waits_for_a_full_decoder_link_and_is_delivered`(flooded 64 = 6 + 58、EOS は待って届く、abandoned 0)
+  4. `tests/receiver_overload.rs::queue_overflow_counts_frames_enters_error_and_keeps_draining`(既存、末尾の Stop の主張だけ変更 — 逸脱 1)
+  5. `tests/stop_in_error.rs` の `a_receiver_in_error_executes_stop_forces_eos_on_both_links_and_stays_in_error` / `a_decoder_in_error_executes_stop_stays_in_error_and_resets_to_idle` / `a_graw_writer_in_error_executes_stop_closes_its_files_and_resets_to_idle`
+  6. `tests/receiver_integration.rs::both_links_reassemble_the_cobo_bytes_exactly` に `decoder_link_dropped_*` == 0 を追加
+  7. `tests/receiver_decoder_link.rs::heartbeats_to_an_absent_decoder_are_dropped_and_counted_while_idle`(Heartbeat 3 = dropped 3)
+  - 単体: `receiver::tests::decoder_link_drops_are_counted_every_time_but_warned_only_once`、`start_resets_every_counter_including_the_new_ones`
+- 赤の証拠(後から採取 — `git archive HEAD` に現行テストを重ねて別 target でビルド): receiver_decoder_link 4 / 4 FAILED(テスト 1 は `graw-writer: PULL recv failed/timed out` = 送信スレッドが decoder リンクで止まり graw が来ない = **run 197 の機序の再現**、他は `decoder_link_dropped_* is not a number`)、stop_in_error 3 / 3 と receiver_overload は `illegal transition Error -> Configured`、単体はコンパイルエラー(E0599 × 7)。
+- 安定性: 4 テストバイナリ × 25 回 = 100 回で失敗 0。実データ(env ゲート、ローカルの実 .graw、root_sink は 10-24 19:12 版): `p2_e2e` 108 / 108 × 2 パス 0 differences、`mini_rawtree_e2e` 108 entries 0 differences、`decoder_pipeline_real_graw` / `graw_writer_real_graw` / `receiver_real_graw`(両リンクでバイト一致)/ `root_sink_intake` 11 本 PASS。未実行: `p3_e2e`・`soak_smoke`(固定ポート)、`elitpc_pevent_e2e`(ELITPC 資産)。
+- implementer の最終ゲート: `cargo fmt && cargo clippy --tests -- -D warnings && cargo test` exit 0、**1120 passed / 0 failed / 1 ignored**。1 回目は `graw_replay_tool::connect_failure_exits_non_zero_with_clear_message` が 1 回だけ失敗(閉じたポートに繋ぎに行く間の取り合い = TOCTOU、185 の worktree の並走と重なった。単独 20 / 20 PASS、再ゲート green、本チケットと無関係)→ 既存の時間依存テストとして記録(要るなら別チケット)。
+- **主対話の再実行(本体の作業ツリー、2026-10-30)**: テスト名がファイルにあることを確認、`cargo fmt --check` clean、`cargo clippy --tests -- -D warnings` 警告 0、`--test receiver_decoder_link` 4 / `stop_in_error` 3 / `receiver_integration` 7 / `receiver_overload` 3 passed、`--lib receiver` 21 passed、すべて 0 failed。
+- 逸脱(主対話の判断: すべて受け入れ): ①テスト 4 の末尾 `assert!(!bad.success, "Error からの Stop は通らない")` は B と正面から矛盾 → 「Stop は成功・state は Error のまま・続く Reset で Idle」に差し替え(溢れの部分は無改変。graw だけ止めて decoder 健全の切り分けを単独で見るテストは無い)②初回 warn のフラグは Data と Heartbeat で共通の 1 本(`logged_decoder_link_drop`、run ごとに reset — 同じ状況なので 1 回でよい = KISS)③テスト 2 の gap 判定は PULL 側の seq の連続性(本物の decoder の `seq_gaps` ではない — 発注書の「相当」の範囲)。
+- 実行できなかった操作: なし(1 回目のゲートの exit 101 は上の flaky、再実行で green)。残プロセスなし。
+- 残り: コミット(本体)→ 185・186 のマージ → 188 / 187 → ELITPC への反映。
+- **コミット前の確認(2026-11-03、主対話、main の作業ツリー)**: `cargo fmt --check` OK、`cargo clippy --tests -- -D warnings` OK、`cargo test` = **1,120 passed / 0 failed / 1 ignored**(63 の test binary)。

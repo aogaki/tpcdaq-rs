@@ -428,9 +428,11 @@ async fn queue_overflow_counts_frames_enters_error_and_keeps_draining() {
         metric_u64(&status, "batches"),
     );
 
-    // Error からの脱出は Reset だけ(SPEC §1.3)
-    let bad = rpc(&cmd_ep, &Command::Stop).await;
-    assert!(!bad.success, "Error からの Stop は通らない");
+    // Error 中の Stop は実行する(強制 EOS を出すため)が Error のまま(SPEC v1.53 §1.3 ②、
+    // TODO/184 — v1.52 までは「Error からの Stop は通らない」)。Error からの脱出は Reset だけ。
+    let stopped = rpc(&cmd_ep, &Command::Stop).await;
+    assert!(stopped.success, "{}", stopped.message);
+    assert_eq!(stopped.state, ComponentState::Error);
     let reset = rpc(&cmd_ep, &Command::Reset).await;
     assert!(reset.success, "{}", reset.message);
     assert_eq!(reset.state, ComponentState::Idle);

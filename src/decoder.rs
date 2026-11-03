@@ -1145,6 +1145,28 @@ impl Handler {
     fn handle(&mut self, cmd: Command) -> CommandResponse {
         self.latch_error();
 
+        // Error 中の Stop は実行する(SPEC §1.3 v1.53 ②、TODO/184 — receiver / graw-writer と
+        // 同じ形)。遷移表は変えないので状態は Error のまま、脱出は Reset だけ。`do_stop` は
+        // 停止合図を `take` するだけなので、スレッドが既に終わっていても二度目でも安全。
+        if self.state == ComponentState::Error && matches!(cmd, Command::Stop) {
+            return match self.do_stop() {
+                Ok(()) => {
+                    warn!(
+                        "decoder: Stop executed in Error state — state stays Error until Reset \
+                         (SPEC §1.3 v1.53)"
+                    );
+                    self.respond(
+                        true,
+                        "Stop executed in Error state (state stays Error; Reset returns to Idle)",
+                    )
+                }
+                Err(message) => {
+                    error!(%cmd, "{message}");
+                    self.respond(false, message)
+                }
+            };
+        }
+
         let Some(target) = cmd.target_state() else {
             return self.respond(true, "status"); // GetStatus は遷移しない
         };

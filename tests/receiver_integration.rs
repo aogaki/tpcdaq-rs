@@ -275,6 +275,15 @@ async fn both_links_reassemble_the_cobo_bytes_exactly() {
     assert_eq!(metric_u64(&stopped, "overflow_frames"), 0);
     assert_eq!(metric_u64(&stopped, "framer_resets"), 0);
     assert!(metric_u64(&stopped, "batches") >= 2);
+    // TODO/184 テスト 6: 正常な start 列(decoder の PULL を先に bind → receiver の Start で
+    // PUSH を connect)では、待たずに送る decoder リンク(SPEC §1.4-7)でも先頭バッチは落ちない。
+    for key in [
+        "decoder_link_dropped_frames",
+        "decoder_link_dropped_batches",
+        "decoder_link_dropped_heartbeats",
+    ] {
+        assert_eq!(metric_u64(&stopped, key), 0, "metrics.{key}");
+    }
 
     shutdown_tx.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(5), task)
