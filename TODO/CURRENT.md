@@ -123,9 +123,10 @@
 | ~~197~~ | 順方向の模型による当てはめ v0(α 1 本)`fitProngs.C` | 済 → [archive/197](archive/197_forward_model_fit_v0.md)(テスト 107 PASS、閉包 0.06 mm、TPCReco と 3.85 %(**TPCReco の σ_z の不具合を発見**)、壁 α 20 / 20 で頭尻が物理と一致、ただし χ²/ndf 中央 23–107 ≫ 1) | 198(Fable に設計を相談) |
 | ~~199~~ | drawUVW のズームを連結成分で強く | 済 → [archive/199](archive/199_drawuvw_zoom_components.md)(テスト 109 PASS、27 もズーム、run 209 全 7,946 枚 236 MB を作り直し) | 目の偽陽性率の試験(ユーザーに確認中) |
 | ~~200~~ | 目の偽陽性率の試験 | 済 → [archive/200](archive/200_blind_eye_test.md)(**偽陽性 2.0 %**、片端だけ内側では目も見分けられない、contained は効く、reject で差 6 / 131 vs 1 / 174) | 198 で reject 6 本を当てはめる |
-| [201](201_fitprongs_hardening.md) | fitProngs v0.1(Fable 起票): 有感の箱・端点 ± 10 mm・A を run ごとに固定・共通モード(data 側)・誤差模型 σ² = σ_v² + (0.1·data)²・mm 表示、壁 α で χ²/ndf 中央 ≤ 3 を狙う、A_ref を測る | IN PROGRESS(implementer / Sonnet、2026-11-03) | → 198 |
-| [198](198_two_prong_hypothesis.md) | 2 本の仮説(Fable 起票): H1 {α} vs H2 {α + 頂点から出る一様な線分 0–60 mm}、Δχ² の閾値は壁 α の分布の 95 % 点、目の 16 本 + 目隠しの 11 本 + 片端だけ内側 50 + 50 に当てる | TODO(201 の後、implementer / Opus) | — |
+| ~~201~~ | fitProngs v0.1(箱・縛り・A 固定・共通モード・誤差模型・mm 表示・初期線分の切り詰め) | 済 → [archive/201](archive/201_fitprongs_hardening.md)(テスト 171 PASS、壁 α χ²/ndf 中央 24.6 → 3.78(目標 3 は未達 → 203)、内部 86 本 107 → 5.5、**A_ref = 81,406 ADC/MeV/面**) | → 198 |
+| [198](198_two_prong_hypothesis.md) | 2 本の仮説(Fable 起票): H1 {α} vs H2 {α + 頂点から出る一様な線分 0–60 mm}、Δχ² の閾値は壁 α の分布の 95 % 点、目の 16 本 + 目隠しの 11 本 + 片端だけ内側 50 + 50 に当てる | IN PROGRESS(implementer / Opus、2026-11-03) | — |
 | [202](202_flaky_tests_under_load.md) | 負荷のかかった全体実行でだけ落ちるテスト 3 件(receiver_stale_link の T4 = 184 の DONTWAIT と接続の競合、root_sink_monitor_pub の 10 s、graw_replay_tool の TOCTOU) | TODO(11/9 の後) | — |
+| [203](203_strip_even_odd_response.md) | 偶数 / 奇数 strip で応答が 2–6 % 違う(201 ⑤、pad の形か利得か配線か) | TODO(Fable キュー) | — |
 | ~~184~~ | receiver の decoder リンク(数えて落とす)| 済 → [archive/184](archive/184_receiver_decoder_link_counted_drop.md)(2026-11-03 コミット `e553bb2`) | 実機の受け入れ(ELITPC 反映後) |
 | ~~185~~ | controller の停止(下流が進む限り待つ・リンクの数・root_complete)| 済 → [archive/185](archive/185_controller_stop_drain_and_link_counts.md)(2026-11-03 マージ `d10ab33`) | 実機の受け入れ(ELITPC 反映後) |
 | ~~186~~ | root_sink: 次の run が来たら未完の run を閉じる | 済 → [archive/186](archive/186_root_sink_close_incomplete_on_new_run.md)(2026-11-03 マージ `6720087`) | 実機の受け入れ(ELITPC 反映後) |
@@ -177,6 +178,7 @@
 
 Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をここに積み、Fable で**まとめて**確定する(運用ルールの正は CLAUDE.md「モデル使い分け」)。
 
+- **203(2026-11-03 積み)**: 偶数 / 奇数 strip の応答差(U 0.058・W 0.042・V 0.022)の原因と直し方、198 の前か後か。
 - **194 → 選別 v2(2026-11-02 積み)**: Fable 裁定の「頂点が内側 + 電荷の並び」は、片端だけ内側の組で背景 48.5 /h(208)を落とせなかった。原因は端の 5 mm の窓がにじみを見ていたこと(分布の最大は端から 12–20 mm)だが、形を 3 分割で見ても、上流 / 下流、q/mm でも、208 と 209 の内訳は同じ(archive/194 の結果)。→ 片端だけ内側の組の選別をどうするか(197–198 の χ² を待つ / 端の幅 = 拡散で z を測る / ML に回す)。目の偽陽性率の試験(208・209 を混ぜて伏せる)をやるか(ユーザーに確認中)。
 
 - **181(2026-10-24 積み)**: 高レートで DAQ が壊れる件の設計 — ① receiver の送信スレッドが graw / decoder 共用で、派生物(ROOT)の遅さが正本の graw を落とす(run 197 で 19,855 喪失)→ graw のリンクを切り離す、ROOT は数えて graw から作り直せる側に(SPEC の「root-sink も保存系」を改める案、ユーザーの判断も要る)② Stop / Reset で途中のフレームが数えられずに消える(≈ 1,097)③ EOS を失ったとき root_sink の run を閉じる正規の手段 ④ Stop 後の drain 中の UI 表示 ⑤ 周期トリガの目安・下限。材料 = 182(PEventTPC off で 100 Hz は 2 倍の余裕、ユーザーは 2 年以内に 100 Hz の実験)。
