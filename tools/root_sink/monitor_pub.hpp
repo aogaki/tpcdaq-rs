@@ -63,6 +63,10 @@ struct Status {
   // 世代が最小に留まって他のソースより遅れている期待ソース(AsAd)の数(TODO/133)。
   // 全ソースが同じ世代なら 0。`acquisition_restarts` の次のキー(13 キー目)。
   uint64_t sources_behind = 0;
+  // 186(SPEC v1.53): その run で受けたフラグメント数(run ごと)と、EOS 無しで未完のまま
+  // 閉じた run の通算。`sources_behind` の次の 2 キー(14・15 キー目)。
+  uint64_t fragments = 0;
+  uint64_t runs_closed_without_eos = 0;
   uint64_t frames_per_cobo[kMaxCobo] = {};
   uint64_t bytes_written = 0;      // Recorder の atomic(--no-root なら 0)
   Saturation saturation[kPlaneCount] = {};
@@ -204,7 +208,7 @@ class Encoder {
 
   void status(const Status& s, uint64_t created_ns, std::vector<uint8_t>& out) {
     open_envelope(out, s.run, created_ns);
-    mpw::map_len(out, 13);
+    mpw::map_len(out, 15);
     mpw::str(out, "kind");
     mpw::str(out, "status");
     mpw::str(out, "run");
@@ -223,6 +227,10 @@ class Encoder {
     mpw::uint_(out, s.acquisition_restarts);
     mpw::str(out, "sources_behind");
     mpw::uint_(out, s.sources_behind);
+    mpw::str(out, "fragments");
+    mpw::uint_(out, s.fragments);
+    mpw::str(out, "runs_closed_without_eos");
+    mpw::uint_(out, s.runs_closed_without_eos);
     mpw::str(out, "frames_per_cobo");
     write_frames_per_cobo(out, s);
     mpw::str(out, "bytes_written");

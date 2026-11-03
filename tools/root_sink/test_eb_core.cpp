@@ -952,10 +952,10 @@ static void test_single_source_oracles_of_run73_and_run76_are_unchanged() {
   // 60.8 s = 6.08e9 ticks(10 ns)、90 区間で 79.6 s へ: 18.8 s / 90 ≈ 20,888,888 ticks。
   CHECK(replay_single_source(73, 259, 349, 6080000000ull, 20888888ull, 297) ==
         "root_sink: run 73 closed (batches=0 events_complete=350 events_incomplete=0 "
-        "late_fragments=0 restarts=1 events_before_restart=91 restart_duplicates=39)\n");
+        "late_fragments=0 restarts=1 events_before_restart=91 restart_duplicates=39 fragments=0)\n");
   CHECK(replay_single_source(76, 120, 136, 3000000000ull, 20000000ull, 118) ==
         "root_sink: run 76 closed (batches=0 events_complete=136 events_incomplete=0 "
-        "late_fragments=0 restarts=1 events_before_restart=17 restart_duplicates=0)\n");
+        "late_fragments=0 restarts=1 events_before_restart=17 restart_duplicates=0 fragments=0)\n");
 }
 
 // §4 テスト 4: 死んだ AsAd(A3 は古い残りを送ったまま再開しない)。run の世代は 0 のまま、

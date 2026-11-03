@@ -244,6 +244,82 @@ void test_shutdown_without_eos_keeps_the_inprogress_name() {
 }
 
 // ---------------------------------------------------------------------------
+// 2a. 186: 未完で閉じる(EOS が来ないまま次の run へ。SPEC v1.53 §6.2-5)
+// ---------------------------------------------------------------------------
+//
+// close_run_incomplete(): 旧 run は inprogress のまま閉じる(中身は読める、完成名に
+// ならない、monitor.root は無い)。プロセスは続くので Recorder は次の run を普通に書き、
+// EOS で finalize できる。workers=1 / 2 の両方で確かめる。
+void check_close_incomplete_then_next_run(int workers, const char* tag) {
+  const std::string dir = scratch_dir(tag);
+  const uint32_t kRunA = 31;
+  const uint32_t kRunB = 32;
+  std::vector<rootsink::RootFileRecord> files;
+  {
+    rootsink::RecorderConfig cfg;
+    cfg.output_root = dir;
+    cfg.geometry = &fixture_geometry();
+    cfg.workers = workers;
+    rootsink::Recorder rec(cfg);
+    // run A: 3 事象(出典: 手計算 — 事象 idx 1,2,3)、EOS なし。
+    for (uint32_t idx = 1; idx <= 3; ++idx) {
+      rootsink::BuiltEvent ev;
+      ev.run_number = kRunA;
+      ev.event_idx = idx;
+      rootsink::OwnedFragment f = make_fragment(kRunA, idx, 0, 0);
+      push_item(f.items, pack_item(0, 1, 2, 3 + idx));
+      ev.fragments.push_back(std::move(f));
+      rec.write(std::move(ev), 1000 + idx);
+    }
+    rec.close_run_incomplete(kRunA);
+    CHECK(rec.fatal_reason() == nullptr);
+    // run B: 2 事象 + EOS(通常どおり)。
+    for (uint32_t idx = 1; idx <= 2; ++idx) {
+      rootsink::BuiltEvent ev;
+      ev.run_number = kRunB;
+      ev.event_idx = idx;
+      rootsink::OwnedFragment f = make_fragment(kRunB, idx, 0, 0);
+      push_item(f.items, pack_item(0, 1, 2, 9 + idx));
+      ev.fragments.push_back(std::move(f));
+      rec.write(std::move(ev), 2000 + idx);
+    }
+    rec.close_run(kRunB, 2100);
+    CHECK(rec.fatal_reason() == nullptr);
+    files = rec.files_snapshot();
+  }
+  const std::string run_dir_a = dir + "/run0031";
+  const std::string run_dir_b = dir + "/run0032";
+  // run A: 完成名にならず、monitor.root も無く、inprogress の中身は書いた 3 件。
+  CHECK(!exists(run_dir_a + "/run0031.root"));
+  CHECK(!exists(run_dir_a + "/run0031_monitor.root"));
+  uint64_t entries_a = 0;
+  for (const std::string& name : list_prefixed(run_dir_a, "run_inprogress_")) {
+    entries_a += read_root_file(run_dir_a + "/" + name).size();
+  }
+  CHECK_EQ(entries_a, 3);
+  CHECK_EQ(list_prefixed(run_dir_a, "run_inprogress_").size(), workers);
+  // run B: 通常どおり finalize(inprogress は残らない)。
+  CHECK_EQ(list_prefixed(run_dir_b, "run_inprogress_").size(), 0);
+  uint64_t entries_b = 0;
+  for (const std::string& name : rootsink::list_directory(run_dir_b)) {
+    if (name.compare(0, 6, "run003") == 0 && name.find(".root") != std::string::npos) {
+      entries_b += read_root_file(run_dir_b + "/" + name).size();
+    }
+  }
+  CHECK_EQ(entries_b, 2);
+  CHECK_EQ(files.size(), 2 * workers);
+  remove_tree(dir);
+}
+
+void test_close_incomplete_keeps_inprogress_and_next_run_finalizes() {
+  check_close_incomplete_then_next_run(1, "incomplete1");
+}
+
+void test_close_incomplete_with_parallel_workers() {
+  check_close_incomplete_then_next_run(2, "incomplete2");
+}
+
+// ---------------------------------------------------------------------------
 // 2b. 混在 run の防御は finalize しない(SPEC §6.5、TODO/024 R-P2-1)
 // ---------------------------------------------------------------------------
 //
@@ -1117,6 +1193,8 @@ int main(int argc, char** argv) {
   if (argc > 1) return inspect(argv[1]);
 
   test_shutdown_without_eos_keeps_the_inprogress_name();
+  test_close_incomplete_keeps_inprogress_and_next_run_finalizes();
+  test_close_incomplete_with_parallel_workers();
   test_mixed_run_defense_keeps_the_old_run_inprogress();
   test_write_triggers_autosave_without_tick();
   test_rollover_splits_the_run_into_numbered_parts();

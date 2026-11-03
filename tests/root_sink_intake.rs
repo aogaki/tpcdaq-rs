@@ -46,7 +46,6 @@ const RUN_NUMBER: u32 = 7;
 const EXIT_MALFORMED: i32 = 2;
 const EXIT_SEQ: i32 = 3;
 const EXIT_ZMQ: i32 = 4;
-const EXIT_RUN_MISMATCH: i32 = 6;
 
 // ---------------------------------------------------------------------
 // skip ゲートとプロセス操作
@@ -448,72 +447,76 @@ fn a_run_whose_first_batch_is_missing_is_fatal() {
 }
 
 // ---------------------------------------------------------------------
-// 3b. run 中の run_number 食い違い = fatal(SPEC §6.2-5 v1.10、R-P2-1、TODO/024)
+// 3b. 別 run_number は fatal にしない(SPEC §6.2-5 v1.53、TODO/186)
 // ---------------------------------------------------------------------
+//
+// v1.10–v1.52 は run 中の run_number 食い違いを exit 6 にしていた。EOS を失った run の
+// 後に次の run を始めると root_sink が死に、次の run の ROOT が丸ごと無くなったため置き換えた:
+// 古い run を未完で閉じ、新しい run を開く。ROOT ファイルの検査は root_sink_incomplete.rs。
 
-/// Data で run が開いたあと、別の run_number の Data が届く = プロトコル違反。
-/// decoder は単一ストリームで run を混ぜない契約なので、旧「カウンタのみ」を
-/// exit 6 に昇格した。
+/// Data で run 7 が開いたあと run 8 の Data(seq は 0 から)。落ちず、run 8 を EOS で閉じる。
 #[test]
-fn a_run_number_mismatch_in_data_is_fatal() {
+fn data_of_another_run_opens_a_new_run_instead_of_dying() {
     let Some(bin) = sink_bin() else {
         eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set");
         return;
     };
     let (mut child, endpoint) = spawn_sink_with_retry(&bin, &[]);
+    let pid = child.id();
 
     let ctx = zmq::Context::new();
     let push = connect_push(&ctx, &endpoint, 100);
     push.send(data_batch(0, &[3]), 0)
         .expect("send seq 0 (run RUN_NUMBER, opens the run)");
-    push.send(batch_with_run(1, RUN_NUMBER + 1, vec![fragment(0, 3)]), 0)
-        .expect("send seq 1 with a different run_number");
+    push.send(batch_with_run(0, RUN_NUMBER + 1, vec![fragment(0, 3)]), 0)
+        .expect("send seq 0 of the next run");
+    push.send(end_of_stream_with_run(RUN_NUMBER + 1), 0)
+        .expect("send EOS of the next run");
 
+    std::thread::sleep(Duration::from_millis(500));
+    send_term(pid);
     let status = wait_for_exit(&mut child, Duration::from_secs(10));
-    assert_eq!(
-        status.code(),
-        Some(EXIT_RUN_MISMATCH),
-        "run_number 食い違いは exit {EXIT_RUN_MISMATCH} であるべき: {status:?}"
-    );
+    assert!(status.success(), "落ちてはいけない: {status:?}");
     let counts = read_counts(&mut child);
-    // 食い違う方は数えない(fatal は on_data() の直後、batches++ より前)
-    assert_eq!(count(&counts, "batches"), 1, "counts={counts}");
-    assert!(
-        count(&counts, "run_number_mismatch") >= 1,
-        "counts={counts}"
-    );
-    assert_eq!(counts["fatal"], "run-number-mismatch", "counts={counts}");
+    assert_eq!(count(&counts, "batches"), 2, "counts={counts}");
+    assert_eq!(count(&counts, "runs_closed_without_eos"), 1, "{counts}");
+    assert_eq!(count(&counts, "run_number_mismatch"), 0, "{counts}");
+    assert_eq!(count(&counts, "runs"), 1, "{counts}"); // 完了したのは run 8 だけ
+    assert_eq!(counts["fatal"], "", "counts={counts}");
 }
 
-/// EOS の run_number が開いている run と食い違う経路(同上、EOS 側)。
+/// run 7 の開放中に run 8 の EOS: 古い run を未完で閉じ、EOS は stale_eos に数えて無視。
 #[test]
-fn a_run_number_mismatch_in_eos_is_fatal() {
+fn eos_of_another_run_closes_the_old_run_incomplete_and_counts_stale() {
     let Some(bin) = sink_bin() else {
         eprintln!("SKIP: TPCDAQ_ROOT_SINK_BIN not set");
         return;
     };
     let (mut child, endpoint) = spawn_sink_with_retry(&bin, &[]);
+    let pid = child.id();
 
     let ctx = zmq::Context::new();
     let push = connect_push(&ctx, &endpoint, 100);
     push.send(data_batch(0, &[3]), 0)
         .expect("send seq 0 (run RUN_NUMBER, opens the run)");
     push.send(end_of_stream_with_run(RUN_NUMBER + 1), 0)
-        .expect("send EndOfStream with a different run_number");
+        .expect("send EndOfStream of another run");
+    // その後の run 9 は普通に開いて閉じる。
+    push.send(batch_with_run(0, RUN_NUMBER + 2, vec![fragment(0, 3)]), 0)
+        .expect("send run 9");
+    push.send(end_of_stream_with_run(RUN_NUMBER + 2), 0)
+        .expect("send EOS run 9");
 
+    std::thread::sleep(Duration::from_millis(500));
+    send_term(pid);
     let status = wait_for_exit(&mut child, Duration::from_secs(10));
-    assert_eq!(
-        status.code(),
-        Some(EXIT_RUN_MISMATCH),
-        "EOS の run_number 食い違いは exit {EXIT_RUN_MISMATCH} であるべき: {status:?}"
-    );
+    assert!(status.success(), "落ちてはいけない: {status:?}");
     let counts = read_counts(&mut child);
-    assert_eq!(count(&counts, "batches"), 1, "counts={counts}");
-    assert!(
-        count(&counts, "run_number_mismatch") >= 1,
-        "counts={counts}"
-    );
-    assert_eq!(counts["fatal"], "run-number-mismatch", "counts={counts}");
+    assert_eq!(count(&counts, "stale_eos"), 1, "counts={counts}");
+    assert_eq!(count(&counts, "runs_closed_without_eos"), 1, "{counts}");
+    assert_eq!(count(&counts, "run_number_mismatch"), 0, "{counts}");
+    assert_eq!(count(&counts, "runs"), 1, "{counts}");
+    assert_eq!(counts["fatal"], "", "counts={counts}");
 }
 
 // ---------------------------------------------------------------------
