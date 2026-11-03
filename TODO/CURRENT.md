@@ -6,6 +6,7 @@
 
 ## いま(1 分で読める要約)
 
+- **期限 2026-11-09**: 隣の中性子検出実験の横に TPC を置く(ユーザー「山ほどイベントが来る」)→ 高レート対策 184–188(181、SPEC v1.53)を仕上げて ELITPC に反映・実機受け入れ(run 197 の再現)まで。184 / 185 は 2026-10-30 に implementer を再開。**2026-11-03: 184 コミット・185 / 186 マージ・push(ユーザー了承)→ ELITPC へ反映。**週末(10-30〜11-02)は PuBe の run 209 系(173 §4)— 反映はその後、ユーザーの OK で。
 - **本番**: ELITPC(旧 puppex、Ubuntu 26.04)で mini eTPC を運用中(2026-10-08〜、[archive/107](archive/107_elitpc_host_setup.md))。
   - 機器: 実 zCoBo + 実 ECC(getEccServer ネイティブ)+ Rust ecc_bridge。
   - 保存先: データは ZFS `data/tpcdaq`。
@@ -63,7 +64,7 @@
   **12:08 実施**: run 174 停止(normal、eos_closed、11:26–12:08 = 42 min)→ **run 175 = 週末 run 2**(B、`elinp__0eb4f039`、comment「gas 100 -> 50 ml/min」、`start_W2.sh`)。次の流量変更も同じ手順(`start_W3.sh` を作る)。
 - **157 完了 → archive**: SPEC **v1.49**(ZS 表モード・0x02 復元・ped_table・decoder カウンタ・§13-9)、WARSAW_PLAN §7 の ZS 行、RUNBOOK のカウンタ名訂正。
 - **159 起票**(Opus): ZS カウンタの run ごとの経路 + PEventTPC 電荷和 + UI 基線。
-- Fable キュー: 176(ML の方針)。181 は 2026-10-24 にスポット Fable でレビュー済み → v1.53。
+- Fable キュー: 176(ML の方針)、**185 の申し送り = 歩き戻し(114)の第二段にも v1.53 の「下流が進む限り待つ」を適用するか**(SPEC v1.39 は「停止と同じ 2 段」、185 は stop_run だけ変えた)。181 は 2026-10-24 にスポット Fable でレビュー済み → v1.53。
 - **160 起票**: スキャン報告書 v1(`docs/reports/2026-10_scan/scan_report_2026-10.pdf`、11 ページ、日本語)。ユーザー「自分用 + mini TPC メンバー、来月 Warsaw の資料にも」。
 
 ### 2026-10-19(月)
@@ -111,9 +112,23 @@
 | [160](160_gas_flowbus_second_host.md) | ガス(Bronkhorst FLOW-BUS)を ELITPC から読む: メーター PT104/Inlet の D-sub(キャップ付き未使用)を第 2 local host に。方式・配線・手順は確定、コード変更なし | READY(現地作業、ユーザー) | 現地に行けるとき。RS-232 専用ケーブル(7.03.367 相当)+ USB-RS232 を用意 |
 | [159](159_zs_counters_per_run.md) | ZS カウンタを run ごとに(root_sink close 行 / status 14・15 キー / run_stop)+ PEventTPC 電荷和の照合 + UI 基線の目視 | READY(Opus) | ZS run の合間に |
 | ~~158~~ | decoder: frameType カウンタ + compact サイズ検査 | 済 → archive(1415c23) | — |
-| [184](184_receiver_decoder_link_counted_drop.md) | receiver: decoder リンクは待たずに送って数えて落とす(seq 不前進)+ Error 中の `Stop` を実行(receiver / decoder / graw-writer)— SPEC v1.53 §1.4-7 | IN PROGRESS(Opus implementer、本体の作業ツリー) | 照合 → 188 |
-| [185](185_controller_stop_drain_and_link_counts.md) | controller の停止: 中止も静止を待つ、強制 EOS 後は進捗待ち、run_stop にリンクごとの送受と `root_complete`、`/api/status.stopping` | IN PROGRESS(Opus implementer、worktree) | 照合 → マージ → 188 |
-| [186](186_root_sink_close_incomplete_on_new_run.md) | root_sink: EOS 未達のまま次の run が来たら古い run を inprogress のまま閉じて新しい run を開く(exit 6 の置き換え)+ close 行 / status に `fragments` | IN PROGRESS(Sonnet implementer、worktree) | 照合 → マージ |
+| [189](189_preamp_al_foil_shielding.md) | トリガ用プリアンプ(フィルタボックスの後)にアルミフォイル — 主 = 物理の取り方で一定時間のトリガレートと振動起動の割合、副 = ペデスタル(前 = run 202) | IN PROGRESS(巻くのはユーザー) | 後の run を取ったら解析 |
+| ~~190~~ | 全事象の UVW(web UI と同じ描き方)を 1 事象 1 ページの PDF に(`macros/drawUVW.C`) | 済 → [archive/190](archive/190_uvw_event_pdf.md)(テスト 32 PASS、run 209 = 7,946 ページ 4.18 GB を `macros/data/run0209_uvw_events.pdf` に。2 GiB 超は ROOT の xref が壊れる → `mutool clean`) | 173 §4 の目視分類(ユーザー) |
+| ~~191~~ | drawUVW に XY / XZ / YZ(模型なしの 3D 点)、既定の出力 = 事象ごとの PNG ディレクトリ | 済 → [archive/191](archive/191_drawuvw_3d_png.md)(テスト 59 PASS、run 209 = 7,946 枚 281 MB を `macros/data/run0209_uvw_events/` に) | 173 §4 の目視分類(ユーザー)、190 の PDF を消すかはユーザー |
+| [192](192_tpcreco_reco_display_survey.md) | TPCReco の再構成と表示の調査: 人のクリック(当てはめなし)/ 自動 = 直線 + α・¹²C 一直線の仮説 / 旧 Hough + 折れ線 / **順方向の模型による N 本の当てはめ(Cwiok 2023、頂点 + 終点、ブラッグ + 拡散 + 整形で UVW を描いて χ²)**。提案 = mm・自動ズーム・縦横そろえの表示 → 3 段(データ / 模型 / 残差)→ 順方向の当てはめを芯に ML と共有 | DRAFT(調査済み、Fable 所見あり 2026-11-02 → 194–198 を起票) | 198 は 197 の後 |
+| ~~193~~ | drawUVW: 上段 UVW を mm・自動ズーム・3 面共通の縮尺で縦横そろえ | 済 → [archive/193](archive/193_drawuvw_mm_zoom.md)(テスト 99 PASS、244 が塊いっぱい、27 はズームせず → 199) | — |
+| ~~194~~ | 暫定選別 v1 `selectNeutron.C` | 済 → [archive/194](archive/194_select_neutron_v1.md)(道具は完成。**片端だけ内側の組は線源の超過 ≈ 3.5 /h が背景 ≈ 50 /h と形・出る側・q/mm で区別できない**、きれいなのは contained + 4.0 /h と blob + 3.2 /h) | 選別 v2 = Fable キュー |
+| ~~195~~ | 短い腕は空間か時間波形か | 済 → [archive/195](archive/195_short_arm_waveforms.md)(27 は artifact ではない = z に ≈ 7–15 mm の実の長さ、5 は決まらず、飽和 strip は窓の終わりまで尾を引く → 197 で χ² から外す) | 198 で当てはめ |
+| [196](196_vdrift_absolute_calibration.md) | v_drift の絶対較正(198 mbar / 1,600 V / 12.5 MHz で α 線源 1 h、dip 角で mmPerCell) | WAITING(チャンバーを開ける日に、ユーザーの run) | E_n・開き角を数字で出す前に |
+| ~~197~~ | 順方向の模型による当てはめ v0(α 1 本)`fitProngs.C` | 済 → [archive/197](archive/197_forward_model_fit_v0.md)(テスト 107 PASS、閉包 0.06 mm、TPCReco と 3.85 %(**TPCReco の σ_z の不具合を発見**)、壁 α 20 / 20 で頭尻が物理と一致、ただし χ²/ndf 中央 23–107 ≫ 1) | 198(Fable に設計を相談) |
+| ~~199~~ | drawUVW のズームを連結成分で強く | 済 → [archive/199](archive/199_drawuvw_zoom_components.md)(テスト 109 PASS、27 もズーム、run 209 全 7,946 枚 236 MB を作り直し) | 目の偽陽性率の試験(ユーザーに確認中) |
+| ~~200~~ | 目の偽陽性率の試験 | 済 → [archive/200](archive/200_blind_eye_test.md)(**偽陽性 2.0 %**、片端だけ内側では目も見分けられない、contained は効く、reject で差 6 / 131 vs 1 / 174) | 198 で reject 6 本を当てはめる |
+| [201](201_fitprongs_hardening.md) | fitProngs v0.1(Fable 起票): 有感の箱・端点 ± 10 mm・A を run ごとに固定・共通モード(data 側)・誤差模型 σ² = σ_v² + (0.1·data)²・mm 表示、壁 α で χ²/ndf 中央 ≤ 3 を狙う、A_ref を測る | IN PROGRESS(implementer / Sonnet、2026-11-03) | → 198 |
+| [198](198_two_prong_hypothesis.md) | 2 本の仮説(Fable 起票): H1 {α} vs H2 {α + 頂点から出る一様な線分 0–60 mm}、Δχ² の閾値は壁 α の分布の 95 % 点、目の 16 本 + 目隠しの 11 本 + 片端だけ内側 50 + 50 に当てる | TODO(201 の後、implementer / Opus) | — |
+| [202](202_flaky_tests_under_load.md) | 負荷のかかった全体実行でだけ落ちるテスト 3 件(receiver_stale_link の T4 = 184 の DONTWAIT と接続の競合、root_sink_monitor_pub の 10 s、graw_replay_tool の TOCTOU) | TODO(11/9 の後) | — |
+| ~~184~~ | receiver の decoder リンク(数えて落とす)| 済 → [archive/184](archive/184_receiver_decoder_link_counted_drop.md)(2026-11-03 コミット `e553bb2`) | 実機の受け入れ(ELITPC 反映後) |
+| ~~185~~ | controller の停止(下流が進む限り待つ・リンクの数・root_complete)| 済 → [archive/185](archive/185_controller_stop_drain_and_link_counts.md)(2026-11-03 マージ `d10ab33`) | 実機の受け入れ(ELITPC 反映後) |
+| ~~186~~ | root_sink: 次の run が来たら未完の run を閉じる | 済 → [archive/186](archive/186_root_sink_close_incomplete_on_new_run.md)(2026-11-03 マージ `6720087`) | 実機の受け入れ(ELITPC 反映後) |
 | ~~183~~ | root_sink: PEventTPC(TPCReco、Warsaw 向け)をオプションに(`[root_sink] pevent`、off なら `--no-root`、monitor.root は raw 側)、SPEC v1.52 | 済 → [archive/183](archive/183_pevent_optional.md)(1 回目の反映で Rust の config が `pevent` を拒否し DAQ が ≈ 10 分停止 → 復旧・修正 `2911209`、**ELITPC は pevent = false で稼働**) | — |
 | ~~182~~ | root_sink の持続レートを実機で(run 198–204) | 済 → [archive/182](archive/182_root_sink_throughput_bench.md)(PEventTPC あり workers 1 = 16.6 Hz / 4 = ≈ 66 Hz、**PEventTPC なし = 169 Hz に完全追従、上限 ≈ 220 Hz**、raw ツリー 1 本 ≈ 5 ms / 事象) | — |
 | [181](181_root_sink_rate_limit_run197.md) | 高レートで graw まで落ちる件(run 197)の設計 — 保存系 = graw-writer のみ、ROOT 側は数えて落とす(ユーザー裁定)、Fable レビュー済み、**SPEC v1.53 / CLAUDE.md 改訂済み(`a5d37e9`)** | 実装中(184–186 発注、188 監視・187 UI は次) | 184–188 の後に実機で run 197 の再現(§12-14) |
@@ -161,6 +176,8 @@
 ## Fable 待ち(キュー)
 
 Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をここに積み、Fable で**まとめて**確定する(運用ルールの正は CLAUDE.md「モデル使い分け」)。
+
+- **194 → 選別 v2(2026-11-02 積み)**: Fable 裁定の「頂点が内側 + 電荷の並び」は、片端だけ内側の組で背景 48.5 /h(208)を落とせなかった。原因は端の 5 mm の窓がにじみを見ていたこと(分布の最大は端から 12–20 mm)だが、形を 3 分割で見ても、上流 / 下流、q/mm でも、208 と 209 の内訳は同じ(archive/194 の結果)。→ 片端だけ内側の組の選別をどうするか(197–198 の χ² を待つ / 端の幅 = 拡散で z を測る / ML に回す)。目の偽陽性率の試験(208・209 を混ぜて伏せる)をやるか(ユーザーに確認中)。
 
 - **181(2026-10-24 積み)**: 高レートで DAQ が壊れる件の設計 — ① receiver の送信スレッドが graw / decoder 共用で、派生物(ROOT)の遅さが正本の graw を落とす(run 197 で 19,855 喪失)→ graw のリンクを切り離す、ROOT は数えて graw から作り直せる側に(SPEC の「root-sink も保存系」を改める案、ユーザーの判断も要る)② Stop / Reset で途中のフレームが数えられずに消える(≈ 1,097)③ EOS を失ったとき root_sink の run を閉じる正規の手段 ④ Stop 後の drain 中の UI 表示 ⑤ 周期トリガの目安・下限。材料 = 182(PEventTPC off で 100 Hz は 2 倍の余裕、ユーザーは 2 年以内に 100 Hz の実験)。
 - ~~134~~ 完了 → archive(2026-10-14、SPEC v1.47)。

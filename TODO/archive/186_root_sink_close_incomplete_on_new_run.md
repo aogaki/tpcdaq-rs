@@ -1,6 +1,6 @@
 # 186 — root_sink: EOS が来ないまま次の run が来たら、古い run を未完のまま閉じて新しい run を開く
 
-**Status: IN PROGRESS**(2026-10-24 起票 Opus、実装 **Sonnet implementer**。設計 = TODO/181 §5-1「§4-3」(Fable レビュー済み)、仕様 = SPEC v1.53 §6.2-5 / §6.5 / §1.4-5 / §1.3 終端条項)
+**Status: COMPLETED**(2026-11-03 main へマージ。実機の受け入れ = ELITPC 反映後、184 と一緒に — CURRENT)(2026-10-24 起票 Opus、実装 **Sonnet implementer**。設計 = TODO/181 §5-1「§4-3」(Fable レビュー済み)、仕様 = SPEC v1.53 §6.2-5 / §6.5 / §1.4-5 / §1.3 終端条項)
 
 ## 0. 背景
 - 今は run 開放中に別の run_number の Data(または EOS)が来ると **fatal(exit 6 `run-number-mismatch`、`root_sink.cxx:808–823`)**。run 197 のように EOS を失った run の後で次の run を始めると root_sink が死に、次の run の ROOT が丸ごと無くなる。
@@ -41,4 +41,17 @@
 - `git diff --stat`(worktree のブランチ名とコミット)、テスト 1–5 の名前と場所と PASS / FAIL、赤の証拠、C++ / cargo のテスト数、**実行できなかった操作**(無ければ「なし」)、発注書からの逸脱と理由、残ったプロセスが無いこと。
 
 ## 結果
-(記入中)
+### 実装(2026-10-24、Sonnet implementer、worktree `worktree-agent-a9b001b11a9ca3f3e` のコミット `c8e41a3`、主対話 Opus が照合)
+- 12 ファイル +797 / −105: `tools/root_sink/{rs_core.hpp, root_sink.cxx, root_recorder.hpp, raw_tree.hpp, monitor_pub.hpp}` とテスト(`test_rs_core.cpp`・`test_recorder.cxx`・`test_raw_tree.cxx`・`test_eb_core.cpp`・`test_monitor_pub.cpp`)、e2e `tests/root_sink_incomplete.rs`(新規)・`tests/root_sink_intake.rs`(exit 6 のテスト 2 本を置換)。範囲内。
+- 中身: `RunState` に `DataAction::Reopened` / `EosAction::ClosedIncomplete`・`runs_closed_without_eos`、`consume` の `close_run_incomplete`(pending を古い run に flush → in-band `RunCloseIncomplete` を Recorder / raw へ → close 行 `closed without EOS (incomplete)` → 新しい run を Opened と同じ手順で開く)、
+  `Recorder::close_run_incomplete` / `RawTreeWriter::close_run_incomplete`(inprogress のまま閉じて再利用、N>1 は全 worker のキューを流し切ってから)、monitor.root は書かない。`RunCounts.fragments`、close 行の末尾に `fragments=N`、status PUB を 13 → **15 キー**(`fragments`・`runs_closed_without_eos`)、終了 JSON に `runs_closed_without_eos`。exit 6 の定数は削除(欠番のコメント)。
+- テスト(赤 = 実装前のコンパイルエラー・旧バイナリで e2e 3 / 3 FAILED を確認): rs_core `test_data_of_another_run_reopens_and_counts_closed_without_eos` / `test_eos_of_another_run_closes_incomplete_and_counts_stale` / `test_run_closed_line_reports_fragments_and_incomplete`、
+  recorder `test_close_incomplete_keeps_inprogress_and_next_run_finalizes` / `test_close_incomplete_with_parallel_workers`、raw `test_close_incomplete_keeps_inprogress_and_next_run_finalizes`、
+  e2e `a_new_run_closes_the_old_run_incomplete_and_opens_the_new_one` / `…_with_no_root_raw_tree` / `close_line_and_status_report_the_fragment_count_of_the_run` / `data_of_another_run_opens_a_new_run_instead_of_dying` / `eos_of_another_run_closes_the_old_run_incomplete_and_counts_stale`。
+- **主対話の再実行(worktree、2026-10-24)**: `make -j` 警告なし、`make test`: tpc_wire 68 / rs_core 120 / eb_core 391 / geo 426 / monitor_hist 202 / monitor_pub 92 / ped_table 27、`make test-root`: recorder 192 / pevent 163 / raw_tree 119 — すべて 0 failed。
+  `TPCDAQ_ROOT_SINK_BIN=… cargo test --test root_sink_incomplete --test root_sink_intake --test root_sink_monitor_pub --test p3_e2e`: 5 / 3 / 11 / 7(+1 ignored)passed・0 failed。残ったプロセスなし。
+- implementer の全体 cargo test: 1115 passed / 0 failed / 1 ignored(1 回目は `monitor_e2e::root_sink_pub_reaches_the_ws_as_uvw_and_histos` が並列負荷で 10 s タイムアウト、単独・2 回目は green — 既存の時間依存テスト、本変更とは無関係と判断)。
+- 逸脱: close 行の書式に `fragments=` を足したので完全一致の期待値を 5 か所更新、status のキー位置は主対話が SPEC §5.3 に追記(14・15 キー目)、`run_number_mismatch` は互換のため残し常に 0、到達しなくなった最後の砦の警告文(`begin_run` の PROTOCOL VIOLATION)は残置。
+- 実行できなかった操作: なし。
+- 残り: 本体へのマージ(184 の完了後)→ ELITPC への反映は 184–188 をまとめて。
+- **マージ後の確認(2026-11-03、主対話、main = 184 + 185 + 186)**: `cargo fmt --check` OK、`cargo clippy --tests -- -D warnings` OK、root_sink `make -j`(警告なし)/ `make -j test`(tpc_wire 68・rs_core 120・eb_core 391・geo 426・monitor_hist 202・monitor_pub 92・ped_table 27、失敗 0)/ `make -j test-root`(recorder 192・pevent 163・raw_tree 119、失敗 0)、`TPCDAQ_ROOT_SINK_BIN=<ビルドした root_sink> cargo test --no-fail-fast` = **1,133 passed / 0 failed / 1 ignored**(2 回目)。1 回目と最初の実行では負荷依存の揺らぎが 1 件ずつ(`receiver_stale_link::eof_after_data_still_ends_the_run` = 184 の DONTWAIT で接続前のフレームを数えて落とす競合、`root_sink_monitor_pub::monitor_root_is_written_within_ten_seconds_of_the_eos` = 10 s の期限)。単独では 10 / 10 通る → 揺らぎのチケット(202)。

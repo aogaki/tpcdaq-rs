@@ -879,6 +879,9 @@ rust_reference はこの情報を落としている)。`Unmapped` の出現は `
   **`acquisition_restarts`(v1.46、TODO/110)** = 取得の再開の回数(§6.3。12 キー目、`pending_events` の次。**v1.50: run ごと** — 通算は終了 JSON)。
   **`sources_behind`(v1.48、TODO/133)** = 世代が最小に留まっている期待ソースの数(全ソースが同じ世代なら 0。13 キー目、
   `acquisition_restarts` の次。死んだ AsAd が見える)。
+  **`fragments`・`runs_closed_without_eos`(v1.53、TODO/186)** = 14・15 キー目(`sources_behind` の次。map は fixmap の上限 15 に
+  ちょうど収まる — 次にキーを足すときは map16 になる)。`fragments` = その run で受け取ったフラグメント数(run ごと、close 行の `fragments=` と同じ —
+  decoder の `fragments_out` と run 単位で照合する、§1.3)、`runs_closed_without_eos` = EOS 未達のまま次の run で未完として閉じた run の数(通算、§6.2-5)。
   monitor(Rust)の `StatusPayload` は今はこのキーを読み飛ばす(未知キーは許す) — UI の status バーへの
   `restarts N` 表示は後続(110 レーン C、ユーザー既定で後回し)。
   `events_built` = emit 済みイベント数(complete + incomplete)。**v1.50(TODO/175)**: `events_built` / `events_incomplete` / `late_fragments` /
