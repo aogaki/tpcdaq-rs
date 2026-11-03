@@ -197,18 +197,24 @@ fn quiesce_needs_every_receiver_to_be_quiet() {
     assert!(report.forced_eos);
 }
 
-/// **中止経路**(SPEC §1.3 v1.6): 待たずに強制 EOS。**run がクローズする前に
+/// **中止経路**(SPEC §1.3 v1.6): EOS で閉じてから畳む。**run がクローズする前に
 /// decoder を Reset しない**。run_stop は ok=false / reason="abort:..."。
+///
+/// 185(SPEC §1.3 v1.53 ①)で前提を改訂: 中止も第一段(受信静止)を通る —— 「待たずに即・
+/// 強制 EOS」は撤去した。ここは受信が止まっている(静止 600 ms)→ 強制 EOS → 第二段で
+/// 閉じる形(`eos_after_polls = Some(4)` = 第一段の graw-writer 判定 4 回の後に閉じる。
+/// 手計算は `stop_forces_eos_as_soon_as_the_receivers_go_quiet` と同じ)。
 #[test]
 fn abort_closes_with_eos_before_resetting_the_decoder() {
     let params = params_with(&[0]);
-    let mut mock = MockTransport::new(&params).with_eos_closed();
+    let mut mock = MockTransport::new(&params);
+    mock.eos_after_polls = Some(4);
     let report =
         Sequencer::new(&params, &mut mock).stop_run(StopMode::Abort("overflow".to_string()));
 
     assert!(!report.ok);
     assert_eq!(report.reason, "abort:overflow");
-    assert!(report.forced_eos, "中止は待たずに強制 EOS(v1.6)");
+    assert!(report.forced_eos, "静止の後に強制 EOS(v1.53)");
 
     // 「EOS が流れ切ったと観測した」時点 = 強制 Stop の直後に来る GetStatus。
     let forced_stop = mock.index_of("receiver0", "Stop").unwrap();
@@ -356,6 +362,419 @@ fn stop_reports_an_error_when_eos_never_propagates() {
         .notes
         .iter()
         .any(|n| n.contains("EOS did not propagate")));
+}
+
+// -----------------------------------------------------------------
+// 185(SPEC §1.3 v1.53): 中止も第一段を通る / 第二段は「下流が進んでいる限り待つ」
+// -----------------------------------------------------------------
+
+/// **185 テスト 3 — 中止でも第一段(受信静止)を通る**。receiver がまだ受信している間は
+/// 強制 EOS(receiver `Stop`)を撃たない —— 即座に撃つと `receiver::drain_task` が畳まれ、
+/// カーネル受信バッファの未読分(= graw)が数えられずに消える(SPEC §1.3 v1.53 ①)。
+///
+/// 手計算(eos_poll 200 ms、eos_timeout 5 s、受信は止まらない): 第一段は静止しないので
+/// ハード上限 = 判定 26 回(即時 1 + 200 ms × 25)= 5 000 ms。receiver0 は Stop の前に
+/// 26 回問い合わされる。`eos_after_polls = Some(26)` = 強制 EOS 直後の判定で閉じる。
+#[test]
+fn an_abort_waits_for_the_receivers_to_go_quiet_before_forcing_eos() {
+    let params = params_with(&[0]);
+    let mut mock = MockTransport::new(&params).receivers_still_receiving(4096);
+    mock.eos_after_polls = Some(26);
+    let report = Sequencer::new(&params, &mut mock)
+        .stop_run(StopMode::Abort("overload:receiver0".to_string()));
+
+    assert_eq!(report.reason, "abort:overload:receiver0");
+    assert!(!report.ok);
+    let forced_stop = mock.index_of("receiver0", "Stop").unwrap();
+    let polls_before_stop = mock.calls[..forced_stop]
+        .iter()
+        .filter(|c| c.component == "receiver0" && c.action == "GetStatus")
+        .count();
+    assert_eq!(
+        polls_before_stop, 26,
+        "中止で受信静止を確かめずに強制 EOS を撃っている: {:?}",
+        mock.calls
+    );
+    assert_eq!(mock.slept, params.eos_timeout);
+    assert!(report.forced_eos);
+    assert!(report.eos_closed, "強制 EOS の後は閉じる");
+}
+
+/// **185 テスト 1(前半)— 強制 EOS の後、下流が書き出しを続けている間は待つ**。
+/// decoder の `batches_out` が動き続ける間は `eos_timeout`(5 s)を超えて待ち、動かなく
+/// なってから `eos_timeout` のあいだ静かなら打ち切る(上限のノブは無い)。
+///
+/// 手計算(eos_poll 200 ms、eos_timeout 5 s、EOS は来ない):
+/// - 第一段: 受信は止まっている → 静止 600 ms で強制 EOS。
+/// - 第二段: 観測サンプルは slept = 600, 800, …。`batches_out` は slept < 9 000 の
+///   GetStatus で +1 なので 8 800 のサンプルまで動き、9 000 から不変。不変が 200 ms ずつ
+///   積もって 8 800 + 5 000 = **13 800 ms** で打ち切り(第二段の待ちは 13 200 ms、最後に
+///   動いたのは第二段の 8 200 ms 時点 = 打ち切りの 5.0 s 前)。
+#[test]
+fn after_the_forced_eos_the_stop_waits_as_long_as_the_decoder_keeps_sending() {
+    let params = params_with(&[0]);
+    let mut mock = MockTransport::new(&params).counter_moves_until(
+        "decoder",
+        "batches_out",
+        Duration::from_millis(9_000),
+    );
+    let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+    assert!(report.forced_eos);
+    assert!(!report.eos_closed);
+    assert_eq!(report.reason, "error:eos-timeout");
+    assert_eq!(
+        mock.slept,
+        Duration::from_millis(13_800),
+        "動いている間は待ち、止まってから eos_timeout で打ち切る"
+    );
+    // 文言は今の流儀(`EOS did not propagate within <eos_timeout> ms` —— e2e の
+    // `tests/p3_error_paths.rs` F1 もこの頭で照合する)に、待った総時間と最後に動いた時刻を足す。
+    assert!(
+        report.notes.iter().any(|n| n
+            == "EOS did not propagate within 5000 ms of no downstream progress after the \
+                forced EOS — waited 13200 ms; the observed counters last moved 5.0 s ago"),
+        "打ち切りの note に最後に動いた時刻が無い: {:?}",
+        report.notes
+    );
+}
+
+/// **185 テスト 1(後半)— 途中で EOS が完了すれば即 true**。decoder はまだ動いて
+/// いる(60 s まで)が、EOS は仮想時刻 8 000 ms で完了する → その判定で返る。
+///
+/// 手計算: 第一段 600 ms(静止)→ 強制 EOS → 第二段は slept = 600, 800, … の判定で、
+/// 8 000 ms の判定で完了 → 眠らずに返る。合計 **8 000 ms**(> eos_timeout = 5 000 ms ——
+/// 旧実装なら 5 600 ms で打ち切っていた)。
+#[test]
+fn a_forced_eos_that_completes_while_the_decoder_still_sends_returns_at_once() {
+    let params = params_with(&[0]);
+    let mut mock = MockTransport::new(&params).counter_moves_until(
+        "decoder",
+        "batches_out",
+        Duration::from_secs(60),
+    );
+    mock.eos_after_slept = Some(Duration::from_millis(8_000));
+    let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+    assert!(report.forced_eos);
+    assert!(
+        report.eos_closed,
+        "動いている間に EOS が届いたのに打ち切っている"
+    );
+    assert_eq!(report.reason, "normal");
+    assert_eq!(mock.slept, Duration::from_millis(8_000));
+}
+
+/// 観測カウンタは receiver の `batches`・graw-writer の `asad[].frames` 合計 + `ctrl_frames`・
+/// decoder の `frames_in` / `batches_out` の**全部**(どれが動いても待つ)。ここは graw-writer
+/// の `ctrl_frames` だけが 3 000 ms まで動く形(asad は不変の 68)。
+///
+/// 手計算: 第一段 600 ms → 第二段は 2 800 ms のサンプルまで動き、2 800 + 5 000 = 7 800 ms で
+/// 打ち切り。
+#[test]
+fn the_graw_writer_frames_also_count_as_downstream_progress() {
+    let params = params_with(&[0]);
+    let mut mock = MockTransport::new(&params).counter_moves_until(
+        "graw-writer",
+        "ctrl_frames",
+        Duration::from_millis(3_000),
+    );
+    mock.set_metric(
+        "graw-writer",
+        "asad",
+        json!([{"cobo": 0, "asad": 0, "bytes": 6528, "frames": 68}]),
+    );
+    let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+    assert!(!report.eos_closed);
+    assert_eq!(mock.slept, Duration::from_millis(7_800));
+}
+
+/// 観測カウンタの 1 つ 1 つ(SPEC §1.3 v1.53 の 4 系統)が、**単独で**動いても第二段を
+/// 引き延ばす(どれかを観測から落とすと、その系統だけが書き出し中の停止は 5 s で切られる)。
+///
+/// 手計算はどの行も `the_graw_writer_frames_also_count_as_downstream_progress` と同じ:
+/// 3 000 ms まで動く → 2 800 ms のサンプルが最後の動き → 2 800 + 5 000 = 7 800 ms で打ち切り
+/// (第一段は `bytes` だけを見るので、receiver の `batches` が動いても 600 ms で静止する)。
+#[test]
+fn each_observed_counter_alone_keeps_the_second_stage_waiting() {
+    let params = params_with(&[0]);
+    for (component, key) in [
+        ("receiver0", "batches"),
+        ("decoder", "frames_in"),
+        ("decoder", "batches_out"),
+        ("graw-writer", "ctrl_frames"),
+    ] {
+        let mut mock = MockTransport::new(&params).counter_moves_until(
+            component,
+            key,
+            Duration::from_millis(3_000),
+        );
+        // 動かない側の材料は全部揃えておく(欠けは「動いていない」扱いで判定には効かないが、
+        // 1 系統だけが動く形をはっきりさせる)。
+        mock.set_metric("receiver0", "batches", json!(1288));
+        mock.set_metric("decoder", "frames_in", json!(3852));
+        mock.set_metric("decoder", "batches_out", json!(1287));
+        mock.set_metric("graw-writer", "ctrl_frames", json!(2));
+        mock.set_metric(
+            "graw-writer",
+            "asad",
+            json!([{"cobo": 0, "asad": 0, "bytes": 6528, "frames": 3850}]),
+        );
+        let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+        assert!(!report.eos_closed, "{component}.{key}");
+        assert_eq!(
+            mock.slept,
+            Duration::from_millis(7_800),
+            "{component}.{key} が動いているのに第二段を引き延ばしていない"
+        );
+    }
+}
+
+/// **185 テスト 2 — Heartbeat 系だけが動いても待ち続けない**(アイドルでも動くので、観測に
+/// 入れると永久待ちになる)。decoder / graw-writer の `heartbeats_*` が 60 s まで動いても、
+/// 第二段は `eos_timeout` で打ち切る: 第一段 600 ms + 第二段 5 000 ms = **5 600 ms**。
+#[test]
+fn heartbeats_alone_do_not_keep_the_stop_waiting() {
+    let params = params_with(&[0]);
+    let until = Duration::from_secs(60);
+    let mut mock = MockTransport::new(&params)
+        .counter_moves_until("decoder", "heartbeats_in", until)
+        .counter_moves_until("decoder", "heartbeats_out", until)
+        .counter_moves_until("decoder", "heartbeats_abandoned", until)
+        .counter_moves_until("graw-writer", "heartbeats_in", until);
+    let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+
+    assert!(!report.eos_closed);
+    assert_eq!(report.reason, "error:eos-timeout");
+    assert_eq!(
+        mock.slept,
+        Duration::from_millis(5_600),
+        "Heartbeat の動きを下流の進捗と読んで待ち続けている"
+    );
+    assert!(
+        report.notes.iter().any(|n| n
+            == "EOS did not propagate within 5000 ms of no downstream progress after the \
+                forced EOS — waited 5000 ms; the observed counters never moved"),
+        "{:?}",
+        report.notes
+    );
+}
+
+// -----------------------------------------------------------------
+// 185 テスト 4: run_stop.counters のリンクごとの送受と `root_complete`(SPEC §9.2 v1.53)
+// -----------------------------------------------------------------
+
+/// 欠けの無い 2 CoBo のチェーン(非対称な値)。手計算:
+/// - receiver: frames 3 852 + 3 849 = 7 701、overflow 0、decoder リンクの落とし 0。
+/// - graw-writer: asad 1 926 + 1 925 + 1 924 + 1 924 = 7 699、ctrl_frames 2 → 7 701。
+/// - decoder: frames_in 7 701、fragments_out 7 699(ctrl 2 本はフラグメントにならない)、
+///   abandoned 0 + 0。
+fn complete_chain(params: &ControllerParams) -> MockTransport {
+    let mut mock = MockTransport::new(params);
+    for (name, frames, batches) in [("receiver0", 3852, 1288), ("receiver1", 3849, 1285)] {
+        mock.set_metric(name, "frames", json!(frames));
+        mock.set_metric(name, "overflow_frames", json!(0));
+        mock.set_metric(name, "batches", json!(batches));
+        mock.set_metric(name, "decoder_link_dropped_frames", json!(0));
+        mock.set_metric(name, "decoder_link_dropped_batches", json!(0));
+        mock.set_metric(name, "decoder_link_dropped_heartbeats", json!(0));
+    }
+    mock.set_metric("graw-writer", "asad", asad_frames(1924));
+    mock.set_metric("graw-writer", "ctrl_frames", json!(2));
+    mock.set_metric("decoder", "frames_in", json!(7701));
+    mock.set_metric("decoder", "fragments_out", json!(7699));
+    mock.set_metric("decoder", "batches_out", json!(2571));
+    mock.set_metric("decoder", "batches_abandoned", json!(0));
+    mock.set_metric("decoder", "eos_abandoned", json!(0));
+    mock
+}
+
+/// graw-writer の `asad` 配列(cobo 1 / asad 1 のフレーム数だけを変えられる形)。
+fn asad_frames(cobo1_asad1: u64) -> Value {
+    json!([
+        {"cobo": 0, "asad": 0, "bytes": 1, "frames": 1926},
+        {"cobo": 0, "asad": 1, "bytes": 1, "frames": 1925},
+        {"cobo": 1, "asad": 0, "bytes": 1, "frames": 1924},
+        {"cobo": 1, "asad": 1, "bytes": 1, "frames": cobo1_asad1},
+    ])
+}
+
+/// metrics からキーを 1 つ消す(古いコンポーネントの模擬)。
+fn remove_metric(mock: &mut MockTransport, component: &str, key: &str) {
+    if let Some(map) = mock
+        .metrics
+        .get_mut(component)
+        .and_then(Value::as_object_mut)
+    {
+        map.remove(key);
+    }
+}
+
+/// 新キーが全部載り、欠けが無ければ `lost_* == 0`・`root_complete == true`。
+#[test]
+fn run_stop_counters_carry_the_link_counts_and_a_complete_run_is_root_complete() {
+    let params = params_with(&[0, 1]);
+    let mut mock = complete_chain(&params).with_eos_closed();
+    let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+    let c = &report.counters;
+
+    assert!(report.eos_closed);
+    assert_eq!(c.decoder_link_dropped_frames, Some(0));
+    assert_eq!(c.decoder_link_dropped_batches, Some(0));
+    assert_eq!(c.decoder_link_dropped_heartbeats, Some(0));
+    assert_eq!(c.graw_frames, Some(7701));
+    assert_eq!(c.decoder_frames_in, Some(7701));
+    assert_eq!(c.decoder_fragments_out, Some(7699));
+    assert_eq!(c.decoder_abandoned, Some(0));
+    assert_eq!(c.lost_receiver_to_graw, Some(0));
+    assert_eq!(c.lost_receiver_to_decoder, Some(0));
+    assert_eq!(c.root_complete, Some(true));
+
+    // ログブックに載る形(SPEC §9.2 v1.53 のキー名どおり)。
+    let json = serde_json::to_value(c).unwrap();
+    for key in [
+        "decoder_link_dropped_frames",
+        "decoder_link_dropped_batches",
+        "decoder_link_dropped_heartbeats",
+        "graw_frames",
+        "decoder_frames_in",
+        "decoder_fragments_out",
+        "decoder_abandoned",
+        "lost_receiver_to_graw",
+        "lost_receiver_to_decoder",
+    ] {
+        assert!(json[key].is_number(), "{key}: {json}");
+    }
+    assert_eq!(json["root_complete"], json!(true));
+}
+
+/// `root_complete == false` の 4 ケース(SPEC §1.4-8)。各ケースの差の手計算は行ごと。
+#[test]
+fn root_complete_is_false_for_overflow_drop_missing_eos_and_abandon() {
+    let params = params_with(&[0, 1]);
+
+    // ① 溢れ(graw の喪失): receiver1 が 5 本溢れ、graw-writer はその 5 本を受けていない
+    //    (asad (1,1) = 1 919 → 7 696)、decoder も 7 696 本。差 = (7 701 − 5) − 7 696 = 0。
+    let mut mock = complete_chain(&params).with_eos_closed();
+    mock.set_metric("receiver1", "overflow_frames", json!(5));
+    mock.set_metric("graw-writer", "asad", asad_frames(1919));
+    mock.set_metric("decoder", "frames_in", json!(7696));
+    let c = Sequencer::new(&params, &mut mock)
+        .stop_run(StopMode::Normal)
+        .counters;
+    assert_eq!(c.overflow_frames, Some(5));
+    assert_eq!(c.graw_frames, Some(7696));
+    assert_eq!(c.lost_receiver_to_graw, Some(0));
+    assert_eq!(c.lost_receiver_to_decoder, Some(0));
+    assert_eq!(c.root_complete, Some(false), "溢れ");
+
+    // ② decoder リンクで数えて落とした: receiver0 が 120 本(40 バッチ)を落とし、decoder は
+    //    7 701 − 120 = 7 581 本。差 = 7 701 − 0 − 120 − 7 581 = 0、graw は完全。
+    let mut mock = complete_chain(&params).with_eos_closed();
+    mock.set_metric("receiver0", "decoder_link_dropped_frames", json!(120));
+    mock.set_metric("receiver0", "decoder_link_dropped_batches", json!(40));
+    mock.set_metric("receiver1", "decoder_link_dropped_heartbeats", json!(3));
+    mock.set_metric("decoder", "frames_in", json!(7581));
+    let c = Sequencer::new(&params, &mut mock)
+        .stop_run(StopMode::Normal)
+        .counters;
+    assert_eq!(c.decoder_link_dropped_frames, Some(120));
+    assert_eq!(c.decoder_link_dropped_batches, Some(40));
+    assert_eq!(c.decoder_link_dropped_heartbeats, Some(3));
+    assert_eq!(c.lost_receiver_to_graw, Some(0));
+    assert_eq!(c.lost_receiver_to_decoder, Some(0));
+    assert_eq!(c.root_complete, Some(false), "decoder リンクの落とし");
+
+    // ③ EOS 未達(強制しても流れ切らない): graw-writer は 11 本受けていない(asad (1,1) =
+    //    1 913 → 7 690)、decoder は 51 本受けていない(7 650)= ZMQ のキューに居たまま。
+    //    差 = 7 701 − 7 690 = 11 / 7 701 − 0 − 7 650 = 51。
+    let mut mock = complete_chain(&params);
+    mock.set_metric("graw-writer", "asad", asad_frames(1913));
+    mock.set_metric("decoder", "frames_in", json!(7650));
+    let report = Sequencer::new(&params, &mut mock).stop_run(StopMode::Normal);
+    assert!(!report.eos_closed);
+    assert_eq!(report.counters.graw_frames, Some(7690));
+    assert_eq!(report.counters.lost_receiver_to_graw, Some(11));
+    assert_eq!(report.counters.lost_receiver_to_decoder, Some(51));
+    assert_eq!(report.counters.root_complete, Some(false), "EOS 未達");
+
+    // ④ decoder が手放した(Reset の打ち切り): batches 1 + eos 1 = 2。
+    let mut mock = complete_chain(&params).with_eos_closed();
+    mock.set_metric("decoder", "batches_abandoned", json!(1));
+    mock.set_metric("decoder", "eos_abandoned", json!(1));
+    let c = Sequencer::new(&params, &mut mock)
+        .stop_run(StopMode::Normal)
+        .counters;
+    assert_eq!(c.decoder_abandoned, Some(2));
+    assert_eq!(c.root_complete, Some(false), "decoder の abandoned");
+}
+
+/// 値が取れないときは null(0 と区別)。
+#[test]
+fn link_counts_are_null_when_a_component_cannot_tell() {
+    let params = params_with(&[0, 1]);
+    let dropped_keys = [
+        "decoder_link_dropped_frames",
+        "decoder_link_dropped_batches",
+        "decoder_link_dropped_heartbeats",
+    ];
+
+    // 184 より前の receiver(decoder リンクのカウンタが無い): 落としの 3 キー・decoder 側の
+    // 差・root_complete が null。graw 側の差は材料が揃うので 0。
+    let mut mock = complete_chain(&params).with_eos_closed();
+    for name in ["receiver0", "receiver1"] {
+        for key in dropped_keys {
+            remove_metric(&mut mock, name, key);
+        }
+    }
+    let c = Sequencer::new(&params, &mut mock)
+        .stop_run(StopMode::Normal)
+        .counters;
+    assert_eq!(c.decoder_link_dropped_frames, None);
+    assert_eq!(c.decoder_link_dropped_batches, None);
+    assert_eq!(c.decoder_link_dropped_heartbeats, None);
+    assert_eq!(c.lost_receiver_to_graw, Some(0));
+    assert_eq!(c.lost_receiver_to_decoder, None);
+    assert_eq!(c.root_complete, None);
+    let json = serde_json::to_value(&c).unwrap();
+    assert_eq!(json["decoder_link_dropped_frames"], Value::Null);
+    assert_eq!(json["root_complete"], Value::Null);
+
+    // 1 台だけ申告しない(receiver1 が古い)なら合計は出さない(半端な和を出さない)。
+    let mut mock = complete_chain(&params).with_eos_closed();
+    remove_metric(&mut mock, "receiver1", "decoder_link_dropped_frames");
+    let c = Sequencer::new(&params, &mut mock)
+        .stop_run(StopMode::Normal)
+        .counters;
+    assert_eq!(c.decoder_link_dropped_frames, None);
+    assert_eq!(c.decoder_link_dropped_batches, Some(0));
+
+    // graw-writer 不達: graw のフレーム数と graw 側の差が null。
+    let mut mock = complete_chain(&params)
+        .with_eos_closed()
+        .unreachable("graw-writer");
+    let c = Sequencer::new(&params, &mut mock)
+        .stop_run(StopMode::Normal)
+        .counters;
+    assert_eq!(c.graw_frames, None);
+    assert_eq!(c.lost_receiver_to_graw, None);
+    assert_eq!(c.lost_receiver_to_decoder, Some(0));
+
+    // decoder 不達: decoder の 3 キー・decoder 側の差・root_complete が null。
+    let mut mock = complete_chain(&params)
+        .with_eos_closed()
+        .unreachable("decoder");
+    let c = Sequencer::new(&params, &mut mock)
+        .stop_run(StopMode::Normal)
+        .counters;
+    assert_eq!(c.decoder_frames_in, None);
+    assert_eq!(c.decoder_fragments_out, None);
+    assert_eq!(c.decoder_abandoned, None);
+    assert_eq!(c.lost_receiver_to_decoder, None);
+    assert_eq!(c.lost_receiver_to_graw, Some(0));
+    assert_eq!(c.root_complete, None);
 }
 
 // -----------------------------------------------------------------

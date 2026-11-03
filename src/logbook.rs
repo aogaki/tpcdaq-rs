@@ -123,6 +123,36 @@ pub struct Counters {
     /// (TODO/158)。0 以外なら compact + ZS の誤配置を疑う。
     #[serde(default)]
     pub compact_size_mismatch: Option<u64>,
+    /// receiver が decoder リンクで数えて落としたフレーム / バッチ / Heartbeat の全 receiver 合計
+    /// (SPEC §1.4-7 / §9.2 v1.53、TODO/184・185)。1 台でも申告しなければ `None`(半端な和を出さない)。
+    #[serde(default)]
+    pub decoder_link_dropped_frames: Option<u64>,
+    #[serde(default)]
+    pub decoder_link_dropped_batches: Option<u64>,
+    #[serde(default)]
+    pub decoder_link_dropped_heartbeats: Option<u64>,
+    /// graw-writer が書いたフレーム数 = `asad[].frames` の合計 + `ctrl_frames`(v1.53)。
+    #[serde(default)]
+    pub graw_frames: Option<u64>,
+    /// decoder の `frames_in` / `fragments_out`、`batches_abandoned + eos_abandoned`(v1.53)。
+    #[serde(default)]
+    pub decoder_frames_in: Option<u64>,
+    #[serde(default)]
+    pub decoder_fragments_out: Option<u64>,
+    #[serde(default)]
+    pub decoder_abandoned: Option<u64>,
+    /// リンクごとの送受の差(SPEC §1.3 v1.53。欠けが無ければ 0): Σ receiver(`frames −
+    /// overflow_frames`)− `graw_frames`。符号つき —— 負は「数え方が食い違う」の印で、隠さない。
+    #[serde(default)]
+    pub lost_receiver_to_graw: Option<i64>,
+    /// Σ receiver(`frames − overflow_frames − decoder_link_dropped_frames`)− `decoder_frames_in`。
+    #[serde(default)]
+    pub lost_receiver_to_decoder: Option<i64>,
+    /// この run の ROOT は欠けなく作れたか(SPEC §1.4-8 v1.53)= `overflow_frames == 0 ∧
+    /// decoder_link_dropped_frames == 0 ∧ eos_closed ∧ decoder_abandoned == 0`。材料のどれかが
+    /// `None` なら `None`。`false` = 「ROOT は graw から作り直す」。
+    #[serde(default)]
+    pub root_complete: Option<bool>,
 }
 
 /// `run_stop.counters.frames_before_restart` の値(TODO/133)。
@@ -638,6 +668,16 @@ mod tests {
                 frames_type1: None,
                 frames_type2: None,
                 compact_size_mismatch: None,
+                decoder_link_dropped_frames: None,
+                decoder_link_dropped_batches: None,
+                decoder_link_dropped_heartbeats: None,
+                graw_frames: None,
+                decoder_frames_in: None,
+                decoder_fragments_out: None,
+                decoder_abandoned: None,
+                lost_receiver_to_graw: None,
+                lost_receiver_to_decoder: None,
+                root_complete: None,
             },
             files: vec![
                 OutputFile {
@@ -738,7 +778,7 @@ mod tests {
         let json = serde_json::to_string(&line).unwrap();
         assert_eq!(
             json,
-            r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","forced_eos":true,"eos_closed":true,"counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4,"acquisition_restarts":null,"frames_before_restart":null,"frames_type1":null,"frames_type2":null,"compact_size_mismatch":null},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}"#
+            r#"{"ts":"2026-08-12T18:00:00.000+03:00","seq":7,"type":"run_stop","actor":"controller","run":58,"duration_s":12.5,"ok":true,"reason":"normal","forced_eos":true,"eos_closed":true,"counters":{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{"0":3852,"1":3849},"overflow_frames":3,"malformed":4,"acquisition_restarts":null,"frames_before_restart":null,"frames_type1":null,"frames_type2":null,"compact_size_mismatch":null,"decoder_link_dropped_frames":null,"decoder_link_dropped_batches":null,"decoder_link_dropped_heartbeats":null,"graw_frames":null,"decoder_frames_in":null,"decoder_fragments_out":null,"decoder_abandoned":null,"lost_receiver_to_graw":null,"lost_receiver_to_decoder":null,"root_complete":null},"files":[{"path":"run58/CoBo0_AsAd0_ts_0000.graw","bytes":30108672},{"path":"run58/run58.root","bytes":1234567}]}"#
         );
     }
 
@@ -898,11 +938,21 @@ mod tests {
             frames_type1: None,
             frames_type2: None,
             compact_size_mismatch: None,
+            decoder_link_dropped_frames: None,
+            decoder_link_dropped_batches: None,
+            decoder_link_dropped_heartbeats: None,
+            graw_frames: None,
+            decoder_frames_in: None,
+            decoder_fragments_out: None,
+            decoder_abandoned: None,
+            lost_receiver_to_graw: None,
+            lost_receiver_to_decoder: None,
+            root_complete: None,
         };
         let json = serde_json::to_string(&counters).unwrap();
         assert_eq!(
             json,
-            r#"{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{},"overflow_frames":null,"malformed":null,"acquisition_restarts":null,"frames_before_restart":null,"frames_type1":null,"frames_type2":null,"compact_size_mismatch":null}"#
+            r#"{"events_built":null,"events_incomplete":null,"late_fragments":null,"frames":{},"overflow_frames":null,"malformed":null,"acquisition_restarts":null,"frames_before_restart":null,"frames_type1":null,"frames_type2":null,"compact_size_mismatch":null,"decoder_link_dropped_frames":null,"decoder_link_dropped_batches":null,"decoder_link_dropped_heartbeats":null,"graw_frames":null,"decoder_frames_in":null,"decoder_fragments_out":null,"decoder_abandoned":null,"lost_receiver_to_graw":null,"lost_receiver_to_decoder":null,"root_complete":null}"#
         );
         let back: Counters = serde_json::from_str(&json).unwrap();
         assert_eq!(back, counters);
@@ -924,11 +974,21 @@ mod tests {
             frames_type1: Some(66),
             frames_type2: Some(77),
             compact_size_mismatch: Some(88),
+            decoder_link_dropped_frames: None,
+            decoder_link_dropped_batches: None,
+            decoder_link_dropped_heartbeats: None,
+            graw_frames: None,
+            decoder_frames_in: None,
+            decoder_fragments_out: None,
+            decoder_abandoned: None,
+            lost_receiver_to_graw: None,
+            lost_receiver_to_decoder: None,
+            root_complete: None,
         };
         let json = serde_json::to_string(&counters).unwrap();
         assert_eq!(
             json,
-            r#"{"events_built":11,"events_incomplete":22,"late_fragments":33,"frames":{},"overflow_frames":44,"malformed":55,"acquisition_restarts":null,"frames_before_restart":null,"frames_type1":66,"frames_type2":77,"compact_size_mismatch":88}"#
+            r#"{"events_built":11,"events_incomplete":22,"late_fragments":33,"frames":{},"overflow_frames":44,"malformed":55,"acquisition_restarts":null,"frames_before_restart":null,"frames_type1":66,"frames_type2":77,"compact_size_mismatch":88,"decoder_link_dropped_frames":null,"decoder_link_dropped_batches":null,"decoder_link_dropped_heartbeats":null,"graw_frames":null,"decoder_frames_in":null,"decoder_fragments_out":null,"decoder_abandoned":null,"lost_receiver_to_graw":null,"lost_receiver_to_decoder":null,"root_complete":null}"#
         );
         let back: Counters = serde_json::from_str(&json).unwrap();
         assert_eq!(back, counters);

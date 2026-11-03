@@ -431,6 +431,8 @@ async fn harness_full(
             "eos_out": if eos_closed { 1 } else { 0 },
             "malformed": 4,
             "fragments_out": 3852,
+            // 185: `/api/status.stopping.decoder_backlog` = frames_in − fragments_out = 48。
+            "frames_in": 3900,
         }),
         shutdown.subscribe(),
     )
@@ -882,6 +884,96 @@ async fn a_stop_without_eos_forces_it_through_the_receivers() {
     assert_eq!(run_stop["eos_closed"], body["eos_closed"], "{run_stop}");
     assert_eq!(run_stop["forced_eos"], json!(true), "{run_stop}");
     assert_eq!(run_stop["eos_closed"], json!(false), "{run_stop}");
+
+    harness.shutdown();
+}
+
+/// 185(SPEC §1.3 v1.53 / §8.1): 停止の待ちの間も `/api/status` は応答し(`controller.run` の
+/// mutex を待ちの間握らない)、phase が `Stopping` の間**だけ** `stopping: {decoder_backlog,
+/// waited_s}` を出す。Running / Idle ではキーごと無い。
+///
+/// フェイクは EOS を流さず値も動かないので、停止は「静止 200 ms → 強制 EOS → 不変 400 ms で
+/// 打ち切り」≈ 0.6 s 以上かかる —— その間に status を覗く。decoder_backlog の手計算:
+/// フェイクの decoder は frames_in 3 900 − fragments_out 3 852 = 48。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_status_shows_stopping_only_while_the_stop_is_waiting() {
+    let harness = harness("stopping-status", &[0], false, None).await;
+    let token = harness.acquire("aogaki");
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let (_, running) = get(harness.rest, "/api/status");
+    assert_eq!(running["phase"], json!("Running"), "{running}");
+    assert!(
+        running.get("stopping").is_none(),
+        "Running 中に出ている: {running}"
+    );
+
+    let rest = harness.rest;
+    let stop_token = token.clone();
+    let stopper =
+        std::thread::spawn(move || post(rest, "/api/run/stop", json!({"token": stop_token})));
+
+    let mut stopping = Value::Null;
+    wait_until("phase Stopping in /api/status", || {
+        let (status, body) = get(rest, "/api/status");
+        assert_eq!(status, 200, "{body}");
+        if body["phase"] == json!("Stopping") {
+            stopping = body;
+            true
+        } else {
+            false
+        }
+    });
+    assert_eq!(
+        stopping["stopping"]["decoder_backlog"],
+        json!(48),
+        "{stopping}"
+    );
+    let waited = stopping["stopping"]["waited_s"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("waited_s が数値でない: {stopping}"));
+    assert!((0.0..10.0).contains(&waited), "{waited}");
+
+    let (status, stop) = stopper.join().unwrap();
+    assert_eq!(status, 200, "{stop}");
+    let (_, idle) = get(harness.rest, "/api/status");
+    assert_eq!(idle["phase"], json!("Idle"), "{idle}");
+    assert!(idle.get("stopping").is_none(), "Idle で残っている: {idle}");
+
+    // 185 テスト 4 のログブック側: run_stop.counters に v1.53 の新キーが**全部載る**(SPEC §9.2)。
+    // フェイクは 184 より前の形(receiver に decoder リンクのカウンタ、graw-writer に asad /
+    // ctrl_frames、decoder に *_abandoned が無い)なので、取れない値は null(0 と区別)。
+    // decoder の frames_in / fragments_out はフェイクの申告どおり 3 900 / 3 852。
+    let records = harness.logbook();
+    let run_stop = records
+        .iter()
+        .find(|r| r["type"] == json!("run_stop"))
+        .unwrap_or_else(|| panic!("run_stop が無い: {records:?}"));
+    let counters = &run_stop["counters"];
+    for key in [
+        "decoder_link_dropped_frames",
+        "decoder_link_dropped_batches",
+        "decoder_link_dropped_heartbeats",
+        "graw_frames",
+        "decoder_frames_in",
+        "decoder_fragments_out",
+        "decoder_abandoned",
+        "lost_receiver_to_graw",
+        "lost_receiver_to_decoder",
+        "root_complete",
+    ] {
+        assert!(counters.get(key).is_some(), "{key} が無い: {counters}");
+    }
+    assert_eq!(counters["decoder_frames_in"], json!(3900), "{counters}");
+    assert_eq!(counters["decoder_fragments_out"], json!(3852), "{counters}");
+    assert_eq!(counters["decoder_link_dropped_frames"], Value::Null);
+    assert_eq!(counters["graw_frames"], Value::Null);
+    assert_eq!(counters["lost_receiver_to_graw"], Value::Null);
+    assert_eq!(counters["root_complete"], Value::Null);
 
     harness.shutdown();
 }
