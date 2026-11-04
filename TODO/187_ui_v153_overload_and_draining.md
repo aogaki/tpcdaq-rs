@@ -1,6 +1,6 @@
 # 187 — UI: v1.53 / v1.54 の表示(ROOT DROPPED・STOPPING draining・OVERLOAD・ログブックの root_complete)
 
-**Status: IMPLEMENTED — マージ待ち・実機の受け入れ待ち(2026-11-04)**(発注書 — Fable 2026-11-04 起票。11/9 前に ③ と ① は要る。Sonnet implementer、204 のキー名が決まれば 204 と並行可)**(設計 = TODO/181 §4-5 / §5-1、仕様 = SPEC v1.53 §11「v1.53 の表示(TODO/187)」+ 204 の v1.54 案(`/api/status.stopping.root_sink_backlog`))
+**Status: DEPLOYED — ユーザーの目視待ち(2026-11-04、main `654f2fd`、ELITPC `aa4336a` 以降)**(発注書 — Fable 2026-11-04 起票。11/9 前に ③ と ① は要る。Sonnet implementer、204 のキー名が決まれば 204 と並行可)**(設計 = TODO/181 §4-5 / §5-1、仕様 = SPEC v1.53 §11「v1.53 の表示(TODO/187)」+ 204 の v1.54 案(`/api/status.stopping.root_sink_backlog`))
 
 ## 0. 背景(1 行ずつ)
 - run 197: Stop の後も root_sink が溜まった分を書き続け、UI は STATE running / RUN 197 のまま → ユーザーに「止まっていない」と見えた。
@@ -52,3 +52,4 @@ worktree のブランチとコミット、`git diff --stat`、テスト 1–7 �
 - **実行できなかった操作**: なし(複合コマンドの権限拒否 3 回は分割 / Edit で回避)。
 - **未**: 204(controller の `stopping.root_sink_backlog`・`stopping.root_sink`)と一緒にマージ → ELITPC に反映 → 実機の受け入れ(§3、通常 run の Stop で「STOPPING — draining」→ Idle、pevent = true の受け入れで backlog が減る様子)。
 - **マージ(2026-11-04)**: main に `654f2fd`(Merge 187、204 と同時)。main の上で `npm test` 413 passed、`npm run build` 警告なし。未: ELITPC 反映と実機の目視(§3)。
+- **ELITPC 反映(2026-11-04)**: `aa4336a` の反映で `/opt/tpcdaq/ui` を入れ替え(旧 `ui.prev663`)。run 217 の停止(11:41:53–11:53:28、≈ 12 分の Stopping、`stopping.root_sink_backlog` 7,514 → 49)は UI に「STOPPING — draining · ROOT backlog N」で出ていたはず — ユーザーが次の停止で目視(§3)。

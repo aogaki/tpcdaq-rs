@@ -1,6 +1,6 @@
 # 188 — controller の run 中監視 + 保存系 Error の自動異常停止(SPEC §1.3「run 中の監視」/ §1.4-3)
 
-**Status: IMPLEMENTED — Fable レビュー中・マージ待ち・実機の受け入れ待ち(2026-11-04、ブランチ `worktree-agent-af34f5c9c61d9815f`)**(発注書 — Fable 2026-11-04 起票。11/9 前に要る)(設計 = TODO/181 §4-4 / §5-1「§4-4」(Fable レビュー済み 2026-10-24)、仕様 = SPEC v1.53 §1.3「run 中の監視(v1.53、TODO/188)」の段落 + §1.4-3。文言は既に SPEC にある — 実装だけ)
+**Status: COMPLETED(2026-11-04 — main `efef4b6`、ELITPC 反映 `81cbe9f`、実機受け入れ run 218 / 219 合格)**(発注書 — Fable 2026-11-04 起票。11/9 前に要る)(設計 = TODO/181 §4-4 / §5-1「§4-4」(Fable レビュー済み 2026-10-24)、仕様 = SPEC v1.53 §1.3「run 中の監視(v1.53、TODO/188)」の段落 + §1.4-3。文言は既に SPEC にある — 実装だけ)
 
 ## 0. 背景(1 行ずつ)
 - run 197: receiver の内部キューが 17:35:11 に溢れた(= graw の喪失)が、receiver が Error になるのは**コマンドを受けたとき**(`receiver.rs` `handle()` 冒頭の `latch_overload`)で、controller は run 中に誰にも `GetStatus` を送らない → 17:40:49 にユーザーが画面を開くまで 5.5 分、誰も気づかず graw を 19,855 失った。
@@ -63,3 +63,11 @@ worktree のブランチとコミット、`git diff --stat`、テスト 1–6 �
 ## レビューの小直しとマージ(2026-11-04)
 - implementer(Opus、同じブランチ)が `953a8d9` の上に **`6b95948`**(3 ファイル + 175 / − 4: `src/controller/{mod.rs, watchdog.rs}`、`tests/controller_integration.rs`)。1 = root-sink の SUB スレッドに専用の停止フラグ `root_sink_stop`、終了の順序 = axum → `stop_flag` → ログ投稿を join → watchdog を join(走っている `watchdog-stop` の完了を待つ)→ `root_sink_stop` → SUB を join。新テスト `shutting_down_during_a_watchdog_stop_keeps_reading_the_root_sink_status`(統合。赤 = 修正前は終了の要求から 1.5 s 以内に `eos_closed:false`・`ok:false`・duration 2.50 s の偽の run_stop、緑 = root-sink の close の後に `eos_closed:true`・`abort:overload:receiver0`)。3 = Stopping 中の不達は info(`unreachable while stopping (expected during a Reset join — not a trigger)`)、Running 中は warn のまま(ログの単体テストは捕捉の仕組みが無いので書かず)。cargo 1,156 passed / 0 failed / 1 ignored、env ゲート controller_integration 49/49・p3_e2e 5/5・p3_error_paths 2/3(既知の F2)。主対話が `git show --stat 6b95948` と新テスト名を照合。
 - **マージ**: main に `efef4b6`(Merge 188)。**main の上のゲート**: fmt OK、clippy 警告 0、`cargo test` **1,156 passed / 0 failed / 1 ignored**(2026-11-04)。SPEC §1.3「run 中の監視」と §9.2 audit を v1.54 に追記(Fable の文言案 A–D)、RUNBOOK §7.1「daq_down は Idle になってから」と 209 の注意。
+
+## 実機の受け入れ(2026-11-04、ELITPC — ユーザー了解「作業してください」)
+- **反映**: Mac main `81cbe9f` を `git bundle aa4336a..main` → ELITPC で ff → `cargo build --release`(17.1 s)→ `daq_down.sh` → `daq_up.sh`。`/api/status` 200・`/` 200・Idle・8 プロセス + root_sink・ログに WARN / ERROR なし。root_sink・UI は無変更。
+- **スクリプト** `~/test/accept184/accept188.sh`(周期 10 ms・pevent = false・params は終了時に `elinp__8efb10d4` へ自動復元、graw_writer は終了時に必ず SIGCONT — 確認済み: 状態 `Ssl`、Idle)。
+- **C1 = run 218(graw_writer に SIGSTOP)**: 12:06:52.9 SIGSTOP → 12:06:54.4 watchdog `unreachable (not a trigger) component=graw-writer`(Running 中の不達 = warn、引き金にしない)→ **12:07:10.4 `reports Error component=receiver0` → `a storage component reports Error while Running — aborting the run component=receiver0 overflow_frames=13 run=218`**(SIGSTOP から 17.5 s = receiver の内部キュー + PUSH HWM が 78 Hz で埋まる時間。溢れ → Error の latch → 引き金は同じポーリング)→ phase Stopping(SIGSTOP から 18.3 s)→ 10 s 後に SIGCONT → Idle(abort から 14.6 s)。run_stop: `ok:false`・**`abort:overload:receiver0`**・duration 47.5 s・受信 2,907・graw 2,507・**overflow 400**・`lost_receiver_to_graw` 0(= 溢れた分は overflow で説明される恒等式)・`eos_closed:true`・`forced_eos:true`・`root_complete:false`・events_built 2,507・decoder_abandoned 0。audit: `{"action":"run/stop","operator":"watchdog","params":{"reason":"abort:overload:receiver0","run":218,"trigger":{"component":"receiver0","overflow_frames":13,"state":"Error"}}}`。
+- **C2 = run 219(対照、SIGSTOP なし — 204 の対照も兼ねる)**: 64.5 s、停止 **4.4 s で `ok:true`・`normal`**、受信 = graw = 4,647、overflow 0、`root_complete:true`、events_built 4,647、watchdog の audit なし(audit の operator は `claude-accept188`)。
+- ログブックに comment(seq の次、author `claude-accept188`): run 217–219 は 204 / 188 の受け入れ試験・物理データではない、218 は意図して 400 フレームを溢れさせた。
+- 発注書 §3 の「≤ 4 s」は「溢れてから」の意味で成立(SIGSTOP から溢れまでは ELITPC の 78 Hz で ≈ 17 s)。
