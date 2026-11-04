@@ -1,6 +1,6 @@
 # 207 — analyzeUVW の strip 電荷の切り(`STRIP_Q_MIN = 2000`)が peaking 232 ns で高すぎ、トラックの淡い側が切れて偽の contained が出る
 
-**Status: TODO**(2026-11-04 起票 Opus。出どころ = run 216(232 ns)の全事象の解析)
+**Status: COMPLETED(macros 側、2026-11-04 — オンライン `src/reco` 側は [210](../210_online_reco_strip_q_min.md) に分けた)**(2026-11-04 起票 Opus。出どころ = run 216(232 ns)の全事象の解析)
 
 ## 何が起きたか
 - run 216(peaking 232 ns、N1068GE トリガ、線源なし、2.54 h、434 事象)を `par_analyzeUVW.sh -p 198 -s 12.5 -d 1600 --tracks` → `selectNeutron.C` に通すと、**contained が 8 本(3.1 /h)**(215 = 502 ns・16.9 h では 0、208 では 0.10 /h)、wall-alpha 13.4 /h(215 は 5.7)。
@@ -41,3 +41,10 @@
 
 ## オンライン(`src/reco`)側 — Fable キュー
 - `src/reco/mod.rs:39` の `STRIP_Q_MIN = 2000.0` も同じ(SPEC §5.5 = macros の移植、定数は macros と同じに固定)。232 ns では UI の Event Display / QA 再構成の線が短く出る(表示だけ、保存には影響なし)。直し方の案: `[monitor] reco_strip_q_min`(既定 2,000、ELITPC は 1,100)を TOML に足して `src/reco` に渡す(SPEC §3.1・§5.5 の改訂 = Fable の確定が要る)。代案: params(current.json)の `peakingTime_ns` から表で引く(monitor は今 params を読まない)。
+
+## 結果(macros 側、2026-11-04)
+- **実装**: implementer(Sonnet)、worktree `.claude/worktrees/agent-ab108d6ce9d98de42`、コミット **`91c99ad`** → main に **`5cdfd1e`**(Merge 207)。5 ファイル + 179 / − 13: `macros/analyzeUVW.C`(末尾の引数 `double stripQMin = STRIP_Q_MIN`、≤ 0 は ERROR で何も書かない、起動時に 1 行、出力に `TParameter<double>("strip_q_min")` — hadd 後も残る)、`macros/par_analyzeUVW.sh`(`-q <v>`、正の数でなければ exit 2、未指定なら引数を足さない = 2,000)、`macros/README.md`(usage・analyzeUVW の行・peaking の表 502 ns → 2,000 / 232 ns → 1,100)、新規 `macros/test_analyzeUVW_qmin.C`、`macros/test_par_analyzeUVW.sh` に T8a–d(既存テストへの追記 = 逸脱、承認)。channel_map.csv はコミットしていない。主対話が `git show --stat 91c99ad` を照合。
+- **テスト**: `cd macros && root -l -b -q test_analyzeUVW_qmin.C` → **6 PASS / 0 failures**(合成 1 本の直線トラック、q = 4,000 × 4 / 3,000 / 1,500 の 6 strip × 3 面: 2,000 で淡い strip が落ち 5 hits × 3、1,100 で残り 6 × 3、引数なし = 2,000、TParameter 1,100 / 2,000、0 はエラー)。**主対話が main の上で再実行して同じ 6 PASS**(2026-11-04)。赤 = 実装前は「requires at most 7 arguments, but 8 were provided」。`./test_par_analyzeUVW.sh macros/data/run0216_raw.root <scratchpad>/t207/w` → **44 passed / 0 failed**(T8a `-q 1100` exit 0、T8b 直列 == 並列 `-j 3`(compareUVW)、T8c hadd 後の `strip_q_min` 1,100、T8d `-q -5` は exit 2。T8 の赤は構造上(実装前は unknown option)で実測していない)。
+- **受け入れ(実データ)**: run 216 を `par_analyzeUVW.sh -p 198 -s 12.5 -d 1600 -q 1100 --tracks` → `selectNeutron.C`(434 事象、2.544 h): blob 3.14 / reject 88.05 / **contained 0** / **wall-alpha 4.72 /h**(215 の 5.7 に対し − 17 %)/ vin-x 46.38 / vin-y 28.30 / vin-z 0。run 215 を既定(2,000)で回して既存の `run0215_uvw.root` と **全 entry / branch / bin が一致**(compareUVW PASS)。
+- **実行できなかった操作**: なし(worktree 隔離の検査で複合コマンドが 2 回拒否 → 分割して実行)。
+- **今後の 232 ns の run**: `par_analyzeUVW.sh -p 198 -s 12.5 -d 1600 -q 1100 --tracks <raw>`。

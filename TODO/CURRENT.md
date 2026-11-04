@@ -129,7 +129,8 @@
 | [203](203_strip_even_odd_response.md) | 偶数 / 奇数 strip で応答が 2–6 % 違う(201 ⑤、pad の形か利得か配線か) | TODO(Fable キュー → 2026-11-04 スポット Fable に相談中) | — |
 | ~~204~~ | 停止が root_sink の積み残しの最中に `error:eos-timeout`(run 214)= 181 の実機受け入れ不合格 | 済 → [archive/204](archive/204_stop_eos_timeout_when_root_sink_backlogged.md)(controller が root_sink の status を購読して close まで待つ + ロスレスの守り、SPEC v1.54、main `343f571`、**実機 run 217: 停止 698.6 s で ok:true / normal、graw 23,309 = 受信、落とし 6,309 は数えて記録、events_built 17,000 = 23,309 − 6,309、lost_receiver_to_decoder 0、root_sink 正常 close**)| — |
 | [206](206_p3_f2_stale_exit6_expectation.md) | `p3_error_paths` の F2 が 186 以来落ちている(root_sink の exit 6 を期待する古いテスト、env ゲートでだけ走る)| TODO(Sonnet、204 / 188 の後)| — |
-| [207](207_strip_q_min_per_peaking.md) | analyzeUVW の `STRIP_Q_MIN = 2000` が peaking 232 ns で高すぎ、淡い側が切れて偽の contained(run 216 で 3.1 /h)— 1,200 で消える、502 ns は 900 で halo を拾う → peaking ごとの切り | **macros 側を発注**(2026-11-04、232 ns = 1,100 = 谷から決定)、オンライン `src/reco` 側は Fable キュー | 232 ns の物理 run の解析の前(ユーザー: 今後は 232 ns)|
+| ~~207~~ | analyzeUVW の strip 電荷の切りが 232 ns で高すぎて偽の contained(run 216 で 3.1 /h)| 済 → [archive/207](archive/207_strip_q_min_per_peaking.md)(macros: `stripQMin` 引数・`par_analyzeUVW.sh -q`、**232 ns = 1,100**(谷 950–1,150)、run 216 で contained 0・wall-alpha 4.7 /h、215 は既定でビット一致)| 232 ns の run は `-q 1100` |
+| [210](210_online_reco_strip_q_min.md) | オンラインの再構成 `src/reco` の `STRIP_Q_MIN = 2000` を peaking ごとに(表示だけ)| TODO(Fable キュー: SPEC §3.1・§5.5)| 11/9 の後 |
 | [208](208_controller_root_sink_status_followups.md) | 204 の残り 2 件(run 番号の再利用で前回の close を取り違える、hist_snapshot の全復号)| TODO(Sonnet、11/9 の後)| — |
 | [209](209_graw_writer_status_during_disk_stall.md) | ディスクが詰まった graw-writer は GetStatus にも答えず(blocking の lock)、204 の守りが Off → 停止で graw の送出待ちを捨てる(ユーザー裁定 B-4 が実際には効かない)| TODO(**ユーザー: 後で** — 2026-11-04)| 11/9 の後 |
 | ~~188~~ | controller の run 中監視(2 s)+ 保存系 Error の自動異常停止 | 済 → [archive/188](archive/188_controller_watchdog_auto_abort.md)(main `efef4b6`、**実機 run 218: graw_writer SIGSTOP → 溢れてすぐ `abort:overload:receiver0`(operator watchdog)、SIGCONT で eos_closed:true、overflow 400 は数えて恒等式どおり**。対照 run 219 は停止 4.4 s で ok / normal)| — |
@@ -188,7 +189,7 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 
 - **198 の後の次の票(2026-11-04 積み)**: 分類器として使えるか(片端組で 209 − 208 = 0.010 ± 0.024)、cos ≈ −1 の縮退(208 の偽陽性 9 / 10 = α の真後ろへ伸びる腕、2 体運動学の許す領域なので罰則で止められない)、A の箱の幅(端に 21 %)、{α, α}・H0・N = 3、電荷の勾配、203、232 ns の較正 — どれを次に切るか(archive/198 の結果 v2)。
 - ~~198 A–D + 203 の順序~~ **裁定済み(2026-11-04 スポット Fable)**: 腕が α に重なるのは模型の縮退(H2 ⊃ H1 + 振幅の自由度)→ 向きの罰則 + A を ± 15 % の箱で自由に + 種の除外 + 印(h1Broken / h2Worse)、T の対照は run 208 の片端組 200 本、③・④ は測定に、203 は 198 の後、232 ns は別票。v2 を implementer(Opus)に発注。元の記述: 198 の実装は green(268 PASS)、受け入れは ② entry 27 合格・③ 0 / 10・④ 健全 62 本の 37 が hyp 1 — 腕が α に重なって H1 の系統的な残差(203)を吸う。分岐 A–D は 198 の結果節。
-- **207 オンライン側(2026-11-04 積み)**: `src/reco` の `STRIP_Q_MIN = 2000` を peaking ごとに — `[monitor] reco_strip_q_min` を TOML に足す(SPEC §3.1・§5.5)か、params の peakingTime から引くか。表示だけの影響。
+- **210 = 207 のオンライン側(2026-11-04 積み)**: `src/reco` の `STRIP_Q_MIN = 2000` を peaking ごとに — `[monitor] reco_strip_q_min` を TOML に足す(SPEC §3.1・§5.5)か、params の peakingTime から引くか。表示だけの影響。
 - **205(2026-11-04 積み)**: N1068GE の設定の記録の経路 — slowctl に「run 開始の合図で 1 回読む」口を作るか(Opus 推し)、controller が直接読むか、params 側で照合するか。11/9 の後でよい。
 - ~~204~~ **裁定済み(2026-11-04 スポット Fable + ユーザー裁定)**: (a) を厳密化 = controller が root_sink の status を購読して close まで待つ、graw-writer が開いている間は打ち切らない、歩き戻しの第二段も同じ関数に(= 185 の申し送りの裁定も「統一」)。188・187 を起票。SPEC v1.54 案は 204 §5(マージ時に反映)。
 - **203(2026-11-03 積み)**: 偶数 / 奇数 strip の応答差(U 0.058・W 0.042・V 0.022)の原因と直し方、198 の前か後か。
