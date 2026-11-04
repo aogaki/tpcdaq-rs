@@ -56,7 +56,7 @@ impl ComponentStatus {
         })
     }
 
-    fn metric_u64(&self, key: &str) -> Option<u64> {
+    pub(super) fn metric_u64(&self, key: &str) -> Option<u64> {
         self.metrics
             .as_ref()
             .and_then(|m| m.get(key))

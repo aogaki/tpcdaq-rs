@@ -801,18 +801,14 @@ pub(super) async fn post_run_stop(
         Err(why) => return unauthorized(&controller, "run/stop", json!({}), why),
     };
 
-    let active = {
-        let mut run_state = lock(&controller.run);
-        if run_state.phase != Phase::Running {
-            let why = format!("controller is {} — no run to stop", run_state.phase);
-            drop(run_state);
+    // 188: watchdog の自動停止と同じ CAS(負けた = 既に Stopping なら 409)。
+    let active = match controller.begin_stopping(None) {
+        Ok(active) => active,
+        Err(phase) => {
+            let why = format!("controller is {phase} — no run to stop");
             controller.audit("run/stop", json!({}), &operator, false, Some(why.clone()));
             return err_json(StatusCode::CONFLICT, why);
         }
-        run_state.phase = Phase::Stopping;
-        // TODO/185: `/api/status.stopping.waited_s` の起点(phase と同じロック区間で立てる)。
-        run_state.stopping_since = Some(Instant::now());
-        run_state.active.clone()
     };
 
     // 停止タスクが panic しても相を Stopping のまま固めない(次の run を出せなくしない)。
@@ -820,21 +816,15 @@ pub(super) async fn post_run_stop(
     // 握るのは上の相の切り替えと下の Idle への戻しだけ(`/api/status` を止めないため)。
     let recovery = Arc::clone(&controller);
     let reply = tokio::task::spawn_blocking(move || {
-        let body = stop_run_blocking(&controller, &operator, active);
-        let mut run_state = lock(&controller.run);
-        run_state.phase = Phase::Idle;
-        run_state.active = None;
-        run_state.stopping_since = None;
+        let body = stop_run_blocking(&controller, &operator, active, None);
+        controller.end_stopping();
         ok_json(body)
     })
     .await;
     match reply {
         Ok(reply) => reply,
         Err(e) => {
-            let mut run_state = lock(&recovery.run);
-            run_state.phase = Phase::Idle;
-            run_state.active = None;
-            run_state.stopping_since = None;
+            recovery.end_stopping();
             error!(error = %e, "run stop task died — back to Idle");
             err_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -844,10 +834,44 @@ pub(super) async fn post_run_stop(
     }
 }
 
+impl Controller {
+    /// `Running → Stopping` の CAS(SPEC §1.3「run 中の監視」v1.53、TODO/188)。`POST /api/run/stop`
+    /// と watchdog の自動停止が**同じロック区間**を通る唯一の入口 —— 取り合っても停止は 1 回で、
+    /// 負けた側には今の相を返す(REST は 409、watchdog は何もしない)。`run` を渡したら、その run が
+    /// まだ走っているときだけ(watchdog が問い合わせている間に別の run に替わっていたら止めない)。
+    /// `stopping_since`(`/api/status.stopping.waited_s` の起点、185)も同じ区間で立てる。
+    pub(super) fn begin_stopping(&self, run: Option<u32>) -> Result<Option<ActiveRun>, Phase> {
+        let mut run_state = lock(&self.run);
+        let same_run = match run {
+            None => true,
+            Some(run) => run_state.active.as_ref().map(|active| active.run) == Some(run),
+        };
+        if run_state.phase != Phase::Running || !same_run {
+            return Err(run_state.phase);
+        }
+        run_state.phase = Phase::Stopping;
+        run_state.stopping_since = Some(Instant::now());
+        Ok(run_state.active.clone())
+    }
+
+    /// 停止の後始末: `Idle` へ戻す(停止の本体が終わったときも、panic したときも)。
+    pub(super) fn end_stopping(&self) {
+        let mut run_state = lock(&self.run);
+        run_state.phase = Phase::Idle;
+        run_state.active = None;
+        run_state.stopping_since = None;
+    }
+}
+
+/// 停止の本体(ブロッキング)。`POST /api/run/stop` と watchdog の自動停止(188)が共用する。
+///
+/// `trigger` = watchdog の引き金(保存系の Error)。あれば reason は `abort:overload:<component>`
+/// を優先し(中止判定の `component-error` と二重に合成しない)、audit の `params.trigger` に載せる。
 pub(super) fn stop_run_blocking(
     controller: &Controller,
     operator: &str,
     active: Option<ActiveRun>,
+    trigger: Option<&OverloadTrigger>,
 ) -> Value {
     let mut transport = controller.transport.clone();
 
@@ -861,11 +885,13 @@ pub(super) fn stop_run_blocking(
             .filter(|s| s.state == Some(ComponentState::Error) || !s.reachable)
             .map(|s| s.name.as_str())
             .collect();
-        if broken.is_empty() {
-            StopMode::Normal
-        } else {
+        if !broken.is_empty() {
             warn!(components = ?broken, "stopping as an abort — component(s) in Error/unreachable");
-            StopMode::Abort(format!("component-error:{}", broken.join(",")))
+        }
+        match trigger {
+            Some(trigger) => trigger.stop_mode(),
+            None if broken.is_empty() => StopMode::Normal,
+            None => StopMode::Abort(format!("component-error:{}", broken.join(","))),
         }
     };
 
@@ -898,14 +924,19 @@ pub(super) fn stop_run_blocking(
         files: report.files.clone(),
         slow: controller.slow_snapshot(),
     });
+    let mut audit_params = json!({
+        "run": run,
+        "reason": report.reason,
+        "forced_eos": report.forced_eos,
+        "eos_closed": report.eos_closed,
+    });
+    // 188: 自動異常停止なら引き金(REST の停止の audit は今までと同じ形 = キーごと無い)。
+    if let (Some(trigger), Some(map)) = (trigger, audit_params.as_object_mut()) {
+        map.insert("trigger".to_string(), trigger.to_json());
+    }
     controller.audit(
         "run/stop",
-        json!({
-            "run": run,
-            "reason": report.reason,
-            "forced_eos": report.forced_eos,
-            "eos_closed": report.eos_closed,
-        }),
+        audit_params,
         operator,
         report.ok,
         (!report.notes.is_empty()).then(|| report.notes.join("; ")),
