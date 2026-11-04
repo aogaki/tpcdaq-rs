@@ -6,7 +6,7 @@
 
 ## いま(1 分で読める要約)
 
-- **期限 2026-11-09**: 隣の中性子検出実験の横に TPC を置く(ユーザー「山ほどイベントが来る」)→ 高レート対策 184–188(181、SPEC v1.53)を仕上げて ELITPC に反映・実機受け入れ(run 197 の再現)まで。184 / 185 は 2026-10-30 に implementer を再開。**2026-11-03: 184 コミット・185 / 186 マージ・push(ユーザー了承)→ ELITPC へ反映。**週末(10-30〜11-02)は PuBe の run 209 系(173 §4)— 反映はその後、ユーザーの OK で。
+- **期限 2026-11-09**: 隣の中性子検出実験の横に TPC を置く(ユーザー「山ほどイベントが来る」)→ 高レート対策 184–188(181、SPEC v1.53)を仕上げて ELITPC に反映・実機受け入れ(run 197 の再現)まで。184 / 185 は 2026-10-30 に implementer を再開。**2026-11-03: 184 コミット・185 / 186 マージ・push(ユーザー了承)→ 14:3x ELITPC へ反映済み(`663b00d`、bundle → ff → cargo build --release 16 s → root_sink make + make test 全 0 failed → daq_down / up、/api/status・/ = 200、7 プロセス + root_sink、新しいログに WARN / ERROR なし、receiver の状態に `decoder_link_dropped_*`)。**実機の受け入れ(14:52–14:55): run 211(10 ms、4,652)・run 212(1 ms、15,267 ≈ 250 Hz)とも受信 = graw = decoder で一致、落とし 0、root_complete true(archive/184 末尾)。+ pevent = true の run 213(60 s)・**run 214(300 s): graw 23,252 = 受信(喪失 0)、decoder リンクで 6,251 を数えて落とした、run は止まらない = SPEC v1.53 の核を実機で確認**。停止が error:eos-timeout になる件は 204(Fable キュー)。run 214 の未完 ROOT は削除・ログブック comment 済み。** 残り = 188・187。**週末(10-30〜11-02)は PuBe の run 209 系(173 §4)— 反映はその後、ユーザーの OK で。
 - **本番**: ELITPC(旧 puppex、Ubuntu 26.04)で mini eTPC を運用中(2026-10-08〜、[archive/107](archive/107_elitpc_host_setup.md))。
   - 機器: 実 zCoBo + 実 ECC(getEccServer ネイティブ)+ Rust ecc_bridge。
   - 保存先: データは ZFS `data/tpcdaq`。
@@ -124,9 +124,14 @@
 | ~~199~~ | drawUVW のズームを連結成分で強く | 済 → [archive/199](archive/199_drawuvw_zoom_components.md)(テスト 109 PASS、27 もズーム、run 209 全 7,946 枚 236 MB を作り直し) | 目の偽陽性率の試験(ユーザーに確認中) |
 | ~~200~~ | 目の偽陽性率の試験 | 済 → [archive/200](archive/200_blind_eye_test.md)(**偽陽性 2.0 %**、片端だけ内側では目も見分けられない、contained は効く、reject で差 6 / 131 vs 1 / 174) | 198 で reject 6 本を当てはめる |
 | ~~201~~ | fitProngs v0.1(箱・縛り・A 固定・共通モード・誤差模型・mm 表示・初期線分の切り詰め) | 済 → [archive/201](archive/201_fitprongs_hardening.md)(テスト 171 PASS、壁 α χ²/ndf 中央 24.6 → 3.78(目標 3 は未達 → 203)、内部 86 本 107 → 5.5、**A_ref = 81,406 ADC/MeV/面**) | → 198 |
-| [198](198_two_prong_hypothesis.md) | 2 本の仮説(Fable 起票): H1 {α} vs H2 {α + 頂点から出る一様な線分 0–60 mm}、Δχ² の閾値は壁 α の分布の 95 % 点、目の 16 本 + 目隠しの 11 本 + 片端だけ内側 50 + 50 に当てる | IN PROGRESS(implementer / Opus、2026-11-03) | — |
+| ~~198~~ | 2 本の仮説 H1 {α} vs H2 {α + 頂点から出る一様な腕}(`fitProngs.C` v0.2)| 済 → [archive/198](archive/198_two_prong_hypothesis.md)(v2 = 向きの罰則・A の箱 ± 15 %・沿う成分を種から外す・h1Broken / h2Worse の印、テスト 346 PASS、T = 5,004.6(208 の片端組 200 本)、壁 α の超過 1 / 20、**entry 27 = 腕 12.6 mm −z**、片端組 209 − 208 = 0.010 ± 0.024 で分けられない、208 の偽陽性 9 / 10 は α の真後ろへの腕)| 次の票は Fable キュー |
 | [202](202_flaky_tests_under_load.md) | 負荷のかかった全体実行でだけ落ちるテスト 3 件(receiver_stale_link の T4 = 184 の DONTWAIT と接続の競合、root_sink_monitor_pub の 10 s、graw_replay_tool の TOCTOU) | TODO(11/9 の後) | — |
-| [203](203_strip_even_odd_response.md) | 偶数 / 奇数 strip で応答が 2–6 % 違う(201 ⑤、pad の形か利得か配線か) | TODO(Fable キュー) | — |
+| [203](203_strip_even_odd_response.md) | 偶数 / 奇数 strip で応答が 2–6 % 違う(201 ⑤、pad の形か利得か配線か) | TODO(Fable キュー → 2026-11-04 スポット Fable に相談中) | — |
+| [204](204_stop_eos_timeout_when_root_sink_backlogged.md) | 下流(root_sink)が積み残しを書いている最中の停止が `error:eos-timeout`(run 214)— **181 の実機受け入れの不合格**。原因 = controller の第二段が decoder(HWM のヒステリシスで数十秒凍る)しか見ず、畳む段の Reset が詰まった decoder リンクの EOS を捨てた。直し = controller が root_sink の PUB status を見て close まで待つ + graw-writer が開いている間は時計で切らない(ユーザー裁定 2026-11-04)| **実装済み `dc8d957`**(cargo 1,147 passed、テスト 12 で run 214 の再現 → ok:true)、Fable レビュー中・マージ待ち | 11/9 前に ELITPC 反映 + accept197b.sh の再実行 |
+| [206](206_p3_f2_stale_exit6_expectation.md) | `p3_error_paths` の F2 が 186 以来落ちている(root_sink の exit 6 を期待する古いテスト、env ゲートでだけ走る)| TODO(Sonnet、204 / 188 の後)| — |
+| [188](188_controller_watchdog_auto_abort.md) | controller の run 中監視(2 s)+ 保存系 Error の自動異常停止(SPEC §1.4-3、未実装だった)| **実装中**(Opus implementer、204 のブランチの上、2026-11-04)| 11/9 前に要る(Fable)|
+| [187](187_ui_v153_overload_and_draining.md) | UI: STOPPING — draining・ROOT DROPPED・ログブックの root_complete・OVERLOAD | **実装済み `95d177c`**(413 PASS、マージ待ち)| ③ と ① は 11/9 前 |
+| [205](205_n1068ge_settings_at_run_start.md) | トリガ(N1068GE)の設定を run 開始時に読んでログブックの `run_start` に残す(読むだけ、ポーリングなし、`CH:16` の MUX は送らない)| TODO(Fable キュー: 経路) | 11/9 の後 |
 | ~~184~~ | receiver の decoder リンク(数えて落とす)| 済 → [archive/184](archive/184_receiver_decoder_link_counted_drop.md)(2026-11-03 コミット `e553bb2`) | 実機の受け入れ(ELITPC 反映後) |
 | ~~185~~ | controller の停止(下流が進む限り待つ・リンクの数・root_complete)| 済 → [archive/185](archive/185_controller_stop_drain_and_link_counts.md)(2026-11-03 マージ `d10ab33`) | 実機の受け入れ(ELITPC 反映後) |
 | ~~186~~ | root_sink: 次の run が来たら未完の run を閉じる | 済 → [archive/186](archive/186_root_sink_close_incomplete_on_new_run.md)(2026-11-03 マージ `6720087`) | 実機の受け入れ(ELITPC 反映後) |
@@ -178,6 +183,10 @@
 
 Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をここに積み、Fable で**まとめて**確定する(運用ルールの正は CLAUDE.md「モデル使い分け」)。
 
+- **198 の後の次の票(2026-11-04 積み)**: 分類器として使えるか(片端組で 209 − 208 = 0.010 ± 0.024)、cos ≈ −1 の縮退(208 の偽陽性 9 / 10 = α の真後ろへ伸びる腕、2 体運動学の許す領域なので罰則で止められない)、A の箱の幅(端に 21 %)、{α, α}・H0・N = 3、電荷の勾配、203、232 ns の較正 — どれを次に切るか(archive/198 の結果 v2)。
+- ~~198 A–D + 203 の順序~~ **裁定済み(2026-11-04 スポット Fable)**: 腕が α に重なるのは模型の縮退(H2 ⊃ H1 + 振幅の自由度)→ 向きの罰則 + A を ± 15 % の箱で自由に + 種の除外 + 印(h1Broken / h2Worse)、T の対照は run 208 の片端組 200 本、③・④ は測定に、203 は 198 の後、232 ns は別票。v2 を implementer(Opus)に発注。元の記述: 198 の実装は green(268 PASS)、受け入れは ② entry 27 合格・③ 0 / 10・④ 健全 62 本の 37 が hyp 1 — 腕が α に重なって H1 の系統的な残差(203)を吸う。分岐 A–D は 198 の結果節。
+- **205(2026-11-04 積み)**: N1068GE の設定の記録の経路 — slowctl に「run 開始の合図で 1 回読む」口を作るか(Opus 推し)、controller が直接読むか、params 側で照合するか。11/9 の後でよい。
+- ~~204~~ **裁定済み(2026-11-04 スポット Fable + ユーザー裁定)**: (a) を厳密化 = controller が root_sink の status を購読して close まで待つ、graw-writer が開いている間は打ち切らない、歩き戻しの第二段も同じ関数に(= 185 の申し送りの裁定も「統一」)。188・187 を起票。SPEC v1.54 案は 204 §5(マージ時に反映)。
 - **203(2026-11-03 積み)**: 偶数 / 奇数 strip の応答差(U 0.058・W 0.042・V 0.022)の原因と直し方、198 の前か後か。
 - **194 → 選別 v2(2026-11-02 積み)**: Fable 裁定の「頂点が内側 + 電荷の並び」は、片端だけ内側の組で背景 48.5 /h(208)を落とせなかった。原因は端の 5 mm の窓がにじみを見ていたこと(分布の最大は端から 12–20 mm)だが、形を 3 分割で見ても、上流 / 下流、q/mm でも、208 と 209 の内訳は同じ(archive/194 の結果)。→ 片端だけ内側の組の選別をどうするか(197–198 の χ² を待つ / 端の幅 = 拡散で z を測る / ML に回す)。目の偽陽性率の試験(208・209 を混ぜて伏せる)をやるか(ユーザーに確認中)。
 

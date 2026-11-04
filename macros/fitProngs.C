@@ -1,5 +1,6 @@
 // =============================================================================
-// fitProngs.C - forward-model fit of ONE alpha per event (TODO/197 v0, hardened by TODO/201 = v0.1).
+// fitProngs.C - forward-model fit of ONE alpha per event (TODO/197 v0, hardened by TODO/201 = v0.1), and of
+// one alpha + one arm from its vertex (TODO/198, H1 = {alpha} vs H2 = {alpha + arm}).
 //
 // The model (a 3D segment with a Bragg curve) is drawn on the strip x cell image of each
 // plane U / V / W and compared with the raw data by chi2 (TODO/192, Fable verdict). No 3D
@@ -27,6 +28,31 @@
 //   chi2 = -1, status = -1 marks it);
 //   (7) images in mm (x = z, y = s) with the fitted segment (thin line, start = open circle, stop = filled
 //   circle) on the model and residual rows only.
+//
+// TODO/198 (H2 = alpha + arm): the arm is a uniform line of charge A x Eeq from the alpha's entering end S (= the vertex)
+//   to E2 (xA2, yA2, zA2), 0.1 mm points (fpArmPoint), sharing sigma_T / sigma_L and the renderer with the alpha
+//   (fpRenderProngs: one charge grid, then the kernel and the ceiling). 12 parameters with A fixed (Eeq >= 0, E2 within
+//   +-10 mm of its seed). Per event (fpFitEventAll): (1) H1 on ROI_alpha (= the TODO/201 fit, the original branches);
+//   (2) the arm seed from its residual (fpSeedArm: per view the 8-neighbour component of residual > 5 sigma_v with the
+//   largest charge -> centroid and farthest pixel; xy by least squares of the s-bars, z = mean z-bar; no component =
+//   seedFallback 1: vertex - 3 mm along the alpha, 0.05 MeV); ROI_event = ROI_alpha + per view vertex -> farthest pixel,
+//   common mode again outside ROI_event; (3) H1 again on ROI_event (both orientations, warm); (4) H2 with the vertex at
+//   either end (warm from (3)). dchi2 = chi2H1 - chi2H2 on the same ROI_event (nBinsEvent); hyp = 1 when dchi2 >
+//   dchi2Threshold (> 0; 0 = no threshold, hyp always 0). armSat (bit v: a saturated strip within 5 mm of the arm in
+//   plane v - armE is then a lower bound), armResid[2] (fpArmThirds). PNG: the shown hypothesis; H2 = 2 segments,
+//   vertex = magenta open circle, alpha stop = filled circle, arm end = open square.
+//
+// TODO/198 v2 (Fable verdict 2026-11-04): (A) H2's minimised chi2 adds FP_ARM_PEN_W (100) x nBins x max(0, cosEff - 0.5)^2,
+//   cosEff = fpArmCos(V, E, E2) = (E2 - V) . u_alpha / max(|E2 - V|, 1 mm) (an arm along the alpha is the degenerate "H1 +
+//   amplitude" direction; recoils do not go along the alpha); chi2H2 and dchi2 include it; tree armCos, armPen, armAlong
+//   (cosEff > 0.55). A box: with adcPerMeV > 0 and aBox > 0 (default 0.15) A is limited to A_ref x [1 - aBox, 1 + aBox] in
+//   every fit (ROI_alpha H1 starts at A_ref, the later fits warm from the previous A), ndf = bins - 9 / - 13, atLimit /
+//   atLimitH2 bit 10 = A at a box edge, tree aRelH1 / aRelH2 = A / A_ref (0 with A free); aBox 0 = A fixed (TODO/201).
+//   (D) fpSeedArm leaves out a component whose charge centroid is within 2.5 mm of the alpha's (s, z) projection (tree
+//   seedAlong, bit v); with no candidate left the fallback Eeq is the left-out charge (I1-a), and an H2 orientation for which the
+//   shared seed lies along its alpha (cos > 0.5) starts from the fallback position instead (fpOrientSeed, tree orientFallback
+//   bit d; I2-a - both from the main session's ruling on TODO/198 v2). (B) h1Broken = the ROI_event H1 has sigma_T or sigma_L within 0.01 mm of 5 mm -> hyp = -1 with a
+//   threshold > 0 (flag only in calibration mode). (C) h2Worse = chi2H2 > chi2H1 -> dchi2 = 0 (flagged, not silent).
 //
 // Model, parameters S (x, y, z), E (x, y, z), A, sigma_T, sigma_L (9). E = the STOPPING end.
 //   - nPts = ceil(|E0 - S0| / 0.1 mm) points at the midpoints of equal steps h = L / nPts
@@ -64,8 +90,10 @@
 //   root -l -b -q 'fitProngs.C+("data/run0209_raw.root", "data/run0209_tracks.root", 198, 12.5, 1600,
 //                               "data/kernel/run0107_kernel.json", "run0209_fit.root", "0,5,27", "png", 81406)'
 //   fitProngs(rawFile, tracksFile, pressureMbar, samplingMHz, driftHvVolt, kernelJson, outFile,
-//             entryList = "", pngDir = "", adcPerMeV = 0, fracErr = 0.10, commonMode = true)
-//   adcPerMeV: > 0 fixes A = adcPerMeV / kernel area (stored as TParameter adc_per_mev); 0 = A free.
+//             entryList = "", pngDir = "", adcPerMeV = 0, fracErr = 0.10, commonMode = true, dchi2Threshold = 0, aBox = 0.15)
+//   adcPerMeV: > 0 gives A_ref = adcPerMeV / kernel area (stored as TParameter adc_per_mev); 0 = A free.
+//   aBox: with adcPerMeV > 0, A in A_ref x [1 - aBox, 1 + aBox] (TParameter a_box; 0 = A fixed at A_ref, TODO/201; [0, 1)).
+//   dchi2Threshold: hyp = 1 when dchi2 > it, -1 when h1Broken (TParameter dchi2_threshold); 0 = calibration (hyp = 0, dchi2 written).
 //   fracErr / commonMode: the error model's f and the common-mode switch (tests and the TODO/201 2 x 2 table).
 //   pressureMbar / samplingMHz / driftHvVolt: run constants, checked as in analyzeUVW.C;
 //     mmPerCell = driftVelocityCmUs(driftHvVolt, 20, pressureMbar) / samplingMHz * 10 (a
@@ -82,6 +110,12 @@
 //   per dir, 0 = converged), ncalls[2], nSatStrips (saturated strips taken out of the ROI),
 //   time_s (both fits), sigmaXY [mm], atLimit (bit j: end parameter xS yS zS xE yE zE at its limit),
 //   cmSkipped (bit v: plane v not common-mode subtracted), noise[3] (sigma_v used). Per-view integrated ADC per MeV = A x kernel area (printed).
+//   TODO/198: chi2H1, chi2H2, dchi2, nBinsEvent, ndfH1 (bins - 8; - 9 with A free), ndfH2 (bins - 12; - 13), hyp, xV yV zV (vertex), xA2 yA2 zA2
+//   (arm end), armLen [mm], armE [MeV eq.], armQ (= A x armE x kernel area, ADC), armDirX/Y/Z, armSat, seedFallback,
+//   statusH2[2], atLimitH2 (bit 9: arm > 60 mm), dirH2, xEH2 yEH2 zEH2 / lengthH2 / sigmaTH2 / sigmaLH2 (H2's alpha),
+//   cmSkippedEvent, armResid[2], timeTotal_s. TODO/198 v2: armCos, armPen, armAlong, aRelH1, aRelH2, seedAlong, h1Broken, h2Worse,
+//   orientFallback
+//   (atLimit / atLimitH2 bit 10: A at its box edge).
 // Test: root -l -b -q 'test_fitProngs.C+' (exit code = failures; see its header).
 // =============================================================================
 #include <Math/Factory.h>
@@ -133,6 +167,22 @@ const double FP_AT_LIMIT_MM = 0.01;   // within this of a limit = atLimit
 const double FP_FRAC_ERR = 0.10;      // pixel sigma^2 = noise^2 + (FRAC * max(data, 0))^2 (TODO/197: residual ~ 10 % of the peak)
 const int FP_CM_MIN_STRIPS = 8;       // common mode needs at least this many strips outside the ROI
 const double FP_SIGMA_XY_PAD2 = 0.146;  // sigmaXY^2 = sigmaT^2 + this [mm^2] (diamond pad, TODO/197)
+// TODO/198 (N = 2: alpha + a uniform arm from the vertex)
+const double FP_ARM_MAX_MM = 60.0;          // an arm longer than this sets atLimit bit 9
+const double FP_SEED_NSIG = 5.0;            // seed pixels: H1 residual > this x sigma_v
+const double FP_SEED_FALLBACK_MM = 3.0;     // no seed component: arm end = vertex - this x (alpha direction) ...
+const double FP_SEED_FALLBACK_MEV = 0.05;   // ... and Eeq = this
+const double FP_ARM_SAT_MM = 5.0;           // a saturated strip within this (in s) of the arm: armSat
+const double FP_WARM_MARGIN = 0.01;         // a warm start is moved this fraction of its range inside a limit
+// TODO/198 v2 (Fable verdict 2026-11-04: A, C, D)
+const double FP_ARM_COS_MAX = 0.5;          // H2 penalty FP_ARM_PEN_W x nBins x max(0, cosEff - this)^2 (an arm along the alpha)
+const double FP_ARM_PEN_W = 100.0;
+const double FP_ARM_COS_MIN_MM = 1.0;       // cosEff = (E2 - V) . u_alpha / max(|E2 - V|, this): -> 0 for a point arm
+const double FP_ARM_ALONG_COS = 0.55;       // armAlong: the final cosEff above this
+const double FP_SEED_ALONG_MM = 2.5;        // a seed component whose centroid is this close to the alpha's (s, z) projection: not a candidate
+const double FP_A_BOX = 0.15;               // default aBox: A in A_ref x [1 - aBox, 1 + aBox] when adcPerMeV > 0
+const double FP_A_AT_LIMIT_REL = 1e-3;      // A within this x A_ref of a box edge: atLimit bit 10
+const double FP_H1_BROKEN_MM = 0.01;        // h1Broken: sigma_T or sigma_L of the H1 fit within this of FP_SIGMA_MAX
 // strip pitch vectors of U, V, W: s = pitch_v . (x, y) (= PITCH of makeTracks.C)
 const double FP_PITCH[3][2] = {{-1, 0}, {0.5, 0.8660254}, {0.5, -0.8660254}};
 
@@ -199,9 +249,20 @@ struct FpTrack {  // E = the stopping end
 };
 struct FpFit {  // par = xS yS zS xE yE zE A sigmaT sigmaL (E = stopping end)
   double par[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+  double arm[4] = {0, 0, 0, 0};  // TODO/198, H2 only: arm end xA2 yA2 zA2 (the arm starts at S = the vertex), Eeq [MeV equivalent]
+  bool hasArm = false;
+  int nPts[2] = {0, 0};          // charge points of the alpha / the arm (fixed during the fit)
   double chi2 = 0;
   int nBins = 0, status = -1, ncalls = 0;
-  int atLimit = 0;  // bit j: end point parameter j (xS yS zS xE yE zE) within FP_AT_LIMIT_MM of its +-FP_END_BOX_MM limit
+  int atLimit = 0;  // bit j: end point parameter j (xS yS zS xE yE zE, 6-8 = xA2 yA2 zA2) within FP_AT_LIMIT_MM of its
+                    // +-FP_END_BOX_MM limit; bit 9: arm longer than FP_ARM_MAX_MM; bit 10: A at an edge of its box (TODO/198 v2)
+  double cosEff = 0, pen = 0;  // TODO/198 v2, H2 only: fpArmCos of the solution and its penalty (included in chi2)
+};
+struct FpProng {  // TODO/198: one prong drawn into the event image
+  bool arm = false;  // false = alpha (Bragg curve, stops at E); true = arm (uniform charge from S = the vertex to E)
+  double S[3] = {0, 0, 0}, E[3] = {0, 0, 0};
+  double Eeq = 0;    // arm: charge in MeV equivalent (total A x Eeq); the alpha's charge is A E(L)
+  int nPts = 1;      // charge points (fixed during a fit)
 };
 struct FpEventFit {
   FpFit fit[2];  // [0] stop at the tracks End, [1] at its Start
@@ -275,17 +336,75 @@ int fpNumPoints(double L) { return std::max(1, (int)std::ceil(L / FP_STEP_MM - 1
 // E(R + h/2) - E(R - h/2) (R = residual range to E at the point): the log-log table has steps in
 // dE/dR at its nodes, and a point crossing a node made the chi2 jump (Migrad stalled); the
 // integral is continuous in L and the charges add up to A E(L) exactly.
-double fpPoint(const FpTrack &t, double rho, int nPts, int i, double xyz[3])
+double fpAlphaPoint(const double S[3], const double E[3], double A, double rho, int nPts, int i, double xyz[3])
 {
   const double u = (i + 0.5) / nPts;
   double L2 = 0;
   for (int j = 0; j < 3; ++j) {
-    const double d = t.E[j] - t.S[j];
-    xyz[j] = t.S[j] + u * d;
+    const double d = E[j] - S[j];
+    xyz[j] = S[j] + u * d;
     L2 += d * d;
   }
   const double L = std::sqrt(L2);
-  return t.A * (fpEnergyModel((1 - (double)i / nPts) * L, rho) - fpEnergyModel((1 - (i + 1.0) / nPts) * L, rho));
+  return A * (fpEnergyModel((1 - (double)i / nPts) * L, rho) - fpEnergyModel((1 - (i + 1.0) / nPts) * L, rho));
+}
+double fpPoint(const FpTrack &t, double rho, int nPts, int i, double xyz[3]) { return fpAlphaPoint(t.S, t.E, t.A, rho, nPts, i, xyz); }
+
+// TODO/198: point i of nPts of the arm V -> E2 (midpoint of step i), charge Q / nPts (uniform; Q = A x Eeq). nPts = 1 puts
+// all of it at the midpoint (the 0-length arm = a point at the vertex).
+double fpArmPoint(const double V[3], const double E2[3], double Q, int nPts, int i, double xyz[3])
+{
+  const double u = (i + 0.5) / nPts;
+  for (int j = 0; j < 3; ++j) xyz[j] = V[j] + u * (E2[j] - V[j]);
+  return Q / nPts;
+}
+
+// TODO/198 v2: the arm's direction relative to the alpha V -> E (V = the vertex = the alpha's entering end):
+// (E2 - V) . u_alpha / max(|E2 - V|, FP_ARM_COS_MIN_MM), u_alpha = (E - V) / |E - V|; 0 for a 0-length alpha. For an arm shorter
+// than 1 mm it is |E2 - V| x cos / 1 mm (-> 0 for a point arm, continuous).
+double fpArmCos(const double V[3], const double E[3], const double E2[3])
+{
+  double la2 = 0, lb2 = 0, dot = 0;
+  for (int j = 0; j < 3; ++j) {
+    const double a = E[j] - V[j], b = E2[j] - V[j];
+    la2 += a * a;
+    lb2 += b * b;
+    dot += a * b;
+  }
+  const double la = std::sqrt(la2);
+  if (!(la > 0)) return 0;
+  return dot / la / std::max(std::sqrt(lb2), FP_ARM_COS_MIN_MM);
+}
+
+// the H2 penalty of an arm along the alpha: FP_ARM_PEN_W x nBins x max(0, cosEff - FP_ARM_COS_MAX)^2 (added to H2's chi2)
+double fpArmPenalty(double cosEff, int nBins)
+{
+  const double x = std::max(0.0, cosEff - FP_ARM_COS_MAX);
+  return FP_ARM_PEN_W * nBins * x * x;
+}
+
+// distance in a plane from the point (px, pz) to the segment (ax, az) -> (bx, bz)
+double fpDistToSegment2(double px, double pz, double ax, double az, double bx, double bz)
+{
+  const double dx = bx - ax, dz = bz - az, l2 = dx * dx + dz * dz;
+  const double t = l2 > 0 ? std::min(1.0, std::max(0.0, ((px - ax) * dx + (pz - az) * dz) / l2)) : 0.0;
+  return std::hypot(px - (ax + t * dx), pz - (az + t * dz));
+}
+
+// TODO/198 v2 flags: h1Broken = sigma_T or sigma_L of the H1 fit within FP_H1_BROKEN_MM of FP_SIGMA_MAX (the blob has no alpha
+// hypothesis, Fable verdict B); dchi2 = chi2H1 - chi2H2, but 0 with h2Worse = 1 when chi2H2 > chi2H1 (Migrad stopped above H1,
+// verdict C); hyp = -1 (h1Broken), 1 (dchi2 > threshold) or 0 with a threshold > 0, always 0 with threshold 0 (calibration).
+int fpH1Broken(double sigT, double sigL) { return (FP_SIGMA_MAX - sigT <= FP_H1_BROKEN_MM || FP_SIGMA_MAX - sigL <= FP_H1_BROKEN_MM) ? 1 : 0; }
+double fpDchi2(double chi2H1, double chi2H2, int &h2Worse)
+{
+  h2Worse = chi2H2 > chi2H1 ? 1 : 0;
+  return h2Worse ? 0.0 : chi2H1 - chi2H2;
+}
+int fpHyp(double dchi2, double threshold, int h1Broken)
+{
+  if (!(threshold > 0)) return 0;
+  if (h1Broken) return -1;
+  return dchi2 > threshold ? 1 : 0;
 }
 
 // Gaussian (centre x0, sigma sig) integrated over the bands [c_k - w/2, c_k + w/2],
@@ -399,10 +518,11 @@ bool fpLoadKernel(const char *path, double samplingMHz, FpKernel &k, std::string
   return fpKernelFromSamples(h, factor, k, err);
 }
 
-// The model image of one track (out); work = scratch charge grid (same size). ceil: per view and
-// strip ceiling, or nullptr (no saturation).
-void fpRender(const FpTrack &t, double rho, int nPts, const FpGeom &g, const FpKernel &kern, const std::vector<double> *ceil,
-              FpImage &out, FpImage &work)
+// The model image of the prongs p[0..n) of one event (out); work = scratch charge grid (same size). ceil: per view and
+// strip ceiling, or nullptr (no saturation). All prongs share A, sigma_T, sigma_L (one gas); their charge points go on ONE
+// charge grid, then the kernel and the ceiling are applied once (saturation acts on the sum, TODO/198).
+void fpRenderProngs(const FpProng *p, int n, double A, double sigT, double sigL, double rho, const FpGeom &g, const FpKernel &kern,
+                    const std::vector<double> *ceil, FpImage &out, FpImage &work)
 {
   const int nc = g.ncell;
   for (FpImage *im : {&out, &work}) {
@@ -421,21 +541,24 @@ void fpRender(const FpTrack &t, double rho, int nPts, const FpGeom &g, const FpK
   int kz[FP_MAX_BAND], ks[FP_MAX_BAND];
   double wz[FP_MAX_BAND], ws[FP_MAX_BAND];
   double xyz[3];
-  for (int i = 0; i < nPts; ++i) {
-    const double q = fpPoint(t, rho, nPts, i, xyz);
-    if (!(q > 0)) continue;
-    if (xyz[0] < -FP_CAGE_X || xyz[0] > FP_CAGE_X || xyz[1] < FP_CAGE_Y_LO || xyz[1] > FP_CAGE_Y_HI) continue;  // outside the box
-    const int nz = fpBandWeights(xyz[2], t.sigL, g.mmPerCell, 0.0, 0, nc - 1, kz, wz, FP_MAX_BAND);
-    if (nz == 0) continue;
-    for (int v = 0; v < 3; ++v) {
-      const double s0 = FP_PITCH[v][0] * xyz[0] + FP_PITCH[v][1] * xyz[1];
-      const int ns = fpStripWeights(g.pl[v], s0, t.sigT, ks, ws, FP_MAX_BAND);
-      for (int a = 0; a < ns; ++a) {
-        double *row = &work.v[v][(size_t)(ks[a] - 1) * nc];
-        const double qs = q * ws[a];
-        for (int b = 0; b < nz; ++b) row[kz[b]] += qs * wz[b];
-        lo[v][ks[a]] = std::min(lo[v][ks[a]], kz[0]);
-        hi[v][ks[a]] = std::max(hi[v][ks[a]], kz[nz - 1]);
+  for (int ip = 0; ip < n; ++ip) {
+    const FpProng &pr = p[ip];
+    for (int i = 0; i < pr.nPts; ++i) {
+      const double q = pr.arm ? fpArmPoint(pr.S, pr.E, A * pr.Eeq, pr.nPts, i, xyz) : fpAlphaPoint(pr.S, pr.E, A, rho, pr.nPts, i, xyz);
+      if (!(q > 0)) continue;
+      if (xyz[0] < -FP_CAGE_X || xyz[0] > FP_CAGE_X || xyz[1] < FP_CAGE_Y_LO || xyz[1] > FP_CAGE_Y_HI) continue;  // outside the box
+      const int nz = fpBandWeights(xyz[2], sigL, g.mmPerCell, 0.0, 0, nc - 1, kz, wz, FP_MAX_BAND);
+      if (nz == 0) continue;
+      for (int v = 0; v < 3; ++v) {
+        const double s0 = FP_PITCH[v][0] * xyz[0] + FP_PITCH[v][1] * xyz[1];
+        const int ns = fpStripWeights(g.pl[v], s0, sigT, ks, ws, FP_MAX_BAND);
+        for (int a = 0; a < ns; ++a) {
+          double *row = &work.v[v][(size_t)(ks[a] - 1) * nc];
+          const double qs = q * ws[a];
+          for (int b = 0; b < nz; ++b) row[kz[b]] += qs * wz[b];
+          lo[v][ks[a]] = std::min(lo[v][ks[a]], kz[0]);
+          hi[v][ks[a]] = std::max(hi[v][ks[a]], kz[nz - 1]);
+        }
       }
     }
   }
@@ -457,6 +580,36 @@ void fpRender(const FpTrack &t, double rho, int nPts, const FpGeom &g, const FpK
         for (int n = nLo; n < nHi; ++n) orow[n] = std::min(orow[n], c);
       }
     }
+}
+
+// The model image of one alpha (TODO/197)
+void fpRender(const FpTrack &t, double rho, int nPts, const FpGeom &g, const FpKernel &kern, const std::vector<double> *ceil,
+              FpImage &out, FpImage &work)
+{
+  FpProng p;
+  for (int j = 0; j < 3; ++j) {
+    p.S[j] = t.S[j];
+    p.E[j] = t.E[j];
+  }
+  p.nPts = nPts;
+  fpRenderProngs(&p, 1, t.A, t.sigT, t.sigL, rho, g, kern, ceil, out, work);
+}
+
+// The model image of a fit: the alpha, plus the arm S -> (xA2, yA2, zA2) for an H2 fit, with the fit's point counts
+void fpRenderFit(const FpFit &f, double rho, const FpGeom &g, const FpKernel &kern, const std::vector<double> *ceil, FpImage &out,
+                 FpImage &work)
+{
+  FpProng p[2];
+  for (int j = 0; j < 3; ++j) {
+    p[0].S[j] = p[1].S[j] = f.par[j];
+    p[0].E[j] = f.par[3 + j];
+    p[1].E[j] = f.arm[j];
+  }
+  p[0].nPts = std::max(1, f.nPts[0]);
+  p[1].arm = true;
+  p[1].Eeq = f.arm[3];
+  p[1].nPts = std::max(1, f.nPts[1]);
+  fpRenderProngs(p, f.hasArm ? 2 : 1, f.par[6], f.par[7], f.par[8], rho, g, kern, ceil, out, work);
 }
 
 // t-range [lo, hi] where |a + t (b - a) - c| <= half; false = never
@@ -514,28 +667,42 @@ bool fpClipSegment(const double a[3], const double b[3], const FpGeom &g, double
   return true;
 }
 
+// Adds to the ROI of view v (strip x cell) the pixels (s_k, cell * mmPerCell) within FP_ROI_MM in s and in z of one point
+// of the (s, z) segment (sa, za) -> (sb, zb). maskV must have the size of the view (strips x cells).
+void fpRoiAddView(int v, double sa, double za, double sb, double zb, const FpGeom &g, std::vector<char> &maskV)
+{
+  const int nc = g.ncell;
+  for (int k = 1; k <= g.pl[v].n; ++k) {
+    double l1, h1;
+    if (!fpInterval(sa, sb, g.pl[v].slope * k + g.pl[v].offset, FP_ROI_MM, l1, h1)) continue;
+    l1 = std::max(l1, 0.0);
+    h1 = std::min(h1, 1.0);
+    if (l1 > h1) continue;
+    for (int n = 0; n < nc; ++n) {
+      double l2, h2;
+      if (!fpInterval(za, zb, n * g.mmPerCell, FP_ROI_MM, l2, h2)) continue;
+      if (std::max(l1, l2) <= std::min(h1, h2)) maskV[(size_t)(k - 1) * nc + n] = 1;
+    }
+  }
+}
+
+// Adds the ROI of the 3D segment a -> b (projected on each view) to mask (sized here if it is not yet)
+void fpRoiAdd(const double a[3], const double b[3], const FpGeom &g, std::vector<char> mask[3])
+{
+  for (int v = 0; v < 3; ++v) {
+    if (mask[v].size() != (size_t)g.pl[v].n * g.ncell) mask[v].assign((size_t)g.pl[v].n * g.ncell, 0);
+    const double sa = FP_PITCH[v][0] * a[0] + FP_PITCH[v][1] * a[1];
+    const double sb = FP_PITCH[v][0] * b[0] + FP_PITCH[v][1] * b[1];
+    fpRoiAddView(v, sa, a[2], sb, b[2], g, mask[v]);
+  }
+}
+
 // ROI per view (strip x cell): a point of the projected segment S0 -> E0 within FP_ROI_MM in s
 // and in z of (s_k, cell * mmPerCell)
 void fpRoi(const double S0[3], const double E0[3], const FpGeom &g, std::vector<char> mask[3])
 {
-  const int nc = g.ncell;
-  for (int v = 0; v < 3; ++v) {
-    mask[v].assign((size_t)g.pl[v].n * nc, 0);
-    const double sa = FP_PITCH[v][0] * S0[0] + FP_PITCH[v][1] * S0[1];
-    const double sb = FP_PITCH[v][0] * E0[0] + FP_PITCH[v][1] * E0[1];
-    for (int k = 1; k <= g.pl[v].n; ++k) {
-      double l1, h1;
-      if (!fpInterval(sa, sb, g.pl[v].slope * k + g.pl[v].offset, FP_ROI_MM, l1, h1)) continue;
-      l1 = std::max(l1, 0.0);
-      h1 = std::min(h1, 1.0);
-      if (l1 > h1) continue;
-      for (int n = 0; n < nc; ++n) {
-        double l2, h2;
-        if (!fpInterval(S0[2], E0[2], n * g.mmPerCell, FP_ROI_MM, l2, h2)) continue;
-        if (std::max(l1, l2) <= std::min(h1, h2)) mask[v][(size_t)(k - 1) * nc + n] = 1;
-      }
-    }
-  }
+  for (int v = 0; v < 3; ++v) mask[v].assign((size_t)g.pl[v].n * g.ncell, 0);
+  fpRoiAdd(S0, E0, g, mask);
 }
 
 // chi2 over the mask; excl[v][k-1] = 1 leaves strip k out (empty excl = none). nBins = summed pixels.
@@ -722,7 +889,8 @@ double fpKernelArea(const FpKernel &k)
   return s;
 }
 
-// A fixed by adcPerMeV (integrated ADC per MeV per plane = A x kernel area); 0 = free
+// A_ref from adcPerMeV (integrated ADC per MeV per plane = A x kernel area): A fixed at it (aBox 0, TODO/201) or the centre of
+// the A box (TODO/198 v2); 0 = A free
 double fpFixedA(double adcPerMeV, const FpKernel &k)
 {
   const double area = fpKernelArea(k);
@@ -762,32 +930,71 @@ double fpInitialA(const FpData &d, const std::vector<char> mask[3], double L0, d
   return (std::isfinite(A0) && A0 > 0) ? A0 : 1.0;
 }
 
-// one Migrad from start0 (entering end) / stop0 (stopping end)
-FpFit fpFitOne(const FpData &d, const FpGeom &g, const FpKernel &k, double rho, const std::vector<char> mask[3],
-               const std::vector<char> excl[3], const double start0[3], const double stop0[3], double A0, double frac,
-               double fixedA)
+// TODO/198: one Migrad = its initial values and the centres of the +-FP_END_BOX_MM end-point limits. The limits of the
+// alpha ends stay at the initial segment of the event (TODO/201) in every fit of the event (H1 on ROI_alpha, H1 again on
+// ROI_event, H2), so H2 with Eeq = 0 is exactly an H1 model; the arm end is limited around its seed.
+struct FpStart {
+  double S[3] = {0, 0, 0}, E[3] = {0, 0, 0};        // alpha: entering / stopping end, initial values
+  double boxS[3] = {0, 0, 0}, boxE[3] = {0, 0, 0};  // ... centres of their limits (also set the point count, fpNumPoints)
+  double A0 = 1, sigT = FP_SIGMA_INIT, sigL = FP_SIGMA_INIT;
+  bool arm = false;                                 // H2: an arm from S (the vertex) to E2
+  double E2[3] = {0, 0, 0}, boxE2[3] = {0, 0, 0}, Eeq = 0;
+};
+
+// a warm start inside [lo, hi], at least FP_WARM_MARGIN x (hi - lo) from a limit (Minuit2's sin transform is flat at a limit:
+// a start on the limit would stay there)
+double fpInside(double x, double lo, double hi)
+{
+  const double m = FP_WARM_MARGIN * (hi - lo);
+  return std::min(std::max(x, lo + m), hi - m);
+}
+
+// parameters of a fit: 8 with A fixed (aRef > 0, aBox 0), 9 with A free (aRef 0) or in its box (aRef > 0, aBox > 0); + 4 for the arm
+int fpNumPar(double aRef, double aBox, bool arm) { return (aRef > 0 && !(aBox > 0) ? 8 : 9) + (arm ? 4 : 0); }
+
+// One Migrad of an alpha (8 parameters with A fixed, 9 with A free or in its box) or of an alpha + arm (+ xA2 yA2 zA2 Eeq = 12 / 13).
+// Minuit indices: xS yS zS xE yE zE, [A], sigmaT, sigmaL, [xA2 yA2 zA2 Eeq]. Point counts: alpha = fpNumPoints(|boxE - boxS|),
+// arm = fpNumPoints(|boxE2 - boxS|), fixed during the fit. A: aRef > 0 and aBox > 0 = limited to aRef x [1 - aBox, 1 + aBox]
+// (TODO/198 v2; start st.A0 moved inside, a fit ending within FP_A_AT_LIMIT_REL x aRef of an edge sets atLimit bit 10), aRef > 0
+// and aBox 0 = fixed at aRef (TODO/201), aRef 0 = free (>= 0, start st.A0). H2: the minimised chi2 includes the arm direction
+// penalty fpArmPenalty(fpArmCos(S, E, E2), nBins) (TODO/198 v2); r.chi2 = with it, r.pen / r.cosEff = its value / the cos.
+FpFit fpFitProngs(const FpData &d, const FpGeom &g, const FpKernel &k, double rho, const std::vector<char> mask[3],
+                  const std::vector<char> excl[3], const FpStart &st, double frac, double aRef, double aBox)
 {
   FpFit r;
-  double L0 = 0;
-  for (int j = 0; j < 3; ++j) L0 += (stop0[j] - start0[j]) * (stop0[j] - start0[j]);
-  const int nPts = fpNumPoints(std::sqrt(L0));
+  r.hasArm = st.arm;
+  double LA = 0, LB = 0;
+  for (int j = 0; j < 3; ++j) {
+    LA += (st.boxE[j] - st.boxS[j]) * (st.boxE[j] - st.boxS[j]);
+    LB += (st.boxE2[j] - st.boxS[j]) * (st.boxE2[j] - st.boxS[j]);
+  }
+  r.nPts[0] = fpNumPoints(std::sqrt(LA));
+  r.nPts[1] = st.arm ? fpNumPoints(std::sqrt(LB)) : 0;
+  const bool fixA = aRef > 0 && !(aBox > 0), boxA = aRef > 0 && aBox > 0;
+  const int o = fixA ? 0 : 1;  // Minuit index shift: with A fixed it is not a variable
+  const int iT = 6 + o, iL = 7 + o, iB = 8 + o, nPar = fpNumPar(aRef, aBox, st.arm);
   FpImage model, work;
   int ncalls = 0;
-  const bool freeA = !(fixedA > 0);
-  const int o = freeA ? 1 : 0;  // Minuit index shift: with A fixed it is not a variable
+  double cosLast = 0, penLast = 0;  // H2: the arm's cosEff and penalty of the last call
+  FpProng pr[2];
+  pr[0].nPts = r.nPts[0];
+  pr[1].arm = true;
+  pr[1].nPts = std::max(1, r.nPts[1]);
   auto chi2Of = [&](const double *p) {
     ++ncalls;
-    FpTrack t;
     for (int j = 0; j < 3; ++j) {
-      t.S[j] = p[j];
-      t.E[j] = p[3 + j];
+      pr[0].S[j] = pr[1].S[j] = p[j];
+      pr[0].E[j] = p[3 + j];
+      if (st.arm) pr[1].E[j] = p[iB + j];
     }
-    t.A = freeA ? p[6] : fixedA;
-    t.sigT = p[6 + o];
-    t.sigL = p[7 + o];
-    fpRender(t, rho, nPts, g, k, d.ceil, model, work);
+    if (st.arm) pr[1].Eeq = p[iB + 3];
+    fpRenderProngs(pr, st.arm ? 2 : 1, fixA ? aRef : p[6], p[iT], p[iL], rho, g, k, d.ceil, model, work);
     int nb;
-    return fpChi2(d.img, model, mask, excl, d.noise, nb, frac);
+    const double c2 = fpChi2(d.img, model, mask, excl, d.noise, nb, frac);
+    if (!st.arm) return c2;
+    cosLast = fpArmCos(p, p + 3, p + iB);
+    penLast = fpArmPenalty(cosLast, nb);
+    return c2 + penLast;
   };
   std::unique_ptr<ROOT::Math::Minimizer> min(ROOT::Math::Factory::CreateMinimizer("Minuit2", "Migrad"));
   if (!min) {
@@ -795,44 +1002,82 @@ FpFit fpFitOne(const FpData &d, const FpGeom &g, const FpKernel &k, double rho, 
     r.status = -2;
     return r;
   }
-  ROOT::Math::Functor fcn(chi2Of, 8 + o);
+  ROOT::Math::Functor fcn(chi2Of, nPar);
   min->SetFunction(fcn);
   min->SetMaxFunctionCalls(FP_MAX_CALLS);
   min->SetTolerance(FP_TOLERANCE);
   min->SetErrorDef(1.0);
   min->SetPrintLevel(ROOT::Math::MinimizerOptions::DefaultPrintLevel());  // 0 unless set (debug)
-  const char *nm[6] = {"xS", "yS", "zS", "xE", "yE", "zE"};
-  double init[6];
-  for (int j = 0; j < 6; ++j) {  // Minuit2 wants the variables in index order; end points in initial +- FP_END_BOX_MM
-    init[j] = j < 3 ? start0[j] : stop0[j - 3];
-    min->SetLimitedVariable(j, nm[j], init[j], 0.5, init[j] - FP_END_BOX_MM, init[j] + FP_END_BOX_MM);
+  const char *nm[9] = {"xS", "yS", "zS", "xE", "yE", "zE", "xA2", "yA2", "zA2"};
+  double lo[9], hi[9];
+  for (int j = 0; j < 6; ++j) {  // Minuit2 wants the variables in index order
+    const double c = j < 3 ? st.boxS[j] : st.boxE[j - 3], x0 = j < 3 ? st.S[j] : st.E[j - 3];
+    lo[j] = c - FP_END_BOX_MM;
+    hi[j] = c + FP_END_BOX_MM;
+    min->SetLimitedVariable(j, nm[j], fpInside(x0, lo[j], hi[j]), 0.5, lo[j], hi[j]);
   }
-  if (freeA) min->SetLowerLimitedVariable(6, "A", A0, 0.1 * A0, 0.0);
-  min->SetLimitedVariable(6 + o, "sigmaT", FP_SIGMA_INIT, 0.1, FP_SIGMA_MIN, FP_SIGMA_MAX);
-  min->SetLimitedVariable(7 + o, "sigmaL", FP_SIGMA_INIT, 0.1, FP_SIGMA_MIN, FP_SIGMA_MAX);
+  const double aLo = aRef * (1 - aBox), aHi = aRef * (1 + aBox);
+  if (boxA)
+    min->SetLimitedVariable(6, "A", fpInside(st.A0, aLo, aHi), 0.05 * aBox * aRef, aLo, aHi);  // step: as 0.5 mm in the +-10 mm box
+  else if (!fixA)
+    min->SetLowerLimitedVariable(6, "A", st.A0, 0.1 * st.A0, 0.0);
+  min->SetLimitedVariable(iT, "sigmaT", fpInside(st.sigT, FP_SIGMA_MIN, FP_SIGMA_MAX), 0.1, FP_SIGMA_MIN, FP_SIGMA_MAX);
+  min->SetLimitedVariable(iL, "sigmaL", fpInside(st.sigL, FP_SIGMA_MIN, FP_SIGMA_MAX), 0.1, FP_SIGMA_MIN, FP_SIGMA_MAX);
+  if (st.arm) {
+    for (int j = 0; j < 3; ++j) {
+      lo[6 + j] = st.boxE2[j] - FP_END_BOX_MM;
+      hi[6 + j] = st.boxE2[j] + FP_END_BOX_MM;
+      min->SetLimitedVariable(iB + j, nm[6 + j], fpInside(st.E2[j], lo[6 + j], hi[6 + j]), 0.5, lo[6 + j], hi[6 + j]);
+    }
+    const double e0 = std::max(st.Eeq, 1e-3);  // a lower-limited variable started at its limit (0) would stay there
+    min->SetLowerLimitedVariable(iB + 3, "Eeq", e0, std::max(0.1 * e0, 0.01), 0.0);
+  }
   min->Minimize();
   r.status = min->Status();
   const double *x = min->X();
   for (int j = 0; j < 6; ++j) r.par[j] = x[j];
-  r.par[6] = freeA ? x[6] : fixedA;
-  r.par[7] = x[6 + o];
-  r.par[8] = x[7 + o];
-  for (int j = 0; j < 6; ++j)
-    if (std::fabs(x[j] - (init[j] - FP_END_BOX_MM)) < FP_AT_LIMIT_MM || std::fabs(x[j] - (init[j] + FP_END_BOX_MM)) < FP_AT_LIMIT_MM)
-      r.atLimit |= 1 << j;
-  r.chi2 = chi2Of(x);
+  r.par[6] = fixA ? aRef : x[6];
+  if (boxA && (std::fabs(x[6] - aLo) < FP_A_AT_LIMIT_REL * aRef || std::fabs(x[6] - aHi) < FP_A_AT_LIMIT_REL * aRef)) r.atLimit |= 1 << 10;
+  r.par[7] = x[iT];
+  r.par[8] = x[iL];
+  if (st.arm)
+    for (int j = 0; j < 4; ++j) r.arm[j] = x[iB + j];
+  for (int j = 0; j < (st.arm ? 9 : 6); ++j) {
+    const double xj = j < 6 ? x[j] : x[iB + j - 6];
+    if (std::fabs(xj - lo[j]) < FP_AT_LIMIT_MM || std::fabs(xj - hi[j]) < FP_AT_LIMIT_MM) r.atLimit |= 1 << j;
+  }
+  if (st.arm) {
+    double L2 = 0;
+    for (int j = 0; j < 3; ++j) L2 += (r.arm[j] - r.par[j]) * (r.arm[j] - r.par[j]);
+    if (std::sqrt(L2) > FP_ARM_MAX_MM) r.atLimit |= 1 << 9;
+  }
+  r.chi2 = chi2Of(x);  // H2: with the penalty
+  r.cosEff = st.arm ? cosLast : 0;
+  r.pen = st.arm ? penLast : 0;
   fpChi2(d.img, model, mask, excl, d.noise, r.nBins, frac);
   r.ncalls = ncalls;
   return r;
 }
 
-// both orientations; S0 / E0 = the tracks file's Start / End. excludeSat: leave saturated strips out.
-FpEventFit fpFitEvent(const FpData &d, const FpGeom &g, const FpKernel &k, double rho, const double S0[3], const double E0[3],
-                      bool excludeSat, double frac, double adcPerMeV)
+// one Migrad of an alpha from start0 (entering end) / stop0 (stopping end); the limits are centred on them (TODO/201)
+FpFit fpFitOne(const FpData &d, const FpGeom &g, const FpKernel &k, double rho, const std::vector<char> mask[3],
+               const std::vector<char> excl[3], const double start0[3], const double stop0[3], double A0, double frac,
+               double aRef, double aBox)
 {
-  FpEventFit r;
-  std::vector<char> mask[3], excl[3];
-  fpRoi(S0, E0, g, mask);
+  FpStart st;
+  for (int j = 0; j < 3; ++j) {
+    st.S[j] = st.boxS[j] = start0[j];
+    st.E[j] = st.boxE[j] = stop0[j];
+  }
+  st.A0 = A0;
+  return fpFitProngs(d, g, k, rho, mask, excl, st, frac, aRef, aBox);
+}
+
+// strips left out of the chi2 (excl[v][k-1] = 1): no channel, and (excludeSat) saturated. Returns the saturated strips with
+// a pixel in mask (nSatStrips).
+int fpExclude(const FpData &d, const FpGeom &g, const std::vector<char> mask[3], bool excludeSat, std::vector<char> excl[3])
+{
+  int nSat = 0;
   for (int v = 0; v < 3; ++v) {
     excl[v].assign(g.pl[v].n, 0);
     for (int kk = 1; kk <= g.pl[v].n; ++kk) {
@@ -841,34 +1086,416 @@ FpEventFit fpFitEvent(const FpData &d, const FpGeom &g, const FpKernel &k, doubl
       if (!d.hasCh[v].empty() && !d.hasCh[v][kk - 1]) excl[v][kk - 1] = 1;
       if (excludeSat && !d.sat[v].empty() && d.sat[v][kk - 1]) {
         excl[v][kk - 1] = 1;
-        if (inRoi) ++r.nSat;
+        if (inRoi) ++nSat;
       }
     }
   }
+  return nSat;
+}
+
+// both orientations; S0 / E0 = the tracks file's Start / End. excludeSat: leave saturated strips out. adcPerMeV > 0: A_ref,
+// A fixed at it (aBox 0) or in A_ref x [1 - aBox, 1 + aBox] started at A_ref (TODO/198 v2); 0 = A free (start from the ROI charge).
+FpEventFit fpFitEvent(const FpData &d, const FpGeom &g, const FpKernel &k, double rho, const double S0[3], const double E0[3],
+                      bool excludeSat, double frac, double adcPerMeV, double aBox)
+{
+  FpEventFit r;
+  std::vector<char> mask[3], excl[3];
+  fpRoi(S0, E0, g, mask);
+  r.nSat = fpExclude(d, g, mask, excludeSat, excl);
   double L0 = 0;
   for (int j = 0; j < 3; ++j) L0 += (E0[j] - S0[j]) * (E0[j] - S0[j]);
-  const double A0 = fpInitialA(d, mask, std::sqrt(L0), rho, k);
-  const double fixedA = fpFixedA(adcPerMeV, k);
-  r.fit[0] = fpFitOne(d, g, k, rho, mask, excl, S0, E0, A0, frac, fixedA);
-  r.fit[1] = fpFitOne(d, g, k, rho, mask, excl, E0, S0, A0, frac, fixedA);
+  const double aRef = fpFixedA(adcPerMeV, k);
+  const double A0 = aRef > 0 ? aRef : fpInitialA(d, mask, std::sqrt(L0), rho, k);
+  r.fit[0] = fpFitOne(d, g, k, rho, mask, excl, S0, E0, A0, frac, aRef, aBox);
+  r.fit[1] = fpFitOne(d, g, k, rho, mask, excl, E0, S0, A0, frac, aRef, aBox);
   if (r.fit[0].status >= -1 || r.fit[1].status >= -1) r.dir = r.fit[1].chi2 < r.fit[0].chi2 ? 1 : 0;
-  r.ndf = r.fit[0].nBins - (fixedA > 0 ? 8 : 9);
+  r.ndf = r.fit[0].nBins - fpNumPar(aRef, aBox, false);
   return r;
+}
+
+// ---- TODO/198: the arm seed, the event ROI, H1 vs H2 ----------------------------------------
+// least-squares (x, y) from the strip coordinates s_v = FP_PITCH[v] . (x, y) of the views with has[v]; false with < 2 views
+bool fpSolveXY(const double s[3], const int has[3], double xy[2])
+{
+  double a11 = 0, a12 = 0, a22 = 0, b1 = 0, b2 = 0;
+  int n = 0;
+  for (int v = 0; v < 3; ++v) {
+    if (!has[v]) continue;
+    const double px = FP_PITCH[v][0], py = FP_PITCH[v][1];
+    a11 += px * px;
+    a12 += px * py;
+    a22 += py * py;
+    b1 += px * s[v];
+    b2 += py * s[v];
+    ++n;
+  }
+  const double det = a11 * a22 - a12 * a12;
+  if (n < 2 || std::fabs(det) < 1e-12) return false;
+  xy[0] = (a22 * b1 - a12 * b2) / det;
+  xy[1] = (a11 * b2 - a12 * b1) / det;
+  return true;
+}
+
+struct FpArmSeed {
+  int fallback = 0;   // 0 = from components in >= 2 views; 1 = no component (E2 = V - FP_SEED_FALLBACK_MM x the alpha
+                      // direction, Eeq = FP_SEED_FALLBACK_MEV); 2 = one view only (xy = V moved along that view's pitch to s-bar)
+  double E2[3] = {0, 0, 0};
+  double Eeq = 0;     // [MeV equivalent] = mean component charge over the views with one / (A x kernel area)
+  int has[3] = {0, 0, 0};
+  int along = 0;      // TODO/198 v2: bit v = a component of view v was left out (its centroid within FP_SEED_ALONG_MM of the alpha)
+  double q[3] = {0, 0, 0}, sBar[3] = {0, 0, 0}, zBar[3] = {0, 0, 0};  // per view: charge [ADC], centroid [mm]
+  double sFar[3] = {0, 0, 0}, zFar[3] = {0, 0, 0}, dFar[3] = {0, 0, 0}; // ... the pixel farthest from the vertex in (s, z)
+};
+
+// The arm seed from the H1 residual data - model (pure). Per view, the ROI pixels (mask, strips not in excl) with residual
+// > FP_SEED_NSIG x noise[v] are grouped into 8-neighbour connected components (the rule of uvwdrawSignalRange in drawUVW.C,
+// TODO/199 - copied, not included); a component whose charge centroid is within FP_SEED_ALONG_MM of the alpha's projection
+// (the (s, z) segment V -> Estop) is not a candidate (TODO/198 v2, Fable verdict D: the arm does not go along the alpha; bit v of
+// `along`), a view with no candidate left has none; the candidate with the largest charge (sum of the residual) gives the charge centroid
+// (s-bar, z-bar) and the pixel farthest from the vertex V in (s, z). >= 2 views: xy = least squares of the s-bars (fpSolveXY),
+// z = mean of the z-bars. Pixel position: s = s_k, z = cell x mmPerCell (as fpRoi). Estop = the alpha's stopping end (the
+// fallback direction). adcPerMeVEff = A x kernel area (the H1 fit's). No candidate in any view = fallback 1 with Eeq =
+// FP_SEED_FALLBACK_MEV, or (TODO/198 v2, I1-a: e.g. a blob on the vertex, whose centroid sits on the projection's end) the mean
+// over the views with a left-out component of the largest left-out charge / adcPerMeVEff.
+FpArmSeed fpSeedArm(const FpImage &data, const FpImage &model, const std::vector<char> mask[3], const std::vector<char> excl[3],
+                    const double noise[3], const FpGeom &g, const double V[3], const double Estop[3], double adcPerMeVEff)
+{
+  FpArmSeed s;
+  const int nc = g.ncell;
+  double exclQ[3] = {0, 0, 0};  // per view: the largest charge of a component left out (along the alpha)
+  for (int v = 0; v < 3; ++v) {
+    const double thr = FP_SEED_NSIG * noise[v];
+    const double sV = FP_PITCH[v][0] * V[0] + FP_PITCH[v][1] * V[1];
+    std::vector<int> cells;  // (k - 1) * nc + t of the seed pixels, ascending
+    for (int k = 1; k <= data.n[v]; ++k) {
+      if (!excl[v].empty() && excl[v][k - 1]) continue;
+      for (int t = 0; t < nc; ++t) {
+        const size_t i = (size_t)(k - 1) * nc + t;
+        if (mask[v][i] && data.v[v][i] - model.v[v][i] > thr) cells.push_back((int)i);
+      }
+    }
+    if (cells.empty()) continue;
+    std::vector<int> comp(cells.size(), -1), stack;  // component id per pixel; neighbours by binary search
+    std::vector<double> charge, chS, chZ;            // per component: charge, charge x s, charge x z
+    for (size_t i = 0; i < cells.size(); ++i) {
+      if (comp[i] >= 0) continue;
+      const int id = (int)charge.size();
+      charge.push_back(0.0);
+      chS.push_back(0.0);
+      chZ.push_back(0.0);
+      comp[i] = id;
+      stack.push_back((int)i);
+      while (!stack.empty()) {
+        const int a = stack.back();
+        stack.pop_back();
+        const int ka = cells[a] / nc, ta = cells[a] % nc;  // ka = k - 1
+        const double ra = data.v[v][cells[a]] - model.v[v][cells[a]];
+        charge[id] += ra;
+        chS[id] += ra * (g.pl[v].slope * (ka + 1) + g.pl[v].offset);
+        chZ[id] += ra * ta * g.mmPerCell;
+        for (int dk = -1; dk <= 1; ++dk)
+          for (int dt = -1; dt <= 1; ++dt) {
+            const int kb = ka + dk, tb = ta + dt;
+            if ((dk == 0 && dt == 0) || kb < 0 || kb >= data.n[v] || tb < 0 || tb >= nc) continue;
+            const auto it = std::lower_bound(cells.begin(), cells.end(), kb * nc + tb);
+            if (it == cells.end() || *it != kb * nc + tb) continue;
+            const int b = (int)(it - cells.begin());
+            if (comp[b] >= 0) continue;
+            comp[b] = id;
+            stack.push_back(b);
+          }
+      }
+    }
+    const double sE = FP_PITCH[v][0] * Estop[0] + FP_PITCH[v][1] * Estop[1];
+    int best = -1;
+    for (size_t c = 0; c < charge.size(); ++c) {
+      if (fpDistToSegment2(chS[c] / charge[c], chZ[c] / charge[c], sV, V[2], sE, Estop[2]) <= FP_SEED_ALONG_MM) {
+        s.along |= 1 << v;  // along the alpha: not a candidate
+        exclQ[v] = std::max(exclQ[v], charge[c]);
+        continue;
+      }
+      if (best < 0 || charge[c] > charge[best]) best = (int)c;
+    }
+    if (best < 0) continue;  // only components along the alpha: has[v] = 0
+    double q = 0, qs = 0, qz = 0, dFar = -1;
+    for (size_t i = 0; i < cells.size(); ++i) {
+      if (comp[i] != best) continue;
+      const int k = cells[i] / nc + 1, t = cells[i] % nc;
+      const double r = data.v[v][cells[i]] - model.v[v][cells[i]];
+      const double sk = g.pl[v].slope * k + g.pl[v].offset, z = t * g.mmPerCell;
+      q += r;
+      qs += r * sk;
+      qz += r * z;
+      const double dd = std::hypot(sk - sV, z - V[2]);
+      if (dd > dFar) {
+        dFar = dd;
+        s.sFar[v] = sk;
+        s.zFar[v] = z;
+      }
+    }
+    s.has[v] = 1;
+    s.q[v] = q;
+    s.sBar[v] = qs / q;
+    s.zBar[v] = qz / q;
+    s.dFar[v] = dFar;
+  }
+  const int nHas = s.has[0] + s.has[1] + s.has[2];
+  if (nHas == 0) {
+    double u[3], L2 = 0;
+    for (int j = 0; j < 3; ++j) L2 += (Estop[j] - V[j]) * (Estop[j] - V[j]);
+    const double L = std::sqrt(L2);
+    for (int j = 0; j < 3; ++j) {
+      u[j] = L > 0 ? (Estop[j] - V[j]) / L : 0.0;
+      s.E2[j] = V[j] - FP_SEED_FALLBACK_MM * u[j];
+    }
+    s.Eeq = FP_SEED_FALLBACK_MEV;
+    if (s.along && adcPerMeVEff > 0) {  // TODO/198 v2 (I1-a): components were left out -> their charge scale
+      double qm = 0;
+      int n = 0;
+      for (int v = 0; v < 3; ++v)
+        if (exclQ[v] > 0) qm += exclQ[v], ++n;
+      s.Eeq = qm / n / adcPerMeVEff;
+    }
+    s.fallback = 1;
+    return s;
+  }
+  double qm = 0, zm = 0;
+  for (int v = 0; v < 3; ++v)
+    if (s.has[v]) {
+      qm += s.q[v] / nHas;
+      zm += s.zBar[v] / nHas;
+    }
+  s.Eeq = adcPerMeVEff > 0 ? qm / adcPerMeVEff : FP_SEED_FALLBACK_MEV;
+  s.E2[2] = zm;
+  double xy[2];
+  if (fpSolveXY(s.sBar, s.has, xy)) {
+    s.E2[0] = xy[0];
+    s.E2[1] = xy[1];
+  } else {  // one view: the vertex moved along its pitch vector (|p| = 1) to s-bar (the least-squares point nearest to V)
+    const int v = s.has[0] ? 0 : (s.has[1] ? 1 : 2);
+    const double ds = s.sBar[v] - (FP_PITCH[v][0] * V[0] + FP_PITCH[v][1] * V[1]);
+    s.E2[0] = V[0] + ds * FP_PITCH[v][0];
+    s.E2[1] = V[1] + ds * FP_PITCH[v][1];
+    s.fallback = 2;
+  }
+  return s;
+}
+
+// TODO/198 v2 (I2-a): the arm seed of the H2 of one orientation (vertex V, alpha stop E): the shared seed E2, or, when the arm
+// V -> E2 would go along that orientation's alpha (fpArmCos > FP_ARM_COS_MAX: the penalty, and the +-10 mm box cannot turn it
+// below), the fallback position V - FP_SEED_FALLBACK_MM x u_alpha (cos -1). out = the seed; returns 1 when the fallback is taken.
+int fpOrientSeed(const double V[3], const double E[3], const double E2[3], double out[3])
+{
+  for (int j = 0; j < 3; ++j) out[j] = E2[j];
+  if (!(fpArmCos(V, E, E2) > FP_ARM_COS_MAX)) return 0;
+  double L2 = 0;
+  for (int j = 0; j < 3; ++j) L2 += (E[j] - V[j]) * (E[j] - V[j]);
+  const double L = std::sqrt(L2);
+  for (int j = 0; j < 3; ++j) out[j] = V[j] - FP_SEED_FALLBACK_MM * (E[j] - V[j]) / L;  // L > 0: fpArmCos is 0 for L = 0
+  return 1;
+}
+
+// bit v = a saturated strip of plane v within FP_ARM_SAT_MM in s of the arm's projection V -> E2 (its charge is then a lower
+// bound: saturated strips are out of the chi2)
+int fpArmSat(const FpData &d, const FpGeom &g, const double V[3], const double E2[3])
+{
+  int bits = 0;
+  for (int v = 0; v < 3; ++v) {
+    const double sa = FP_PITCH[v][0] * V[0] + FP_PITCH[v][1] * V[1], sb = FP_PITCH[v][0] * E2[0] + FP_PITCH[v][1] * E2[1];
+    const double lo = std::min(sa, sb), hi = std::max(sa, sb);
+    for (int k = 1; k <= g.pl[v].n && !(bits & (1 << v)); ++k) {
+      if (d.sat[v].empty() || !d.sat[v][k - 1]) continue;
+      const double sk = g.pl[v].slope * k + g.pl[v].offset;
+      const double dist = sk < lo ? lo - sk : (sk > hi ? sk - hi : 0.0);
+      if (dist <= FP_ARM_SAT_MM) bits |= 1 << v;
+    }
+  }
+  return bits;
+}
+
+// Residual along the arm of an H2 fit (TODO/198 acceptance 7): the arm is cut into thirds, third j drawn alone (Eeq / 3, no
+// ceiling) = M_j, and each ROI pixel's residual is shared by M_j / model: R_j = sum (M_j / model)(data - model) / sum M_j
+// over the ROI pixels (strips not excluded) with model > 0. out[0] = the vertex-side third, out[1] = the arm-end third.
+void fpArmThirds(const FpData &d, const FpImage &model, const std::vector<char> mask[3], const std::vector<char> excl[3],
+                 const FpGeom &g, const FpKernel &k, double rho, const FpFit &h, double out[2])
+{
+  out[0] = out[1] = 0;
+  double L2 = 0;
+  for (int j = 0; j < 3; ++j) L2 += (h.arm[j] - h.par[j]) * (h.arm[j] - h.par[j]);
+  if (!h.hasArm || !(h.arm[3] > 0)) return;
+  for (int third = 0; third < 2; ++third) {
+    const double u0 = third == 0 ? 0.0 : 2.0 / 3, u1 = u0 + 1.0 / 3;
+    FpProng p;
+    p.arm = true;
+    for (int j = 0; j < 3; ++j) {
+      p.S[j] = h.par[j] + u0 * (h.arm[j] - h.par[j]);
+      p.E[j] = h.par[j] + u1 * (h.arm[j] - h.par[j]);
+    }
+    p.Eeq = h.arm[3] / 3;
+    p.nPts = fpNumPoints(std::sqrt(L2) / 3);
+    FpImage m, w;
+    fpRenderProngs(&p, 1, h.par[6], h.par[7], h.par[8], rho, g, k, nullptr, m, w);
+    double num = 0, den = 0;
+    for (int v = 0; v < 3; ++v)
+      for (int kk = 1; kk <= g.pl[v].n; ++kk) {
+        if (!excl[v].empty() && excl[v][kk - 1]) continue;
+        for (int t = 0; t < g.ncell; ++t) {
+          const size_t i = (size_t)(kk - 1) * g.ncell + t;
+          if (!mask[v][i] || !(model.v[v][i] > 0) || m.v[v][i] == 0) continue;
+          num += m.v[v][i] / model.v[v][i] * (d.img.v[v][i] - model.v[v][i]);
+          den += m.v[v][i];
+        }
+      }
+    out[third] = den > 0 ? num / den : 0;
+  }
+}
+
+struct FpEventResult {  // one event: H1 on ROI_alpha (TODO/201) and H1 / H2 on ROI_event (TODO/198)
+  FpEventFit h1a;       // H1 on ROI_alpha = the TODO/201 fit (the tree's original branches)
+  FpEventFit h1;        // H1 on ROI_event, both orientations, warm from h1a
+  FpFit h2[2];          // H2 on ROI_event, [d] = vertex at the entering end of orientation d, warm from h1.fit[d]
+  int dirH2 = -1;
+  FpArmSeed seed;
+  int cmSkipped = 0, cmSkippedEvent = 0;  // bit v: plane v not common-mode subtracted (ROI_alpha / ROI_event)
+  int nBinsEvent = 0, ndfH1 = 0, ndfH2 = 0, armSat = 0;
+  double chi2H1 = 0, chi2H2 = 0, dchi2 = 0;  // chi2H1 / H2 = the better orientation (H2 with its penalty), dchi2 = chi2H1 - chi2H2
+                                             // (0 when h2Worse)
+  int h1Broken = 0, h2Worse = 0, armAlong = 0;  // TODO/198 v2: fpH1Broken of the H1 on ROI_event; chi2H2 > chi2H1; armCos > 0.55
+  int orientFallback = 0;                       // bit d: H2 of orientation d started from the fallback seed (fpOrientSeed, I2-a)
+  double armCos = 0, armPen = 0;                // the better H2's cosEff and penalty
+  double aRelH1 = 0, aRelH2 = 0;                // A / A_ref of the H1 / H2 on ROI_event (0 when A is free: no A_ref)
+  double armResid[2] = {0, 0};               // fpArmThirds of the better H2
+  double timeH1a = 0;                        // [s] the two ROI_alpha fits (the time_s branch)
+  double noiseA[3] = {0, 0, 0};              // sigma_v after the ROI_alpha common mode (the noise branch)
+  FpData data;                               // the grid with the ROI_event common mode (H1 / H2 were fitted on it)
+  std::vector<char> roi[3], excl[3];         // ROI_event and its left-out strips
+};
+
+// TODO/198 for one event; raw = the grid before any common mode, S0 / E0 = the initial segment (tracks Start / End, clipped).
+//  (1) ROI_alpha = fpRoi(S0, E0), common mode on it, H1 both orientations (TODO/197 / 201) -> h1a;
+//  (2) the arm seed from the residual of the better orientation (vertex = its entering end);
+//      ROI_event = ROI_alpha + per view the (s, z) segment vertex -> the seed component's farthest pixel (a view without a
+//      component: vertex -> the seed arm end); the common mode again from raw, now from the strips outside ROI_event;
+//  (3) H1 on ROI_event, both orientations, warm from (1);
+//  (4) H2 with the vertex at either end (= the entering end of orientation d, warm from (3)), the same arm seed - except
+//      (TODO/198 v2, I2-a) an orientation for which it lies along the alpha (fpOrientSeed): there V_d - 3 mm x u_d.
+// Both hypotheses: same data, noise, ROI, strips (nBins equal). false (why) = not fitted. A (TODO/198 v2): adcPerMeV > 0 and
+// aBox > 0 = A in A_ref x [1 - aBox, 1 + aBox] in every fit ((1) starts at A_ref, (3) / (4) warm from the previous A); aBox 0 =
+// A fixed at A_ref; adcPerMeV 0 = A free.
+bool fpFitEventAll(const FpData &raw, const FpGeom &g, const FpKernel &k, double rho, const double S0[3], const double E0[3],
+                   bool commonMode, double frac, double adcPerMeV, double aBox, FpEventResult &r, std::string &why)
+{
+  std::vector<char> roiA[3];
+  fpRoi(S0, E0, g, roiA);
+  FpData d1 = raw;
+  r.cmSkipped = commonMode ? fpSubtractCommonMode(d1, roiA) : 0;
+  if (!(d1.noise[0] > 0 && d1.noise[1] > 0 && d1.noise[2] > 0)) {
+    why = "a plane has noise 0 (empty?)";
+    return false;
+  }
+  TStopwatch sw;
+  r.h1a = fpFitEvent(d1, g, k, rho, S0, E0, true, frac, adcPerMeV, aBox);
+  r.timeH1a = sw.RealTime();
+  for (int v = 0; v < 3; ++v) r.noiseA[v] = d1.noise[v];
+  if (r.h1a.dir < 0) {
+    why = "no fit (minimizer failed)";
+    return false;
+  }
+  const double aRef = fpFixedA(adcPerMeV, k), area = fpKernelArea(k);
+  const FpFit &b1 = r.h1a.fit[r.h1a.dir];
+  {
+    FpImage m, w;
+    fpRenderFit(b1, rho, g, k, d1.ceil, m, w);
+    std::vector<char> exA[3];
+    fpExclude(d1, g, roiA, true, exA);
+    r.seed = fpSeedArm(d1.img, m, roiA, exA, d1.noise, g, b1.par, b1.par + 3, b1.par[6] * area);
+  }
+  for (int v = 0; v < 3; ++v) {
+    r.roi[v] = roiA[v];
+    const double sV = FP_PITCH[v][0] * b1.par[0] + FP_PITCH[v][1] * b1.par[1];
+    const double sB = r.seed.has[v] ? r.seed.sFar[v] : FP_PITCH[v][0] * r.seed.E2[0] + FP_PITCH[v][1] * r.seed.E2[1];
+    const double zB = r.seed.has[v] ? r.seed.zFar[v] : r.seed.E2[2];
+    fpRoiAddView(v, sV, b1.par[2], sB, zB, g, r.roi[v]);
+  }
+  r.data = raw;
+  r.cmSkippedEvent = commonMode ? fpSubtractCommonMode(r.data, r.roi) : 0;
+  if (!(r.data.noise[0] > 0 && r.data.noise[1] > 0 && r.data.noise[2] > 0)) {
+    why = "a plane has noise 0 after the ROI_event common mode";
+    return false;
+  }
+  r.h1.nSat = fpExclude(r.data, g, r.roi, true, r.excl);
+  const double *box[2][2] = {{S0, E0}, {E0, S0}};  // orientation d: entering / stopping end of the initial segment
+  for (int pass = 0; pass < 2; ++pass)              // 0 = H1 again (warm from h1a), 1 = H2 (warm from that)
+    for (int d = 0; d < 2; ++d) {
+      const FpFit &w = pass == 0 ? r.h1a.fit[d] : r.h1.fit[d];
+      FpStart st;
+      for (int j = 0; j < 3; ++j) {
+        st.S[j] = w.par[j];
+        st.E[j] = w.par[3 + j];
+        st.boxS[j] = box[d][0][j];
+        st.boxE[j] = box[d][1][j];
+        st.E2[j] = st.boxE2[j] = r.seed.E2[j];
+      }
+      if (pass == 1 && fpOrientSeed(st.S, st.E, r.seed.E2, st.E2)) {  // TODO/198 v2 (I2-a); Eeq stays the seed's (its charge)
+        for (int j = 0; j < 3; ++j) st.boxE2[j] = st.E2[j];
+        r.orientFallback |= 1 << d;
+      }
+      st.A0 = w.par[6] > 0 ? w.par[6] : 1.0;
+      st.sigT = w.par[7];
+      st.sigL = w.par[8];
+      st.arm = pass == 1;
+      st.Eeq = r.seed.Eeq;
+      FpFit f = fpFitProngs(r.data, g, k, rho, r.roi, r.excl, st, frac, aRef, aBox);
+      if (pass == 0)
+        r.h1.fit[d] = f;
+      else
+        r.h2[d] = f;
+    }
+  if (r.h1.fit[0].status < -1 && r.h1.fit[1].status < -1) {
+    why = "no H1 fit on ROI_event (minimizer failed)";
+    return false;
+  }
+  if (r.h2[0].status < -1 && r.h2[1].status < -1) {
+    why = "no H2 fit (minimizer failed)";
+    return false;
+  }
+  r.h1.dir = r.h1.fit[1].chi2 < r.h1.fit[0].chi2 ? 1 : 0;
+  r.dirH2 = r.h2[1].chi2 < r.h2[0].chi2 ? 1 : 0;
+  r.nBinsEvent = r.h1.fit[0].nBins;
+  r.h1.ndf = r.ndfH1 = r.nBinsEvent - fpNumPar(aRef, aBox, false);
+  r.ndfH2 = r.nBinsEvent - fpNumPar(aRef, aBox, true);
+  r.chi2H1 = r.h1.fit[r.h1.dir].chi2;
+  r.chi2H2 = r.h2[r.dirH2].chi2;
+  r.dchi2 = fpDchi2(r.chi2H1, r.chi2H2, r.h2Worse);
+  const FpFit &h = r.h2[r.dirH2], &b = r.h1.fit[r.h1.dir];
+  r.h1Broken = fpH1Broken(b.par[7], b.par[8]);
+  r.armCos = h.cosEff;
+  r.armPen = h.pen;
+  r.armAlong = h.cosEff > FP_ARM_ALONG_COS ? 1 : 0;
+  r.aRelH1 = aRef > 0 ? b.par[6] / aRef : 0;
+  r.aRelH2 = aRef > 0 ? h.par[6] / aRef : 0;
+  r.armSat = fpArmSat(r.data, g, h.par, h.arm);
+  FpImage m, w;
+  fpRenderFit(h, rho, g, k, r.data.ceil, m, w);
+  fpArmThirds(r.data, m, r.roi, r.excl, g, k, rho, h, r.armResid);
+  return true;
 }
 
 // ---- image -----------------------------------------------------------------------------
 // mm axes as drawUVW.C: x = z [mm] (cell j = [j - 1/2, j + 1/2) x mmPerCell), y = s [mm] (strip k = s_k +- pitch/2).
-// The fitted segment (thin line, start = entering end open circle, stop = stopping end filled circle) is drawn on
-// the model and residual rows only, never on the data row (TODO/192 3-2).
-void fpDrawEvent(const FpData &d, const FpImage &model, const std::vector<char> mask[3], const FpGeom &g, UInt_t eventId,
-                 Long64_t entry, const FpEventFit &f, const std::string &path)
+// The fitted segments are drawn (thin lines) on the model and residual rows only, never on the data row (TODO/192 3-2):
+// H1 (h2 = false): the alpha, entering end = open circle, stopping end = filled circle (TODO/201);
+// H2 (h2 = true, TODO/198): the alpha and the arm, vertex = magenta open circle, alpha stop = filled circle, arm end = open
+// square. header = the start of every pad title (event, chi2 H1 / H2, dchi2, T). Returns the segments drawn per pad (1 / 2).
+int fpDrawEvent(const FpData &d, const FpImage &model, const std::vector<char> mask[3], const FpGeom &g, const std::string &header,
+                const FpFit &b, bool h2, const std::string &path)
 {
   const char *vn[3] = {"U", "V", "W"}, *rowName[3] = {"data", "model", "data - model"};
+  const int nSeg = h2 ? 2 : 1;
   TCanvas c("fpCanvas", "", 1200, 900);
   c.Divide(3, 3);
   std::vector<TH2D *> hs;
   std::vector<TObject *> marks;
-  const FpFit &b = f.fit[f.dir < 0 ? 0 : f.dir];
   for (int v = 0; v < 3; ++v) {
     int k0 = g.pl[v].n + 1, k1 = 0, t0 = g.ncell, t1 = -1;
     for (int k = 1; k <= g.pl[v].n; ++k)
@@ -885,10 +1512,8 @@ void fpDrawEvent(const FpData &d, const FpImage &model, const std::vector<char> 
     const double sLo = std::min(sA, sB) - half, sHi = std::max(sA, sB) + half;
     double rmax = 0;
     for (int row = 0; row < 3; ++row) {
-      auto *h = new TH2D(Form("fp_%d_%d", v, row),
-                         Form("event %u (entry %lld) %s %s  chi2/ndf %.0f/%d = %.2f;z [mm];s [mm]", eventId, entry, vn[v],
-                              rowName[row], b.chi2, f.ndf, f.ndf > 0 ? b.chi2 / f.ndf : 0.0),
-                         t1 - t0 + 1, (t0 - 0.5) * g.mmPerCell, (t1 + 0.5) * g.mmPerCell, k1 - k0 + 1, sLo, sHi);
+      auto *h = new TH2D(Form("fp_%d_%d", v, row), Form("%s  %s %s;z [mm];s [mm]", header.c_str(), vn[v], rowName[row]), t1 - t0 + 1,
+                         (t0 - 0.5) * g.mmPerCell, (t1 + 0.5) * g.mmPerCell, k1 - k0 + 1, sLo, sHi);
       h->SetDirectory(nullptr);
       h->SetStats(0);
       for (int k = k0; k <= k1; ++k) {
@@ -908,33 +1533,46 @@ void fpDrawEvent(const FpData &d, const FpImage &model, const std::vector<char> 
       gPad->SetRightMargin(0.14);
       h->Draw("colz");
       hs.push_back(h);
-      if (row > 0) {
-        const double sS = FP_PITCH[v][0] * b.par[0] + FP_PITCH[v][1] * b.par[1];
-        const double sE = FP_PITCH[v][0] * b.par[3] + FP_PITCH[v][1] * b.par[4];
-        auto *ln = new TLine(b.par[2], sS, b.par[5], sE);
-        ln->SetLineWidth(1);
-        ln->Draw();
-        auto *m0 = new TMarker(b.par[2], sS, 24);
-        auto *m1 = new TMarker(b.par[5], sE, 20);
-        for (TMarker *m : {m0, m1}) {
-          m->SetMarkerSize(0.8);
-          m->Draw();
-        }
-        marks.push_back(ln);
-        marks.push_back(m0);
-        marks.push_back(m1);
+      if (row == 0) continue;
+      const double sS = FP_PITCH[v][0] * b.par[0] + FP_PITCH[v][1] * b.par[1];
+      const double sE = FP_PITCH[v][0] * b.par[3] + FP_PITCH[v][1] * b.par[4];
+      const double sA2 = FP_PITCH[v][0] * b.arm[0] + FP_PITCH[v][1] * b.arm[1];
+      std::vector<TObject *> objs;
+      auto *ln = new TLine(b.par[2], sS, b.par[5], sE);
+      ln->SetLineWidth(1);
+      objs.push_back(ln);
+      auto *m0 = new TMarker(b.par[2], sS, 24);
+      auto *m1 = new TMarker(b.par[5], sE, 20);
+      objs.push_back(m1);
+      if (h2) {
+        auto *la = new TLine(b.par[2], sS, b.arm[2], sA2);
+        la->SetLineWidth(1);
+        la->SetLineColor(kMagenta);
+        objs.push_back(la);
+        auto *m2 = new TMarker(b.arm[2], sA2, 25);
+        m2->SetMarkerSize(0.8);
+        objs.push_back(m2);
+        m0->SetMarkerColor(kMagenta);
+      }
+      objs.push_back(m0);
+      for (TObject *o : objs) {
+        if (auto *m = dynamic_cast<TMarker *>(o)) m->SetMarkerSize(0.8);
+        o->Draw();
+        marks.push_back(o);
       }
     }
   }
   c.SaveAs(path.c_str());
   for (auto *h : hs) delete h;
   for (auto *m : marks) delete m;
+  return nSeg;
 }
 
 // ---- entry point -----------------------------------------------------------------------
 void fitProngs(const char *rawFile, const char *tracksFile, double pressureMbar, double samplingMHz, double driftHvVolt,
                const char *kernelJson, const char *outFile, const char *entryList = "", const char *pngDir = "",
-               double adcPerMeV = 0, double fracErr = FP_FRAC_ERR, bool commonMode = true)
+               double adcPerMeV = 0, double fracErr = FP_FRAC_ERR, bool commonMode = true, double dchi2Threshold = 0,
+               double aBox = FP_A_BOX)
 {
   // run constants (as analyzeUVW.C), checked before anything is read or written
   const double SAMPLING_OK[4] = {100.0, 50.0, 25.0, 12.5};
@@ -947,6 +1585,10 @@ void fitProngs(const char *rawFile, const char *tracksFile, double pressureMbar,
   }
   if (!(driftHvVolt > 0) || !(pressureMbar > 0)) {
     std::cout << "ERROR: driftHvVolt and pressureMbar must be > 0; nothing written" << std::endl;
+    return;
+  }
+  if (!(aBox >= 0 && aBox < 1)) {
+    std::cout << "ERROR: aBox = " << aBox << " must be in [0, 1); nothing written" << std::endl;
     return;
   }
   std::string err;
@@ -1028,11 +1670,20 @@ void fitProngs(const char *rawFile, const char *tracksFile, double pressureMbar,
     std::cout << "ERROR: cannot write " << outFile << std::endl;
     return;
   }
-  TTree tree("fit", "forward-model fit, one alpha (TODO/197)");
+  TTree tree("fit", "forward-model fit, H1 = one alpha (TODO/197, 201) vs H2 = alpha + arm (TODO/198)");
   Long64_t entry = 0;
   Int_t dir = 0, ndf = 0, status[2] = {0, 0}, ncalls[2] = {0, 0}, nSat = 0, atLimit = 0, cmSkipped = 0, initClipped = 0;
   Double_t sigmaXY = 0, noiseOut[3] = {0, 0, 0};
   Double_t chi2[2] = {0, 0}, xS, yS, zS, xE, yE, zE, A, sigmaT, sigmaL, length, energy, timeS;
+  // TODO/198
+  Int_t nBinsEvent = 0, ndfH1 = 0, ndfH2 = 0, hyp = 0, armSat = 0, seedFallback = 0, statusH2[2] = {0, 0}, atLimitH2 = 0, dirH2 = 0,
+        cmSkippedEvent = 0;
+  Double_t chi2H1 = 0, chi2H2 = 0, dchi2 = 0, xV = 0, yV = 0, zV = 0, xA2 = 0, yA2 = 0, zA2 = 0, armLen = 0, armE = 0, armQ = 0;
+  Double_t armDirX = 0, armDirY = 0, armDirZ = 0, xEH2 = 0, yEH2 = 0, zEH2 = 0, lengthH2 = 0, sigmaTH2 = 0, sigmaLH2 = 0;
+  Double_t armResid[2] = {0, 0}, timeTotal = 0;
+  // TODO/198 v2
+  Int_t armAlong = 0, seedAlong = 0, h1Broken = 0, h2Worse = 0, orientFallback = 0;
+  Double_t armCos = 0, armPen = 0, aRelH1 = 0, aRelH2 = 0;
   tree.Branch("eventId", &eventId);
   tree.Branch("entry", &entry);
   tree.Branch("dir", &dir);
@@ -1058,6 +1709,48 @@ void fitProngs(const char *rawFile, const char *tracksFile, double pressureMbar,
   tree.Branch("cmSkipped", &cmSkipped);
   tree.Branch("initClipped", &initClipped);
   tree.Branch("noise", noiseOut, "noise[3]/D");
+  tree.Branch("chi2H1", &chi2H1);
+  tree.Branch("chi2H2", &chi2H2);
+  tree.Branch("dchi2", &dchi2);
+  tree.Branch("nBinsEvent", &nBinsEvent);
+  tree.Branch("ndfH1", &ndfH1);
+  tree.Branch("ndfH2", &ndfH2);
+  tree.Branch("hyp", &hyp);
+  tree.Branch("xV", &xV);
+  tree.Branch("yV", &yV);
+  tree.Branch("zV", &zV);
+  tree.Branch("xA2", &xA2);
+  tree.Branch("yA2", &yA2);
+  tree.Branch("zA2", &zA2);
+  tree.Branch("armLen", &armLen);
+  tree.Branch("armE", &armE);
+  tree.Branch("armQ", &armQ);
+  tree.Branch("armDirX", &armDirX);
+  tree.Branch("armDirY", &armDirY);
+  tree.Branch("armDirZ", &armDirZ);
+  tree.Branch("armSat", &armSat);
+  tree.Branch("seedFallback", &seedFallback);
+  tree.Branch("statusH2", statusH2, "statusH2[2]/I");
+  tree.Branch("atLimitH2", &atLimitH2);
+  tree.Branch("dirH2", &dirH2);
+  tree.Branch("xEH2", &xEH2);
+  tree.Branch("yEH2", &yEH2);
+  tree.Branch("zEH2", &zEH2);
+  tree.Branch("lengthH2", &lengthH2);
+  tree.Branch("sigmaTH2", &sigmaTH2);
+  tree.Branch("sigmaLH2", &sigmaLH2);
+  tree.Branch("cmSkippedEvent", &cmSkippedEvent);
+  tree.Branch("armResid", armResid, "armResid[2]/D");
+  tree.Branch("timeTotal_s", &timeTotal);
+  tree.Branch("armCos", &armCos);
+  tree.Branch("armPen", &armPen);
+  tree.Branch("armAlong", &armAlong);
+  tree.Branch("aRelH1", &aRelH1);
+  tree.Branch("aRelH2", &aRelH2);
+  tree.Branch("seedAlong", &seedAlong);
+  tree.Branch("h1Broken", &h1Broken);
+  tree.Branch("h2Worse", &h2Worse);
+  tree.Branch("orientFallback", &orientFallback);
 
   const double kArea = fpKernelArea(kern);
   std::cout << Form("fitProngs: %zu entries, mm/cell %.6f, rho %.4e g/cm3, kernel %zu cells (i0 %d, area/peak %.3f)",
@@ -1067,9 +1760,10 @@ void fitProngs(const char *rawFile, const char *tracksFile, double pressureMbar,
     std::cout << "ERROR: adcPerMeV < 0; nothing written" << std::endl;
     return;
   }
-  const double fixedA = fpFixedA(adcPerMeV, kern);
-  std::cout << Form("fitProngs: adcPerMeV %g (A %s %g), fracErr %g, common mode %s", adcPerMeV, fixedA > 0 ? "fixed =" : "free, start", fixedA,
-                    fracErr, commonMode ? "on" : "off")
+  const double aRef = fpFixedA(adcPerMeV, kern);
+  const std::string aText = !(aRef > 0) ? "free" : (aBox > 0 ? Form("in A_ref x [%g, %g], A_ref = %g", 1 - aBox, 1 + aBox, aRef) : Form("fixed = %g", aRef));
+  std::cout << Form("fitProngs: adcPerMeV %g (A %s), aBox %g, fracErr %g, common mode %s, dchi2Threshold %g%s", adcPerMeV, aText.c_str(), aBox,
+                    fracErr, commonMode ? "on" : "off", dchi2Threshold, dchi2Threshold > 0 ? "" : " (none: hyp = 0, dchi2 only)")
             << std::endl;
   FpData data;
   int nFit = 0;
@@ -1093,35 +1787,40 @@ void fitProngs(const char *rawFile, const char *tracksFile, double pressureMbar,
       // no part of the initial segment is in the sensitive volume: not fitted; a row with initClipped = 4 (bit 2) is the mark
       std::cout << "entry " << e << " (event " << eventId << "): the initial segment is outside the sensitive box, not fitted" << std::endl;
       dir = -1, ndf = 0, nSat = 0, atLimit = 0, cmSkipped = 0, timeS = 0;
-      for (int j = 0; j < 2; ++j) chi2[j] = -1, status[j] = -1, ncalls[j] = 0;
+      for (int j = 0; j < 2; ++j) chi2[j] = -1, status[j] = -1, ncalls[j] = 0, statusH2[j] = -1;
       xS = yS = zS = xE = yE = zE = A = sigmaT = sigmaL = sigmaXY = length = 0;
       energy = -1;
       for (int v = 0; v < 3; ++v) noiseOut[v] = 0;
+      chi2H1 = chi2H2 = -1;
+      dchi2 = 0;
+      nBinsEvent = ndfH1 = ndfH2 = hyp = armSat = seedFallback = atLimitH2 = cmSkippedEvent = 0;
+      dirH2 = -1;
+      xV = yV = zV = xA2 = yA2 = zA2 = armLen = armE = armQ = armDirX = armDirY = armDirZ = 0;
+      xEH2 = yEH2 = zEH2 = lengthH2 = sigmaTH2 = sigmaLH2 = armResid[0] = armResid[1] = timeTotal = 0;
+      armAlong = seedAlong = h1Broken = h2Worse = orientFallback = 0;
+      armCos = armPen = aRelH1 = aRelH2 = 0;
       tree.Fill();
       continue;
     }
-    cmSkipped = 0;
-    if (commonMode) {
-      std::vector<char> roi[3];
-      fpRoi(S0, E0, geom, roi);
-      cmSkipped = fpSubtractCommonMode(data, roi);
-      if (cmSkipped)
-        std::cout << "INFO: entry " << e << ": common mode not subtracted in planes (bit mask " << cmSkipped
-                  << "), < 8 strips outside the ROI" << std::endl;
-    }
-    if (!(data.noise[0] > 0 && data.noise[1] > 0 && data.noise[2] > 0)) {
-      std::cout << "WARNING: entry " << e << ": a plane has noise 0 (empty?), skipped" << std::endl;
+    TStopwatch swAll;
+    FpEventResult r;
+    std::string why;
+    const bool fitted = fpFitEventAll(data, geom, kern, rho, S0, E0, commonMode, fracErr, adcPerMeV, aBox, r, why);
+    timeTotal = swAll.RealTime();
+    if (r.cmSkipped)
+      std::cout << "INFO: entry " << e << ": common mode not subtracted in planes (bit mask " << r.cmSkipped
+                << "), < 8 strips outside the ROI" << std::endl;
+    if (!fitted) {
+      std::cout << "WARNING: entry " << e << ": " << why << ", skipped" << std::endl;
       continue;
     }
-    TStopwatch sw;
-    const FpEventFit f = fpFitEvent(data, geom, kern, rho, S0, E0, true, fracErr, adcPerMeV);
-    timeS = sw.RealTime();
-    if (f.dir < 0) {
-      std::cout << "WARNING: entry " << e << ": no fit (minimizer failed), skipped" << std::endl;
-      continue;
-    }
+    if (r.cmSkippedEvent)
+      std::cout << "INFO: entry " << e << ": ROI_event common mode not subtracted in planes (bit mask " << r.cmSkippedEvent
+                << "), < 8 strips outside ROI_event" << std::endl;
+    const FpEventFit &f = r.h1a;
     const FpFit &b = f.fit[f.dir];
-    entry = e;
+    timeS = r.timeH1a;
+    cmSkipped = r.cmSkipped;
     dir = f.dir;
     ndf = f.ndf;
     nSat = f.nSat;
@@ -1135,9 +1834,35 @@ void fitProngs(const char *rawFile, const char *tracksFile, double pressureMbar,
     A = b.par[6], sigmaT = b.par[7], sigmaL = b.par[8];
     sigmaXY = std::sqrt(sigmaT * sigmaT + FP_SIGMA_XY_PAD2);
     atLimit = b.atLimit;
-    for (int v = 0; v < 3; ++v) noiseOut[v] = data.noise[v];
+    for (int v = 0; v < 3; ++v) noiseOut[v] = r.noiseA[v];  // sigma_v of the ROI_alpha fit (TODO/201)
     length = std::sqrt((xE - xS) * (xE - xS) + (yE - yS) * (yE - yS) + (zE - zS) * (zE - zS));
     energy = fpEnergyFromRangeMm(length, rho);
+    // TODO/198
+    const FpFit &h = r.h2[r.dirH2];
+    chi2H1 = r.chi2H1, chi2H2 = r.chi2H2, dchi2 = r.dchi2;
+    nBinsEvent = r.nBinsEvent, ndfH1 = r.ndfH1, ndfH2 = r.ndfH2;
+    h1Broken = r.h1Broken, h2Worse = r.h2Worse;
+    hyp = fpHyp(dchi2, dchi2Threshold, h1Broken);
+    xV = h.par[0], yV = h.par[1], zV = h.par[2];
+    xEH2 = h.par[3], yEH2 = h.par[4], zEH2 = h.par[5];
+    xA2 = h.arm[0], yA2 = h.arm[1], zA2 = h.arm[2];
+    sigmaTH2 = h.par[7], sigmaLH2 = h.par[8];
+    lengthH2 = std::sqrt((xEH2 - xV) * (xEH2 - xV) + (yEH2 - yV) * (yEH2 - yV) + (zEH2 - zV) * (zEH2 - zV));
+    armLen = std::sqrt((xA2 - xV) * (xA2 - xV) + (yA2 - yV) * (yA2 - yV) + (zA2 - zV) * (zA2 - zV));
+    armDirX = armLen > 0 ? (xA2 - xV) / armLen : 0;
+    armDirY = armLen > 0 ? (yA2 - yV) / armLen : 0;
+    armDirZ = armLen > 0 ? (zA2 - zV) / armLen : 0;
+    armE = h.arm[3];
+    armQ = h.par[6] * armE * kArea;
+    armSat = r.armSat;
+    seedFallback = r.seed.fallback;
+    statusH2[0] = r.h2[0].status, statusH2[1] = r.h2[1].status;
+    atLimitH2 = h.atLimit;
+    dirH2 = r.dirH2;
+    cmSkippedEvent = r.cmSkippedEvent;
+    armResid[0] = r.armResid[0], armResid[1] = r.armResid[1];
+    armCos = r.armCos, armPen = r.armPen, armAlong = r.armAlong, seedAlong = r.seed.along;
+    aRelH1 = r.aRelH1, aRelH2 = r.aRelH2, orientFallback = r.orientFallback;
     tree.Fill();
     ++nFit;
     std::cout << Form("entry %lld event %u: dir %d chi2 %.0f / %.0f ndf %d (%.2f) L %.1f mm E %.2f MeV A %.0f (%.0f ADC/MeV per "
@@ -1145,21 +1870,22 @@ void fitProngs(const char *rawFile, const char *tracksFile, double pressureMbar,
                       e, eventId, dir, chi2[0], chi2[1], ndf, ndf > 0 ? b.chi2 / ndf : 0.0, length, energy, A, A * kArea,
                       sigmaT, sigmaL, status[0], status[1], nSat, atLimit, cmSkipped, initClipped, timeS)
               << std::endl;
+    std::cout << Form("   H1 %.0f H2 %.0f dchi2 %.1f (bins %d) hyp %d broken %d worse %d | H2 dir %d L %.1f arm %.1f mm E %.3f MeV Q %.0f "
+                      "dir (%.2f %.2f %.2f) cos %.3f pen %.1f sat %d fb %d along %d ofb %d status %d/%d atLimit %d aRel %.3f/%.3f cmE %d "
+                      "resid %.3f/%.3f | %.2f s",
+                      chi2H1, chi2H2, dchi2, nBinsEvent, hyp, h1Broken, h2Worse, dirH2, lengthH2, armLen, armE, armQ, armDirX, armDirY,
+                      armDirZ, armCos, armPen, armSat, seedFallback, seedAlong, orientFallback, statusH2[0], statusH2[1], atLimitH2, aRelH1, aRelH2,
+                      cmSkippedEvent, armResid[0], armResid[1], timeTotal)
+              << std::endl;
     if (!png.empty()) {
-      FpTrack t;
-      for (int j = 0; j < 3; ++j) {
-        t.S[j] = b.par[j];
-        t.E[j] = b.par[3 + j];
-      }
-      t.A = A, t.sigT = sigmaT, t.sigL = sigmaL;
-      double L0 = 0;
-      for (int j = 0; j < 3; ++j) L0 += (E0[j] - S0[j]) * (E0[j] - S0[j]);
+      const FpFit &shown = hyp == 1 ? h : r.h1.fit[r.h1.dir];
       FpImage model, work;
-      fpRender(t, rho, fpNumPoints(std::sqrt(L0)), geom, kern, data.ceil, model, work);
-      std::vector<char> mask[3];
-      fpRoi(S0, E0, geom, mask);
+      fpRenderFit(shown, rho, geom, kern, r.data.ceil, model, work);
+      const std::string header =
+          Form("ev %u (%lld) %s: #chi^{2} H1 %.0f H2 %.0f #Delta %.0f T %.0f", eventId, e, hyp == 1 ? "H2" : (hyp < 0 ? "H1 broken" : "H1"), chi2H1,
+               chi2H2, dchi2, dchi2Threshold);
       out.cd();
-      fpDrawEvent(data, model, mask, geom, eventId, e, f, Form("%s/event%07u.png", png.c_str(), eventId));
+      fpDrawEvent(r.data, model, r.roi, geom, header, shown, hyp == 1, Form("%s/event%07u.png", png.c_str(), eventId));
     }
   }
   out.cd();
@@ -1172,6 +1898,8 @@ void fitProngs(const char *rawFile, const char *tracksFile, double pressureMbar,
   TParameter<double>("adc_per_mev", adcPerMeV, 'f').Write();
   TParameter<double>("frac_err", fracErr, 'f').Write();
   TParameter<double>("common_mode", commonMode ? 1.0 : 0.0, 'f').Write();
+  TParameter<double>("dchi2_threshold", dchi2Threshold, 'f').Write();
+  TParameter<double>("a_box", aBox, 'f').Write();
   out.Close();
   std::cout << "wrote " << outFile << " (" << nFit << " fits)" << std::endl;
 }

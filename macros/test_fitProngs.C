@@ -67,9 +67,62 @@
 //        fitted with adcPerMeV = 5000 * area: A stays 5000, ndf = bins - 8, end points within 1 mm.
 //   [15] tree: sigmaXY = sqrt(sigmaT^2 + 0.146), atLimit, cmSkipped, noise[3] (the [9] e2e).
 //   [16] e2e png >= 10 kB.
-//   [17] fpClipSegment (initial segment cut to x +-53, y -58..48, z 0..512 cells): y = 66 end cut at
+//   [clip] fpClipSegment (TODO/201, was [17]) (initial segment cut to x +-53, y -58..48, z 0..512 cells): y = 66 end cut at
 //        y = 48 with the direction unchanged (1e-9), a segment inside unchanged (flags 0), both ends,
 //        z, and completely outside (flags 4 = skipped).
+//  TODO/198 (N = 2: alpha + a uniform arm from the vertex, H1 {alpha} vs H2 {alpha + arm}):
+//   [17] arm render: kernel {0.5, 1, 0.5} (area 2), A 1000, Eeq 0.5, an 8 mm arm along -z inside the box
+//        -> each view sums to A Eeq area = 1000 x 0.5 x 2 = 1000 (+-0.5 %), the 0 mm arm (1 point) too;
+//        z variance of the image grows by L^2 / 12 = 64 / 12 = 5.333 mm^2 (+-10 %; 80 midpoints give
+//        (L^2 / 12)(1 - 1/80^2) = 5.3325), the z mean moves by L / 2 = 4 mm (the kernel is symmetric).
+//        One call with alpha + arm = the two images added (1e-9); the ceiling acts on the SUM (a pixel
+//        where clipping each prong alone and adding would exceed the ceiling).
+//   [18] seed: (x, y) = (12.3, -7.1) -> s_U = -12.3, s_V = 6.15 - 6.14878 = 0.00122, s_W = 12.29878; the
+//        least squares (3 views, and 2 views) gives (x, y) back to 1e-6; 1 view: no solution.
+//        Hand-made residual (41 strips, 200 cells, 0.25 mm, noise 1): a blob at (3.0, -1.5, 20.0) split
+//        over 2 strips so its charge centroid is exactly s_v of the point, cells 79 / 80 / 81 (1 : 2 : 1)
+//        -> E2 = (3.0, -1.5, 20.0) to 1e-9, Eeq = mean charge 400 / adcPerMeV 800 = 0.5; farthest pixel
+//        of U from the vertex (0, 0, 10): (s, z) = (-3.0, 20.25). One view only (U): two blobs, the
+//        larger by charge only through a DIAGONAL neighbour (8-neighbour components): B = 240 + 200 = 440
+//        > A = 400; xy = the vertex moved along p_U to s-bar, fallback 2. No pixel > 5 sigma: fallback 1,
+//        E2 = vertex - 3 mm x (alpha direction), Eeq 0.05. Synthetic alpha 40 mm + arm 8 mm (-z, Eeq 0.3
+//        E_alpha; E(40 mm) = 2.15 MeV) fitted with H1 -> fpSeedArm within 5 mm of the arm's centroid,
+//        fallback 0; the alpha alone -> fallback 1.
+//   [19] ROI: the union of the ROIs of two segments = a brute-force scan of both ([7] style); the same
+//        for an (s, z) segment added to one view; H1 and H2 have the same nBins (= nBinsEvent) ([20]).
+//   [20] closure N = 2 (noise 7 ADC, TRandom3 seed 198, A 5000 fixed, f 0.1, common mode on):
+//        (a) alpha 40 mm (dip 30) + arm 8 mm (-z, Eeq 0.3 E_alpha) x 3 -> vertex +-1 mm, arm end +-2 mm,
+//        Eeq +-15 %, dchi2 >= 200; (b) the alpha alone x 5 -> dchi2 <= 20; (c) a 0 mm arm (point,
+//        Eeq 0.3 E_alpha) -> dchi2 > 100 (H2 chosen at T = 100) and armLen <= 3 mm.
+//   [21] tree: dchi2Threshold 100 -> hyp 1 for an (a)-type event, 0 for a (b)-type; threshold 0 -> hyp 0
+//        for both and the same dchi2; TParameter dchi2_threshold; the new branches exist.
+//   [22] e2e with H2: the [21] run writes the png of the (a)-type event (>= 10 kB); fpDrawEvent draws
+//        2 segments (alpha + arm) for H2, 1 for H1.
+//  TODO/198 v2 (Fable 2026-11-04). The v1 tests of the old behaviour ([14], [18], [20], [21]) call with aBox = 0 (A fixed):
+//   [23] arm direction: alpha V -> E along u = (0.6, 0.8, 0): arm 5 mm along u -> cos +1, against -> -1, along w = (0.8, -0.6, 0)
+//        -> 0; 0.5 mm along u -> cosEff = 0.5 / max(0.5, 1 mm) = 0.5, 0.5 mm at 120 deg -> 0.5 x (-0.5) = -0.25. Penalty
+//        100 x nBins x max(0, cos - 0.5)^2: 0 at cos 0.5 and -1, 100 x 1234 x 0.4^2 = 19744 at 0.9, 100 x 1000 x 0.05^2 = 250 at
+//        0.55. [20](a) (arm along -z, alpha dip 30 deg -> cos = -sin 30 = -0.5): penalty 0, the v1 numbers unchanged. Synthetic
+//        alpha 40 mm + an 8 mm arm ALONG the alpha (0.3 E_alpha, aBox 0.15): final cosEff <= 0.55, armAlong = (cosEff > 0.55);
+//        an H2 Migrad started with the arm at cos 0.8 (37 deg off the alpha, the data pulls it to 1) ends at cosEff <= 0.55,
+//        and its chi2 = the pure chi2 + the penalty.
+//   [24] A box: the [14] alpha drawn with A_true = 1.10 A_ref, aBox 0.15 -> A = 1.10 +- 0.03 A_ref, atLimit bit 10 not set,
+//        ndf = bins - 9; A_true = 1.30 A_ref -> A = 1.15 A_ref +- 0.001 (the box edge), bit 10 set; aBox 0 -> A = A_ref,
+//        ndf = bins - 8 (= [14]).
+//   [25] seed: the alpha (0, 0, 10) -> (20, 0, 10) projects to (s, z) (0, 10) -> (-20, 10) in U and (0, 10) -> (10, 10) in V / W.
+//        U: a blob of 800 at (-9, 10) (on the projection, distance 0) and one of 200 at (-9, 16) (6 mm off) -> the 200 one
+//        (s-bar -9, z-bar 16), seedAlong bit 0; V only a blob on the projection -> has 0, bit 1 -> along 3, fallback 2; all 3
+//        views only along -> along 7, fallback 1 (E2 = vertex - 3 mm x the alpha direction = (-3, 0, 10)). Point - segment
+//        distance: on it 0, 6 mm across 6, (3, 6) beyond the end (0, 10) -> hypot(3, 4) = 5.
+//   [26] flags: h1Broken = sigma_T or sigma_L >= 5 - 0.01: 4.995 -> 1, 4.9 -> 0; h2Worse: chi2_H2 = chi2_H1 + 1 -> dchi2 0,
+//        flag 1; hyp: threshold > 0 and h1Broken -> -1, threshold 0 -> 0.
+//   [27] e2e: the [21] runs (aBox 0) write armCos, armPen, armAlong, aRelH1, aRelH2 (= 1 exactly with A fixed), seedAlong,
+//        h1Broken, h2Worse, orientFallback and TParameter a_box = 0; the [9] run (defaults) writes a_box = 0.15.
+//  Main session's ruling on v2 (I1-a, I2-a): [25] all-along fallback Eeq = mean largest left-out charge / adcPerMeV =
+//        (800 + 600 + 600) / 3 / 800 = 0.8333; [20](c) (a blob on the vertex, left out in all views) green again.
+//   [28] fpOrientSeed: alpha V -> V + 10 u; a seed 5 mm along u (cos 1) or 0.9 mm along (cosEff 0.9) -> V - 3 mm u =
+//        (1 - 1.8, 2 - 2.4, 3) = (-0.8, -0.4, 3) (cos -1); perpendicular (0) and cosEff exactly 0.5 kept; [20](a): the
+//        reversed orientation only (orientFallback = 2).
 // =============================================================================
 #include "fitProngs.C"
 #include "stoppedAlphas.C"
@@ -230,6 +283,46 @@ static bool writeText(const std::string &path, const std::string &text)
   std::ofstream f(path);
   f << text;
   return (bool)f;
+}
+
+// TODO/198 fixture: alpha S -> E (40 mm, dip 30 deg, azimuth phiDeg, centre (0, -5, 60)) and, if armLen >= 0, an arm
+// from S along -z of length armLen with Eeq = eeqFrac x E_alpha; A, sigma_T 0.8, sigma_L 1.3 as [6].
+// alongAlpha (TODO/198 v2, [23]): the arm goes from S along the alpha's direction instead (cos = +1).
+struct ArmCase {
+  double S[3], E[3], A2[3], Eeq;
+  bool arm;
+};
+static ArmCase makeArmCase(double phiDeg, double armLen, double eeqFrac, double rho, const FpGeom &g, const FpKernel &k,
+                           double A, FpImage &model, bool alongAlpha = false)
+{
+  ArmCase c;
+  const double L = 40, phi = phiDeg * M_PI / 180, th = 30 * M_PI / 180;
+  const double d[3] = {std::cos(th) * std::cos(phi), std::cos(th) * std::sin(phi), std::sin(th)};
+  const double M[3] = {0, -5, 60};
+  for (int j = 0; j < 3; ++j) {
+    c.S[j] = M[j] - 0.5 * L * d[j];
+    c.E[j] = M[j] + 0.5 * L * d[j];
+    c.A2[j] = c.S[j];
+  }
+  c.arm = armLen >= 0;
+  c.A2[2] = c.S[2] - (c.arm ? armLen : 0.0);
+  if (c.arm && alongAlpha)
+    for (int j = 0; j < 3; ++j) c.A2[j] = c.S[j] + armLen * d[j];
+  c.Eeq = eeqFrac * fpEnergyModel(L, rho);
+  FpProng p[2];
+  for (int j = 0; j < 3; ++j) {
+    p[0].S[j] = c.S[j];
+    p[0].E[j] = c.E[j];
+    p[1].S[j] = c.S[j];
+    p[1].E[j] = c.A2[j];
+  }
+  p[0].nPts = fpNumPoints(L);
+  p[1].arm = true;
+  p[1].Eeq = c.Eeq;
+  p[1].nPts = fpNumPoints(c.arm ? armLen : 0.0);
+  FpImage work;
+  fpRenderProngs(p, c.arm ? 2 : 1, A, 0.8, 1.3, rho, g, k, nullptr, model, work);
+  return c;
 }
 
 int test_fitProngs()
@@ -590,7 +683,7 @@ int test_fitProngs()
         }
         const bool rev = ic % 2 == 1;
         TStopwatch sw;
-        const FpEventFit f = rev ? fpFitEvent(data, g, k, rho198, b0, a0, true, 0.0, 0.0) : fpFitEvent(data, g, k, rho198, a0, b0, true, 0.0, 0.0);
+        const FpEventFit f = rev ? fpFitEvent(data, g, k, rho198, b0, a0, true, 0.0, 0.0, 0.0) : fpFitEvent(data, g, k, rho198, a0, b0, true, 0.0, 0.0, 0.0);
         const int want = rev ? 1 : 0;
         const FpFit &b = f.fit[f.dir < 0 ? 0 : f.dir];
         const double dSf = dist3(b.par, t.S), dEf = dist3(b.par + 3, t.E);
@@ -739,12 +832,14 @@ int test_fitProngs()
       if (haveNew) {
         checkNear(sXY, std::sqrt(sT * sT + 0.146), 1e-9, "[15] sigmaXY = sqrt(sigmaT^2 + 0.146)");
         check(atLimit == 0 && cmSkipped == 0, Form("[15] atLimit %d, cmSkipped %d (both 0 on this event)", atLimit, cmSkipped));
-        check(ft->GetBranch("initClipped") != nullptr, "[17] tree has initClipped");
+        check(ft->GetBranch("initClipped") != nullptr, "[clip] tree has initClipped");
         check(noiseB[0] > 0 && noiseB[1] > 0 && noiseB[2] > 0, Form("[15] noise %.2f %.2f %.2f (> 0)", noiseB[0], noiseB[1], noiseB[2]));
         std::printf("     sigmaT %.4f sigmaXY %.4f noise %.3f %.3f %.3f\n", sT, sXY, noiseB[0], noiseB[1], noiseB[2]);
       }
       TParameter<double> *apm = (TParameter<double> *)fo->Get("adc_per_mev");
       check(apm && apm->GetVal() == 0, "[14] TParameter adc_per_mev = 0 (free) stored");
+      TParameter<double> *abx = (TParameter<double> *)fo->Get("a_box");
+      check(abx && abx->GetVal() == FP_A_BOX && FP_A_BOX == 0.15, Form("[27] TParameter a_box = the default 0.15 (%g)", abx ? abx->GetVal() : -1.0));
       fo->Close();
     }
     fitProngs("run0001_raw.root", "run0001_tracks.root", 198, 12.5, 1600, "kernel.json", "out_fit1.root", "1", "");
@@ -836,7 +931,7 @@ int test_fitProngs()
       a0[j] = t.S[j] + (j == 0 ? 12.0 : 0.0);
       b0[j] = t.E[j] + (j == 0 ? 12.0 : 0.0);
     }
-    const FpEventFit f = fpFitEvent(data, g, k, rho198, a0, b0, true, 0.0, 0.0);
+    const FpEventFit f = fpFitEvent(data, g, k, rho198, a0, b0, true, 0.0, 0.0, 0.0);
     const FpFit &b = f.fit[f.dir < 0 ? 0 : f.dir];
     const double *i0 = f.dir == 1 ? b0 : a0, *i1 = f.dir == 1 ? a0 : b0;  // initial entering / stopping end
     double worst = 0;
@@ -979,7 +1074,7 @@ int test_fitProngs()
       a0[j] = t.S[j] + dS[j];
       b0[j] = t.E[j] + dE[j];
     }
-    const FpEventFit f = fpFitEvent(data, g, k, rho198, a0, b0, true, 0.0, 5000.0 * fpKernelArea(k));
+    const FpEventFit f = fpFitEvent(data, g, k, rho198, a0, b0, true, 0.0, 5000.0 * fpKernelArea(k), 0.0);  // aBox 0 = A fixed (TODO/201)
     const FpFit &b = f.fit[f.dir < 0 ? 0 : f.dir];
     const double dSf = dist3(b.par, t.S), dEf = dist3(b.par + 3, t.E);
     std::printf("     fixed A: dir %d chi2 %.0f ndf %d (bins %d) A %.6f |dS| %.3f |dE| %.3f sT %.3f sL %.3f status %d\n", f.dir, b.chi2,
@@ -990,8 +1085,8 @@ int test_fitProngs()
   }
 
 
-  // ---- [17] initial segment clipped to the sensitive volume ---------------------------------
-  std::printf("[17] fpClipSegment\n");
+  // ---- [clip] initial segment clipped to the sensitive volume ---------------------------------
+  std::printf("[clip] fpClipSegment\n");
   {
     FpGeom g = makeGeom(72, 92, 92, 0.25);  // z 0 .. 128 mm
     double a2[3], b2[3];
@@ -1000,46 +1095,773 @@ int test_fitProngs()
       const double a[3] = {-4.0, -44.0, 30.0}, b[3] = {-50.0, 66.0, 56.0};
       const bool in = fpClipSegment(a, b, g, a2, b2, fl);
       const double u = (48.0 - a[1]) / (b[1] - a[1]);  // 92 / 110
-      checkNear(b2[1], 48.0, 1e-9, "[17] y = 66 end cut at y = 48");
-      checkNear(b2[0], a[0] + u * (b[0] - a[0]), 1e-9, "[17] x of the cut = start + u (b - a)");
-      checkNear(b2[2], a[2] + u * (b[2] - a[2]), 1e-9, "[17] z of the cut");
-      checkNear(a2[0], a[0], 1e-9, "[17] the start is not moved");
+      checkNear(b2[1], 48.0, 1e-9, "[clip] y = 66 end cut at y = 48");
+      checkNear(b2[0], a[0] + u * (b[0] - a[0]), 1e-9, "[clip] x of the cut = start + u (b - a)");
+      checkNear(b2[2], a[2] + u * (b[2] - a[2]), 1e-9, "[clip] z of the cut");
+      checkNear(a2[0], a[0], 1e-9, "[clip] the start is not moved");
       const double d1[3] = {b2[0] - a2[0], b2[1] - a2[1], b2[2] - a2[2]}, d0[3] = {b[0] - a[0], b[1] - a[1], b[2] - a[2]};
       const double cx = d1[1] * d0[2] - d1[2] * d0[1], cy = d1[2] * d0[0] - d1[0] * d0[2], cz = d1[0] * d0[1] - d1[1] * d0[0];
-      checkNear(std::fabs(cx) + std::fabs(cy) + std::fabs(cz), 0, 1e-9, "[17] direction unchanged (cross product 0)");
-      check(in && fl == 2, Form("[17] inside, flags = %d (bit 1: the end moved)", fl));
+      checkNear(std::fabs(cx) + std::fabs(cy) + std::fabs(cz), 0, 1e-9, "[clip] direction unchanged (cross product 0)");
+      check(in && fl == 2, Form("[clip] inside, flags = %d (bit 1: the end moved)", fl));
     }
     {  // inside: unchanged
       const double a[3] = {-10, 5, 30}, b[3] = {20, -30, 60};
       const bool in = fpClipSegment(a, b, g, a2, b2, fl);
       double dd = 0;
       for (int j = 0; j < 3; ++j) dd += std::fabs(a2[j] - a[j]) + std::fabs(b2[j] - b[j]);
-      check(in && fl == 0 && dd == 0, "[17] a segment inside the box: unchanged, flags 0");
+      check(in && fl == 0 && dd == 0, "[clip] a segment inside the box: unchanged, flags 0");
     }
     {  // both ends out, the middle crosses
       const double a[3] = {-70, 0, 10}, b[3] = {70, 0, 10};
       const bool in = fpClipSegment(a, b, g, a2, b2, fl);
       check(in && fl == 3 && std::fabs(a2[0] + 53) < 1e-9 && std::fabs(b2[0] - 53) < 1e-9,
-            Form("[17] both ends moved to x = -+53, flags %d", fl));
+            Form("[clip] both ends moved to x = -+53, flags %d", fl));
     }
     {  // z: below 0 / above 128 (= 512 x 0.25)
       const double a[3] = {0, 0, -20}, b[3] = {0, 0, 20};
       const bool in = fpClipSegment(a, b, g, a2, b2, fl);
-      check(in && fl == 1 && std::fabs(a2[2]) < 1e-9, Form("[17] z < 0 start cut at z = 0, flags %d", fl));
+      check(in && fl == 1 && std::fabs(a2[2]) < 1e-9, Form("[clip] z < 0 start cut at z = 0, flags %d", fl));
       const double c[3] = {0, 0, 100}, e[3] = {0, 0, 150};
       const bool in2 = fpClipSegment(c, e, g, a2, b2, fl);
-      check(in2 && fl == 2 && std::fabs(b2[2] - 128) < 1e-9, Form("[17] z > 128 end cut at z = 128, flags %d", fl));
+      check(in2 && fl == 2 && std::fabs(b2[2] - 128) < 1e-9, Form("[clip] z > 128 end cut at z = 128, flags %d", fl));
     }
     {  // completely outside: x, y, z, and a corner miss
       const double a[3] = {60, 0, 30}, b[3] = {80, 10, 40};
-      check(!fpClipSegment(a, b, g, a2, b2, fl) && fl == 4, "[17] x > 53 all along: skipped, flags 4 (bit 2)");
+      check(!fpClipSegment(a, b, g, a2, b2, fl) && fl == 4, "[clip] x > 53 all along: skipped, flags 4 (bit 2)");
       const double c[3] = {0, 50, 30}, e[3] = {5, 70, 40};
-      check(!fpClipSegment(c, e, g, a2, b2, fl) && fl == 4, "[17] y > 48 all along: skipped");
+      check(!fpClipSegment(c, e, g, a2, b2, fl) && fl == 4, "[clip] y > 48 all along: skipped");
       const double h[3] = {0, 0, -30}, i[3] = {5, 5, -2};
-      check(!fpClipSegment(h, i, g, a2, b2, fl) && fl == 4, "[17] z < 0 all along: skipped");
+      check(!fpClipSegment(h, i, g, a2, b2, fl) && fl == 4, "[clip] z < 0 all along: skipped");
       const double j[3] = {-60, 60, 30}, kk[3] = {60, 100, 30};
-      check(!fpClipSegment(j, kk, g, a2, b2, fl) && fl == 4, "[17] a segment missing the box: skipped");
+      check(!fpClipSegment(j, kk, g, a2, b2, fl) && fl == 4, "[clip] a segment missing the box: skipped");
     }
+  }
+
+  // ---- [17] the arm: uniform charge from the vertex (TODO/198) ------------------------------
+  std::printf("[17] arm render, one image for all prongs, ceiling on the sum\n");
+  {
+    FpGeom g = makeGeom(120, 120, 120, 0.25);
+    FpKernel k;
+    k.h = {0.5, 1.0, 0.5};
+    k.i0 = 1;
+    const double V[3] = {-10, 4, 40};
+    auto armProng = [&](double L) {
+      FpProng p;
+      p.arm = true;
+      for (int j = 0; j < 3; ++j) p.S[j] = p.E[j] = V[j];
+      p.E[2] = V[2] - L;  // along -z (entry 27, TODO/195)
+      p.Eeq = 0.5;
+      p.nPts = fpNumPoints(L);
+      return p;
+    };
+    FpImage m8, m0, w;
+    const FpProng p8 = armProng(8.0), p0 = armProng(0.0);
+    fpRenderProngs(&p8, 1, 1000.0, 1.0, 1.2, rho198, g, k, nullptr, m8, w);
+    fpRenderProngs(&p0, 1, 1000.0, 1.0, 1.2, rho198, g, k, nullptr, m0, w);
+    checkNear(p8.nPts, 80, 0, "[17] 8 mm arm: 80 points (0.1 mm)");
+    checkNear(p0.nPts, 1, 0, "[17] 0 mm arm: 1 point (all the charge)");
+    auto zMoments = [&](const FpImage &m, int v, double &mean) {
+      double s0 = 0, s1 = 0, s2 = 0;
+      for (int kk = 1; kk <= m.n[v]; ++kk)
+        for (int t = 0; t < m.ncell; ++t) {
+          const double q = m.get(v, kk, t), z = t * g.mmPerCell;
+          s0 += q;
+          s1 += q * z;
+          s2 += q * z * z;
+        }
+      mean = s0 > 0 ? s1 / s0 : 0;
+      return s0 > 0 ? s2 / s0 - mean * mean : 0;
+    };
+    for (int v = 0; v < 3; ++v) {
+      checkNear(m8.v[v].empty() ? -1 : imageSum(m8, v), 1000.0, 5.0, Form("[17] view %d, L 8 mm: sum = A Eeq area = 1000 x 0.5 x 2 = 1000 (+-0.5 %%)", v));
+      checkNear(m0.v[v].empty() ? -1 : imageSum(m0, v), 1000.0, 5.0, Form("[17] view %d, L 0: the same sum (1 point)", v));
+      double z8 = 0, z0 = 0;
+      const double var8 = m8.v[v].empty() ? 0 : zMoments(m8, v, z8), var0 = m0.v[v].empty() ? 0 : zMoments(m0, v, z0);
+      checkNear(var8 - var0, 64.0 / 12, 0.1 * 64.0 / 12, Form("[17] view %d: z variance grows by L^2 / 12 = 5.333 mm^2 (+-10 %%)", v));
+      checkNear(z0 - z8, 4.0, 0.05, Form("[17] view %d: z mean moves by L / 2 = 4 mm", v));
+    }
+    // an alpha prong = fpRender (the TODO/197 wrapper); alpha + arm in one call = the two images added
+    FpTrack t;
+    for (int j = 0; j < 3; ++j) t.S[j] = V[j];
+    t.E[0] = V[0] + 12, t.E[1] = V[1] + 16, t.E[2] = V[2];  // 20 mm in xy
+    t.A = 1000, t.sigT = 1.0, t.sigL = 1.2;
+    FpProng pa;
+    for (int j = 0; j < 3; ++j) pa.S[j] = t.S[j], pa.E[j] = t.E[j];
+    pa.nPts = fpNumPoints(20.0);
+    FpImage ma, mt, mb, mab, mc;
+    fpRender(t, rho198, pa.nPts, g, k, nullptr, mt, w);
+    fpRenderProngs(&pa, 1, 1000.0, 1.0, 1.2, rho198, g, k, nullptr, ma, w);
+    fpRenderProngs(&p8, 1, 1000.0, 1.0, 1.2, rho198, g, k, nullptr, mb, w);
+    const FpProng both[2] = {pa, p8};
+    fpRenderProngs(both, 2, 1000.0, 1.0, 1.2, rho198, g, k, nullptr, mab, w);
+    double eT = 0, eSum = 0;
+    std::vector<double> ceil[3];
+    double cv[3] = {0, 0, 0};
+    for (int v = 0; v < 3; ++v) {
+      if (ma.v[v].size() != mt.v[v].size() || mab.v[v].size() != ma.v[v].size() || mb.v[v].size() != ma.v[v].size()) {
+        eT = eSum = 1e9;
+        continue;
+      }
+      for (size_t i = 0; i < ma.v[v].size(); ++i) {
+        eT = std::max(eT, std::fabs(ma.v[v][i] - mt.v[v][i]));
+        eSum = std::max(eSum, std::fabs(mab.v[v][i] - (ma.v[v][i] + mb.v[v][i])));
+        cv[v] = std::max(cv[v], ma.v[v][i] + mb.v[v][i]);
+      }
+      cv[v] *= 0.6;
+      ceil[v].assign(g.pl[v].n, cv[v]);
+    }
+    checkNear(eT, 0, 1e-12, "[17] an alpha prong = fpRender(FpTrack)");
+    checkNear(eSum, 0, 1e-9, "[17] alpha + arm in one call = alpha image + arm image");
+    fpRenderProngs(both, 2, 1000.0, 1.0, 1.2, rho198, g, k, ceil, mc, w);
+    double eC = 0;
+    int nSumOnly = 0;  // pixels where clipping each prong alone and adding exceeds the ceiling of the sum
+    for (int v = 0; v < 3; ++v)
+      for (size_t i = 0; i < ma.v[v].size() && i < mc.v[v].size(); ++i) {
+        const double a = ma.v[v][i], b = mb.v[v][i];
+        eC = std::max(eC, std::fabs(mc.v[v][i] - std::min(a + b, cv[v])));
+        if (std::min(a, cv[v]) + std::min(b, cv[v]) > mc.v[v][i] + 1e-6) ++nSumOnly;
+      }
+    check(eC < 1e-9 && nSumOnly > 0, Form("[17] ceiling on the sum: max |model - min(alpha + arm, ceiling)| %.2g, %d pixels differ from clipping each prong", eC, nSumOnly));
+  }
+
+  // ---- [18] arm seed ------------------------------------------------------------------------
+  std::printf("[18] arm seed (fpSolveXY, fpSeedArm)\n");
+  {
+    const double P[2] = {12.3, -7.1};
+    double s[3], xy[2] = {0, 0};
+    for (int v = 0; v < 3; ++v) s[v] = FP_PITCH[v][0] * P[0] + FP_PITCH[v][1] * P[1];
+    const int all[3] = {1, 1, 1}, two[3] = {1, 0, 1}, one[3] = {0, 1, 0};
+    bool ok = fpSolveXY(s, all, xy);
+    check(ok && std::fabs(xy[0] - P[0]) <= 1e-6 && std::fabs(xy[1] - P[1]) <= 1e-6,
+          Form("[18] (x, y) from s_U s_V s_W = (%.9f, %.9f), want (12.3, -7.1) within 1e-6", xy[0], xy[1]));
+    ok = fpSolveXY(s, two, xy);
+    check(ok && std::fabs(xy[0] - P[0]) <= 1e-6 && std::fabs(xy[1] - P[1]) <= 1e-6,
+          Form("[18] (x, y) from s_U s_W (2 views) = (%.9f, %.9f)", xy[0], xy[1]));
+    check(!fpSolveXY(s, one, xy), "[18] 1 view: no solution");
+
+    // hand-made residuals (model 0): strip s_k = 1.5 (k - 21), z = cell x 0.25
+    FpGeom g = makeGeom(41, 41, 41, 0.25, 200);
+    const double noise[3] = {1, 1, 1};
+    std::vector<char> mask[3], excl[3];
+    for (int v = 0; v < 3; ++v) {
+      mask[v].assign((size_t)41 * 200, 1);
+      excl[v].assign(41, 0);
+    }
+    const double Vtx[3] = {0, 0, 10}, Stop[3] = {20, 0, 10};
+    FpImage data, model;
+    data.init(g);
+    model.init(g);
+    const double Pt[3] = {3.0, -1.5, 20.0};  // z = cell 80
+    for (int v = 0; v < 3; ++v) {
+      const double sP = FP_PITCH[v][0] * Pt[0] + FP_PITCH[v][1] * Pt[1];
+      const double kf = (sP - g.pl[v].offset) / g.pl[v].slope;
+      const int k0 = (int)std::floor(kf);
+      const double fr = kf - k0;
+      for (int dt = -1; dt <= 1; ++dt) {
+        data.at(v, k0, 80 + dt) = 100.0 * (1 - fr) * (dt == 0 ? 2 : 1);
+        if (fr > 0) data.at(v, k0 + 1, 80 + dt) = 100.0 * fr * (dt == 0 ? 2 : 1);
+      }
+    }
+    FpArmSeed sd = fpSeedArm(data, model, mask, excl, noise, g, Vtx, Stop, 800.0);
+    check(sd.fallback == 0 && sd.has[0] && sd.has[1] && sd.has[2], Form("[18] blob in 3 views: fallback %d, has %d %d %d", sd.fallback, sd.has[0], sd.has[1], sd.has[2]));
+    check(dist3(sd.E2, Pt) <= 1e-9, Form("[18] E2 = (%.9f, %.9f, %.9f), want (3, -1.5, 20) within 1e-9", sd.E2[0], sd.E2[1], sd.E2[2]));
+    checkNear(sd.Eeq, 0.5, 1e-9, "[18] Eeq = mean charge 400 / adcPerMeV 800 = 0.5");
+    checkNear(sd.sFar[0], -3.0, 1e-9, "[18] U: farthest pixel from the vertex at s = -3.0");
+    checkNear(sd.zFar[0], 20.25, 1e-9, "[18] U: ... and z = 81 x 0.25 = 20.25");
+
+    FpImage d1;
+    d1.init(g);
+    for (int t = 50; t <= 51; ++t)
+      for (int kk = 5; kk <= 6; ++kk) d1.at(0, kk, t) = 100;  // A = 400
+    for (int t = 100; t <= 102; ++t) d1.at(0, 30, t) = 80;     // B = 240 ...
+    d1.at(0, 31, 103) = 200;                                    // ... + 200 through a diagonal neighbour = 440
+    d1.at(0, 7, 52) = 4.0;                                      // below 5 sigma: not a seed pixel
+    sd = fpSeedArm(d1, model, mask, excl, noise, g, Vtx, Stop, 800.0);
+    const double sB = (240 * (1.5 * (30 - 21)) + 200 * (1.5 * (31 - 21))) / 440.0;
+    const double zB = (80 * (100 + 101 + 102) * 0.25 + 200 * 103 * 0.25) / 440.0;
+    // one view: xy = vertex moved along p_U = (-1, 0) to s-bar -> x = -sB, y = 0
+    check(sd.fallback == 2 && sd.has[0] && !sd.has[1] && !sd.has[2], Form("[18] one view only: fallback %d (want 2)", sd.fallback));
+    checkNear(sd.q[0], 440, 1e-9, "[18] the larger component by charge, joined through a diagonal neighbour: 240 + 200 = 440");
+    checkNear(sd.sBar[0], sB, 1e-9, "[18] its s-bar");
+    checkNear(sd.zBar[0], zB, 1e-9, "[18] its z-bar");
+    check(std::fabs(sd.E2[0] + sB) < 1e-9 && std::fabs(sd.E2[1]) < 1e-9 && std::fabs(sd.E2[2] - zB) < 1e-9,
+          Form("[18] one view: E2 = (%.4f, %.4f, %.4f) = vertex moved along p_U, z = z-bar", sd.E2[0], sd.E2[1], sd.E2[2]));
+    checkNear(sd.Eeq, 440.0 / 800.0, 1e-12, "[18] one view: Eeq = 440 / 800");
+
+    FpImage d0;
+    d0.init(g);
+    sd = fpSeedArm(d0, model, mask, excl, noise, g, Vtx, Stop, 800.0);
+    const double want0[3] = {-3, 0, 10};  // vertex - 3 mm x (stop - vertex) / |stop - vertex|
+    check(sd.fallback == 1 && dist3(sd.E2, want0) < 1e-12 && std::fabs(sd.Eeq - 0.05) < 1e-12,
+          Form("[18] no pixel > 5 sigma: fallback %d, E2 (%.3f, %.3f, %.3f), Eeq %.3f", sd.fallback, sd.E2[0], sd.E2[1], sd.E2[2], sd.Eeq));
+
+    // synthetic alpha + arm fitted with H1 (A fixed, f 0.1)
+    FpGeom gs = makeGeom(72, 92, 92, mmPerCell);
+    int view[4][68], strip[4][68];
+    makeChannels(gs, view, strip);
+    FpKernel k;
+    std::string err;
+    fpKernelFromSamples(agetSamples25(502, 0.008), 2, k, err);
+    const double adcPerMeV = 5000 * fpKernelArea(k);
+    TRandom3 rng(1818);
+    for (int withArm = 1; withArm >= 0; --withArm) {
+      FpImage m;
+      const ArmCase c = makeArmCase(60, withArm ? 8.0 : -1.0, 0.3, rho198, gs, k, 5000, m);
+      double mx = 0;
+      makeAdc(m, view, strip, 250, &rng, 7.0, &mx);
+      FpData d;
+      fpFillData(g_adc, view, strip, gs, d);
+      double a0[3], b0[3];
+      for (int j = 0; j < 3; ++j) a0[j] = c.S[j] + 0.5, b0[j] = c.E[j] - 0.5;
+      const FpEventFit f = fpFitEvent(d, gs, k, rho198, a0, b0, true, FP_FRAC_ERR, adcPerMeV, 0.0);
+      const FpFit &b = f.fit[f.dir < 0 ? 0 : f.dir];
+      FpTrack t;
+      for (int j = 0; j < 3; ++j) t.S[j] = b.par[j], t.E[j] = b.par[3 + j];
+      t.A = b.par[6], t.sigT = b.par[7], t.sigL = b.par[8];
+      FpImage mf, w;
+      fpRender(t, rho198, fpNumPoints(dist3(a0, b0)), gs, k, d.ceil, mf, w);
+      std::vector<char> roi[3], ex[3];
+      fpRoi(a0, b0, gs, roi);
+      fpExclude(d, gs, roi, true, ex);
+      const FpArmSeed s2 = fpSeedArm(d.img, mf, roi, ex, d.noise, gs, b.par, b.par + 3, adcPerMeV);
+      double cen[3];
+      for (int j = 0; j < 3; ++j) cen[j] = 0.5 * (c.S[j] + c.A2[j]);
+      std::printf("     %s: H1 dir %d chi2 %.0f, seed fallback %d E2 (%.2f %.2f %.2f) Eeq %.3f (true %.3f), |E2 - arm centroid| %.2f mm\n",
+                  withArm ? "alpha + arm" : "alpha only", f.dir, b.chi2, s2.fallback, s2.E2[0], s2.E2[1], s2.E2[2], s2.Eeq, c.Eeq, dist3(s2.E2, cen));
+      if (withArm)
+        check(s2.fallback == 0 && dist3(s2.E2, cen) <= 5.0, Form("[18] alpha + arm: seed within 5 mm of the arm centroid (%.2f), fallback %d", dist3(s2.E2, cen), s2.fallback));
+      else
+        check(s2.fallback == 1, Form("[18] alpha only: fallback %d (want 1)", s2.fallback));
+    }
+  }
+
+  // ---- [19] ROI of the event ----------------------------------------------------------------
+  std::printf("[19] ROI union\n");
+  {
+    FpGeom gr = makeGeom(41, 41, 41, 0.5, 100);
+    const double S[3] = {-10, 3, 10}, E[3] = {12, -7, 34}, C[3] = {-12, 2, 9}, D[3] = {-20, 10, 22};
+    std::vector<char> mask[3];
+    fpRoi(S, E, gr, mask);
+    fpRoiAdd(C, D, gr, mask);
+    auto near = [&](const double *a, const double *b, int v, double sk, double zn) {
+      for (int it = 0; it <= 10000; ++it) {
+        const double u = it / 10000.0;
+        const double x = a[0] + u * (b[0] - a[0]), y = a[1] + u * (b[1] - a[1]), z = a[2] + u * (b[2] - a[2]);
+        if (std::fabs(FP_PITCH[v][0] * x + FP_PITCH[v][1] * y - sk) <= 15 && std::fabs(z - zn) <= 15) return true;
+      }
+      return false;
+    };
+    for (int v = 0; v < 3; ++v) {
+      long diff = 0, cnt = 0, cnt1 = 0;
+      for (int kk = 1; kk <= 41; ++kk)
+        for (int tt = 0; tt < 100; ++tt) {
+          const double sk = gr.pl[v].slope * kk + gr.pl[v].offset, zn = tt * 0.5;
+          const bool in1 = near(S, E, v, sk, zn), in = in1 || near(C, D, v, sk, zn);
+          const char got = mask[v].empty() ? 0 : mask[v][(size_t)(kk - 1) * 100 + tt];
+          cnt += got;
+          cnt1 += in1;
+          if (got != (char)in) ++diff;
+        }
+      check(diff == 0 && cnt > cnt1, Form("[19] union of 2 segment ROIs, view %d: %ld pixels (first alone %ld), %ld differ from the brute-force scan", v, cnt, cnt1, diff));
+    }
+    // an (s, z) segment added to one view
+    std::vector<char> m1(41 * 100, 0);
+    fpRoiAddView(1, -4.0, 30.0, 9.0, 45.0, gr, m1);
+    long diff = 0, cnt = 0;
+    for (int kk = 1; kk <= 41; ++kk)
+      for (int tt = 0; tt < 100; ++tt) {
+        const double sk = gr.pl[1].slope * kk + gr.pl[1].offset, zn = tt * 0.5;
+        bool in = false;
+        for (int it = 0; it <= 10000 && !in; ++it) {
+          const double u = it / 10000.0;
+          in = std::fabs(-4.0 + u * 13.0 - sk) <= 15 && std::fabs(30.0 + u * 15.0 - zn) <= 15;
+        }
+        cnt += m1[(size_t)(kk - 1) * 100 + tt];
+        if (m1[(size_t)(kk - 1) * 100 + tt] != (char)in) ++diff;
+      }
+    check(diff == 0 && cnt > 0, Form("[19] (s, z) segment in view 1: %ld pixels, %ld differ from the brute-force scan", cnt, diff));
+  }
+
+  // ---- [20] closure N = 2 -------------------------------------------------------------------
+  std::printf("[20] closure N = 2 (noise 7 ADC, seed 198, A fixed, f 0.1, common mode)\n");
+  {
+    FpGeom g = makeGeom(72, 92, 92, mmPerCell);
+    int view[4][68], strip[4][68];
+    makeChannels(g, view, strip);
+    FpKernel k;
+    std::string err;
+    fpKernelFromSamples(agetSamples25(502, 0.008), 2, k, err);
+    const double adcPerMeV = 5000 * fpKernelArea(k);
+    TRandom3 rng(198);
+    struct C20 {
+      char type;  // a = arm 8 mm, b = no arm, c = arm 0 mm
+      double phi;
+    };
+    const C20 cases[9] = {{'a', 60}, {'a', 150}, {'a', 250}, {'b', 20}, {'b', 80}, {'b', 140}, {'b', 200}, {'b', 290}, {'c', 110}};
+    for (const C20 &cs : cases) {
+      FpImage m;
+      const ArmCase c = makeArmCase(cs.phi, cs.type == 'a' ? 8.0 : (cs.type == 'c' ? 0.0 : -1.0), 0.3, rho198, g, k, 5000, m);
+      double mx = 0;
+      makeAdc(m, view, strip, 250, &rng, 7.0, &mx);
+      FpData raw;
+      fpFillData(g_adc, view, strip, g, raw);
+      const double dS[3] = {1.2, -0.8, 0.9}, dE[3] = {-1.0, 1.1, -0.7};
+      double a0[3], b0[3];
+      for (int j = 0; j < 3; ++j) a0[j] = c.S[j] + dS[j], b0[j] = c.E[j] + dE[j];
+      FpEventResult r;
+      std::string why;
+      TStopwatch sw;
+      const bool ok = fpFitEventAll(raw, g, k, rho198, a0, b0, true, FP_FRAC_ERR, adcPerMeV, 0.0, r, why);  // aBox 0 = the v1 numbers
+      const double sec = sw.RealTime();
+      check(ok && r.dirH2 >= 0, Form("[20] %c phi %.0f: fitted (%s)", cs.type, cs.phi, why.c_str()));
+      if (!ok || r.dirH2 < 0) continue;
+      const FpFit &h = r.h2[r.dirH2];
+      const double armLen = dist3(h.par, h.arm);
+      std::printf("     %c phi %3.0f: max adc %.0f  chi2 H1 %.0f H2 %.0f dchi2 %.1f (bins %d)  |V| %.3f |E2| %.3f mm  Eeq %.4f (true %.4f)  "
+                  "armLen %.2f  seed fb %d  status %d/%d  %.1f s\n",
+                  cs.type, cs.phi, mx, r.chi2H1, r.chi2H2, r.dchi2, r.nBinsEvent, dist3(h.par, c.S), dist3(h.arm, c.A2), h.arm[3], c.Eeq,
+                  armLen, r.seed.fallback, r.h2[0].status, r.h2[1].status, sec);
+      check(mx < 4090, Form("[20] %c phi %.0f: no saturated sample (max %.0f)", cs.type, cs.phi, mx));
+      check(r.h1.fit[0].nBins == r.nBinsEvent && r.h1.fit[1].nBins == r.nBinsEvent && r.h2[0].nBins == r.nBinsEvent && r.h2[1].nBins == r.nBinsEvent,
+            Form("[19] %c phi %.0f: H1 and H2 on the same ROI: nBins %d %d / %d %d = nBinsEvent %d", cs.type, cs.phi, r.h1.fit[0].nBins, r.h1.fit[1].nBins,
+                 r.h2[0].nBins, r.h2[1].nBins, r.nBinsEvent));
+      if (cs.type == 'a') {
+        check(dist3(h.par, c.S) <= 1.0, Form("[20] a phi %.0f: vertex within 1 mm (%.3f)", cs.phi, dist3(h.par, c.S)));
+        check(dist3(h.arm, c.A2) <= 2.0, Form("[20] a phi %.0f: arm end within 2 mm (%.3f)", cs.phi, dist3(h.arm, c.A2)));
+        check(std::fabs(h.arm[3] / c.Eeq - 1) <= 0.15, Form("[20] a phi %.0f: Eeq within 15 %% (%.4f / %.4f)", cs.phi, h.arm[3], c.Eeq));
+        check(r.dchi2 >= 200, Form("[20] a phi %.0f: dchi2 = %.1f >= 200", cs.phi, r.dchi2));
+        // TODO/198 v2: the arm along -z of an alpha with dip 30 deg has cos = -sin(30 deg) = -0.5 < FP_ARM_COS_MAX: no penalty,
+        // the v1 numbers stay (the printed line above = the v1 log)
+        check(h.pen == 0 && r.armPen == 0 && std::fabs(r.armCos + 0.5) <= 0.1 && r.armAlong == 0,
+              Form("[23] a phi %.0f: arm along -z, cosEff %.3f (want -0.5 +- 0.1), penalty %.3g (want 0), armAlong %d", cs.phi, r.armCos,
+                   r.armPen, r.armAlong));
+        // I2-a (main session's ruling): the shared seed lies along the alpha of the reversed orientation (vertex = the stop end)
+        // -> only orientation 1 starts from the fallback position
+        check(r.orientFallback == 2, Form("[28] a phi %.0f: orientFallback %d (want 2 = orientation 1 only)", cs.phi, r.orientFallback));
+      } else if (cs.type == 'b') {
+        check(r.dchi2 <= 20, Form("[20] b phi %.0f: alpha alone, dchi2 = %.2f <= 20", cs.phi, r.dchi2));
+      } else {
+        check(r.dchi2 > 100, Form("[20] c: point arm, dchi2 = %.1f > 100 (H2 chosen at T = 100)", r.dchi2));
+        check(armLen <= 3.0, Form("[20] c: armLen = %.2f <= 3 mm", armLen));
+      }
+    }
+  }
+
+  // ---- [21] / [22] fitProngs() with H2 ------------------------------------------------------
+  std::printf("[21] hyp / dchi2 / threshold in the tree  [22] e2e png with 2 segments\n");
+  {
+    const std::string dir = std::string(gSystem->TempDirectory()) + "/test_fitProngs198_" + std::to_string(gSystem->GetPid());
+    gSystem->mkdir(dir.c_str(), kTRUE);
+    gSystem->ChangeDirectory(dir.c_str());
+    FpGeom g = makeGeom(72, 92, 92, mmPerCell);
+    int view[4][68], strip[4][68];
+    makeChannels(g, view, strip);
+    std::string csv = "# aget,raw_channel,view(0=U 1=V 2=W),strip,s_mm  (synthetic, test_fitProngs.C)\n";
+    for (int a = 0; a < 4; ++a)
+      for (int c = 0; c < 68; ++c)
+        if (view[a][c] >= 0) {
+          const FpPlane &p = g.pl[view[a][c]];
+          csv += Form("%d,%d,%d,%d,%.3f\n", a, c, view[a][c], strip[a][c], p.slope * strip[a][c] + p.offset);
+        }
+    writeText("channel_map.csv", csv);
+    const std::vector<double> h25 = agetSamples25(502, 0.008);
+    std::string js = "{\"run\": 1, \"window_cells\": [-40, 300], \"all\": {\"mean_norm\": [";
+    for (size_t i = 0; i < h25.size(); ++i) js += Form("%s%.10g", i ? ", " : "", h25[i]);
+    js += "]}}\n";
+    writeText("kernel.json", js);
+    FpKernel k;
+    std::string err;
+    fpKernelFromSamples(h25, 2, k, err);
+    const double adcPerMeV = 5000 * fpKernelArea(k);
+    // entry 0 = event 90: alpha + 8 mm arm ((a) type), entry 1 = event 91: the alpha alone ((b) type)
+    FpImage m0, m1;
+    const ArmCase c0 = makeArmCase(60, 8.0, 0.3, rho198, g, k, 5000, m0);
+    const ArmCase c1 = makeArmCase(200, -1.0, 0.3, rho198, g, k, 5000, m1);
+    {
+      TFile f("run0002_raw.root", "RECREATE");
+      TTree tr("raw", "synthetic");
+      UInt_t id;
+      tr.Branch("eventId", &id);
+      tr.Branch("adc", g_adc, "adc[4][68][512]/S");
+      TRandom3 rng(2198);
+      double mx;
+      makeAdc(m0, view, strip, 250, &rng, 7.0, &mx);
+      id = 90;
+      tr.Fill();
+      makeAdc(m1, view, strip, 250, &rng, 7.0, &mx);
+      id = 91;
+      tr.Fill();
+      tr.Write();
+    }
+    {
+      TFile f("run0002_tracks.root", "RECREATE");
+      TTree tr("tracks", "synthetic");
+      UInt_t id;
+      Int_t ok;
+      Float_t xs, ys, zs, xe, ye, ze, lf = 40;
+      tr.Branch("eventId", &id);
+      tr.Branch("ok", &ok);
+      tr.Branch("xStartF", &xs);
+      tr.Branch("yStartF", &ys);
+      tr.Branch("zStartF", &zs);
+      tr.Branch("xEndF", &xe);
+      tr.Branch("yEndF", &ye);
+      tr.Branch("zEndF", &ze);
+      tr.Branch("lengthF", &lf);
+      for (const ArmCase *c : {&c0, &c1}) {
+        id = c == &c0 ? 90 : 91, ok = 1;
+        xs = c->S[0] + 1.2, ys = c->S[1] - 0.8, zs = c->S[2] + 0.9, xe = c->E[0] - 1.0, ye = c->E[1] + 1.1, ze = c->E[2] - 0.7;
+        tr.Fill();
+      }
+      tr.Write();
+      TParameter<double>("mm_per_cell", mmPerCell, 'f').Write();
+    }
+    fitProngs("run0002_raw.root", "run0002_tracks.root", 198, 12.5, 1600, "kernel.json", "out100.root", "", "png", adcPerMeV, FP_FRAC_ERR, true, 100.0, 0.0);
+    fitProngs("run0002_raw.root", "run0002_tracks.root", 198, 12.5, 1600, "kernel.json", "out0.root", "", "", adcPerMeV, FP_FRAC_ERR, true, 0.0, 0.0);
+    Int_t hyp[2][2] = {{-1, -1}, {-1, -1}};
+    Double_t dchi2[2][2] = {{-1e9, -1e9}, {-1e9, -1e9}}, thr[2] = {-1, -1};
+    const char *outs[2] = {"out100.root", "out0.root"};
+    const char *newBr[] = {"chi2H1", "chi2H2", "dchi2", "nBinsEvent", "ndfH1", "ndfH2", "hyp", "xV", "yV", "zV", "xA2", "yA2", "zA2",
+                           "armLen", "armE", "armQ", "armDirX", "armDirY", "armDirZ", "armSat", "seedFallback", "statusH2", "atLimitH2"};
+    for (int o = 0; o < 2; ++o) {
+      TFile *fo = TFile::Open(outs[o]);
+      TTree *ft = fo ? (TTree *)fo->Get("fit") : nullptr;
+      check(ft && ft->GetEntries() == 2, Form("[21] %s: tree fit with 2 entries", outs[o]));
+      if (!ft) continue;
+      std::string missing;
+      for (const char *b : newBr)
+        if (!ft->GetBranch(b)) missing += std::string(" ") + b;
+      check(missing.empty(), "[21] new branches present" + (missing.empty() ? std::string("") : " (missing:" + missing + ")"));
+      if (missing.empty()) {
+        Int_t h = -1, nbe = 0, ndf1 = 0, ndf2 = 0;
+        Double_t dc = 0, c1v = 0, c2v = 0, aq = 0, ae = 0;
+        ft->SetBranchAddress("hyp", &h);
+        ft->SetBranchAddress("dchi2", &dc);
+        ft->SetBranchAddress("chi2H1", &c1v);
+        ft->SetBranchAddress("chi2H2", &c2v);
+        ft->SetBranchAddress("nBinsEvent", &nbe);
+        ft->SetBranchAddress("ndfH1", &ndf1);
+        ft->SetBranchAddress("ndfH2", &ndf2);
+        ft->SetBranchAddress("armQ", &aq);
+        ft->SetBranchAddress("armE", &ae);
+        for (int e = 0; e < 2 && e < ft->GetEntries(); ++e) {
+          ft->GetEntry(e);
+          hyp[o][e] = h;
+          dchi2[o][e] = dc;
+          std::printf("     %s entry %d: hyp %d dchi2 %.2f (H1 %.1f - H2 %.1f) ndf %d / %d (bins %d) armE %.4f armQ %.0f\n", outs[o], e, h, dc, c1v, c2v,
+                      ndf1, ndf2, nbe, ae, aq);
+          if (o == 0 && e == 0) {
+            checkNear(dc, c1v - c2v, 1e-6, "[21] dchi2 = chi2H1 - chi2H2");
+            check(ndf1 == nbe - 8 && ndf2 == nbe - 12, Form("[21] ndfH1 = bins - 8 (%d), ndfH2 = bins - 12 (%d) with A fixed", ndf1, ndf2));
+            checkNear(aq, adcPerMeV * ae, 1e-6 * aq, "[21] armQ = A x Eeq x kernel area = adcPerMeV x Eeq");
+          }
+        }
+      }
+      TParameter<double> *tp = (TParameter<double> *)fo->Get("dchi2_threshold");
+      thr[o] = tp ? tp->GetVal() : -1;
+      // [27] TODO/198 v2 branches and TParameter a_box (this run: aBox 0 = A fixed -> A / A_ref = 1 exactly)
+      const char *v2Br[] = {"armCos", "armPen", "armAlong", "aRelH1", "aRelH2", "seedAlong", "h1Broken", "h2Worse", "orientFallback"};
+      std::string missing2;
+      for (const char *b : v2Br)
+        if (!ft->GetBranch(b)) missing2 += std::string(" ") + b;
+      check(missing2.empty(), Form("[27] %s: v2 branches present%s", outs[o], missing2.empty() ? "" : (" (missing:" + missing2 + ")").c_str()));
+      TParameter<double> *abx = (TParameter<double> *)fo->Get("a_box");
+      check(abx && abx->GetVal() == 0, Form("[27] %s: TParameter a_box = 0 (%g)", outs[o], abx ? abx->GetVal() : -1.0));
+      if (missing2.empty()) {
+        Double_t aR1 = -1, aR2 = -1, cosA = 9, pen = -1;
+        Int_t along = -1, broken = -1, worse = -1, sAlong = -1;
+        ft->SetBranchAddress("aRelH1", &aR1);
+        ft->SetBranchAddress("aRelH2", &aR2);
+        ft->SetBranchAddress("armCos", &cosA);
+        ft->SetBranchAddress("armPen", &pen);
+        ft->SetBranchAddress("armAlong", &along);
+        ft->SetBranchAddress("seedAlong", &sAlong);
+        ft->SetBranchAddress("h1Broken", &broken);
+        ft->SetBranchAddress("h2Worse", &worse);
+        ft->GetEntry(0);
+        std::printf("     %s entry 0: aRelH1 %.6f aRelH2 %.6f armCos %.3f armPen %.3g armAlong %d seedAlong %d h1Broken %d h2Worse %d\n", outs[o], aR1, aR2,
+                    cosA, pen, along, sAlong, broken, worse);
+        check(aR1 == 1 && aR2 == 1, Form("[27] %s entry 0: aBox 0 -> aRelH1 = aRelH2 = 1 (%.9g, %.9g)", outs[o], aR1, aR2));
+        check(pen == 0 && along == 0 && broken == 0 && worse == 0 && std::fabs(cosA + 0.5) <= 0.1,
+              Form("[27] %s entry 0 (arm along -z): armPen %.3g, armAlong %d, h1Broken %d, h2Worse %d, armCos %.3f", outs[o], pen, along, broken, worse, cosA));
+      }
+      fo->Close();
+    }
+    check(hyp[0][0] == 1 && hyp[0][1] == 0, Form("[21] threshold 100: hyp %d (alpha + arm, want 1), %d (alpha alone, want 0)", hyp[0][0], hyp[0][1]));
+    check(hyp[1][0] == 0 && hyp[1][1] == 0, Form("[21] threshold 0: hyp %d %d (want 0 0)", hyp[1][0], hyp[1][1]));
+    check(dchi2[0][0] == dchi2[1][0] && dchi2[0][1] == dchi2[1][1], Form("[21] the same dchi2 with threshold 100 and 0 (%.3f / %.3f, %.3f / %.3f)", dchi2[0][0],
+                                                                         dchi2[1][0], dchi2[0][1], dchi2[1][1]));
+    check(thr[0] == 100 && thr[1] == 0, Form("[21] TParameter dchi2_threshold %g / %g", thr[0], thr[1]));
+    FileStat_t st;
+    const bool gotStat = gSystem->GetPathInfo("png/event0000090.png", st) == 0;
+    check(gotStat && st.fSize >= 10000, Form("[22] png of the H2 event (%lld bytes >= 10 kB)", gotStat ? (Long64_t)st.fSize : -1LL));
+    // fpDrawEvent: 2 segments for H2, 1 for H1
+    double mxd = 0;
+    makeAdc(m0, view, strip, 250, nullptr, 0.0, &mxd);
+    FpData d;
+    fpFillData(g_adc, view, strip, g, d);
+    std::vector<char> mask[3];
+    fpRoi(c0.S, c0.E, g, mask);
+    FpFit b;
+    for (int j = 0; j < 3; ++j) b.par[j] = c0.S[j], b.par[3 + j] = c0.E[j], b.arm[j] = c0.A2[j];
+    b.arm[3] = c0.Eeq;
+    b.hasArm = true;
+    const int n2 = fpDrawEvent(d, m0, mask, g, "test H2", b, true, "draw_h2.png");
+    const int n1 = fpDrawEvent(d, m0, mask, g, "test H1", b, false, "draw_h1.png");
+    check(n2 == 2 && n1 == 1 && gSystem->AccessPathName("draw_h2.png") == kFALSE, Form("[22] fpDrawEvent: %d segments for H2, %d for H1", n2, n1));
+    for (const char *f : {"channel_map.csv", "kernel.json", "run0002_raw.root", "run0002_tracks.root", "out100.root", "out0.root",
+                          "png/event0000090.png", "png/event0000091.png", "draw_h2.png", "draw_h1.png"})
+      gSystem->Unlink(f);
+    gSystem->Unlink("png");
+    gSystem->ChangeDirectory(startDir.c_str());
+    gSystem->Unlink(dir.c_str());
+  }
+
+  // ---- [23] the arm direction penalty (TODO/198 v2, Fable verdict A) -----------------------------
+  std::printf("[23] arm direction: fpArmCos, fpArmPenalty, the wall in a fit\n");
+  {
+    // alpha V -> E along u = (0.6, 0.8, 0) (10 mm); w = (0.8, -0.6, 0) is perpendicular to u
+    const double V[3] = {1.0, 2.0, 3.0}, u[3] = {0.6, 0.8, 0.0}, w[3] = {0.8, -0.6, 0.0};
+    double E[3], Ep[3], Em[3], Eo[3], Eh[3], E60[3];
+    for (int j = 0; j < 3; ++j) {
+      E[j] = V[j] + 10 * u[j];
+      Ep[j] = V[j] + 5 * u[j];                                  // 5 mm along the alpha: cos +1
+      Em[j] = V[j] - 5 * u[j];                                  // 5 mm backwards: cos -1
+      Eo[j] = V[j] + 5 * w[j];                                  // perpendicular: cos 0
+      Eh[j] = V[j] + 0.5 * u[j];                                // 0.5 mm along: cosEff = 0.5 x 1 / max(0.5, 1) = 0.5
+      E60[j] = V[j] - 0.5 * (0.5 * u[j] + 0.8660254038 * w[j]);  // 0.5 mm at 120 deg: cos -0.5 -> cosEff -0.25
+    }
+    checkNear(fpArmCos(V, E, Ep), 1.0, 1e-12, "[23] arm along the alpha: cos = +1");
+    checkNear(fpArmCos(V, E, Em), -1.0, 1e-12, "[23] arm backwards: cos = -1");
+    checkNear(fpArmCos(V, E, Eo), 0.0, 1e-12, "[23] arm perpendicular: cos = 0");
+    checkNear(fpArmCos(V, E, Eh), 0.5, 1e-12, "[23] 0.5 mm arm along the alpha: cosEff = 0.5 / 1 mm = 0.5 = 0.5 |cos|");
+    checkNear(fpArmCos(V, E, E60), -0.25, 1e-9, "[23] 0.5 mm arm at 120 deg: cosEff = 0.5 x (-0.5) = -0.25 = 0.5 cos");
+    checkNear(fpArmCos(V, E, V), 0.0, 0, "[23] 0 mm arm: cosEff = 0 (continuous)");
+    checkNear(fpArmCos(V, V, Ep), 0.0, 0, "[23] 0 mm alpha: no direction, cosEff = 0");
+    checkNear(fpArmPenalty(0.5, 1234), 0.0, 0, "[23] penalty at cos = 0.5: 0");
+    checkNear(fpArmPenalty(-1.0, 1234), 0.0, 0, "[23] penalty at cos = -1: 0");
+    checkNear(fpArmPenalty(0.9, 1234), 100.0 * 1234 * 0.16, 1e-9, "[23] penalty at cos = 0.9: 100 x nBins x 0.4^2 = 100 x 1234 x 0.16 = 19744");
+    checkNear(fpArmPenalty(0.55, 1000), 250.0, 1e-9, "[23] penalty at cos = 0.55: 100 x 1000 x 0.05^2 = 250");
+
+    // the wall in a fit: alpha 40 mm + an 8 mm arm ALONG the alpha (cos +1, Eeq 0.3 E_alpha), A_ref = the true A, aBox 0.15
+    FpGeom g = makeGeom(72, 92, 92, mmPerCell);
+    int view[4][68], strip[4][68];
+    makeChannels(g, view, strip);
+    FpKernel k;
+    std::string err;
+    fpKernelFromSamples(agetSamples25(502, 0.008), 2, k, err);
+    const double aRef = 5000, adcPerMeV = aRef * fpKernelArea(k);
+    TRandom3 rng(2023);
+    FpImage m;
+    const ArmCase c = makeArmCase(60, 8.0, 0.3, rho198, g, k, aRef, m, true);
+    double mx = 0;
+    makeAdc(m, view, strip, 250, &rng, 7.0, &mx);
+    FpData raw;
+    fpFillData(g_adc, view, strip, g, raw);
+    const double dS[3] = {1.2, -0.8, 0.9}, dE[3] = {-1.0, 1.1, -0.7};
+    double a0[3], b0[3];
+    for (int j = 0; j < 3; ++j) a0[j] = c.S[j] + dS[j], b0[j] = c.E[j] + dE[j];
+    checkNear(fpArmCos(c.S, c.E, c.A2), 1.0, 1e-12, "[23] fixture: the arm is along the alpha (cos +1)");
+    FpEventResult r;
+    std::string why;
+    const bool ok = fpFitEventAll(raw, g, k, rho198, a0, b0, true, FP_FRAC_ERR, adcPerMeV, FP_A_BOX, r, why);
+    check(ok && r.dirH2 >= 0 && mx < 4090, Form("[23] along-alpha arm: fitted (%s), max adc %.0f", why.c_str(), mx));
+    if (ok && r.dirH2 >= 0) {
+      const FpFit &h = r.h2[r.dirH2];
+      std::printf("     along-alpha arm: chi2 H1 %.0f H2 %.0f dchi2 %.1f  armCos %.3f armPen %.1f armAlong %d  armLen %.2f Eeq %.4f  seed fb %d along %d  "
+                  "aRel %.4f / %.4f\n",
+                  r.chi2H1, r.chi2H2, r.dchi2, r.armCos, r.armPen, r.armAlong, dist3(h.par, h.arm), h.arm[3], r.seed.fallback, r.seed.along, r.aRelH1,
+                  r.aRelH2);
+      check(r.armCos <= FP_ARM_ALONG_COS, Form("[23] along-alpha arm: final cosEff %.3f <= 0.55 (the wall)", r.armCos));
+      check(r.armAlong == (r.armCos > FP_ARM_ALONG_COS ? 1 : 0), Form("[23] armAlong %d = (cosEff > 0.55)", r.armAlong));
+      checkNear(r.armPen, fpArmPenalty(r.armCos, r.nBinsEvent), 1e-9 * (1 + r.armPen), "[23] armPen = fpArmPenalty(armCos, nBinsEvent)");
+      // the wall itself: H2 started with the arm 37 deg off the alpha (cos 0.8, where the data pulls it towards cos 1)
+      const int d = r.h1.dir;
+      const FpFit &w1 = r.h1.fit[d];
+      FpStart st;
+      double uA[3], L = dist3(w1.par, w1.par + 3), perp[3] = {0, 0, 0};
+      for (int j = 0; j < 3; ++j) uA[j] = (w1.par[3 + j] - w1.par[j]) / L;
+      // perp = z x uA normalised (uA is not along z: dip 30 deg)
+      perp[0] = -uA[1], perp[1] = uA[0];
+      const double pn = std::hypot(perp[0], perp[1]);
+      for (int j = 0; j < 3; ++j) {
+        perp[j] /= pn;
+        st.S[j] = w1.par[j];
+        st.E[j] = w1.par[3 + j];
+        st.boxS[j] = d == 0 ? a0[j] : b0[j];
+        st.boxE[j] = d == 0 ? b0[j] : a0[j];
+        st.E2[j] = st.boxE2[j] = w1.par[j] + 8.0 * (0.8 * uA[j] + 0.6 * perp[j]);
+      }
+      st.A0 = w1.par[6];
+      st.sigT = w1.par[7];
+      st.sigL = w1.par[8];
+      st.arm = true;
+      st.Eeq = c.Eeq;
+      check(std::fabs(fpArmCos(st.S, st.E, st.E2) - 0.8) < 1e-9, Form("[23] start: arm at cos %.3f (0.8)", fpArmCos(st.S, st.E, st.E2)));
+      const FpFit f = fpFitProngs(r.data, g, k, rho198, r.roi, r.excl, st, FP_FRAC_ERR, aRef, FP_A_BOX);
+      FpImage mf, wf;
+      fpRenderFit(f, rho198, g, k, r.data.ceil, mf, wf);
+      int nb = 0;
+      const double c2pure = fpChi2(r.data.img, mf, r.roi, r.excl, r.data.noise, nb, FP_FRAC_ERR);
+      std::printf("     wall: start cos 0.8 -> cosEff %.3f, penalty %.1f, chi2 %.0f (pure %.0f), armLen %.2f Eeq %.4f status %d\n", f.cosEff, f.pen, f.chi2,
+                  c2pure, dist3(f.par, f.arm), f.arm[3], f.status);
+      check(f.cosEff <= FP_ARM_ALONG_COS, Form("[23] the wall: started at cos 0.8, final cosEff %.3f <= 0.55", f.cosEff));
+      checkNear(f.chi2, c2pure + fpArmPenalty(f.cosEff, nb), 1e-6 * f.chi2, "[23] H2 chi2 = pure chi2 + penalty (the minimised value)");
+      checkNear(f.cosEff, fpArmCos(f.par, f.par + 3, f.arm), 1e-12, "[23] FpFit::cosEff = fpArmCos of the solution");
+    }
+  }
+
+  // ---- [24] A in a box (TODO/198 v2, Fable verdict A) ---------------------------------------------
+  std::printf("[24] A limited to A_ref x [1 - aBox, 1 + aBox]\n");
+  {
+    FpGeom g = makeGeom(72, 92, 92, mmPerCell);
+    int view[4][68], strip[4][68];
+    makeChannels(g, view, strip);
+    FpKernel k;
+    std::string err;
+    fpKernelFromSamples(agetSamples25(502, 0.008), 2, k, err);
+    const double aRef = 5000, adcPerMeV = aRef * fpKernelArea(k);
+    TRandom3 rng(2024);
+    const double L = 40, phi = 120 * M_PI / 180, th = 30 * M_PI / 180;  // the [14] alpha
+    const double d[3] = {std::cos(th) * std::cos(phi), std::cos(th) * std::sin(phi), std::sin(th)};
+    const double M[3] = {0, -5, 60};
+    for (double aTrue : {1.10, 1.30}) {
+      FpTrack t;
+      for (int j = 0; j < 3; ++j) {
+        t.S[j] = M[j] - 0.5 * L * d[j];
+        t.E[j] = M[j] + 0.5 * L * d[j];
+      }
+      t.A = aTrue * aRef;
+      t.sigT = 0.8;
+      t.sigL = 1.3;
+      FpImage model, work;
+      fpRender(t, rho198, fpNumPoints(L), g, k, nullptr, model, work);
+      double maxAdc = 0;
+      makeAdc(model, view, strip, 250, &rng, 7.0, &maxAdc);
+      FpData data;
+      fpFillData(g_adc, view, strip, g, data);
+      const double dS[3] = {1.2, -0.8, 0.9}, dE[3] = {-1.0, 1.1, -0.7};
+      double a0[3], b0[3];
+      for (int j = 0; j < 3; ++j) a0[j] = t.S[j] + dS[j], b0[j] = t.E[j] + dE[j];
+      const FpEventFit f = fpFitEvent(data, g, k, rho198, a0, b0, true, 0.0, adcPerMeV, 0.15);
+      const FpFit &b = f.fit[f.dir < 0 ? 0 : f.dir];
+      const double aRel = b.par[6] / aRef;
+      std::printf("     A_true %.2f A_ref, aBox 0.15: A %.5f A_ref, atLimit %d, ndf %d (bins %d), dir %d chi2 %.0f status %d, max adc %.0f\n", aTrue, aRel,
+                  b.atLimit, f.ndf, b.nBins, f.dir, b.chi2, b.status, maxAdc);
+      check(maxAdc < 4090, Form("[24] A_true %.2f: no saturated sample (max %.0f)", aTrue, maxAdc));
+      if (aTrue < 1.2) {
+        checkNear(aRel, 1.10, 0.03, "[24] A_true 1.10 A_ref, aBox 0.15: A / A_ref = 1.10 +- 0.03");
+        check(!(b.atLimit & (1 << 10)), Form("[24] A_true 1.10: bit 10 (A at the box edge) not set (atLimit %d)", b.atLimit));
+        checkNear(f.ndf, b.nBins - 9, 0, "[24] A in the box: ndf = bins - 9 (A is a parameter)");
+        // aBox 0 on the same data = A fixed (TODO/201, [14])
+        const FpEventFit f0 = fpFitEvent(data, g, k, rho198, a0, b0, true, 0.0, adcPerMeV, 0.0);
+        const FpFit &b0f = f0.fit[f0.dir < 0 ? 0 : f0.dir];
+        checkNear(b0f.par[6], aRef, 1e-9, "[24] aBox 0: A = A_ref (fixed)");
+        checkNear(f0.ndf, b0f.nBins - 8, 0, "[24] aBox 0: ndf = bins - 8 (= [14])");
+        check(!(b0f.atLimit & (1 << 10)), "[24] aBox 0: bit 10 not set");
+      } else {
+        checkNear(aRel, 1.15, 0.001, "[24] A_true 1.30 A_ref, aBox 0.15: A / A_ref = 1.15 (the box edge) +- 0.001");
+        check(b.atLimit & (1 << 10), Form("[24] A_true 1.30: bit 10 (A at the box edge) set (atLimit %d)", b.atLimit));
+      }
+    }
+  }
+
+  // ---- [25] arm seed: components along the alpha are not candidates (TODO/198 v2, verdict D) ----------
+  std::printf("[25] arm seed: a component along the alpha's projection is left out\n");
+  {
+    // the alpha V (0, 0, 10) -> Stop (20, 0, 10): projections (s, z) U (0, 10) -> (-20, 10), V and W (0, 10) -> (10, 10)
+    checkNear(fpDistToSegment2(-9, 10, 0, 10, -20, 10), 0.0, 1e-12, "[25] distance of a point on the segment: 0");
+    checkNear(fpDistToSegment2(-9, 16, 0, 10, -20, 10), 6.0, 1e-12, "[25] 6 mm off the segment (perpendicular): 6");
+    checkNear(fpDistToSegment2(3, 6, 0, 10, -20, 10), 5.0, 1e-12, "[25] beyond the end: distance to the end point (3, 4) -> 5");
+    checkNear(fpDistToSegment2(1, 2, 1, 2, 1, 2), 0.0, 0, "[25] 0-length segment at the point: 0");
+    FpGeom g = makeGeom(41, 41, 41, 0.25, 200);  // s_k = 1.5 (k - 21), z = cell x 0.25
+    const double noise[3] = {1, 1, 1};
+    std::vector<char> mask[3], excl[3];
+    for (int v = 0; v < 3; ++v) {
+      mask[v].assign((size_t)41 * 200, 1);
+      excl[v].assign(41, 0);
+    }
+    const double Vtx[3] = {0, 0, 10}, Stop[3] = {20, 0, 10};
+    FpImage model;
+    model.init(g);
+    // a blob of charge q on strip kk, cells t - 1 / t / t + 1 (1 : 2 : 1): its centroid is (s_kk, t x 0.25)
+    auto blob = [](FpImage &im, int v, int kk, int t, double q) {
+      im.at(v, kk, t - 1) += 0.25 * q;
+      im.at(v, kk, t) += 0.5 * q;
+      im.at(v, kk, t + 1) += 0.25 * q;
+    };
+    FpImage d1;
+    d1.init(g);
+    blob(d1, 0, 15, 40, 800);  // U: s = -9, z = 10 = on the projection (distance 0), the larger charge
+    blob(d1, 0, 15, 64, 200);  // U: s = -9, z = 16 = 6 mm off it
+    blob(d1, 1, 24, 40, 600);  // V: s = 4.5, z = 10 = on the projection only
+    FpArmSeed sd = fpSeedArm(d1, model, mask, excl, noise, g, Vtx, Stop, 800.0);
+    std::printf("     has %d %d %d, along %d, fallback %d, U q %.1f s-bar %.3f z-bar %.3f\n", sd.has[0], sd.has[1], sd.has[2], sd.along, sd.fallback, sd.q[0],
+                sd.sBar[0], sd.zBar[0]);
+    checkNear(sd.q[0], 200, 1e-9, "[25] U: the smaller component 6 mm off the alpha is chosen (charge 200, not 800)");
+    checkNear(sd.sBar[0], -9.0, 1e-9, "[25] U: its s-bar = -9");
+    checkNear(sd.zBar[0], 16.0, 1e-9, "[25] U: its z-bar = 64 x 0.25 = 16");
+    check(sd.has[0] == 1 && sd.has[1] == 0 && sd.has[2] == 0, Form("[25] has %d %d %d: V had only a component along the alpha -> 0", sd.has[0], sd.has[1], sd.has[2]));
+    checkNear(sd.along, 3, 0, "[25] seedAlong = bit 0 (U) + bit 1 (V) = 3 (W: no component, no bit)");
+    checkNear(sd.fallback, 2, 0, "[25] one view left: fallback 2");
+    FpImage d2;
+    d2.init(g);
+    blob(d2, 0, 15, 40, 800);  // U, V, W: only components on the projection
+    blob(d2, 1, 24, 40, 600);
+    blob(d2, 2, 24, 40, 600);
+    sd = fpSeedArm(d2, model, mask, excl, noise, g, Vtx, Stop, 800.0);
+    const double want0[3] = {-3, 0, 10};  // vertex - 3 mm x the alpha direction
+    check(sd.has[0] == 0 && sd.has[1] == 0 && sd.has[2] == 0 && sd.along == 7,
+          Form("[25] all 3 views only along the alpha: has %d %d %d, along %d (want 0 0 0, 7)", sd.has[0], sd.has[1], sd.has[2], sd.along));
+    check(sd.fallback == 1 && dist3(sd.E2, want0) < 1e-12,
+          Form("[25] ... seedFallback %d (want 1), E2 (%.3f, %.3f, %.3f) = vertex - 3 mm x alpha direction", sd.fallback, sd.E2[0], sd.E2[1], sd.E2[2]));
+    // I1-a (main session's ruling): the fallback Eeq = mean over the views of the largest left-out charge / adcPerMeV
+    checkNear(sd.Eeq, (800.0 + 600.0 + 600.0) / 3 / 800.0, 1e-9, "[25] I1-a: fallback Eeq = (800 + 600 + 600) / 3 / 800 = 0.8333 (the left-out charge)");
+  }
+
+  // ---- [26] flags h1Broken / h2Worse and hyp (TODO/198 v2, verdicts B and C) -------------------------
+  std::printf("[26] h1Broken, h2Worse, hyp\n");
+  {
+    checkNear(fpH1Broken(4.995, 1.0), 1, 0, "[26] sigma_T 4.995 (within 0.01 of 5): h1Broken 1");
+    checkNear(fpH1Broken(4.9, 1.0), 0, 0, "[26] sigma_T 4.9: h1Broken 0");
+    checkNear(fpH1Broken(1.0, 4.995), 1, 0, "[26] sigma_L 4.995: h1Broken 1");
+    checkNear(fpH1Broken(1.0, 1.0), 0, 0, "[26] sigma 1 / 1: h1Broken 0");
+    int worse = -1;
+    checkNear(fpDchi2(1000.0, 1001.0, worse), 0.0, 0, "[26] chi2_H2 = chi2_H1 + 1: dchi2 = 0 ...");
+    checkNear(worse, 1, 0, "[26] ... and h2Worse 1");
+    checkNear(fpDchi2(1001.0, 1000.0, worse), 1.0, 0, "[26] chi2_H2 = chi2_H1 - 1: dchi2 = 1 ...");
+    checkNear(worse, 0, 0, "[26] ... and h2Worse 0");
+    checkNear(fpDchi2(1000.0, 1000.0, worse), 0.0, 0, "[26] equal chi2: dchi2 0, h2Worse 0 (not worse)");
+    checkNear(worse, 0, 0, "[26] equal chi2: h2Worse 0");
+    checkNear(fpHyp(5000, 100, 1), -1, 0, "[26] threshold 100, h1Broken: hyp = -1 (not classified)");
+    checkNear(fpHyp(5000, 0, 1), 0, 0, "[26] threshold 0 (calibration), h1Broken: hyp = 0");
+    checkNear(fpHyp(5000, 100, 0), 1, 0, "[26] threshold 100, dchi2 5000: hyp = 1");
+    checkNear(fpHyp(50, 100, 0), 0, 0, "[26] threshold 100, dchi2 50: hyp = 0");
+    checkNear(fpHyp(5000, 0, 0), 0, 0, "[26] threshold 0: hyp = 0");
+  }
+
+  // ---- [28] the H2 seed per orientation (main session's ruling I2-a) --------------------------------
+  std::printf("[28] fpOrientSeed: an orientation whose alpha the shared seed lies along starts from the fallback\n");
+  {
+    const double V[3] = {1.0, 2.0, 3.0}, u[3] = {0.6, 0.8, 0.0}, w[3] = {0.8, -0.6, 0.0};
+    double E[3], Ea[3], Eo[3], Eh[3], E9[3], out[3];
+    for (int j = 0; j < 3; ++j) {
+      E[j] = V[j] + 10 * u[j];
+      Ea[j] = V[j] + 5 * u[j];    // along: cos 1 > 0.5
+      Eo[j] = V[j] + 5 * w[j];    // perpendicular: cos 0
+      Eh[j] = V[j] + 0.5 * u[j];  // 0.5 mm along: cosEff 0.5 = FP_ARM_COS_MAX, not above
+      E9[j] = V[j] + 0.9 * u[j];  // 0.9 mm along: cosEff 0.9
+    }
+    const double fb[3] = {1.0 - 1.8, 2.0 - 2.4, 3.0};  // V - 3 mm x u
+    int f = fpOrientSeed(V, E, Ea, out);
+    check(f == 1 && dist3(out, fb) < 1e-12, Form("[28] seed along the alpha (cos 1): fallback %d, seed (%.3f, %.3f, %.3f) = V - 3 mm u = (-0.8, -0.4, 3)", f, out[0], out[1], out[2]));
+    f = fpOrientSeed(V, E, Eo, out);
+    check(f == 0 && dist3(out, Eo) == 0, Form("[28] seed perpendicular (cos 0): kept (%d)", f));
+    f = fpOrientSeed(V, E, Eh, out);
+    check(f == 0 && dist3(out, Eh) == 0, Form("[28] cosEff = 0.5 (not above FP_ARM_COS_MAX): kept (%d)", f));
+    f = fpOrientSeed(V, E, E9, out);
+    check(f == 1 && dist3(out, fb) < 1e-12, Form("[28] 0.9 mm along (cosEff 0.9): fallback (%d)", f));
+    checkNear(fpArmCos(V, E, fb), -1.0, 1e-12, "[28] the fallback seed has cos -1 (no penalty)");
   }
 
   std::printf("%s: %d failure(s)\n", g_failures == 0 ? "GREEN" : "RED", g_failures);
