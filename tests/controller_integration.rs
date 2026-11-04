@@ -1331,13 +1331,15 @@ async fn the_status_shows_the_root_sink_backlog_while_stopping() {
         "{stopping}"
     );
     let summary = &stopping["stopping"]["root_sink"];
+    // 204 追補 C: どの run の status かを `run` で示す(停止中の run と違う run なら null)。
+    assert_eq!(summary["run"], json!(run), "{stopping}");
     assert_eq!(summary["state"], json!("running"), "{stopping}");
     assert_eq!(summary["fragments"], json!(3000), "{stopping}");
     assert!(summary["events_built"].is_u64(), "{stopping}");
     assert_eq!(
         summary.as_object().unwrap().len(),
-        3,
-        "{{state, events_built, fragments}} だけ: {summary}"
+        4,
+        "{{run, state, events_built, fragments}} だけ: {summary}"
     );
 
     // eos_timeout(400 ms)の 3 倍を越えても、root-sink が書いている間は Stopping のまま。

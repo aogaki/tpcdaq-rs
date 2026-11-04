@@ -143,6 +143,8 @@ pub struct Sequencer<'a> {
     run: Option<u32>,
     /// 停止 1 回分の root-sink の観測(204)。停止・歩き戻しの待ちの頭で空にする。
     root_sink: RootSinkWatch,
+    /// 強制 EOS の `Stop` が通らなかった receiver(204 追補 A。守りを外す条件)。
+    stop_rejected: Vec<String>,
 }
 
 /// 停止 1 回分の root-sink の観測(TODO/204 B-1 / B-2 / C、SPEC §1.3 v1.54)。
@@ -167,6 +169,8 @@ struct LosslessGuard {
     graw_writers: Vec<(String, Option<u64>, bool)>,
     /// 不達の receiver(以後問い合わせないものも含む)。
     receivers_gone: Vec<String>,
+    /// 到達できるのに強制 EOS の `Stop` を断った receiver(204 追補 A)= EOS を出さない。
+    receivers_rejected_stop: Vec<String>,
 }
 
 /// 静止が `eos_timeout` に達したときの守りの判定。
@@ -182,7 +186,10 @@ enum GuardVerdict {
 
 impl LosslessGuard {
     /// 主対話の裁定 1(案 β): 守るのは「graw-writer が到達可能 ∧ `files_open > 0` ∧
-    /// graw-writer が Error でない ∧ 全 receiver が到達可能」の間だけ。
+    /// graw-writer が Error でない ∧ 全 receiver が到達可能」の間だけ。204 追補 A: 到達できても
+    /// 強制 EOS の `Stop` を断った receiver が居れば外す(その receiver は EOS を出さないので、
+    /// graw-writer は全ソースの EOS まで閉じない)。Error 中の receiver は Stop を実行する(184)
+    /// ので断らない = ここには入らない。
     fn verdict(&self) -> GuardVerdict {
         let open = self
             .graw_writers
@@ -196,6 +203,19 @@ impl LosslessGuard {
             return GuardVerdict::Off;
         };
         let mut reasons = Vec::new();
+        let rejected: Vec<&String> = self
+            .receivers_rejected_stop
+            .iter()
+            .filter(|name| !self.receivers_gone.contains(name))
+            .collect();
+        if !rejected.is_empty() {
+            let names: Vec<&str> = rejected.iter().map(|name| name.as_str()).collect();
+            reasons.push(format!(
+                "{} rejected the Stop — no EOS will come from it, so {component} cannot close \
+                 its {files_open} open files",
+                names.join(", ")
+            ));
+        }
         if !self.receivers_gone.is_empty() {
             let verb = if self.receivers_gone.len() == 1 {
                 "is"
@@ -234,6 +254,7 @@ impl<'a> Sequencer<'a> {
             walked_back_run: None,
             run: None,
             root_sink: RootSinkWatch::default(),
+            stop_rejected: Vec::new(),
         }
     }
 
@@ -426,6 +447,7 @@ impl<'a> Sequencer<'a> {
         let previous_run = previous_run_number(&reported_runs);
         self.run = previous_run.as_ref().ok().copied();
         self.root_sink = RootSinkWatch::default();
+        self.stop_rejected.clear();
 
         // 2. チェーンが無傷なら前の run を EOS で閉じる(停止経路の 2 段そのもの、114 追補)。
         //    第一段 = 自然 EOS か受信静止の早い方まで待つ —— `receiver::drain_task` は Stop で
@@ -433,15 +455,20 @@ impl<'a> Sequencer<'a> {
         //    Stop する。閉じていなければ全 receiver へ Stop(強制 EOS)→ 第二段 = EOS 待ち。
         if chain_intact {
             let mut notes = Vec::new();
-            let mut closed = self.wait_for_eos_or_quiesce(&mut notes);
-            forced_eos = !closed;
+            // 第一段の完了は chain の 3 点だけ(204 追補 B)。
+            let chain_closed = self.wait_for_eos_or_quiesce(&mut notes);
+            forced_eos = !chain_closed;
             if forced_eos {
                 for (component, _, now, step) in steps.iter_mut() {
                     if matches!(component.kind, ComponentKind::Receiver { .. }) {
                         self.walk_back_step(component, now, &Command::Stop, step)?;
                     }
                 }
-                // 204 D: 第二段は停止経路と同じ「下流が進む限り待つ」(185 の申し送りの裁定)。
+            }
+            // 204 D: 第二段は停止経路と同じ「下流が進む限り待つ」(185 の申し送りの裁定)。
+            // 自然 EOS で chain が閉じても root-sink がまだ開いていれば、強制せずにここで待つ。
+            let mut closed = chain_closed && self.root_sink_closed();
+            if !closed {
                 closed = self.wait_for_eos_while_downstream_moves(&mut notes);
             }
             eos_closed = closed;
@@ -779,6 +806,7 @@ impl<'a> Sequencer<'a> {
         let params = self.params;
         let mut notes = Vec::new();
         self.root_sink = RootSinkWatch::default();
+        self.stop_rejected.clear();
 
         // 1. ecc stop(CoBo が送信を止める)。中止では不達でも続行する。
         //    **データリンクはここでは閉じない**(SPEC §1.3 v1.12 の事実修正、TODO/032):
@@ -800,8 +828,9 @@ impl<'a> Sequencer<'a> {
         //    静止検出が無いとここは毎停止 eos_timeout をまるごと空振りする。
         //    **中止も同じ**(v1.53 ①、TODO/185): 即座に強制 EOS を撃つと receiver の drain が
         //    畳まれ、カーネル受信バッファの未読分(= graw)が数えられずに消える。
-        let mut eos_closed = self.wait_for_eos_or_quiesce(&mut notes);
-        let forced_eos = !eos_closed;
+        //    第一段の完了は chain の 3 点だけ(204 追補 B)—— 自然 EOS で 3 点が揃えば強制しない。
+        let chain_closed = self.wait_for_eos_or_quiesce(&mut notes);
+        let forced_eos = !chain_closed;
         if forced_eos {
             // 強制 EOS = receiver へ Stop(drain タスクが未送 EOS を出してから畳む)。
             info!("EOS did not arrive — forcing it via receiver Stop (SPEC §1.3)");
@@ -809,10 +838,16 @@ impl<'a> Sequencer<'a> {
                 if matches!(component.kind, ComponentKind::Receiver { .. }) {
                     if let Err(note) = self.apply(component, &Command::Stop) {
                         notes.push(note);
+                        // 204 追補 A: この receiver は EOS を出さない(守りを外す条件)。
+                        self.stop_rejected.push(component.name.clone());
                     }
                 }
             }
-            // 第二段: 下流が進んでいる限り待つ(v1.53、TODO/185)。
+        }
+        // 第二段: 下流が進んでいる限り待つ(v1.53、TODO/185)。強制 EOS の後か、自然 EOS で
+        // chain は閉じたが root-sink がまだ run を開いているとき(204 B-2 / 追補 B)。
+        let mut eos_closed = chain_closed && self.root_sink_closed();
+        if !eos_closed {
             eos_closed = self.wait_for_eos_while_downstream_moves(&mut notes);
         }
 
@@ -889,7 +924,10 @@ impl<'a> Sequencer<'a> {
         // 一度不達だった receiver(以後は問い合わせない —— 下記 `receiver_bytes` 参照)。
         let mut gone: Vec<String> = Vec::new();
         loop {
-            if self.eos_complete(notes) {
+            // 204 追補 B: 第一段の完了は chain の 3 点だけ(root-sink は読んで「見ている」かを
+            // 控えるが、その close は第二段で待つ —— 自然 EOS を強制と記録しないため)。
+            self.observe_root_sink();
+            if self.chain_eos_complete(notes) {
                 return true;
             }
             let sample = self.receiver_bytes(&mut gone, notes);
@@ -1196,6 +1234,7 @@ impl<'a> Sequencer<'a> {
                 out.push(value);
             }
         }
+        guard.receivers_rejected_stop = self.stop_rejected.clone();
         // B-1: root-sink の進み(status が届いている限り。止まれば同じ値のまま = 静止)。
         let root_sink = self.root_sink.latest.as_ref().map(|status| &status.payload);
         out.push(root_sink.map(|p| p.events_built));
@@ -1252,8 +1291,21 @@ impl<'a> Sequencer<'a> {
     /// Idle へ戻ると、次の run の Data が古い EOS を追い越して root-sink に届く(204)。
     ///
     /// root-sink の status は**呼ぶたびに 1 回だけ**読む(コンポーネントの判定の前に)。
+    /// 第一段([`Self::wait_for_eos_or_quiesce`])は 4 点目を見ない(204 追補 B)。
     fn eos_complete(&mut self, notes: &mut Vec<String>) -> bool {
         self.observe_root_sink();
+        self.chain_eos_complete(notes) && self.root_sink_closed()
+    }
+
+    /// B-2 の 4 点目: root-sink を見ていない(閉じようとしている run の `running` を見ていない)
+    /// か、見ていてその run を閉じた(`idle`)のを見たら `true`。読むのは直近の
+    /// [`Self::observe_root_sink`] の結果だけ(ここでは IO をしない)。
+    fn root_sink_closed(&self) -> bool {
+        !self.root_sink.seen_running || self.root_sink.closed.is_some()
+    }
+
+    /// chain の 3 点(decoder `eos_in` / `eos_out`・graw-writer `files_open == 0`)。
+    fn chain_eos_complete(&mut self, notes: &mut Vec<String>) -> bool {
         let params = self.params;
         let expected_eos = params.cobos.len() as u64;
         for component in params.components.iter() {
@@ -1301,8 +1353,7 @@ impl<'a> Sequencer<'a> {
                 return false;
             }
         }
-        // B-2: root-sink を見ているなら、その run の close まで。
-        !(self.root_sink.seen_running && self.root_sink.closed.is_none())
+        true
     }
 
     /// 全コンポーネントの `GetStatus`(`components` と同じ順)。

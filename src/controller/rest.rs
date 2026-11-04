@@ -160,7 +160,9 @@ pub(super) async fn get_status(State(controller): State<Arc<Controller>>) -> Rep
                 "root_sink_backlog": root_sink_backlog(
                     &controller.params, &statuses, root_sink, run, &mut notes,
                 ),
-                "root_sink": root_sink.map(|p| json!({
+                // 停止中の run と違う run の status(root-sink がまだ前の run に居る等)は null。
+                "root_sink": root_sink.filter(|p| Some(p.run) == run).map(|p| json!({
+                    "run": p.run,
                     "state": p.state,
                     "events_built": p.events_built,
                     "fragments": p.fragments,

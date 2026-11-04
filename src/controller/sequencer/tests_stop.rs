@@ -1358,3 +1358,79 @@ fn root_sink_counters_are_null_when_root_sink_was_not_observed() {
         assert_eq!(report.counters.late_fragments, None, "{case}");
     }
 }
+
+/// **204 追補 A**: receiver は到達できるのに強制 EOS の `Stop` を断った(Running でない・不許可
+/// 遷移など)—— その receiver は EOS を出さないので、graw-writer は全ソースの EOS まで閉じない
+/// (`files_open > 0` のまま)。待っても閉じる見込みが無いので守りを外して打ち切り、note に条件を
+/// 1 行残す。Error 中の receiver は Stop を実行する(184)ので対象外。
+///
+/// 手計算: 第一段 600 ms + 静止 5 000 ms = **5 600 ms**。守りを外さない実装なら graw-writer が
+/// 60 000 ms で閉じるまで待ってしまう(打ち切りはその後)。
+#[test]
+fn the_lossless_guard_is_lifted_when_a_reachable_receiver_rejects_the_stop() {
+    let params = params_with(&[0]);
+    let mut mock = still_chain(&params)
+        .fail_on("receiver0", "Stop")
+        .graw_files_open_until(Duration::from_secs(60));
+    let report = Sequencer::new(&params, &mut mock)
+        .with_run(RUN)
+        .stop_run(StopMode::Normal);
+
+    assert_eq!(report.reason, "error:eos-timeout");
+    assert_eq!(mock.slept, Duration::from_millis(5_600));
+    let lifted: Vec<&String> = report
+        .notes
+        .iter()
+        .filter(|n| n.starts_with("lossless guard lifted"))
+        .collect();
+    assert_eq!(lifted.len(), 1, "{:?}", report.notes);
+    assert!(
+        lifted[0].starts_with("lossless guard lifted: receiver0 rejected the Stop"),
+        "{lifted:?}"
+    );
+    // 断られた事実そのものも従来どおり note に残る。
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("receiver0: Stop refused")),
+        "{:?}",
+        report.notes
+    );
+}
+
+/// **204 追補 B**: EOS が自然に流れ切った(リプレイの EOF / 歩き戻しの breakup)= chain の 3 点が
+/// 第一段の 1 回目の判定で揃ったが、root-sink はまだ run 214 を書いている。第一段は chain の
+/// 3 点で完了とし、receiver へ強制 EOS(Stop)を**撃たずに**第二段で root-sink の close を待つ ——
+/// `forced_eos: false`(誤って「強制した」と記録しない)、閉じたら `ok` / `normal`。
+///
+/// 手計算: root-sink の読み 0 は第一段(0 ms、`running` を見る)、読み 1 から第二段で 200 ms 刻み
+/// (読み k = (k − 1) × 200 ms)。`idle` は読み 31 = **6 000 ms**(> eos_timeout —— その間
+/// `bytes_written` が読みごとに +4 096 なので静止ではない)。
+#[test]
+fn a_natural_eos_with_root_sink_still_writing_is_not_recorded_as_forced() {
+    let params = params_with(&[0]);
+    let mut mock = MockTransport::new(&params)
+        .with_eos_closed()
+        .with_root_sink_script(script(32, |k| {
+            let state = if k < 31 { "running" } else { "idle" };
+            root_sink(RUN, state, 9_000, 1_000_000 + 4096 * k as u64, 9_000)
+        }));
+    let report = Sequencer::new(&params, &mut mock)
+        .with_run(RUN)
+        .stop_run(StopMode::Normal);
+
+    assert!(!report.forced_eos, "自然 EOS なのに強制したと記録している");
+    assert!(report.eos_closed, "{:?}", report.notes);
+    assert_eq!(report.reason, "normal");
+    assert!(report.ok);
+    assert_eq!(mock.slept, Duration::from_millis(6_000));
+    // receiver の Stop は畳む段の 1 回だけ = root-sink が閉じた後。
+    assert_eq!(mock.actions("receiver0"), vec!["Stop", "Reset"]);
+    let closing_read = *mock.root_sink_polled_at.last().unwrap();
+    assert!(
+        mock.index_of("receiver0", "Stop").unwrap() > closing_read,
+        "root-sink が閉じる前に receiver を Stop している: {:?}",
+        mock.calls
+    );
+}

@@ -963,7 +963,7 @@ async fn f1_eos_timeout_leaves_the_run_open_and_f2_the_next_run_hits_a_late_fata
 /// * receiver `messages_abandoned 0`、decoder `batches_abandoned + eos_abandoned 0`(何も捨てていない)
 /// * root-sink のログに `run N closed (`、`run{N}_monitor.root` ができ、inprogress は残らない
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn f2_a_stop_with_a_throttled_root_sink_waits_for_its_close_and_reports_ok() {
+async fn f3_a_stop_with_a_throttled_root_sink_waits_for_its_close_and_reports_ok() {
     let Some(env) = e2e_env("F3 (TODO/204 test 12)") else {
         return;
     };
