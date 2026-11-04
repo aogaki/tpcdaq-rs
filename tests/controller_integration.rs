@@ -26,6 +26,7 @@ use tpcdaq::command::{Command, CommandResponse, ComponentState};
 use tpcdaq::config::ConfigIds;
 use tpcdaq::controller::{
     run_controller, BoundEndpoints, CoboSpec, ComponentEndpoint, ComponentKind, ControllerParams,
+    WATCHDOG_PERIOD,
 };
 
 // ---------------------------------------------------------------------
@@ -87,9 +88,48 @@ struct Recorder {
     /// 113: コマンド名 → 残り「断る回数」(`u32::MAX` = 常に断る)。停止時の Reset 不達や
     /// Configure の失敗を作るため。断ったコマンドも `commands` には記録される。
     refusals: Mutex<Vec<(&'static str, u32)>>,
+    /// 188: 立っている間は**次のコマンドから** Error を報告する(receiver の `latch_overload` の
+    /// 代役 —— 溢れの検出はホットパス、状態への反映はコマンドを受けたとき、SPEC §1.4-3)。
+    /// `Reset` で降りる(Error → Idle が唯一の脱出路)。
+    overloaded: AtomicBool,
+    /// 188: 次のコマンドから metrics のキーを差し替える((キー, 値) の列。適用したら空にする)。
+    metric_updates: Mutex<Vec<(String, Value)>>,
+    /// 188: 受けた `GetStatus` の数。Running 中に `/api/status` を叩かなければ、数えているのは
+    /// watchdog のポーリングだけ。
+    status_polls: AtomicU64,
+    /// 188: 次の 1 回の `GetStatus` をこの時間だけ寝てから答える(`status_timeout` より長ければ
+    /// controller から見て 1 回の不達)。
+    stall_next_status: Mutex<Option<Duration>>,
 }
 
 impl Recorder {
+    /// 188: 次のコマンドから Error を報告させる(receiver の内部キューが溢れた姿)。
+    fn overload(&self) {
+        self.overloaded.store(true, Ordering::SeqCst);
+    }
+
+    /// 188: 次のコマンドから metrics の `key` を `value` にする。
+    fn set_metric(&self, key: &str, value: Value) {
+        self.metric_updates
+            .lock()
+            .unwrap()
+            .push((key.to_string(), value));
+    }
+
+    fn status_polls(&self) -> u64 {
+        self.status_polls.load(Ordering::SeqCst)
+    }
+
+    /// 188: 次の 1 回の `GetStatus` を `stall` だけ遅らせる。
+    fn stall_next_status(&self, stall: Duration) {
+        *self.stall_next_status.lock().unwrap() = Some(stall);
+    }
+
+    /// 188: 遅らせる `GetStatus` がまだ来ていないか。
+    fn stall_pending(&self) -> bool {
+        self.stall_next_status.lock().unwrap().is_some()
+    }
+
     /// 113: 次の `times` 回の `command` を断らせる(`u32::MAX` = 常に)。
     fn refuse(&self, command: &'static str, times: u32) {
         self.refusals.lock().unwrap().push((command, times));
@@ -146,6 +186,23 @@ impl FakeComponent {
         };
         if name != "GetStatus" {
             self.recorder.push(name);
+        } else {
+            self.recorder.status_polls.fetch_add(1, Ordering::SeqCst);
+            // 188: 1 回の不達(REP は逐次なので、寝ている間に来た次の REQ は待たされて答えを得る)。
+            let stall = self.recorder.stall_next_status.lock().unwrap().take();
+            if let Some(stall) = stall {
+                std::thread::sleep(stall);
+            }
+        }
+        for (key, value) in self.recorder.metric_updates.lock().unwrap().drain(..) {
+            self.metrics[key.as_str()] = value;
+        }
+        // 188: `latch_overload`(receiver.rs)の代役: 立っていて Error へ遷移できる状態なら Error。
+        if self.recorder.overloaded.load(Ordering::SeqCst)
+            && self.state != ComponentState::Error
+            && self.state.can_transition_to(ComponentState::Error)
+        {
+            self.state = ComponentState::Error;
         }
         let respond = |fake: &Self, ok: bool, message: String| {
             let mut response = if ok {
@@ -162,6 +219,11 @@ impl FakeComponent {
         let Some(target) = command.target_state() else {
             return respond(self, true, "status".to_string());
         };
+        // 188: Error 中の Stop は実行して状態は Error のまま(SPEC §1.3 v1.53 ②、receiver.rs
+        // `handle`)。脱出は Reset だけ。
+        if self.state == ComponentState::Error && name == "Stop" {
+            return respond(self, true, "Stop executed in Error state".to_string());
+        }
         if self.recorder.take_refusal(name) {
             return respond(self, false, format!("fake refuses {name}"));
         }
@@ -182,6 +244,10 @@ impl FakeComponent {
         }
         if let Command::Start { run_number } = &command {
             self.run_number = Some(*run_number);
+        }
+        if let Command::Reset = &command {
+            // 188: 過負荷ラッチも降ろす(receiver.rs `do_reset`)。
+            self.recorder.overloaded.store(false, Ordering::SeqCst);
         }
         self.state = target;
         respond(self, true, format!("{name} ok"))
@@ -411,6 +477,53 @@ async fn harness_full(
     ecc_config_dir: Option<PathBuf>,
     slow_cmd: Option<String>,
 ) -> Harness {
+    harness_inner(
+        tag,
+        cobo_ids,
+        eos_closed,
+        ui_dir,
+        config_ids,
+        ecc_config_dir,
+        slow_cmd,
+        NO_ROOT_SINK,
+    )
+    .await
+}
+
+/// 188: root-sink の monitor PUB(フェイク [`FakeRootSinkPub`])付きのハーネス。停止は root-sink が
+/// run を閉じるまで待つ(204)ので、テストが Stopping を好きなだけ保持できる。
+async fn harness_with_root_sink(
+    tag: &str,
+    cobo_ids: &[u32],
+    eos_closed: bool,
+    root_sink_pub: &str,
+) -> Harness {
+    harness_inner(
+        tag,
+        cobo_ids,
+        eos_closed,
+        None,
+        ConfigIds::same("integration"),
+        None,
+        None,
+        root_sink_pub,
+    )
+    .await
+}
+
+/// [`harness_full`] / [`harness_with_root_sink`] の本体(`root_sink_pub` = controller が購読する
+/// root-sink の monitor PUB)。
+#[allow(clippy::too_many_arguments)]
+async fn harness_inner(
+    tag: &str,
+    cobo_ids: &[u32],
+    eos_closed: bool,
+    ui_dir: Option<PathBuf>,
+    config_ids: ConfigIds,
+    ecc_config_dir: Option<PathBuf>,
+    slow_cmd: Option<String>,
+    root_sink_pub: &str,
+) -> Harness {
     let (shutdown, _) = broadcast::channel(1);
     let output_root = temp_root(tag);
 
@@ -505,7 +618,7 @@ async fn harness_full(
         config_ids,
         ecc_config_dir,
         slow_cmd,
-        NO_ROOT_SINK,
+        root_sink_pub,
     )
     .await;
 
@@ -4121,6 +4234,430 @@ async fn a_power_command_in_flight_refuses_run_start_and_a_second_power_command(
             ("run/start".to_string(), true),
         ]
     );
+
+    harness.shutdown();
+}
+
+// ---------------------------------------------------------------------
+// 188 — run 中の監視と保存系 Error の自動異常停止(SPEC §1.3「run 中の監視」v1.53 / §1.4-3)
+// ---------------------------------------------------------------------
+
+/// 188: 述語が真になるまで待つ(watchdog の 2 s 周期を何回か跨ぐので、[`wait_until`] の 10 s とは
+/// 別に上限を渡す)。
+fn wait_for(what: &str, within: Duration, mut predicate: impl FnMut() -> bool) {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if predicate() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out after {within:?} waiting for {what}");
+}
+
+/// 188: `/api/status` の phase。
+fn phase_of(rest: SocketAddr) -> String {
+    let (status, body) = get(rest, "/api/status");
+    assert_eq!(status, 200, "{body}");
+    body["phase"].as_str().unwrap().to_string()
+}
+
+/// 188: その run の run_stop レコード(1 本であるべき)。
+fn run_stops_of(records: &[Value], run: u64) -> Vec<Value> {
+    records
+        .iter()
+        .filter(|r| r["type"] == json!("run_stop") && r["run"] == json!(run))
+        .cloned()
+        .collect()
+}
+
+/// 188: watchdog が書いた `run/stop` の audit 行(その run の)。
+fn watchdog_audits_of(records: &[Value], run: u64) -> Vec<Value> {
+    records
+        .iter()
+        .filter(|r| {
+            r["type"] == json!("audit")
+                && r["action"] == json!("run/stop")
+                && r["operator"] == json!("watchdog")
+                && r["params"]["run"] == json!(run)
+        })
+        .cloned()
+        .collect()
+}
+
+/// 188: ECC が受けた `stop` の数(停止 1 回 = 1 発。歩き戻しは Ready からなので stop を撃たない)。
+fn ecc_stops(harness: &Harness) -> usize {
+    harness
+        .ecc
+        .actions()
+        .iter()
+        .filter(|action| *action == "stop")
+        .count()
+}
+
+/// 188: run を始め、root-sink(フェイク)がその run を開いて書き続けている形にする —— 停止は
+/// root-sink が閉じる([`release_root_sink`])まで Stopping のまま待つ(204)。
+fn start_run_held_by_root_sink(harness: &Harness, root_sink: &FakeRootSinkPub, token: &str) -> u64 {
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let run = body["run"].as_u64().unwrap();
+    root_sink.set(|s| {
+        s.run = run as u32;
+        s.state = "running";
+        s.moving = true;
+    });
+    std::thread::sleep(Duration::from_millis(300)); // status が SUB に届くまで(20 ms 周期)
+    run
+}
+
+/// 188: root-sink が run を閉じる(停止の第二段が終わる)。
+fn release_root_sink(root_sink: &FakeRootSinkPub) {
+    root_sink.set(|s| {
+        s.moving = false;
+        s.state = "idle";
+    });
+}
+
+/// **188 テスト 1**: Running 中に保存系(receiver / graw-writer)が Error を報告したら、watchdog が
+/// **≤ 2 回目のポーリング**(周期 2 s ≈ 4 s)で run を異常停止する(SPEC §1.3「run 中の監視」/
+/// §1.4-3): phase は Stopping → Idle、run_stop `reason = "abort:overload:<名前>"`、audit に 1 行
+/// (`operator = "watchdog"`、`params.trigger = {component, state, overflow_frames}`)。
+///
+/// 停止は root-sink(フェイク)が run を閉じるまで待つ(204)ので Stopping を確実に観測できる。
+/// `overflow_frames` 17 はフェイクの receiver0 に載せた値。graw-writer には溢れのカウンタが無い
+/// = null(0 と区別)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_receiver_in_error_is_aborted_by_the_watchdog_within_two_polls() {
+    let root_sink = FakeRootSinkPub::spawn();
+    let harness =
+        harness_with_root_sink("watchdog-overload", &[0], true, &root_sink.endpoint).await;
+    let token = harness.acquire("aogaki");
+
+    for (component, recorder, overflow_frames) in [
+        ("receiver0", &harness.receivers[0], json!(17)),
+        ("graw-writer", &harness.graw_writer, Value::Null),
+    ] {
+        let run = start_run_held_by_root_sink(&harness, &root_sink, &token);
+        if !overflow_frames.is_null() {
+            recorder.set_metric("overflow_frames", overflow_frames.clone());
+        }
+        let overloaded_at = Instant::now();
+        recorder.overload();
+        wait_for(
+            &format!("the watchdog to stop run {run} ({component} in Error)"),
+            Duration::from_secs(8),
+            || phase_of(harness.rest) == "Stopping",
+        );
+        let noticed = overloaded_at.elapsed();
+        assert!(
+            noticed < 2 * WATCHDOG_PERIOD,
+            "{component}: ≤ 2 回目のポーリングで止まるはず: {noticed:?}"
+        );
+        // 停止は root-sink の close まで Stopping のまま(watchdog は停止経路を共用 = 204 が効く)。
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(phase_of(harness.rest), "Stopping", "{component}");
+        release_root_sink(&root_sink);
+        wait_for("Idle", Duration::from_secs(5), || {
+            phase_of(harness.rest) == "Idle"
+        });
+
+        let records = harness.logbook();
+        let stops = run_stops_of(&records, run);
+        assert_eq!(stops.len(), 1, "{component}: run_stop は 1 本: {stops:?}");
+        assert_eq!(
+            stops[0]["reason"],
+            json!(format!("abort:overload:{component}")),
+            "{}",
+            stops[0]
+        );
+        assert_eq!(stops[0]["ok"], json!(false), "{}", stops[0]);
+        assert_eq!(stops[0]["eos_closed"], json!(true), "{}", stops[0]);
+        let audits = watchdog_audits_of(&records, run);
+        assert_eq!(audits.len(), 1, "{component}: audit は 1 行: {audits:?}");
+        assert_eq!(
+            audits[0]["params"]["reason"],
+            json!(format!("abort:overload:{component}"))
+        );
+        assert_eq!(
+            audits[0]["params"]["trigger"],
+            json!({"component": component, "state": "Error", "overflow_frames": overflow_frames}),
+            "{}",
+            audits[0]
+        );
+    }
+
+    harness.shutdown();
+}
+
+/// **188 テスト 2**: decoder の Error は引き金にしない(SPEC §1.4-7 —— decoder → root-sink は graw から
+/// 作り直せる派生系で、画面に出すだけ)。decoder が Error を報告し続ける間に watchdog が 3 回ポーリング
+/// しても run は Running のまま。手動の停止は従来どおり `stop_run_blocking` の中止判定
+/// (`abort:component-error:decoder`)を通る。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decoder_in_error_does_not_trigger_the_watchdog() {
+    let harness = harness("watchdog-decoder", &[0], true, None).await;
+    let token = harness.acquire("aogaki");
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    // Running 中に GetStatus を撃つのは watchdog だけ(このテストは待つ間 `/api/status` を叩かない)。
+    let before = harness.decoder.status_polls();
+    harness.decoder.overload();
+    wait_for(
+        "three watchdog polls of the decoder in Error",
+        Duration::from_secs(12),
+        || harness.decoder.status_polls() >= before + 3,
+    );
+
+    let (_, status) = get(harness.rest, "/api/status");
+    assert_eq!(status["phase"], json!("Running"), "{status}");
+    assert_eq!(
+        status["components"][1]["name"],
+        json!("decoder"),
+        "{status}"
+    );
+    assert_eq!(status["components"][1]["state"], json!("Error"), "{status}");
+    let records = harness.logbook();
+    assert!(
+        records.iter().all(|r| r["type"] != json!("run_stop")),
+        "decoder の Error で run_stop が書かれた: {records:?}"
+    );
+    assert_eq!(ecc_stops(&harness), 0);
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["reason"], json!("abort:component-error:decoder"));
+    let records = harness.logbook();
+    assert!(watchdog_audits_of(&records, 1).is_empty(), "{records:?}");
+
+    harness.shutdown();
+}
+
+/// **188 テスト 3**: 1 回の不達は引き金にしない(REP は逐次で、decoder の Reset の join 中などは
+/// 一時不達に見える —— SPEC §1.3「run 中の監視」)。receiver0 の GetStatus 1 回を `status_timeout`
+/// (2 s)より長く寝かせ(= watchdog から見て 1 回の不達)、以後回復したまま 2 回ポーリングしても
+/// run は Running。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_single_unreachable_component_does_not_trigger_the_watchdog() {
+    let harness = harness("watchdog-unreachable", &[0], true, None).await;
+    let token = harness.acquire("aogaki");
+    let (status, body) = post(
+        harness.rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 200, "{body}");
+
+    let receiver = &harness.receivers[0];
+    receiver.stall_next_status(Duration::from_millis(2_500));
+    wait_for(
+        "the watchdog poll that finds receiver0 unreachable",
+        Duration::from_secs(6),
+        || !receiver.stall_pending(),
+    );
+    let after_stall = receiver.status_polls();
+    wait_for(
+        "two more watchdog polls after receiver0 recovered",
+        Duration::from_secs(10),
+        || receiver.status_polls() >= after_stall + 2,
+    );
+
+    let (_, status) = get(harness.rest, "/api/status");
+    assert_eq!(status["phase"], json!("Running"), "{status}");
+    assert_eq!(
+        status["components"][2]["reachable"],
+        json!(true),
+        "{status}"
+    );
+    let records = harness.logbook();
+    assert!(
+        records.iter().all(|r| r["type"] != json!("run_stop")),
+        "1 回の不達で run_stop が書かれた: {records:?}"
+    );
+    assert_eq!(ecc_stops(&harness), 0);
+
+    let (status, body) = post(harness.rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["reason"], json!("normal"), "{body}");
+
+    harness.shutdown();
+}
+
+/// **188 テスト 4**: 手動の停止と watchdog の停止が重なっても**停止は 1 回**(run_stop 1 本、ecc stop
+/// 1 発)。`controller.run` の mutex 下の Running → Stopping の CAS を両者が取り合い、負けた側は
+/// 何もしない(REST は 409)。3 通りを順に:
+///
+/// * A: watchdog が先 → 手動の `POST /api/run/stop` は 409。
+/// * B: 手動が先 → Stopping 中に receiver が Error になっても watchdog は観測だけ(audit なし、
+///   run_stop の reason は手動の停止のもの)。
+/// * C: 同時 —— watchdog のポーリングの直前に Error と `POST` を重ねる。どちらが勝っても 1 回。
+///
+/// どの停止も root-sink(フェイク)が run を閉じるまで Stopping のまま待つ(204)ので、負けた側は
+/// 必ず Stopping の最中に来る。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_concurrent_manual_stop_and_the_watchdog_stop_the_run_exactly_once() {
+    let root_sink = FakeRootSinkPub::spawn();
+    let harness = harness_with_root_sink("watchdog-race", &[0], true, &root_sink.endpoint).await;
+    let token = harness.acquire("aogaki");
+    let rest = harness.rest;
+    let receiver = &harness.receivers[0];
+    let spawn_stop = |token: &str| {
+        let token = token.to_string();
+        std::thread::spawn(move || post(rest, "/api/run/stop", json!({"token": token})))
+    };
+
+    // --- A: watchdog が先 ---
+    let run_a = start_run_held_by_root_sink(&harness, &root_sink, &token);
+    receiver.overload();
+    wait_for("the watchdog stop (A)", Duration::from_secs(8), || {
+        phase_of(rest) == "Stopping"
+    });
+    let (status, body) = post(rest, "/api/run/stop", json!({"token": token}));
+    assert_eq!(status, 409, "A: 負けた手動の停止は 409: {body}");
+    release_root_sink(&root_sink);
+    wait_for("Idle (A)", Duration::from_secs(5), || {
+        phase_of(rest) == "Idle"
+    });
+    assert_eq!(ecc_stops(&harness), 1, "A");
+
+    // --- B: 手動が先 ---
+    let run_b = start_run_held_by_root_sink(&harness, &root_sink, &token);
+    let stopper = spawn_stop(&token);
+    wait_for("the manual stop (B)", Duration::from_secs(5), || {
+        phase_of(rest) == "Stopping"
+    });
+    receiver.overload();
+    // watchdog のポーリングを少なくとも 1 回、Stopping の最中に通す(観測のみ)。
+    std::thread::sleep(WATCHDOG_PERIOD + Duration::from_millis(500));
+    release_root_sink(&root_sink);
+    let (status, body_b) = stopper.join().unwrap();
+    assert_eq!(status, 200, "B: 勝った手動の停止は 200: {body_b}");
+    assert_eq!(phase_of(rest), "Idle", "B");
+    assert_eq!(ecc_stops(&harness), 2, "B");
+
+    // --- C: 同時 ---
+    let run_c = start_run_held_by_root_sink(&harness, &root_sink, &token);
+    // Running 中に receiver0 へ GetStatus を撃つのは watchdog だけ = 数の変化がポーリングの時刻
+    // (1 ms 刻みで捕まえる)。次のポーリングはその 1 周期後 —— その直前に Error を立て、POST を
+    // ちょうどそのポーリング(= watchdog の CAS)の時刻に撃つ。
+    let before = receiver.status_polls();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while receiver.status_polls() == before {
+        assert!(
+            Instant::now() < deadline,
+            "C: watchdog のポーリングが来ない"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let polled_at = Instant::now();
+    std::thread::sleep(WATCHDOG_PERIOD - Duration::from_millis(50));
+    receiver.overload();
+    std::thread::sleep((polled_at + WATCHDOG_PERIOD).saturating_duration_since(Instant::now()));
+    let stopper = spawn_stop(&token);
+    wait_for("a stop (C)", Duration::from_secs(8), || {
+        phase_of(rest) == "Stopping"
+    });
+    release_root_sink(&root_sink);
+    let (status_c, body_c) = stopper.join().unwrap();
+    wait_for("Idle (C)", Duration::from_secs(5), || {
+        phase_of(rest) == "Idle"
+    });
+    assert_eq!(ecc_stops(&harness), 3, "C: ecc stop は 1 発: {body_c}");
+
+    let records = harness.logbook();
+    for run in [run_a, run_b, run_c] {
+        assert_eq!(
+            run_stops_of(&records, run).len(),
+            1,
+            "run {run}: run_stop は 1 本: {records:?}"
+        );
+    }
+    // A: watchdog が止めた。
+    let audits = watchdog_audits_of(&records, run_a);
+    assert_eq!(audits.len(), 1, "A: {audits:?}");
+    assert_eq!(
+        run_stops_of(&records, run_a)[0]["reason"],
+        json!("abort:overload:receiver0")
+    );
+    // B: watchdog は何もしていない。
+    assert!(
+        watchdog_audits_of(&records, run_b).is_empty(),
+        "B: {records:?}"
+    );
+    assert_eq!(
+        run_stops_of(&records, run_b)[0]["reason"],
+        body_b["reason"],
+        "B: run_stop は手動の停止のもの"
+    );
+    // C: 勝った側だけが書いた。
+    let audits = watchdog_audits_of(&records, run_c);
+    let stop_c = &run_stops_of(&records, run_c)[0];
+    match status_c {
+        409 => {
+            assert_eq!(audits.len(), 1, "C: watchdog が勝った: {audits:?}");
+            assert_eq!(stop_c["reason"], json!("abort:overload:receiver0"));
+        }
+        200 => {
+            assert!(audits.is_empty(), "C: 手動が勝った: {audits:?}");
+            assert_eq!(stop_c["reason"], body_c["reason"]);
+        }
+        other => panic!("C: 想定外の応答 {other}: {body_c}"),
+    }
+    eprintln!("188 test 4 round C: the manual stop got {status_c}");
+
+    harness.shutdown();
+}
+
+/// **188 テスト 6**: watchdog 経由の停止でも `stopping_since` が phase と同じロック区間で立つ
+/// → `/api/status.stopping.waited_s` が数値(185 の申し送り —— 立てないと null)。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_watchdog_sets_stopping_since_so_the_status_shows_waited_s() {
+    let root_sink = FakeRootSinkPub::spawn();
+    let harness = harness_with_root_sink("watchdog-waited", &[0], true, &root_sink.endpoint).await;
+    let token = harness.acquire("aogaki");
+    let run = start_run_held_by_root_sink(&harness, &root_sink, &token);
+
+    harness.receivers[0].overload();
+    let mut stopping = Value::Null;
+    wait_for("the watchdog stop", Duration::from_secs(8), || {
+        let (status, body) = get(harness.rest, "/api/status");
+        assert_eq!(status, 200, "{body}");
+        if body["phase"] == json!("Stopping") {
+            stopping = body;
+            true
+        } else {
+            false
+        }
+    });
+    let first = stopping["stopping"]["waited_s"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("waited_s が数値でない: {stopping}"));
+    assert!((0.0..10.0).contains(&first), "{first}");
+    std::thread::sleep(Duration::from_millis(300));
+    let (_, later) = get(harness.rest, "/api/status");
+    let second = later["stopping"]["waited_s"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("waited_s が数値でない: {later}"));
+    assert!(second > first, "waited_s は進む: {first} → {second}");
+
+    release_root_sink(&root_sink);
+    wait_for("Idle", Duration::from_secs(5), || {
+        phase_of(harness.rest) == "Idle"
+    });
+    let (_, idle) = get(harness.rest, "/api/status");
+    assert!(idle.get("stopping").is_none(), "Idle で残っている: {idle}");
+    let records = harness.logbook();
+    let stops = run_stops_of(&records, run);
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(stops[0]["reason"], json!("abort:overload:receiver0"));
 
     harness.shutdown();
 }
