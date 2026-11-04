@@ -176,5 +176,22 @@ o="$(rootq "stoppedAlphas.C(\"${W}/t_tracks.root\", -370, 101)")"; rc=1
 grep -q "WARNING: pressure argument" <<<"${o}" && rc=0
 report "T7c pressure argument 1 mbar off the tracks file -> WARNING" "${rc}"
 
+# ---- T8 -q (TODO/207): stripQMin が各部分に効く ------------------------------
+# 直列 analyzeUVW(..., 1100) == 並列 par_analyzeUVW.sh -q 1100、strip_q_min = 1100 が hadd 後も残る
+rm -f "${W}/q_serial.root" "${W}/q_par.root"
+rootq "analyzeUVW.C(\"${link}\", 100, 25, 1200, 0, -1, \"${W}/q_serial.root\", 1100)" >"${W}/q_serial.log"
+"${here}/par_analyzeUVW.sh" -p 100 -s 25 -d 1200 -q 1100 -j 3 -o "${W}/q_par.root" "${link}" >"${W}/q_par.log" 2>&1
+report "T8a par_analyzeUVW.sh -q 1100 exit 0" "$?"
+out="$(rootq "compareUVW.C(\"${W}/q_serial.root\", \"${W}/q_par.root\")")"
+rc=$?
+echo "    ${out##*$'\n'}"
+report "T8b serial(stripQMin=1100) == parallel -q 1100" "${rc}"
+v="$(getp "${W}/q_par.root" strip_q_min)"
+awk -v v="${v}" 'BEGIN{exit !(v == 1100)}'
+report "T8c hadd-merged output keeps strip_q_min = 1100 (got ${v})" "$?"
+"${here}/par_analyzeUVW.sh" -p 100 -s 25 -d 1200 -q -5 "${link}" >"${W}/t8.log" 2>&1; rc=$?
+[[ "${rc}" == 2 ]] && rc=0 || rc=1
+report "T8d par_analyzeUVW.sh -q -5 exits 2" "${rc}"
+
 echo "TOTAL: ${pass} passed, ${fail} failed"
 [[ "${fail}" == 0 ]]
