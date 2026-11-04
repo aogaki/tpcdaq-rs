@@ -21,3 +21,23 @@
 - 25 MHz と 12.5 MHz の差(± 5 cells の窓は 12.5 MHz で 880 ns)も同じ表に。202 / 209 / 215 の結果は 2,000 のままでよい(502 ns)。
 - テスト: test_uvw_closure 流の合成で、232 ns の核の形の淡い strip が 2,000 で落ち 1,200 で残ること。実データ: 216 で contained 0、wall-alpha が 215 と ± 30 % で揃う。
 - 影響: fitProngs は makeTracks の線を初期値と ROI に使うので、232 ns の当てはめ(198「その後」)はこの後に。drawUVW(表示)は影響なし。
+
+## 谷の測定と値の決定(2026-11-04、主対話 — ユーザー「今後は 232 ns で行こうと思う」)
+- STRIP_Q_MIN = 300 の写しで strip ヒットの q の分布(対数ビン、scratchpad `q207/qhist.C`): **502 ns(run 215 の先頭 600 事象)** = halo の山 ≈ 500、**谷 1,700–2,000**、トラックの山 ≈ 4,400–5,300(今の 2,000 は谷の上端 = 妥当)。**232 ns(run 216 全 434 事象)** = halo の山 ≈ 700、**谷 950–1,150**、トラックの山 ≈ 2,500–3,000。トラックの山の比 0.56 × 2,000 = 1,130 も谷に入る → **232 ns = 1,100**。
+- 切りを変えた試験(上の表)で 900・1,200 とも 216 の偽の contained が 0 になることは確認済み。
+
+## 発注書(macros 側 — implementer / Sonnet)
+**作るもの**
+1. `macros/analyzeUVW.C`: 引数の末尾に `double stripQMin = 2000.0`(`outFile` の後)。`STRIP_Q_MIN` 定数は既定値として残し、halo の切りはこの引数で行う。`stripQMin <= 0` はエラーで何も書かない。出力の uvw ファイルに `TParameter<double>("strip_q_min")` を書き、起動時の 1 行に値を出す。ヘッダのコメント(halo cut の段落)に「peaking ごとの値 = README の表」を 1 文。
+2. `macros/par_analyzeUVW.sh`: オプション `-q <stripQMin>`(既定 = 指定なし = analyzeUVW の既定 2000)を各部分の analyzeUVW に渡す。usage とヘッダの説明に追加。`--tracks` はそのまま。
+3. `macros/README.md`: analyzeUVW の行と par_analyzeUVW の段落に `stripQMin` と表 **「peaking 502 ns → 2,000(run 215 の谷 1,700–2,000)/ 232 ns → 1,100(run 216 の谷 950–1,150)」**(sampling 12.5 MHz、± 5 cells の窓)。
+**テスト**
+- `macros/test_par_analyzeUVW.sh` の流儀か新しい小さな ROOT テスト `macros/test_analyzeUVW_qmin.C`(合成の raw: 1 本の直線トラック、strip ごとのパルスの面積を 232 ns の核に見立てて q ≈ 1,500 の strip を数本含める)で: `stripQMin = 2000` ではその strip が落ち、`1100` では残る。`strip_q_min` の TParameter が書かれる。既定(引数なし)の出力が今の analyzeUVW とヒット単位で一致(回帰)。`-q` が par_analyzeUVW を通って各部分に効く(serial == parallel の比較、`compareUVW.C`)。
+**受け入れ(実データ)**
+- run 216(`/Users/aogaki/Workspace/tpcdaq-rs/macros/data/run0216_raw.root`、198 mbar / 12.5 MHz / 1,600 V)を `par_analyzeUVW.sh -q 1100 --tracks` → `selectNeutron.C` で contained 0、wall-alpha が 215(2,000)の 5.7 /h と ± 50 % で揃う(数字を報告)。run 215 を既定(2,000)で回して今の `run0215_uvw.root` と一致。
+**禁止**
+- 触るのは `macros/analyzeUVW.C`・`macros/par_analyzeUVW.sh`・`macros/README.md`・新しいテストファイルだけ。`makeTracks.C`・`selectNeutron.C`・`drawUVW.C`・`fitProngs.C` は触らない。`macros/data/` は読むだけ(出力は scratchpad)。`src/`(オンラインの `src/reco` は別 — Fable キュー)・`docs/` は触らない。
+**報告**: 変更ファイルと diff の要約、テスト名と PASS / FAIL、赤の証拠、受け入れの数字、**「実行できなかった操作」節(無ければ「なし」)**。
+
+## オンライン(`src/reco`)側 — Fable キュー
+- `src/reco/mod.rs:39` の `STRIP_Q_MIN = 2000.0` も同じ(SPEC §5.5 = macros の移植、定数は macros と同じに固定)。232 ns では UI の Event Display / QA 再構成の線が短く出る(表示だけ、保存には影響なし)。直し方の案: `[monitor] reco_strip_q_min`(既定 2,000、ELITPC は 1,100)を TOML に足して `src/reco` に渡す(SPEC §3.1・§5.5 の改訂 = Fable の確定が要る)。代案: params(current.json)の `peakingTime_ns` から表で引く(monitor は今 params を読まない)。

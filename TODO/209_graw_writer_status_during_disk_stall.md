@@ -1,6 +1,6 @@
 # 209 — ディスクが詰まった graw-writer は GetStatus にも答えず、204 の「graw を時計で切らない」守りが効かない
 
-**Status: TODO(ユーザー判断: 11/9 の前にやるか)**(2026-11-04 起票 Opus。出どころ = 188 の Fable フェーズ境界レビュー 指摘 2)
+**Status: TODO(11/9 の後 — ユーザー「あとでいいです」2026-11-04)**(2026-11-04 起票 Opus。出どころ = 188 の Fable フェーズ境界レビュー 指摘 2)
 
 ## 何が起きるか
 - graw-writer の `respond()`(GetStatus など、`src/graw_writer.rs:1073-1087`)と `latch_error()`(`:976-995`)は RunWriter の Mutex を **blocking の `lock()`** で取る。書き込みスレッドは `handle_batch` の中(= `write(2)` の中)でそのロックを握る。
