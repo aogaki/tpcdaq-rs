@@ -55,7 +55,8 @@
 //! 通す —— 違うのは `reason` のラベルだけ): `ecc stop`(不達でも続行)→ 受信静止 →
 //! receiver へ `Stop`(= 強制 EOS)→ 下流が進んでいる限り待つ →
 //! EOS がチェーンを流れて run がクローズしたことを graw-writer / decoder の `GetStatus` で
-//! 確認 → **その後で**各コンポーネントの `Stop` / `Reset`。run クローズ前に decoder を
+//! 確認(root-sink がその run を開いているのを PUB status で見ていれば、root-sink の close まで
+//! —— v1.54 / TODO/204)→ **その後で**各コンポーネントの `Stop` / `Reset`。run クローズ前に decoder を
 //! `Reset` しない(送出打ち切りの seq ギャップが root-sink を fatal 死させるため)。
 
 use std::collections::BTreeMap;
@@ -83,6 +84,7 @@ use crate::logbook::{
     CoboListen, Counters, FramesBeforeRestart, Geometry as GeometryRecord, LogbookRecord,
     LogbookWriter, OutputFile,
 };
+use crate::monitor::StatusPayload;
 
 // ---------------------------------------------------------------------
 // 定数
@@ -204,6 +206,10 @@ pub struct ControllerParams {
     /// 124: `[[slowctl.device]]` の (name, type)、設定の順。power の宛先と 400 の判定に使う
     /// (power を持たない型も載る —— 「その機器に電源スイッチは無い」と言い分けるため)。
     pub slow_devices: Vec<(String, String)>,
+    /// 204(SPEC §5.3 v1.54): root-sink の monitor PUB への SUB 接続先。停止の第二段が
+    /// root-sink の進みと run の close を見る口。**新しい TOML キーは作らない** ——
+    /// `[monitor] sub_endpoint`(monitor と同じ宛先)をそのまま写す。
+    pub root_sink_pub: String,
 }
 
 impl ControllerParams {
@@ -269,6 +275,7 @@ impl ControllerParams {
                 .flat_map(|slowctl| slowctl.device.iter())
                 .map(|device| (device.name.clone(), device.device_type.clone()))
                 .collect(),
+            root_sink_pub: config.monitor.sub_endpoint.clone(),
         }
     }
 
@@ -657,6 +664,9 @@ pub enum ControllerError {
 
     #[error("REST server failed: {0}")]
     Serve(#[source] std::io::Error),
+
+    #[error("cannot spawn the root-sink status thread: {0}")]
+    RootSinkThread(#[source] std::io::Error),
 }
 
 // ---------------------------------------------------------------------
@@ -736,6 +746,24 @@ pub async fn run_controller(
             source,
         })?;
     info!(%local, "controller REST listening");
+
+    // 204(SPEC §5.3 v1.54): root-sink の status を読む SUB スレッド(停止の第二段の材料)。
+    let root_sink_thread = match spawn_root_sink_status_thread(
+        controller.params.root_sink_pub.clone(),
+        controller.transport.root_sink_latest(),
+        Arc::clone(&stop_flag),
+    ) {
+        Ok(handle) => handle,
+        Err(e) => {
+            // 先に起こしたログ投稿スレッドを残さない。
+            stop_flag.store(true, Ordering::Relaxed);
+            if log_thread.join().is_err() {
+                error!("log post thread panicked");
+            }
+            return Err(ControllerError::RootSinkThread(e));
+        }
+    };
+
     if let Some(tx) = bound {
         let _ = tx.send(BoundEndpoints {
             rest: local,
@@ -754,6 +782,9 @@ pub async fn run_controller(
     if log_thread.join().is_err() {
         error!("log post thread panicked");
     }
+    if root_sink_thread.join().is_err() {
+        error!("root-sink status thread panicked");
+    }
     info!("controller stopped");
     result
 }
@@ -762,6 +793,7 @@ mod logpost;
 mod params_api;
 mod power;
 mod rest;
+mod root_sink_status;
 mod sequencer;
 mod status;
 mod transport;
@@ -770,6 +802,7 @@ use self::logpost::*;
 use self::params_api::*;
 use self::power::*;
 use self::rest::*;
+pub use self::root_sink_status::*;
 pub use self::sequencer::*;
 pub use self::status::*;
 pub use self::transport::*;
@@ -919,6 +952,8 @@ config_id = "default"
         // 124: `slow_cmd` は opt-in(省略 = None = power は 503)、`[slowctl]` が無ければ機器表も空。
         assert_eq!(params.slow_cmd, None);
         assert!(params.slow_devices.is_empty());
+        // 204: root-sink の status は `[monitor] sub_endpoint` の既定(= root-sink PUB 47004)から。
+        assert_eq!(params.root_sink_pub, "tcp://127.0.0.1:47004");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

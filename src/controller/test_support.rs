@@ -77,6 +77,23 @@ pub(super) struct MockTransport {
     /// 成り立てば閉じた形)。GetStatus の回数に依らずに「何秒後に閉じるか」を書くため。
     pub(super) eos_after_slept: Option<Duration>,
     pub(super) slept: Duration,
+    /// 204: graw-writer 名(files_open の模擬の相手を kind で判別するため)。
+    pub(super) graw_writers: BTreeSet<String>,
+    /// 204: `Stop` が通った receiver。**全 receiver が Stop を受けた後の graw-writer の
+    /// GetStatus は `files_open = 0`** —— 実機の receiver は Stop で EOS を graw-writer →
+    /// decoder の順に送り、graw-writer はすぐに閉じる(run 214: Stop の 1 ms 後)。
+    pub(super) stopped_receivers: BTreeSet<String>,
+    /// 204 テスト 6: graw-writer の `files_open` を仮想時刻(`slept`)がこの値に達するまで 1、
+    /// 以後 0 にする(上の「Stop で閉じる」も EOS の「閉じた形」も上書きする = ディスクが詰まって
+    /// 閉じられない graw-writer の模擬)。
+    pub(super) graw_files_open_until: Option<Duration>,
+    /// 204: root-sink の status の台本。`root_sink_status()` 1 回ごとに 1 つ進み、**尽きたら
+    /// 最後の 1 つを返し続ける**(実物の「最新値の箱」と同じ —— 届かなくなった status は
+    /// 同じ `received_at` のまま残る)。空 = root-sink 不在(常に `None`)。
+    pub(super) root_sink_script: Vec<Option<RootSinkStatus>>,
+    /// 204: `root_sink_status()` を読んだ時点の `calls.len()`(読んだ順)。コマンド列のどこで
+    /// root-sink を見たかを照合するため(`calls` には混ぜない —— 既存の呼び出し列の照合を壊さない)。
+    pub(super) root_sink_polled_at: Vec<usize>,
 }
 
 impl MockTransport {
@@ -84,6 +101,7 @@ impl MockTransport {
         let mut names = BTreeMap::new();
         let mut metrics = BTreeMap::new();
         let mut receivers = BTreeSet::new();
+        let mut graw_writers = BTreeSet::new();
         for (i, component) in params.components.iter().enumerate() {
             names.insert(component.endpoint.clone(), component.name.clone());
             let value = match component.kind {
@@ -102,10 +120,13 @@ impl MockTransport {
                 // 033-C: `eos_out` も **decoder の実 metrics と同じ形**で持つ
                 // (最後のホップの観測点。無ければ controller は判定を保留する)。
                 ComponentKind::Decoder => json!({"eos_in": 0, "eos_out": 0, "malformed": 7}),
-                ComponentKind::GrawWriter => json!({
+                ComponentKind::GrawWriter => {
+                    graw_writers.insert(component.name.clone());
+                    json!({
                     "files_open": 1,
                     "files": [{"path": "run0001/CoBo0_AsAd0_ts_0000.graw", "bytes": 30_108_672u64}],
-                }),
+                    })
+                }
             };
             metrics.insert(component.name.clone(), value);
         }
@@ -133,7 +154,33 @@ impl MockTransport {
             moving_values: BTreeMap::new(),
             eos_after_slept: None,
             slept: Duration::ZERO,
+            graw_writers,
+            stopped_receivers: BTreeSet::new(),
+            graw_files_open_until: None,
+            root_sink_script: Vec::new(),
+            root_sink_polled_at: Vec::new(),
         }
+    }
+
+    /// 204: root-sink の status の台本(`root_sink_status()` 1 回ごとに 1 つ、尽きたら最後を返し続ける)。
+    pub(super) fn with_root_sink_script(mut self, script: Vec<Option<RootSinkStatus>>) -> Self {
+        self.root_sink_script = script;
+        self
+    }
+
+    /// 204 テスト 6: graw-writer の `files_open` を仮想時刻 `until` まで 1 に固定する。
+    pub(super) fn graw_files_open_until(mut self, until: Duration) -> Self {
+        self.graw_files_open_until = Some(until);
+        self
+    }
+
+    /// 全 receiver が Stop を受けたか(receiver が居なければ false)。
+    fn all_receivers_stopped(&self) -> bool {
+        !self.receivers.is_empty()
+            && self
+                .receivers
+                .iter()
+                .all(|name| self.stopped_receivers.contains(name))
     }
 
     /// 185: `component` の metrics `key` を、仮想時刻 `until` まで GetStatus のたびに 1 ずつ
@@ -387,6 +434,19 @@ impl Transport for MockTransport {
                     }
                 }
             }
+            // 204: graw-writer の files_open(Stop で閉じる実機の姿 / テスト 6 の詰まり)。
+            if self.graw_writers.contains(&name) {
+                let open = match self.graw_files_open_until {
+                    Some(until) => Some(u64::from(self.slept < until)),
+                    None if self.all_receivers_stopped() => Some(0),
+                    None => None,
+                };
+                if let (Some(open), Some(map)) = (open, metrics.as_object_mut()) {
+                    if map.contains_key("files_open") {
+                        map.insert("files_open".to_string(), json!(open));
+                    }
+                }
+            }
         }
 
         let mut refused = self.fail.iter().any(|(c, a)| c == &name && a == &action);
@@ -401,6 +461,9 @@ impl Transport for MockTransport {
         if !refused {
             if let Some(target) = command.target_state() {
                 self.states.insert(name.clone(), target);
+            }
+            if matches!(command, Command::Stop) && self.receivers.contains(&name) {
+                self.stopped_receivers.insert(name.clone());
             }
         }
         let state = self
@@ -457,6 +520,16 @@ impl Transport for MockTransport {
     fn sleep(&mut self, duration: Duration) {
         self.slept += duration; // 仮想時間: 実際には眠らない
     }
+
+    fn root_sink_status(&mut self) -> Option<RootSinkStatus> {
+        self.root_sink_polled_at.push(self.calls.len());
+        let index = self
+            .root_sink_polled_at
+            .len()
+            .saturating_sub(1)
+            .min(self.root_sink_script.len().saturating_sub(1));
+        self.root_sink_script.get(index).cloned().flatten()
+    }
 }
 
 // -----------------------------------------------------------------
@@ -511,6 +584,7 @@ pub(super) fn params_with(cobo_ids: &[u32]) -> ControllerParams {
         status_timeout: Duration::from_secs(1),
         slow_cmd: None,
         slow_devices: Vec::new(),
+        root_sink_pub: "inproc://root-sink-pub".to_string(),
     }
 }
 

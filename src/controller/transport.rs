@@ -42,6 +42,11 @@ pub trait Transport {
 
     /// EOS 待ちなどの休止。モックは仮想時間を進めるだけでよい。
     fn sleep(&mut self, duration: Duration);
+
+    /// root-sink の最新の status(SPEC §5.3 の PUB、TODO/204 A)。まだ 1 通も受け取って
+    /// いなければ `None`。**届かなくなっても最後の 1 通を返し続ける**(`received_at` は古いまま)
+    /// —— 止まったかどうかは呼び手が値の不変で判断する(停止の第二段の静止と同じ扱い)。
+    fn root_sink_status(&mut self) -> Option<RootSinkStatus>;
 }
 
 /// 実物の ZMQ Transport。ソケットは**呼び出し毎に作って捨てる**
@@ -52,6 +57,9 @@ pub struct ZmqTransport {
     ecc_endpoint: String,
     command_timeout: Duration,
     ecc_timeout: Duration,
+    /// root-sink の最新 status の置き場(TODO/204 A)。書き手は `run_controller` が起こす SUB
+    /// スレッド([`spawn_root_sink_status_thread`])、複製はみな同じ箱を共有する。
+    root_sink: LatestRootSinkStatus,
 }
 
 impl ZmqTransport {
@@ -61,6 +69,7 @@ impl ZmqTransport {
             ecc_endpoint,
             command_timeout,
             ecc_timeout,
+            root_sink: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -71,7 +80,13 @@ impl ZmqTransport {
             ecc_endpoint: self.ecc_endpoint.clone(),
             command_timeout: timeout,
             ecc_timeout: timeout,
+            root_sink: Arc::clone(&self.root_sink),
         }
+    }
+
+    /// root-sink の status の置き場(SUB スレッドに渡す。TODO/204 A)。
+    pub(super) fn root_sink_latest(&self) -> LatestRootSinkStatus {
+        Arc::clone(&self.root_sink)
     }
 }
 
@@ -121,5 +136,9 @@ impl Transport for ZmqTransport {
 
     fn sleep(&mut self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+
+    fn root_sink_status(&mut self) -> Option<RootSinkStatus> {
+        lock(&self.root_sink).clone()
     }
 }

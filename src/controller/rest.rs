@@ -142,6 +142,8 @@ pub(super) async fn get_status(State(controller): State<Arc<Controller>>) -> Rep
         // status は必ず 200 を返す既存の姿勢を崩さない —— params 側の不整合は `notes` へ
         // 積んで `params: null` にする(このリクエスト自体は失敗させない)。
         let params_status = params_status_json(&controller, &mut notes);
+        // 204: root-sink の最新 status(SUB スレッドの箱。読むだけで待たない)。
+        let root_sink = transport.root_sink_status();
         let run_state = lock(&controller.run);
         let operator = lock(&controller.session)
             .as_ref()
@@ -149,9 +151,20 @@ pub(super) async fn get_status(State(controller): State<Arc<Controller>>) -> Rep
         // TODO/185(SPEC §1.3 v1.53): 停止の待ち(分単位になりうる)の間だけ出す。Stopping 以外では
         // キーごと省略。backlog は上で採った decoder の GetStatus から(停止の待ちは
         // `controller.run` を握らないので、ここは待ちの間も応答する)。
+        // 204(v1.54): root-sink の最新 status の要約と「残り N」(187 ③ の UI の元)。
         let stopping = (run_state.phase == Phase::Stopping).then(|| {
+            let root_sink = root_sink.as_ref().map(|status| &status.payload);
+            let run = run_state.active.as_ref().map(|active| active.run);
             json!({
                 "decoder_backlog": decoder_backlog(&statuses, &mut notes),
+                "root_sink_backlog": root_sink_backlog(
+                    &controller.params, &statuses, root_sink, run, &mut notes,
+                ),
+                "root_sink": root_sink.map(|p| json!({
+                    "state": p.state,
+                    "events_built": p.events_built,
+                    "fragments": p.fragments,
+                })),
                 "waited_s": run_state.stopping_since.map(|since| since.elapsed().as_secs_f64()),
             })
         });
@@ -856,6 +869,10 @@ pub(super) fn stop_run_blocking(
 
     let report = {
         let mut sequencer = Sequencer::new(&controller.params, &mut transport);
+        // 204: 停止する run の番号(root-sink がこの run を開いていれば、閉じるまで待つ)。
+        if let Some(active) = &active {
+            sequencer = sequencer.with_run(active.run);
+        }
         sequencer.stop_run(mode)
     };
 
