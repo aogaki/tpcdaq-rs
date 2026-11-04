@@ -51,3 +51,4 @@ worktree のブランチとコミット、`git diff --stat`、テスト 1–7 �
 - **逸脱**: ④ の文言は英語(「ROOT writing · run N」— UI が英語)。⑤ はチップでなく既存の `fields`(`LogbookEntry` の型を変えない)。`ctl` 項目の追加(silent failure 回避)。run_stop の探索に `getLogbook(0)` を Stop 完了時に 1 回。prettier が無関係なファイルを整形した分は戻した(コミットに入っていない)。
 - **実行できなかった操作**: なし(複合コマンドの権限拒否 3 回は分割 / Edit で回避)。
 - **未**: 204(controller の `stopping.root_sink_backlog`・`stopping.root_sink`)と一緒にマージ → ELITPC に反映 → 実機の受け入れ(§3、通常 run の Stop で「STOPPING — draining」→ Idle、pevent = true の受け入れで backlog が減る様子)。
+- **マージ(2026-11-04)**: main に `654f2fd`(Merge 187、204 と同時)。main の上で `npm test` 413 passed、`npm run build` 警告なし。未: ELITPC 反映と実機の目視(§3)。

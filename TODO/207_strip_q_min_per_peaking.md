@@ -1,0 +1,23 @@
+# 207 — analyzeUVW の strip 電荷の切り(`STRIP_Q_MIN = 2000`)が peaking 232 ns で高すぎ、トラックの淡い側が切れて偽の contained が出る
+
+**Status: TODO**(2026-11-04 起票 Opus。出どころ = run 216(232 ns)の全事象の解析)
+
+## 何が起きたか
+- run 216(peaking 232 ns、N1068GE トリガ、線源なし、2.54 h、434 事象)を `par_analyzeUVW.sh -p 198 -s 12.5 -d 1600 --tracks` → `selectNeutron.C` に通すと、**contained が 8 本(3.1 /h)**(215 = 502 ns・16.9 h では 0、208 では 0.10 /h)、wall-alpha 13.4 /h(215 は 5.7)。
+- 8 本を drawUVW で見ると(scratchpad `r216/png/`)、どれもまっすぐな長いトラックで、片端が有感の箱の縁(y ≈ 47–48 mm など)にある。**makeTracks の端点が絵の 3D 点と食い違う**(例 entry 230: 絵は z 38 → 88 mm、makeTracks は z 55 → 58 で xy も鏡映)。
+- 原因: analyzeUVW の strip ごとの電荷 q(ピーク ± 5 cells の和)の切り `STRIP_Q_MIN = 2000`(2026-09-25 の 25 MHz / 502 ns のデータで「halo < ≈ 1,500、トラック ≈ 5,500 の谷」として決めた値)。232 ns ではパルスの面積が ≈ 0.45 倍(138 の核)で、トラックの淡い側の strip が 2,000 を割って落ちる。entry 230 の V 面は絵では V −19 → 63 だが残ったヒットは −16.5 → 19.5(最小 q 2,076)、entry 21 の V 面は −15 → 50 に対して −9 → 12。片面が短くなり、makeTracks の方向と端点が狂う。
+- 電荷 / mm の中央(reject / wall / vin-x / vin-y): 216 = 3,968 / 4,338 / 4,101 / 4,516、215 = 6,703 / 6,539 / 7,617 / 7,533(比 ≈ 0.55–0.66)。
+
+## 切りを変えた試験(2026-11-04、scratchpad `q207/` に analyzeUVW の写し — リポの analyzeUVW.C は無変更)
+| STRIP_Q_MIN | 216(232 ns): contained / wall-alpha / vin-x / reject /h | 215(502 ns): contained / wall-alpha / vin-x / reject /h |
+|---|---|---|
+| 2,000(今) | **3.14** / 13.36 / 42.1 / 82.2 | 0 / 5.73 / 34.8 / 87.2 |
+| 1,200 | **0** / 5.11 / 45.6 / 87.7 | 0.06 / 2.95 / 36.0 / 89.6 |
+| 900 | **0** / 5.90 / 45.6 / 91.2 | **0.41** / 1.71 / 33.9 / 94.1 |
+- 216 は 1,200 で偽の contained が消え、wall-alpha が 215(2,000)と揃う。215 は 900 まで下げると halo を拾って contained が出る → **切りは peaking(と sampling)ごとに変える必要がある**。比 ≈ 0.5–0.6 は電荷 / mm の比・核の面積比と合う。
+
+## 直すこと(案 — 設計は Opus で足りる。KISS)
+- analyzeUVW に `stripQMin` を任意引数で足す(既定 2,000 = 今の挙動)か、run の条件(peaking)から引く表を持たせる。推し = **核の面積比で決める**のではなく、**事象ごとの halo の分布から谷を取る**のでもなく、まずは **引数 + README の表(502 ns → 2,000、232 ns → 1,200)**。par_analyzeUVW.sh に `-q` を通す。
+- 25 MHz と 12.5 MHz の差(± 5 cells の窓は 12.5 MHz で 880 ns)も同じ表に。202 / 209 / 215 の結果は 2,000 のままでよい(502 ns)。
+- テスト: test_uvw_closure 流の合成で、232 ns の核の形の淡い strip が 2,000 で落ち 1,200 で残ること。実データ: 216 で contained 0、wall-alpha が 215 と ± 30 % で揃う。
+- 影響: fitProngs は makeTracks の線を初期値と ROI に使うので、232 ns の当てはめ(198「その後」)はこの後に。drawUVW(表示)は影響なし。
