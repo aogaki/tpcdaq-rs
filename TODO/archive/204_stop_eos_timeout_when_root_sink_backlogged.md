@@ -1,6 +1,6 @@
 # 204 — 下流(root_sink)が積み残しを書いている最中の停止が `error:eos-timeout` になる
 
-**Status: IMPLEMENTED — Fable レビュー中・マージ待ち・実機の受け入れ待ち(2026-11-04、`dc8d957`)**(発注書 = 下の「Fable 裁定」節。181 の実機受け入れの不合格として扱う)(2026-11-03 起票 Opus。出どころ = 184–186 の実機の受け入れ run 214)
+**Status: COMPLETED(2026-11-04 — main `343f571`、ELITPC 反映 `aa4336a`、実機受け入れ run 217 合格)**(発注書 = 下の「Fable 裁定」節。181 の実機受け入れの不合格として扱う)(2026-11-03 起票 Opus。出どころ = 184–186 の実機の受け入れ run 214)
 
 ## 何が起きたか
 - run 214(ELITPC、`pevent = true` = PEventTPC を書く遅い設定、CoBo の周期トリガ 10 ms ≈ 73 Hz、300 s、`~/test/accept184/accept197b.sh` — run 197 の再現)。
@@ -167,3 +167,22 @@ worktree のブランチとコミット、`git diff --stat`、テスト 1–12 �
 - 新テスト: `the_lossless_guard_is_lifted_when_a_reachable_receiver_rejects_the_stop`(赤 = slept 60 s ≠ 5.6 s)、`a_natural_eos_with_root_sink_still_writing_is_not_recorded_as_forced`(赤 = forced_eos true)— PASS。テスト 11 に `run` の照合(赤 = Null ≠ 1)。既存テスト 2 は無改変で green、逸脱なし。cargo 1,149 passed / 0 failed / 1 ignored、env ゲート controller_integration 43 / p3_e2e 5 / p3_error_paths 2 + 既知の F2(206)。テスト 12 の再実測: 停止 25.7 s、backlog 2,141 から単調減少、fragments 2,300。主対話が `git show --stat 90af662` と新テスト名を照合。
 - **マージ**: main `71dd15d` に `343f571`(Merge 204)・`654f2fd`(Merge 187)。**main の上のゲート**: `cargo fmt --check` OK、`cargo clippy --tests -- -D warnings` 警告 0、`cargo test` **1,149 passed / 0 failed / 1 ignored**、UI `npm test` 413 passed / 10 skipped・`npm run build` 警告なし(2026-11-04)。SPEC v1.54・RUNBOOK v0.5 を同じ日に docs へ(Fable の文言案 + A の条件)。
 - 未: ELITPC 反映 → 受け入れ(`~/test/accept184/accept204.sh` = accept197b.sh + 停止中の status の記録)。
+
+## 実機の受け入れ(2026-11-04、ELITPC — ユーザー了解「作業してください」、run 216 はユーザーが停止済み)
+- **反映**: Mac main `aa4336a` を `git bundle 663b00d..main` → ELITPC `~/tpcdaq-rs` で ff → `cargo build --release`(16.6 s)。root_sink は 663b00d から無変更(diff 0 行)なのでビルドせず。UI は Mac の `ui/dist/ui/browser`(main 654f2fd でビルド)を `/opt/tpcdaq/ui` へ(旧版 `/opt/tpcdaq/ui.prev663`)。`daq_down.sh` → `daq_up.sh`: `/api/status` 200・`/` 200・Idle・8 プロセス + root_sink・ログに WARN / ERROR なし。controller のログ `subscribed to the root-sink status PUB endpoint="tcp://127.0.0.1:47004"`。
+- **受け入れ run = run 217**(`~/test/accept184/accept204.sh` = accept197b.sh + 停止中 10 s ごとの status の記録。pevent = true・周期 10 ms・300 s、終了後に pevent = false・params `elinp__8efb10d4` へ自動復元 = 確認済み):
+  | | run 214(204 の前) | **run 217(204 の後)** |
+  |---|---|---|
+  | 停止 | 10.6 s、`ok:false`・`error:eos-timeout` | **698.6 s、`ok:true`・`normal`** |
+  | eos_closed / forced_eos | false / — | **true / true**(TCP flow は常に強制 EOS = 期待どおり) |
+  | 受信 = graw | 23,252 = 23,252 | **23,309 = 23,309**(`lost_receiver_to_graw` 0、overflow 0) |
+  | decoder リンクで数えて落とした | 6,251 | 6,309(batches 6,303、heartbeats 3) |
+  | `lost_receiver_to_decoder` | 1,522(停止で捨てられた) | **0** |
+  | root_sink | EOS 来ず run を閉じず(inprogress) | **`run 217 closed (… events_complete=17000 … fragments=17000)`、monitor.root あり、inprogress 0** |
+  | `events_built` | null | **17,000**(= 23,309 − 6,309、恒等式が厳密に成立) |
+  | root_complete | false | false(落としたので正しい) |
+  | abandoned | EOS 1 通が捨てられた | `decoder_abandoned` 0、send abandoned の行なし |
+- **停止中の見え方**(`accept204_stop.log`): phase `Stopping` が 11:41:53 → 11:53:28、`stopping.root_sink_backlog` が 7,514(waited 262 s)→ 49(696 s)と **10 s ごとに単調減少(≈ 17 /s = PEventTPC の書き出し速度)**、`stopping.root_sink = {run 217, running, events_built 9,486 → 16,951}`、`decoder_backlog` 0。close の 8 s 後に Idle(`root_sink_backlog` null)。
+- **controller のログ**(`controller.log.prev`): `root-sink has the run open — the stop waits for its close (SPEC §1.3 v1.54) run=217 events_built=5028` → `receivers are quiet … forcing EOS now` → `downstream is still moving after the forced EOS — waiting past eos_timeout` → `root-sink closed the run run=217 events_built=17000` → `run stopped reason="normal" forced_eos=true`。status の購読 = status_in 1,019 / ignored 8,981(hist_snapshot など)/ decode_errors 0。WARN は receiver の `decoder link full or absent — dropping and counting`(設計どおり)の 1 行だけ。
+- **181 の実機受け入れ(§5-3「実機: Stop で eos_closed:true・root_complete:false・root_sink 正常 close」)もこれで合格**。
+- 未(188 の受け入れと一緒に): 対照の通常 run(pevent = false)の停止が従来 + 数秒で `ok:true`。187 の目視(STOPPING — draining の表示)はユーザーが次の停止で。

@@ -1,6 +1,6 @@
 # 188 — controller の run 中監視 + 保存系 Error の自動異常停止(SPEC §1.3「run 中の監視」/ §1.4-3)
 
-**Status: TODO(発注書 — Fable 2026-11-04 起票。11/9 前に要る。204 の後に着手、Opus implementer)**(設計 = TODO/181 §4-4 / §5-1「§4-4」(Fable レビュー済み 2026-10-24)、仕様 = SPEC v1.53 §1.3「run 中の監視(v1.53、TODO/188)」の段落 + §1.4-3。文言は既に SPEC にある — 実装だけ)
+**Status: IMPLEMENTED — Fable レビュー中・マージ待ち・実機の受け入れ待ち(2026-11-04、ブランチ `worktree-agent-af34f5c9c61d9815f`)**(発注書 — Fable 2026-11-04 起票。11/9 前に要る)(設計 = TODO/181 §4-4 / §5-1「§4-4」(Fable レビュー済み 2026-10-24)、仕様 = SPEC v1.53 §1.3「run 中の監視(v1.53、TODO/188)」の段落 + §1.4-3。文言は既に SPEC にある — 実装だけ)
 
 ## 0. 背景(1 行ずつ)
 - run 197: receiver の内部キューが 17:35:11 に溢れた(= graw の喪失)が、receiver が Error になるのは**コマンドを受けたとき**(`receiver.rs` `handle()` 冒頭の `latch_overload`)で、controller は run 中に誰にも `GetStatus` を送らない → 17:40:49 にユーザーが画面を開くまで 5.5 分、誰も気づかず graw を 19,855 失った。
@@ -43,3 +43,19 @@
 
 ## 5. 報告(必須)
 worktree のブランチとコミット、`git diff --stat`、テスト 1–6 の名前・場所・PASS / FAIL、赤の証拠、cargo のテスト数、発注書からの逸脱と理由、**「実行できなかった操作」の節(無ければ「なし」)**、残プロセスが無いこと。
+
+## 結果(2026-11-04 — 実装・テスト済み。Fable レビュー、マージ、ELITPC の受け入れは未)
+- **実装**: implementer(Opus)、worktree `.claude/worktrees/agent-af34f5c9c61d9815f`、ブランチ `worktree-agent-af34f5c9c61d9815f`。並び = `dc8d957`(204)→ **`6319dea`**(188 本体)→ `953a8d9`(204 の追補 `90af662` のマージ、衝突なし)。188 だけの差分(`git diff --stat 90af662..HEAD`)= 5 ファイル + 976 / − 30: `src/controller/watchdog.rs`(新規 348)、`src/controller/{mod.rs, rest.rs, status.rs}`、`tests/controller_integration.rs`。receiver / decoder / graw_writer / sequencer は無変更(主対話が diff で確認)。主対話が 6 本のテスト名(各 1 件)を照合。
+- **中身**: `WATCHDOG_PERIOD = 2 s` の専用 OS スレッド。Idle / Starting は問い合わせない、Stopping は全コンポーネントへ GetStatus(観測のみ)、Running は receiver / graw-writer の Error を引き金に `Controller::begin_stopping(Some(run))`(CAS + `stopping_since` を同じロック区間、REST の stop と共有。同じ run かも確かめる)→ 停止の本体は別スレッド `watchdog-stop` で `stop_run_blocking(.., "watchdog", active, Some(&trigger))`(mode `Abort("overload:<名前>")`、audit `params.trigger = {component, state, overflow_frames}`)。drop ガードで Idle に戻す。終了時は watchdog が停止を join、`run_controller` が watchdog を join。到達性 / Error の変化だけ warn / info 1 行。
+- **テスト**(TDD、赤 = `poll_once` のスタブで lib 1 FAILED・統合 0 / 5 passed): 1 `a_receiver_in_error_is_aborted_by_the_watchdog_within_two_polls`(統合、receiver0 と graw-writer の両方、< 4 s)・2 `a_decoder_in_error_does_not_trigger_the_watchdog`(統合、3 ポーリング)・3 `a_single_unreachable_component_does_not_trigger_the_watchdog`(統合、GetStatus を 2.5 s 寝かせる)・4 `a_concurrent_manual_stop_and_the_watchdog_stop_the_run_exactly_once`(統合、3 ラウンド、本物の取り合いで手動 200 が 4 回・409 が 2 回)・5 `the_watchdog_does_not_fire_outside_running`(単体 MockTransport — 統合のカウントでは Stopping の観測を区別できないため、逸脱)・6 `the_watchdog_sets_stopping_since_so_the_status_shows_waited_s`(統合)— すべて PASS。
+- **cargo**(`90af662` のマージ後、2026-11-04、macOS): fmt OK、clippy 警告 0、`cargo test --no-fail-fast` **1,155 passed / 0 failed / 1 ignored**(lib 811、controller_integration 48)。env ゲート: controller_integration 48/48、p3_e2e 5/5、p3_error_paths 2/3(既知の F2 = [206](206_p3_f2_stale_exit6_expectation.md))。
+- **逸脱・判断(申告)**: テスト 5 は単体、停止は別スレッド、CAS で同じ run を確認、同時 Error は components の順で最初(graw-writer が receiver より先 = ディスクで止まった graw-writer の名前が reason に出る)、変化だけのログ、共有の最新値は `Controller` の Mutex フィールド、テストのフェイクにつまみ。
+- **実行できなかった操作**: heredoc での追記が worktree 隔離の検査で拒否 → Edit で同じ内容(実害なし)。残プロセスなし。
+- **未**: Fable のフェーズ境界レビュー(2026-11-04 依頼中)→ main にマージ → ELITPC 反映 → 受け入れ(§3: graw_writer の SIGSTOP → ≤ 4 s で `abort:overload:receiver0`、SIGCONT で閉じる + 対照)。
+
+## Fable のフェーズ境界レビュー(2026-11-04、`953a8d9`)
+- **判定: このままマージ可**。Fable が worktree で `cargo test --test controller_integration watchdog` 5/5・`--lib watchdog` 1/1 を実走。CAS(`begin_stopping` が唯一の Running → Stopping の入口、run 番号も照合)・停止の共用・`watchdog-stop` のスレッドの寿命・ロック順序・REQ の作り方・周期(累積ドリフトなし)・REST の 409 の意味の保存・audit / reason / ログ・テスト 4 の取り合い(揺らがない)はすべて問題なし。
+- **マージ前に入れる(同じブランチの上に 1 コミット — 2026-11-04 発注)**: 1 = controller の終了中に watchdog の停止が走ると、root-sink の SUB スレッド(204)が共有の `stop_flag` で先に死に、`eos_closed:false` を偽に記録する → SUB 用の停止フラグを分け、watchdog の join の後に立てる。3 = Stopping 中の不達(decoder の Reset の join ≤ 2.1 s > status_timeout 1 s)は info に。
+- **188 の外(別票)** → [209](209_graw_writer_status_during_disk_stall.md): graw-writer の GetStatus は RunWriter のロックを blocking で取るので、**実ディスクの詰まり中は不達に見え、204 の守り(到達可能 ∧ files_open > 0)が Off** → 停止は静止 ≥ eos_timeout で切れ、receiver の graw リンクの送出待ちを `messages_abandoned` に数えて捨てる(= ユーザー裁定 B-4「ディスクが固まったら graw-writer を落とすまで待つ」が実際には効かない)。指摘 4(不達の相手に毎周 1 s)は多 CoBo のときの留意だけ。
+- **受け入れ §3 の読み方(Fable の机上計算、既定値 status 1 s / command 5 s / eos_timeout 5 s / quiesce 500 ms)**: SIGSTOP 中の graw-writer は不達 → 守りは Off。**SIGCONT が abort の audit 行から ≈ 20 s 以内(第一段の中)なら `eos_closed:true`**、遅れると打ち切り + `messages_abandoned > 0`(試験 run の graw の一部を失う)。→ 実機では abort の audit 行を見てから ≈ 10 s で SIGCONT。ELITPC の daq.toml に時間のキーは無い = 既定値(2026-11-04 確認)。
+- SPEC §1.3「run 中の監視」の文言修正案(Fable A–D): 取り合いは CAS 1 箇所(REST が負けたら 409、watchdog が負けたら何もしない、run 番号も照合)、不達は 1 回でも連続でも引き金にしない、同時 Error は components の順で最初、停止の本体は別スレッドで Stopping 中も観測が続く、§9.2 audit の `params.trigger` — マージ時に主対話が docs へ。運用注記: systemd の `TimeoutStopSec` が 204 の待ちより短いと SIGKILL → 次の起動の歩き戻しに落ちる(RUNBOOK に 1 行)。
