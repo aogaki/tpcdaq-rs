@@ -78,6 +78,23 @@
   border-color: #ffb300;
 }
 
+// TODO/187: controller status 由来の chip。赤 = 保存系の異常 / ROOT 欠け、琥珀 = 待ち。
+.stopping,
+.root-writing {
+  background: color-mix(in srgb, #ffb300 28%, transparent);
+  color: #ffca28;
+  border-color: #ffb300;
+  cursor: default;
+}
+
+.overload,
+.root-dropped {
+  background: color-mix(in srgb, var(--mat-sys-error) 22%, transparent);
+  color: var(--mat-sys-error);
+  border-color: var(--mat-sys-error);
+  cursor: default;
+}
+
 .health-offline {
   background: color-mix(in srgb, var(--mat-sys-error) 22%, transparent);
   color: var(--mat-sys-error);

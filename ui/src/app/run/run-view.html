@@ -14,6 +14,16 @@
     </p>
   }
 
+  <!-- TODO/187: Stop can take minutes. Believe /api/status.phase, not the HTTP response. -->
+  @if (stoppingText(); as stopping) {
+    <p class="banner stopping">{{ stopping }}</p>
+  }
+  @if (stopOutcome(); as outcome) {
+    <p class="banner" [class.ok]="outcome.ok" [class.error]="!outcome.ok">
+      {{ outcome.text }} ({{ outcome.at }})
+    </p>
+  }
+
   <!-- Result of the last action. On failure show the controller error string **verbatim**. -->
   @if (lastAction(); as result) {
     <p class="banner" [class.ok]="result.ok" [class.error]="!result.ok">

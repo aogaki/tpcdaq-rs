@@ -244,6 +244,14 @@ function shapeRunStop(raw: Raw): Shaped {
     { label: 'reason', value: str(raw, 'reason') ?? '—' },
     { label: 'duration', value: duration === null ? '—' : `${duration} s` },
   ];
+  // TODO/187 ⑤: root_complete:false = graw は完全だが ROOT に欠けがある(SPEC §1.4-7)。印だけで
+  // severity は変えない。true / null / キー無し(古い run)は印なし。
+  if (counters?.['root_complete'] === false) {
+    fields.push({
+      label: 'ROOT',
+      value: 'incomplete — graw is complete; rebuild ROOT from graw',
+    });
+  }
   // eos_closed:false = 明確な異常。severity を 'error' へ引き上げる(ok=false の場合と同じ扱い)。
   if (eosClosed === false) {
     fields.push({

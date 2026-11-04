@@ -35,6 +35,13 @@ export interface ComponentView {
   readonly error: string | null;
 }
 
+/** `phase == "Stopping"` の間だけ付く `stopping`(TODO/185・204、SPEC §8.1)。取れない値は null。 */
+export interface StoppingView {
+  readonly decoderBacklog: number | null;
+  readonly rootSinkBacklog: number | null;
+  readonly waitedS: number | null;
+}
+
 export interface ActiveRunView {
   readonly run: number;
   readonly operator: string;
@@ -56,6 +63,10 @@ export interface StatusView {
   readonly components: readonly ComponentView[];
   readonly ecc: EccView;
   readonly logPosts: LogPostsView | null;
+  /** 全 receiver の `metrics.decoder_link_dropped_frames` の合計(TODO/187 ①)。 */
+  readonly rootDroppedFrames: number;
+  /** Stopping 以外では null。 */
+  readonly stopping: StoppingView | null;
   readonly notes: readonly string[];
 }
 
@@ -125,6 +136,15 @@ function parseComponent(raw: unknown): ComponentView | null {
   };
 }
 
+function parseStopping(raw: unknown): StoppingView | null {
+  if (!isObject(raw)) return null;
+  return {
+    decoderBacklog: num(raw, 'decoder_backlog'),
+    rootSinkBacklog: num(raw, 'root_sink_backlog'),
+    waitedS: num(raw, 'waited_s'),
+  };
+}
+
 function parseRun(raw: unknown): ActiveRunView | null {
   if (!isObject(raw)) return null;
   const run = num(raw, 'run');
@@ -165,6 +185,60 @@ export function parseControllerStatus(raw: unknown): StatusView | null {
     components,
     ecc: parseEcc(raw['ecc']),
     logPosts: parseLogPosts(raw['log_posts']),
+    rootDroppedFrames: sumRootDropped(raw['components']),
+    stopping: parseStopping(raw['stopping']),
     notes,
   };
 }
+
+/** 3 桁区切り(ロケール非依存 — テストが環境で揺れない)。 */
+function group(value: number): string {
+  return Math.trunc(value)
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/**
+ * 「STOPPING — draining · ROOT backlog N · waited S s」(TODO/187 ③)。
+ * backlog は root_sink を優先、無ければ decoder、それも無ければ数字なし。
+ * `stopping` 自体が無い(phase が Stopping でない)ときは null。
+ */
+export function drainingLabel(stopping: StoppingView | null): string | null {
+  if (stopping === null) return null;
+  const parts = ['STOPPING — draining'];
+  if (stopping.rootSinkBacklog !== null) {
+    parts.push(`ROOT backlog ${group(stopping.rootSinkBacklog)}`);
+  } else if (stopping.decoderBacklog !== null) {
+    parts.push(`decoder backlog ${group(stopping.decoderBacklog)}`);
+  }
+  if (stopping.waitedS !== null) parts.push(`waited ${Math.round(stopping.waitedS)} s`);
+  return parts.join(' · ');
+}
+
+/** 保存系(receiver / graw-writer)の名前。decoder・root_sink は含めない。 */
+function isStorageComponent(name: string): boolean {
+  return name.startsWith('receiver') || name === 'graw-writer';
+}
+
+/** receiver の `metrics.decoder_link_dropped_frames` の合計。decoder 自身の値は混ぜない。 */
+function sumRootDropped(rawComponents: unknown): number {
+  if (!Array.isArray(rawComponents)) return 0;
+  let total = 0;
+  for (const raw of rawComponents as unknown[]) {
+    if (!isObject(raw) || !(str(raw, 'name') ?? '').startsWith('receiver')) continue;
+    const metrics = raw['metrics'];
+    const value = isObject(metrics) ? metrics['decoder_link_dropped_frames'] : null;
+    if (typeof value === 'number' && Number.isFinite(value)) total += value;
+  }
+  return total;
+}
+
+/** `state == "Error"` の receiver / graw-writer の名前(TODO/187 ②)。 */
+export function overloadedComponents(components: readonly ComponentView[]): string[] {
+  return components
+    .filter((c) => isStorageComponent(c.name) && c.state === 'Error')
+    .map((c) => c.name);
+}
+
+/** 3 桁区切りの公開版(status バー / Run 画面の chip 用)。 */
+export const groupDigits = group;

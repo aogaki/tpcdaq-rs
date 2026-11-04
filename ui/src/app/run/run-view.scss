@@ -69,6 +69,11 @@ h3 {
   color: var(--tpc-error);
 }
 
+.banner.stopping {
+  border-color: #ffb300;
+  font-weight: 600;
+}
+
 .banner.ok {
   border-color: var(--tpc-ok);
 }

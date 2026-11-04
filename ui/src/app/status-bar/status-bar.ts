@@ -3,12 +3,23 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 
 import { alarmLabels, countAlarms } from '../slow/slow-history';
+import { ControllerApiService } from '../api/controller-api';
+import {
+  type StatusView,
+  drainingLabel,
+  groupDigits,
+  overloadedComponents,
+  parseControllerStatus,
+} from '../api/controller-status';
 import { ParamsApiService } from '../api/params-api';
 import { saturationPercent } from '../ws/json';
 import { WsClientService } from '../ws/ws-client';
 
 /** `params <id> · exceptions N` の poll 間隔(078 §11「作るもの」4)。 */
 export const STATUS_BAR_PARAMS_POLL_MS = 15000;
+
+/** controller `GET /api/status` の poll 間隔(STOPPING / ROOT DROPPED / OVERLOAD 用、TODO/187)。 */
+export const STATUS_BAR_CONTROLLER_POLL_MS = 5000;
 
 /**
  * 全ページ共通の status バー(SPEC §10.3 の `status` + monitor の 3 キー + §5.2 の飽和率)。
@@ -25,6 +36,7 @@ export const STATUS_BAR_PARAMS_POLL_MS = 15000;
 export class StatusBar implements OnDestroy {
   private readonly ws = inject(WsClientService);
   private readonly paramsApi = inject(ParamsApiService);
+  private readonly controllerApi = inject(ControllerApiService);
 
   readonly health = this.ws.health;
   readonly link = this.ws.link;
@@ -120,14 +132,62 @@ export class StatusBar implements OnDestroy {
 
   private paramsTimer: ReturnType<typeof setInterval> | null = null;
 
+  private controllerTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * controller の `GET /api/status`(TODO/187)。取れていないときは null = 下の chip は何も
+   * 出さず、`ctl` が `—` になる(「異常なし」と取り違えない)。
+   */
+  readonly controller = signal<StatusView | null>(null);
+
+  /** ③ `STOPPING — draining · ROOT backlog N · waited S s`。Stopping でなければ null。 */
+  readonly stoppingText = computed(() => {
+    const view = this.controller();
+    if (view?.phase !== 'Stopping') return null;
+    return drainingLabel(
+      view.stopping ?? { decoderBacklog: null, rootSinkBacklog: null, waitedS: null },
+    );
+  });
+
+  /** ① 全 receiver の `decoder_link_dropped_frames` の合計。0(または未取得)なら null。 */
+  readonly rootDropped = computed(() => {
+    const total = this.controller()?.rootDroppedFrames ?? 0;
+    return total > 0 ? groupDigits(total) : null;
+  });
+
+  /** ② Error の receiver / graw-writer の名前。無ければ空。 */
+  readonly overloaded = computed(() => overloadedComponents(this.controller()?.components ?? []));
+
+  /** ④ controller が Idle なのに root_sink が run を書いている(WS status の state)。 */
+  readonly rootWritingRun = computed(() => {
+    const status = this.status();
+    if (this.controller()?.phase !== 'Idle' || status?.state !== 'running') return null;
+    return status.run;
+  });
+
   constructor() {
     void this.pollParams();
     this.paramsTimer = setInterval(() => void this.pollParams(), STATUS_BAR_PARAMS_POLL_MS);
+    void this.pollController();
+    this.controllerTimer = setInterval(
+      () => void this.pollController(),
+      STATUS_BAR_CONTROLLER_POLL_MS,
+    );
   }
 
   ngOnDestroy(): void {
     if (this.paramsTimer !== null) clearInterval(this.paramsTimer);
     this.paramsTimer = null;
+    if (this.controllerTimer !== null) clearInterval(this.controllerTimer);
+    this.controllerTimer = null;
+  }
+
+  private async pollController(): Promise<void> {
+    try {
+      this.controller.set(parseControllerStatus(await this.controllerApi.getStatus()));
+    } catch {
+      this.controller.set(null);
+    }
   }
 
   private async pollParams(): Promise<void> {
