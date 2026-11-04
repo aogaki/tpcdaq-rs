@@ -38,6 +38,11 @@ pub struct StatusPayload {
     pub bytes_written: u64,
     pub saturation: std::collections::BTreeMap<String, SaturationPayload>,
     pub publish_drops: u64,
+    /// run ごとのフラグメント受信数(root-sink 186 以降が出す。controller の停止の第二段と
+    /// `stopping.root_sink_backlog` の材料、TODO/204)。古い root-sink は出さない = `None`。
+    /// **WS JSON には出さない**(`skip_serializing` —— WS の status JSON は不変、TODO/204)。
+    #[serde(default, skip_serializing)]
+    pub fragments: Option<u64>,
 }
 
 /// ヒスト 1 枚(SPEC §5.3 の `hists[]`)。

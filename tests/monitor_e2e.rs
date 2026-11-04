@@ -617,6 +617,8 @@ fn status_payload() -> StatusPayload {
         bytes_written: 0,
         saturation,
         publish_drops: 0,
+        // TODO/204: WS JSON には出ない(skip_serializing)。
+        fragments: None,
     }
 }
 

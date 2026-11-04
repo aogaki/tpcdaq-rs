@@ -300,6 +300,8 @@ async fn a_run_start_gives_up_when_the_ecc_stalls_past_the_ecc_timeout() {
         // 124: power の経路は使わない(省略 = 503)。
         slow_cmd: None,
         slow_devices: Vec::new(),
+        // 204: root-sink は居ない(何も listen していない口 = status は来ない = 従来の停止)。
+        root_sink_pub: "tcp://127.0.0.1:1".to_string(),
     };
 
     let (bound_tx, bound_rx) = oneshot::channel();

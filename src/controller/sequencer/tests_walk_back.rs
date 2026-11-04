@@ -163,9 +163,13 @@ fn a_component_that_refuses_the_walk_back_reset_stops_the_run_before_any_configu
 ///   行かない)+ receiver 2 台の bytes。graw-writer = 3, 4, 5, 6 の 4 周で静止 0 → 200 →
 ///   400 → 600 ms ≥ 500 ms → 切り上げ。眠るのは 3 回 = 600 ms。receiver はそれぞれ
 ///   状態調べ 1 + 第一段 4 = **5 回**問い合わされてから Stop される。
-/// - 第二段: graw-writer = 7(≤ 7 = 未着)→ 200 ms → graw-writer = 8・decoder = 9
-///   (> 7 = 到着)。眠るのは 1 回 = 200 ms。
-/// - 合計 800 ms。receiver0 の Stop と decoder の Stop のあいだは graw-writer × 2 + decoder × 1。
+/// - 第二段: graw-writer = 7(≤ 7 = EOS の「閉じた形」ではないが、204 で MockTransport は
+///   **全 receiver が Stop を受けた後の graw-writer を `files_open = 0`** にする —— 実機の receiver は
+///   EOS を graw-writer → decoder の順に送り、graw-writer はすぐ閉じる)→ decoder = 8(> 7 = 到着)。
+///   1 回目の判定で閉じるので眠らない。
+/// - 合計 600 ms。receiver0 の Stop と decoder の Stop のあいだは graw-writer × 1 + decoder × 1。
+///   (204 より前: graw-writer = 7 で files_open = 1 → 200 ms → graw-writer = 8・decoder = 9、
+///   合計 800 ms・graw-writer × 2 + decoder × 1。)
 #[test]
 fn a_fully_running_chain_is_closed_with_eos_before_the_walk_back_resets() {
     let params = params_with(&[0, 1]);
@@ -220,12 +224,11 @@ fn a_fully_running_chain_is_closed_with_eos_before_the_walk_back_resets() {
         &mock.calls[last_receiver_stop + 1..decoder_stop],
         &[
             Call::new("graw-writer", "GetStatus"),
-            Call::new("graw-writer", "GetStatus"),
             Call::new("decoder", "GetStatus"),
         ],
         "第二段の EOS 待ちが receiver Stop と decoder Stop のあいだに無い"
     );
-    assert_eq!(mock.slept, Duration::from_millis(800));
+    assert_eq!(mock.slept, Duration::from_millis(600));
     assert_eq!(
         report.component_walk_back,
         vec![
@@ -691,4 +694,51 @@ fn a_receiver_without_a_router_port_fails_the_arm_stage() {
         .unwrap_err();
     assert_eq!(failure.stage, "Arm");
     assert!(failure.detail.contains("router_port"), "{}", failure.detail);
+}
+
+// -----------------------------------------------------------------
+// 204 D — 歩き戻しの第二段も「下流が進む限り待つ」(停止経路と同じ関数)
+// -----------------------------------------------------------------
+
+/// **204 テスト 9(D)**: 全員 Running の歩き戻しで、強制 EOS の後も decoder が書き出しを続けて
+/// いる(`batches_out` が 9 000 ms まで動く)間は `eos_timeout` を越えて待ち、動かなくなってから
+/// `eos_timeout` 静かなら打ち切る —— 停止経路の
+/// `after_the_forced_eos_the_stop_waits_as_long_as_the_decoder_keeps_sending` と同じ形・同じ時間。
+///
+/// 手計算: 第一段 = 受信静止 600 ms → 強制 EOS。第二段のサンプルは 600, 800, … ms、
+/// `batches_out` は 8 800 ms のサンプルまで動き、9 000 ms から不変 → 8 800 + 5 000 =
+/// **13 800 ms** で打ち切り。旧実装(通算 `eos_timeout` の `wait_for_eos`)は 600 + 5 000 =
+/// 5 600 ms で打ち切り、Reset が書き出し途中の送出待ちを捨てていた。打ち切っても run は始まる
+/// (跡の先頭は従来どおり `eos: did not propagate within 5000 ms`)。
+#[test]
+fn the_walk_back_second_stage_waits_while_downstream_moves() {
+    let params = params_with(&[0]);
+    let mut mock = MockTransport::new(&params)
+        .component_in("graw-writer", ComponentState::Running)
+        .component_in("decoder", ComponentState::Running)
+        .component_in("receiver0", ComponentState::Running)
+        .reports_run("graw-writer", 58)
+        .reports_run("decoder", 58)
+        .reports_run("receiver0", 58)
+        .counter_moves_until("decoder", "batches_out", Duration::from_millis(9_000));
+    let report = Sequencer::new(&params, &mut mock)
+        .start_run(59, "", "2026-11-04T09:00:00.000")
+        .unwrap();
+
+    assert_eq!(mock.slept, Duration::from_millis(13_800));
+    assert_eq!(
+        report.component_walk_back[0],
+        "eos: did not propagate within 5000 ms"
+    );
+    let closed = report.walked_back_run.expect("run 58 is closed");
+    assert_eq!(closed.run, Ok(58));
+    assert!(closed.forced_eos);
+    assert!(!closed.eos_closed);
+    for name in ["receiver0", "decoder", "graw-writer"] {
+        assert_eq!(
+            mock.actions(name),
+            vec!["Stop", "Reset", "Configure", "Arm", "Start"],
+            "{name}"
+        );
+    }
 }

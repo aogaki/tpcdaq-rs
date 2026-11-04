@@ -142,5 +142,7 @@ pub(super) fn status_payload() -> StatusPayload {
         bytes_written: 123_456,
         saturation,
         publish_drops: 9,
+        // TODO/204: WS JSON には出ない(skip_serializing)。
+        fragments: None,
     }
 }

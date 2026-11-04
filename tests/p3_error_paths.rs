@@ -150,8 +150,70 @@ impl Default for TopologyOptions {
     }
 }
 
+/// F3 の root-sink: 1 通ごとに 10 ms 眠り(≤ 100 Hz)、受け口(rcvhwm)と内部キューは 1 通 =
+/// 積み残しは decoder の PUSH(HWM 1000)と decoder の PULL(HWM 1000)に溜まる。
+///
+/// run 214 の形を作る: libzmq は読み手が HWM/2(≈ 500 通)まで吸うまで送り手を再開しないので、
+/// decoder は 500 通 ÷ 100 Hz ≈ 5 s 凍る = F3 の `eos_timeout`([`BACKLOG_EOS_TIMEOUT`] = 2 s)の
+/// 2.5 倍。185 の controller(decoder の進みだけを見る)はここで打ち切って `error:eos-timeout`。
+const BACKLOG_SINK_ARGS: &[&str] = &["--throttle-ms", "10", "--rcvhwm", "1", "--queue", "1"];
+
+/// F3 の `eos_timeout`(上の凍りより十分短く、停止の所要を数十秒に収める)。
+const BACKLOG_EOS_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// F3 の receiver の PUSH HWM(1 回の書き込み 20 フレームの一気書きは吸い、落としは decoder が
+/// root-sink に詰まって decoder の PULL(HWM 1000)まで埋まってから起きる深さ)。
+const BACKLOG_RECEIVER_HWM: i32 = 200;
+
+/// F3 の入力 = frameType 1(blkSize=1、big-endian)の正しいフレーム **16 KiB**(ヘッダ 88 B +
+/// item 4 074 個)、cobo 0 / asad 0 = root_sink の `--expect 0:0`。大きさの理由(どちらも 204 の
+/// 赤確認で実測):
+/// * 実 .graw(1 事象 ≈ 1.5 × 10^5 items)だと debug ビルドの decoder(≈ 80 事象 / s)が
+///   root-sink より遅く、decoder が root-sink に詰まらない(185 の controller のまま `normal`)。
+/// * 96 B の最小フレームだとカーネルの TCP バッファが数万通を呑み、HWM で詰まらない。
+const SYNTH_ITEMS: usize = 4_074;
+const SYNTH_FRAME_BYTES: usize = 88 + 4 * SYNTH_ITEMS;
+
+fn synth_frame(event_idx: u32) -> Vec<u8> {
+    let put_be = |b: &mut [u8], at: usize, value: u64, len: usize| {
+        for i in 0..len {
+            b[at + i] = (value >> (8 * (len - 1 - i))) as u8;
+        }
+    };
+    let mut b = vec![0u8; SYNTH_FRAME_BYTES];
+    b[0] = 0x00; // big-endian, blkSize=1
+    put_be(&mut b, 1, SYNTH_FRAME_BYTES as u64, 3); // frameSize
+    put_be(&mut b, 5, 1, 2); // frameType 1
+    put_be(&mut b, 8, 88, 2); // headerSize
+    put_be(&mut b, 10, 4, 2); // itemSize
+    put_be(&mut b, 12, SYNTH_ITEMS as u64, 4); // nItems
+    put_be(&mut b, 22, u64::from(event_idx), 4);
+    // item = aget<<30 | chan<<23 | bucket<<14 | adc。(aget, chan, bucket) は i ごとに一意。
+    for i in 0..SYNTH_ITEMS {
+        let aget = (i % 4) as u32;
+        let chan = ((i / 4) % 68) as u32;
+        let bucket = ((i / 272) % 512) as u32;
+        let adc = (100 + i * 7) as u32 % 4096;
+        let word = (aget << 30) | (chan << 23) | (bucket << 14) | adc;
+        put_be(&mut b, 88 + i * 4, u64::from(word), 4);
+    }
+    b
+}
+
 impl Topology {
     async fn start(env: &E2eEnv, tag: &str, options: TopologyOptions) -> Topology {
+        Self::start_with(env, tag, options, false).await
+    }
+
+    /// `backlog`(204 F3): root-sink を入力より遅くし(`--throttle-ms` + 受け口 1 通)、receiver /
+    /// decoder のバッチを 1 フレーム / 1 フラグメントにする —— decoder リンクの落としと
+    /// decoder → root-sink の積み残しを数千フレームで作るため(既定の 8 MiB バッチでは数万要る)。
+    async fn start_with(
+        env: &E2eEnv,
+        tag: &str,
+        options: TopologyOptions,
+        backlog: bool,
+    ) -> Topology {
         let scratch = scratch_dir("tpcdaq_p3_err", tag);
         let data_root = scratch.join("data");
         std::fs::create_dir_all(&data_root).expect("create data root");
@@ -174,10 +236,15 @@ impl Topology {
         let bridge = Proc::spawn_with_banner(bridge_cmd, "BIND");
 
         // --- 2. root-sink(C++ 実バイナリ)---
-        let sink = Sink::spawn(&env.root_sink, &env.geometry, &data_root, &[]);
+        let sink_args: &[&str] = if backlog { BACKLOG_SINK_ARGS } else { &[] };
+        let sink = Sink::spawn(&env.root_sink, &env.geometry, &data_root, sink_args);
 
         // --- 3. graw-writer / decoder / receiver(プロセス内タスク)---
-        let components = spawn_components(&data_root, &sink.data_ep).await;
+        let components = if backlog {
+            spawn_backlog_components(&data_root, &sink.data_ep).await
+        } else {
+            spawn_components(&data_root, &sink.data_ep).await
+        };
         let gw_command = endpoint_of(&components, "graw-writer");
         let dec_command = endpoint_of(&components, "decoder");
         let receiver_command = endpoint_of(&components, "receiver0");
@@ -226,6 +293,8 @@ impl Topology {
             // 124: power の経路は使わない(省略 = 503)。
             slow_cmd: None,
             slow_devices: Vec::new(),
+            // 204: 本番の `from_config` と同じ配線(`[monitor] sub_endpoint` = root-sink PUB)。
+            root_sink_pub: sink.pub_ep.clone(),
         };
         let (controller_shutdown, controller_rx) = broadcast::channel(1);
         let (rest_tx, rest_rx) = oneshot::channel();
@@ -322,6 +391,91 @@ impl Topology {
             }
         }
     }
+}
+
+/// F3(204)用の 3 コンポーネント: [`spawn_components`] と同じ配線で、receiver / decoder の
+/// バッチだけを 1 フレーム / 1 フラグメントにし、receiver の PUSH HWM を
+/// [`BACKLOG_RECEIVER_HWM`] にする。graw-writer リンクはロスレス(背圧で待つ)のまま。
+async fn spawn_backlog_components(data_root: &Path, sink_data_ep: &str) -> Vec<Component> {
+    use tpcdaq::decoder::{run_decoder, DecoderParams};
+    use tpcdaq::graw_writer::{run_graw_writer, GrawWriterParams};
+    use tpcdaq::receiver::{run_receiver, ReceiverParams};
+
+    let gw_pull = common::free_endpoint();
+    let dec_pull = common::free_endpoint();
+    let mut components = Vec::new();
+
+    let (gw_shutdown, gw_rx) = broadcast::channel(1);
+    let (gw_tx, gw_ep_rx) = oneshot::channel();
+    let gw_handle = tokio::spawn(run_graw_writer(
+        GrawWriterParams {
+            pull_bind: gw_pull.clone(),
+            command_listen: "tcp://127.0.0.1:0".to_string(),
+            output_root: data_root.to_path_buf(),
+            max_file_bytes: tpcdaq::config::DEFAULT_GRAW_WRITER_MAX_FILE_BYTES,
+            flush_interval_ms: tpcdaq::config::DEFAULT_GRAW_WRITER_FLUSH_INTERVAL_MS,
+            expected_sources: vec![0],
+            finalize_delay_ms: 0,
+        },
+        gw_rx,
+        Some(gw_tx),
+    ));
+    components.push(Component {
+        name: "graw-writer",
+        command_endpoint: gw_ep_rx.await.expect("graw-writer command endpoint"),
+        shutdown: gw_shutdown,
+        handle: gw_handle,
+    });
+
+    let (dec_shutdown, dec_rx) = broadcast::channel(1);
+    let (dec_tx, dec_ep_rx) = oneshot::channel();
+    let dec_handle = tokio::spawn(run_decoder(
+        DecoderParams {
+            pull_bind: dec_pull.clone(),
+            push_connect: sink_data_ep.to_string(),
+            command_listen: "tcp://127.0.0.1:0".to_string(),
+            batch_max_bytes: 1, // 1 フラグメント = 1 通
+            batch_max_ms: tpcdaq::config::DEFAULT_BATCH_MAX_MS,
+            heartbeat_ms: tpcdaq::config::DEFAULT_HEARTBEAT_MS,
+            send_timeout_ms: tpcdaq::config::DEFAULT_DECODER_SEND_TIMEOUT_MS,
+            workers: 1,
+            expected_sources: vec![0],
+        },
+        dec_rx,
+        Some(dec_tx),
+    ));
+    components.push(Component {
+        name: "decoder",
+        command_endpoint: dec_ep_rx.await.expect("decoder command endpoint"),
+        shutdown: dec_shutdown,
+        handle: dec_handle,
+    });
+
+    let (recv_shutdown, recv_rx) = broadcast::channel(1);
+    let (recv_tx, recv_ep_rx) = oneshot::channel();
+    let recv_handle = tokio::spawn(run_receiver(
+        ReceiverParams {
+            cobo_id: 0,
+            listen: "127.0.0.1:0".to_string(),
+            command_listen: "tcp://127.0.0.1:0".to_string(),
+            graw_writer_endpoint: gw_pull,
+            decoder_endpoint: dec_pull,
+            batch_max_bytes: 1, // 1 フレーム = 1 通
+            batch_max_ms: tpcdaq::config::DEFAULT_BATCH_MAX_MS,
+            queue_frames: tpcdaq::config::DEFAULT_QUEUE_FRAMES,
+            heartbeat_ms: tpcdaq::config::DEFAULT_HEARTBEAT_MS,
+            hwm: BACKLOG_RECEIVER_HWM,
+        },
+        recv_rx,
+        Some(recv_tx),
+    ));
+    components.push(Component {
+        name: "receiver0",
+        command_endpoint: recv_ep_rx.await.expect("receiver command endpoint"),
+        shutdown: recv_shutdown,
+        handle: recv_handle,
+    });
+    components
 }
 
 /// receiver が期待フレーム数を読み終えるまで待つ(閉塞を 120 s ハングにしない)。
@@ -787,5 +941,214 @@ async fn f1_eos_timeout_leaves_the_run_open_and_f2_the_next_run_hits_a_late_fata
     );
 
     eprintln!("F1/F2: {counts}");
+    cleanup(&topology.scratch);
+}
+
+// =====================================================================
+// F3 — root-sink が積み残しを書いている間の停止(TODO/204、SPEC §1.3 v1.54)
+// =====================================================================
+
+/// **TODO/204 テスト 12(184 ③ と 185 ① の間の穴)**: 本物の root-sink を入力より遅くし
+/// (`--throttle-ms 10`、受け口 1 通)、receiver が decoder リンクで落とし始めるまで合成フレーム
+/// ([`synth_frame`])を流し続けてから(リンクは閉じない = 実機の停止経路)`POST /api/run/stop`。
+///
+/// run 214 では decoder が decoder → root-sink の HWM ヒステリシスで凍り、controller が 5 s で
+/// 打ち切って Reset が停止の EOS を捨てた(`error:eos-timeout`、root-sink の run は開いたまま)。
+/// v1.54 の controller は root-sink の status を見て、root-sink が run を閉じるまで `Stopping` で
+/// 待つ:
+/// * 待っている間 `/api/status.phase == "Stopping"`、`stopping.root_sink_backlog` が減っていく
+/// * 応答 `ok:true` / `reason normal` / `eos_closed true`
+/// * run_stop: `root_complete false`(decoder リンクで落とした)/ `lost_receiver_to_decoder 0` /
+///   `lost_receiver_to_graw 0` / `events_built` 非 null(root-sink の close の status から)
+/// * receiver `messages_abandoned 0`、decoder `batches_abandoned + eos_abandoned 0`(何も捨てていない)
+/// * root-sink のログに `run N closed (`、`run{N}_monitor.root` ができ、inprogress は残らない
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn f3_a_stop_with_a_throttled_root_sink_waits_for_its_close_and_reports_ok() {
+    let Some(env) = e2e_env("F3 (TODO/204 test 12)") else {
+        return;
+    };
+    let mut topology = Topology::start_with(
+        &env,
+        "f3",
+        TopologyOptions {
+            eos_timeout: BACKLOG_EOS_TIMEOUT,
+            ..TopologyOptions::default()
+        },
+        true,
+    )
+    .await;
+
+    let token = topology.acquire().await;
+    let (status, body) = http_async(
+        "POST",
+        topology.rest,
+        "/api/run/start",
+        Some(json!({"token": token, "comment": "f3 throttled root-sink"}).to_string()),
+    )
+    .await;
+    assert_eq!(status, 200, "run/start failed: {body}");
+    let run = body["run"].as_u64().expect("run number") as u32;
+
+    // --- receiver が decoder リンクで落とし始めるまで合成フレームを流す(リンクは閉じない)---
+    // 20 フレーム(320 KiB)を 10 ms ごと(≈ 2 000 フレーム / s = 32 MB/s)、200 フレームごとに
+    // receiver の落としを見る。上限 20 000 フレーム。
+    let data_address = topology.receiver_data_address().await;
+    let receiver_endpoint = topology.endpoint_of("receiver0");
+    let (_stream, sent) = tokio::task::spawn_blocking(move || {
+        let addr: SocketAddr = data_address.parse().expect("receiver data address");
+        let mut stream = TcpStream::connect(addr).expect("connect to the receiver data port");
+        let mut sent = 0u32;
+        while sent < 20_000 {
+            for _ in 0..10 {
+                let chunk: Vec<u8> = (sent..sent + 20).flat_map(synth_frame).collect();
+                stream.write_all(&chunk).expect("write synthetic frames");
+                stream.flush().expect("flush");
+                sent += 20;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let dropped = get_status_blocking(&receiver_endpoint)
+                .metrics
+                .and_then(|m| m["decoder_link_dropped_frames"].as_u64())
+                .unwrap_or(0);
+            if dropped > 0 {
+                break;
+            }
+        }
+        (stream, u64::from(sent))
+    })
+    .await
+    .expect("flooding cobo task");
+    let receiver_endpoint = topology.endpoint_of("receiver0");
+    let want = sent;
+    let frames = wait_for_frames(&receiver_endpoint, want, Duration::from_secs(120)).await;
+    assert_eq!(frames, want, "receiver が全フレームを読めていない");
+    let dropped_before_stop = get_status_blocking(&receiver_endpoint)
+        .metrics
+        .and_then(|m| m["decoder_link_dropped_frames"].as_u64())
+        .unwrap_or(0);
+    assert!(
+        dropped_before_stop > 0,
+        "{sent} フレーム流しても decoder リンクの落としが起きない(root-sink が速すぎる?)"
+    );
+    assert!(
+        topology
+            .sink
+            .wait_for_stderr(&format!("run {run} opened"), Duration::from_secs(30)),
+        "root_sink が run {run} を開いていない"
+    );
+    eprintln!(
+        "F3: sent = {sent} frames, received = {frames}, decoder_link_dropped_frames = \
+         {dropped_before_stop}"
+    );
+
+    // --- 停止(root-sink が積み残しを書き切るまで Stopping)---
+    let rest = topology.rest;
+    let stop_token = token.clone();
+    let stop_started = Instant::now();
+    let stop = tokio::spawn(async move {
+        http_async(
+            "POST",
+            rest,
+            "/api/run/stop",
+            Some(json!({"token": stop_token}).to_string()),
+        )
+        .await
+    });
+    let mut backlogs: Vec<u64> = Vec::new();
+    while !stop.is_finished() {
+        let status = topology.status().await;
+        if status["phase"] == json!("Stopping") {
+            if let Some(backlog) = status["stopping"]["root_sink_backlog"].as_u64() {
+                backlogs.push(backlog);
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let (status, stop_body) = stop.await.expect("run/stop task");
+    let stop_elapsed = stop_started.elapsed();
+    assert_eq!(status, 200, "run/stop failed: {stop_body}");
+    eprintln!(
+        "F3: run/stop 所要 = {:.1} s、root_sink_backlog の推移(0.5 s ごと)= {backlogs:?}",
+        stop_elapsed.as_secs_f64()
+    );
+
+    assert_eq!(stop_body["ok"], json!(true), "stop: {stop_body}");
+    assert_eq!(stop_body["reason"], json!("normal"), "stop: {stop_body}");
+    assert_eq!(stop_body["forced_eos"], json!(true), "stop: {stop_body}");
+    assert_eq!(stop_body["eos_closed"], json!(true), "stop: {stop_body}");
+    assert!(
+        backlogs.len() >= 2,
+        "Stopping の間に root_sink_backlog を 2 回以上見ていない: {backlogs:?}"
+    );
+    assert!(
+        backlogs.last() < backlogs.first(),
+        "root_sink_backlog が減っていない: {backlogs:?}"
+    );
+    assert!(
+        stop_elapsed > BACKLOG_EOS_TIMEOUT * 3,
+        "積み残しがあるのに eos_timeout の 3 倍より早く閉じた: {stop_elapsed:?}"
+    );
+
+    // --- run_stop(SPEC §9.2 v1.53 / v1.54)---
+    let lines = read_logbook(&topology.logbook_path());
+    let stop_record = lines
+        .iter()
+        .find(|l| l["type"] == "run_stop")
+        .unwrap_or_else(|| panic!("run_stop が無い: {lines:?}"));
+    let counters = &stop_record["counters"];
+    assert_eq!(stop_record["ok"], json!(true), "{stop_record}");
+    assert_eq!(stop_record["reason"], json!("normal"), "{stop_record}");
+    assert_eq!(stop_record["eos_closed"], json!(true), "{stop_record}");
+    assert_eq!(counters["root_complete"], json!(false), "{counters}");
+    assert_eq!(counters["lost_receiver_to_decoder"], json!(0), "{counters}");
+    assert_eq!(counters["lost_receiver_to_graw"], json!(0), "{counters}");
+    assert_eq!(counters["overflow_frames"], json!(0), "{counters}");
+    assert!(
+        counters["decoder_link_dropped_frames"].as_u64() > Some(0),
+        "{counters}"
+    );
+    assert!(counters["events_built"].is_u64(), "{counters}");
+
+    // --- 何も捨てていない(Reset は root-sink の close の後)---
+    let receiver = get_status_blocking(&receiver_endpoint)
+        .metrics
+        .unwrap_or(Value::Null);
+    assert_eq!(receiver["messages_abandoned"], json!(0), "{receiver}");
+    let decoder_endpoint = topology.endpoint_of("decoder");
+    let decoder = tokio::task::spawn_blocking(move || {
+        get_status_blocking(&decoder_endpoint)
+            .metrics
+            .unwrap_or(Value::Null)
+    })
+    .await
+    .expect("decoder GetStatus task");
+    assert_eq!(decoder["batches_abandoned"], json!(0), "{decoder}");
+    assert_eq!(decoder["eos_abandoned"], json!(0), "{decoder}");
+    assert_eq!(decoder["eos_out"], json!(1), "{decoder}");
+
+    // --- root-sink は run を閉じた(EOS で finalize、monitor.root、inprogress 無し)---
+    assert!(
+        topology.sink.stderr_has(&format!("run {run} closed (")),
+        "root_sink が run {run} を閉じていない"
+    );
+    let run_dir = topology.run_dir(run);
+    let monitor_file = run_dir.join(format!("run{run:04}_monitor.root"));
+    assert!(
+        wait_for_file(&monitor_file, Duration::from_secs(30)),
+        "{} が出来なかった(dir={:?})",
+        monitor_file.display(),
+        names_in(&run_dir)
+    );
+    let names = names_in(&run_dir);
+    assert!(
+        !names.iter().any(|n| n.contains("inprogress")),
+        "書きかけの run が残っている: {names:?}"
+    );
+
+    topology.shutdown_rust().await;
+    let counts = topology.sink.terminate(Duration::from_secs(60));
+    assert_eq!(count(&counts, "eos"), 1, "{counts}");
+    assert_eq!(counts["fatal"], "", "{counts}");
+    eprintln!("F3: {counts}");
     cleanup(&topology.scratch);
 }

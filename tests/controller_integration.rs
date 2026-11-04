@@ -353,6 +353,10 @@ struct Harness {
     _data_listeners: Vec<TcpListener>,
 }
 
+/// 204: root-sink の monitor PUB が居ない口(何も listen していない)。status は 1 通も来ないので
+/// 停止は root-sink を「見ていない」= 従来の 3 点判定で閉じる。
+const NO_ROOT_SINK: &str = "tcp://127.0.0.1:1";
+
 fn temp_root(tag: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
@@ -412,7 +416,10 @@ async fn harness_full(
 
     let (graw_endpoint, graw_writer, _) = spawn_fake(
         json!({
-            "files_open": if eos_closed { 0 } else { 1 },
+            // 204(SPEC §1.3 v1.54 B-4): graw-writer が到達可能でファイルを開いたままなら停止は
+            // 時計で打ち切らない。`eos_closed = false` の形は「EOS が欠けるのは decoder 側だけ」
+            // (実機の receiver は Stop で EOS を graw-writer に先に送り、graw-writer はすぐ閉じる)。
+            "files_open": 0,
             "files_closed": 2,
             // 非対称なバイト数(取り違え検出用)。
             "files": [
@@ -498,6 +505,7 @@ async fn harness_full(
         config_ids,
         ecc_config_dir,
         slow_cmd,
+        NO_ROOT_SINK,
     )
     .await;
 
@@ -528,6 +536,7 @@ async fn spawn_controller(
     config_ids: ConfigIds,
     ecc_config_dir: Option<PathBuf>,
     slow_cmd: Option<String>,
+    root_sink_pub: &str,
 ) -> (BoundEndpoints, FakeEcc, ControllerParams) {
     let ecc = FakeEcc::spawn();
     let params = ControllerParams {
@@ -564,6 +573,7 @@ async fn spawn_controller(
             ("lv".to_string(), "hmp2020".to_string()),
             ("gas".to_string(), "bronkhorst_flowbus".to_string()),
         ],
+        root_sink_pub: root_sink_pub.to_string(),
     };
 
     let bound = launch_controller(params.clone(), shutdown).await;
@@ -976,6 +986,297 @@ async fn the_status_shows_stopping_only_while_the_stop_is_waiting() {
     assert_eq!(counters["root_complete"], Value::Null);
 
     harness.shutdown();
+}
+
+// ---------------------------------------------------------------------
+// 204 — 停止は root-sink の status を見る(SPEC §1.3 v1.54 / §5.3 / §8.1)
+// ---------------------------------------------------------------------
+
+/// root-sink の monitor PUB が撃つ status の中身(テストが途中で書き換える)。
+struct FakeRootSinkState {
+    run: u32,
+    state: &'static str,
+    events_built: u64,
+    fragments: u64,
+    /// true の間は 1 通ごとに `events_built` を +1(積み残しを書いている姿)。
+    moving: bool,
+}
+
+/// root-sink の monitor PUB の代役: SPEC §5.3 の `status`(186 以降の形 = `fragments` 付き)を
+/// 20 ms ごとに撃つ。エンベロープは SPEC §2.2 の `{"Data": [source_id 101, run, seq, ns, payload]}`。
+struct FakeRootSinkPub {
+    endpoint: String,
+    state: Arc<Mutex<FakeRootSinkState>>,
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl FakeRootSinkPub {
+    fn spawn() -> Self {
+        let context = zmq::Context::new();
+        let socket = context.socket(zmq::PUB).unwrap();
+        socket.set_linger(0).unwrap();
+        socket.bind("tcp://127.0.0.1:*").unwrap();
+        let endpoint = socket.get_last_endpoint().unwrap().unwrap();
+        let state = Arc::new(Mutex::new(FakeRootSinkState {
+            run: 0,
+            state: "idle",
+            events_built: 0,
+            fragments: 0,
+            moving: false,
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handle = std::thread::spawn({
+            let state = Arc::clone(&state);
+            let stop = Arc::clone(&stop);
+            move || {
+                let mut seq = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    let (run, payload) = {
+                        let mut s = state.lock().unwrap();
+                        if s.moving {
+                            s.events_built += 1;
+                        }
+                        let payload = json!({
+                            "kind": "status",
+                            "run": s.run,
+                            "state": s.state,
+                            "events_built": s.events_built,
+                            "events_incomplete": 3,
+                            "late_fragments": 2,
+                            "pending_events": 0,
+                            "frames_per_cobo": {"0": 3852},
+                            "bytes_written": 70_368_744u64,
+                            "saturation": {},
+                            "publish_drops": 0,
+                            "fragments": s.fragments,
+                        });
+                        (s.run, payload)
+                    };
+                    let mut message = vec![0x81]; // fixmap(1)
+                    message.extend_from_slice(&[0xa4, b'D', b'a', b't', b'a']); // "Data"
+                    message.push(0x95); // fixarray(5)
+                    for value in [101u64, u64::from(run), seq, 1] {
+                        message.push(0xcf); // uint64
+                        message.extend_from_slice(&value.to_be_bytes());
+                    }
+                    message.extend_from_slice(&rmp_serde::to_vec_named(&payload).unwrap());
+                    let _ = socket.send(message, 0);
+                    seq += 1;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        });
+        Self {
+            endpoint,
+            state,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn set(&self, update: impl FnOnce(&mut FakeRootSinkState)) {
+        update(&mut self.state.lock().unwrap());
+    }
+}
+
+impl Drop for FakeRootSinkPub {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// **204 テスト 11**: root-sink が積み残しを書いている間の停止は `Stopping` のまま待ち、
+/// `/api/status.stopping` に `root_sink_backlog` と `root_sink: {state, events_built, fragments}` が
+/// 出る(Running / Idle ではキーごと無い)。root-sink が run を閉じた(`idle`)ら停止は `normal`
+/// で閉じ、run_stop の `events_built` は閉じた status の値。
+///
+/// 手計算: receiver0 は frames 3 852 − overflow 1 − decoder リンクで落とした 120 = 3 731 本を
+/// decoder へ出した。root-sink の fragments 3 000 → `root_sink_backlog` = **731**。decoder_backlog
+/// は frames_in 3 900 − fragments_out 3 852 = 48(185 と同じフェイク値)。
+/// decoder の EOS と graw-writer の close は最初から揃っているが、root-sink が run を開いて
+/// 書き続けている(`events_built` が 20 ms ごとに +1)ので `eos_timeout`(400 ms)を越えても待つ。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_status_shows_the_root_sink_backlog_while_stopping() {
+    let (shutdown, _) = broadcast::channel(1);
+    let output_root = temp_root("root-sink-backlog");
+    let root_sink = FakeRootSinkPub::spawn();
+
+    let (graw_endpoint, _, _) =
+        spawn_fake(json!({"files_open": 0, "files": []}), shutdown.subscribe()).await;
+    let (decoder_endpoint, _, _) = spawn_fake(
+        json!({"eos_in": 1, "eos_out": 1, "malformed": 0,
+               "frames_in": 3900, "fragments_out": 3852}),
+        shutdown.subscribe(),
+    )
+    .await;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (receiver_endpoint, _, _) = spawn_fake(
+        json!({
+            "cobo_id": 0,
+            "bind_address": address.to_string(),
+            "router_port": address.port(),
+            "frames": 3852,
+            "overflow_frames": 1,
+            "decoder_link_dropped_frames": 120,
+            "bytes": 30_108_684u64,
+        }),
+        shutdown.subscribe(),
+    )
+    .await;
+    let components = vec![
+        ComponentEndpoint {
+            name: "graw-writer".to_string(),
+            endpoint: graw_endpoint,
+            kind: ComponentKind::GrawWriter,
+        },
+        ComponentEndpoint {
+            name: "decoder".to_string(),
+            endpoint: decoder_endpoint,
+            kind: ComponentKind::Decoder,
+        },
+        ComponentEndpoint {
+            name: "receiver0".to_string(),
+            endpoint: receiver_endpoint,
+            kind: ComponentKind::Receiver { cobo_id: 0 },
+        },
+    ];
+    let cobos = vec![CoboSpec {
+        id: 0,
+        listen: "0.0.0.0:46005".to_string(),
+        data_sender_id: "CoBo[0]".to_string(),
+    }];
+    let (BoundEndpoints { rest, .. }, _ecc, _) = spawn_controller(
+        &shutdown,
+        &output_root,
+        cobos,
+        components,
+        None,
+        ConfigIds::same("integration"),
+        None,
+        None,
+        &root_sink.endpoint,
+    )
+    .await;
+
+    let (status, body) = post(
+        rest,
+        "/api/control/acquire",
+        json!({"operator": "aogaki", "passphrase": "change-me"}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let token = body["token"].as_str().unwrap().to_string();
+    let (status, body) = post(
+        rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let run = body["run"].as_u64().unwrap() as u32;
+
+    // root-sink が run を開き、積み残しを書いている。
+    root_sink.set(|s| {
+        s.run = run;
+        s.state = "running";
+        s.fragments = 3000;
+        s.moving = true;
+    });
+    std::thread::sleep(Duration::from_millis(300)); // status が SUB に届くまで(20 ms 周期)
+    let (_, running) = get(rest, "/api/status");
+    assert_eq!(running["phase"], json!("Running"), "{running}");
+    assert!(
+        running.get("stopping").is_none(),
+        "Running 中に出ている: {running}"
+    );
+
+    let stop_token = token.clone();
+    let stopper =
+        std::thread::spawn(move || post(rest, "/api/run/stop", json!({"token": stop_token})));
+    let mut stopping = Value::Null;
+    wait_until("phase Stopping with the root-sink status", || {
+        let (status, body) = get(rest, "/api/status");
+        assert_eq!(status, 200, "{body}");
+        if body["phase"] == json!("Stopping") && body["stopping"]["root_sink"].is_object() {
+            stopping = body;
+            true
+        } else {
+            false
+        }
+    });
+    assert_eq!(
+        stopping["stopping"]["root_sink_backlog"],
+        json!(731),
+        "{stopping}"
+    );
+    assert_eq!(
+        stopping["stopping"]["decoder_backlog"],
+        json!(48),
+        "{stopping}"
+    );
+    let summary = &stopping["stopping"]["root_sink"];
+    // 204 追補 C: どの run の status かを `run` で示す(停止中の run と違う run なら null)。
+    assert_eq!(summary["run"], json!(run), "{stopping}");
+    assert_eq!(summary["state"], json!("running"), "{stopping}");
+    assert_eq!(summary["fragments"], json!(3000), "{stopping}");
+    assert!(summary["events_built"].is_u64(), "{stopping}");
+    assert_eq!(
+        summary.as_object().unwrap().len(),
+        4,
+        "{{run, state, events_built, fragments}} だけ: {summary}"
+    );
+
+    // eos_timeout(400 ms)の 3 倍を越えても、root-sink が書いている間は Stopping のまま。
+    std::thread::sleep(Duration::from_millis(1_200));
+    let (_, still) = get(rest, "/api/status");
+    assert_eq!(still["phase"], json!("Stopping"), "{still}");
+
+    // root-sink が run を閉じる → 停止は normal で閉じる。
+    root_sink.set(|s| {
+        s.moving = false;
+        s.state = "idle";
+        s.events_built = 2999;
+    });
+    let (status, stop) = stopper.join().unwrap();
+    assert_eq!(status, 200, "{stop}");
+    assert_eq!(stop["ok"], json!(true), "{stop}");
+    assert_eq!(stop["reason"], json!("normal"), "{stop}");
+    assert_eq!(stop["eos_closed"], json!(true), "{stop}");
+    let (_, idle) = get(rest, "/api/status");
+    assert_eq!(idle["phase"], json!("Idle"), "{idle}");
+    assert!(idle.get("stopping").is_none(), "Idle で残っている: {idle}");
+
+    let (status, body) = get(rest, "/api/logbook?since_seq=0");
+    assert_eq!(status, 200, "{body}");
+    let run_stop = body["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["type"] == json!("run_stop"))
+        .cloned()
+        .unwrap_or_else(|| panic!("run_stop が無い: {body}"));
+    assert_eq!(
+        run_stop["counters"]["events_built"],
+        json!(2999),
+        "{run_stop}"
+    );
+    assert_eq!(
+        run_stop["counters"]["events_incomplete"],
+        json!(3),
+        "{run_stop}"
+    );
+    assert_eq!(
+        run_stop["counters"]["late_fragments"],
+        json!(2),
+        "{run_stop}"
+    );
+
+    let _ = shutdown.send(());
+    let _ = std::fs::remove_dir_all(&output_root);
+    drop(listener);
 }
 
 /// controller を通さずにコンポーネント(`/api/status` の `components[index]`)へ
@@ -2897,6 +3198,7 @@ async fn real_chain(tag: &str) -> (RealChain, PathBuf) {
         ConfigIds::same("integration"),
         Some(ecc_config_dir.clone()),
         None,
+        NO_ROOT_SINK,
     )
     .await;
 

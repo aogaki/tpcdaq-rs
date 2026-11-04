@@ -230,6 +230,17 @@ pub(super) fn graw_frames(metrics: Option<&Value>) -> Option<u64> {
     Some(asad + ctrl)
 }
 
+/// run_stop の `events_built` / `events_incomplete` / `late_fragments`(SPEC §9.2 v1.54、TODO/204 C)。
+/// root-sink がその run を閉じた(`idle`)status を観測できた run ではその値(v1.50 以降は run ごと)、
+/// 観測できなければ触らない(= [`counters_from`] の `None` のまま)。
+pub(super) fn fill_root_sink_counters(counters: &mut Counters, closed: Option<&StatusPayload>) {
+    if let Some(closed) = closed {
+        counters.events_built = Some(closed.events_built);
+        counters.events_incomplete = Some(closed.events_incomplete);
+        counters.late_fragments = Some(closed.late_fragments);
+    }
+}
+
 /// `run_stop.counters.root_complete`(SPEC §1.4-8 v1.53)= `overflow_frames == 0 ∧
 /// decoder_link_dropped_frames == 0 ∧ eos_closed ∧ decoder_abandoned == 0`。材料のどれかが
 /// `None` なら `None`(TODO/185 §1-C「どれかが null なら null」)。
@@ -255,6 +266,58 @@ pub(super) fn decoder_backlog(
         notes.push(format!(
             "{}: fragments_out {fragments_out} > frames_in {frames_in} — decoder_backlog is null",
             decoder.name
+        ));
+    }
+    backlog
+}
+
+/// `GET /api/status` の `stopping.root_sink_backlog`(TODO/204 C、187 ③ の「残り N」)=
+/// Σ receiver(`frames − overflow_frames − decoder_link_dropped_frames`)− root-sink の `fragments`
+/// = decoder リンクへ出たのに root-sink がまだ受け取っていないフレーム数(ctrl フレームは
+/// フラグメントにならないので 1 run あたり数本は残る)。
+///
+/// どれか取れなければ `None`: 設定にある receiver が居ない・キーが無い・root-sink の status が
+/// 無い / `fragments` を出さない古い root-sink / **停止中の run と違う run の status**(別の run の
+/// 数を引くと意味の無い値になる)。負になる食い違いは `None` + `notes`(silent にしない)。
+pub(super) fn root_sink_backlog(
+    params: &ControllerParams,
+    statuses: &[ComponentStatus],
+    root_sink: Option<&StatusPayload>,
+    run: Option<u32>,
+    notes: &mut Vec<String>,
+) -> Option<u64> {
+    let root_sink = root_sink.filter(|status| Some(status.run) == run)?;
+    let fragments = root_sink.fragments?;
+    let receivers: Vec<&ComponentStatus> = statuses
+        .iter()
+        .filter(|s| matches!(s.kind, ComponentKind::Receiver { .. }))
+        .collect();
+    if receivers.is_empty() || receivers.len() < params.cobos.len() {
+        return None;
+    }
+    let mut delivered = 0u64;
+    for receiver in receivers {
+        let frames = receiver.metric_u64("frames")?;
+        let overflow = receiver.metric_u64("overflow_frames")?;
+        let dropped = receiver.metric_u64("decoder_link_dropped_frames")?;
+        let Some(sent) = frames
+            .checked_sub(overflow)
+            .and_then(|n| n.checked_sub(dropped))
+        else {
+            notes.push(format!(
+                "{}: frames {frames} < overflow_frames {overflow} + decoder_link_dropped_frames \
+                 {dropped} — root_sink_backlog is null",
+                receiver.name
+            ));
+            return None;
+        };
+        delivered += sent;
+    }
+    let backlog = delivered.checked_sub(fragments);
+    if backlog.is_none() {
+        notes.push(format!(
+            "root-sink fragments {fragments} > frames sent to the decoder {delivered} — \
+             root_sink_backlog is null"
         ));
     }
     backlog

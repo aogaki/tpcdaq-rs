@@ -910,3 +910,527 @@ fn counters_keep_a_key_for_every_configured_cobo() {
     assert_eq!(counters.frames.get("0"), Some(&0));
     assert_eq!(counters.frames.get("1"), Some(&0));
 }
+
+// -----------------------------------------------------------------
+// 204(SPEC §1.3 v1.54): 第二段は root-sink の進みと close も見る / ロスレスの守り
+// -----------------------------------------------------------------
+
+/// 停止する run(非対称: 受け入れ試験の run 214)。
+const RUN: u32 = 214;
+
+/// root-sink の status 1 通(186 以降の形 = `fragments` 付き)。他の値は非対称な定数。
+fn root_sink(
+    run: u32,
+    state: &str,
+    events_built: u64,
+    bytes_written: u64,
+    fragments: u64,
+) -> crate::monitor::StatusPayload {
+    crate::monitor::StatusPayload {
+        kind: "status".to_string(),
+        run,
+        state: state.to_string(),
+        events_built,
+        events_incomplete: 3,
+        late_fragments: 2,
+        pending_events: 5,
+        frames_per_cobo: BTreeMap::from([("0".to_string(), 1109)]),
+        bytes_written,
+        saturation: BTreeMap::new(),
+        publish_drops: 0,
+        fragments: Some(fragments),
+    }
+}
+
+/// 台本: 読み k 回目(0 始まり)に `status(k)` を返す。`received_at` は読みごとに 1 ms 進める
+/// (= 毎回新しい 1 通が届いた形)。尽きた後は最後の 1 通が同じ `received_at` のまま返る
+/// (= 届かなくなった、MockTransport の流儀)。
+fn script(
+    n: usize,
+    status: impl Fn(usize) -> crate::monitor::StatusPayload,
+) -> Vec<Option<RootSinkStatus>> {
+    let base = Instant::now();
+    (0..n)
+        .map(|k| {
+            Some(RootSinkStatus {
+                received_at: base + Duration::from_millis(k as u64),
+                payload: status(k),
+            })
+        })
+        .collect()
+}
+
+/// `stop_run` が root-sink を読む k 回目(0 始まり)の仮想時刻。root-sink は EOS の判定
+/// (`eos_complete`)1 回につき 1 回読む。受信が止まっている停止では第一段 = 読み 0–3
+/// (0 / 200 / 400 / 600 ms、静止 600 ms ≥ 500 ms で強制 EOS —— 手計算は
+/// `stop_forces_eos_as_soon_as_the_receivers_go_quiet`)、第二段 = 読み 4 の 600 ms から 200 ms 刻み。
+fn read_at(k: usize) -> Duration {
+    let k = k as u64;
+    Duration::from_millis(if k < 4 { 200 * k } else { 600 + 200 * (k - 4) })
+}
+
+/// 観測カウンタを全部載せて**動かない**値にする(欠けの note を出さず、動くのは各テストが
+/// 指定したものだけ、という形をはっきりさせる —— `each_observed_counter_alone_…` と同じ値)。
+fn still_chain(params: &ControllerParams) -> MockTransport {
+    let mut mock = MockTransport::new(params);
+    mock.set_metric("receiver0", "batches", json!(1288));
+    mock.set_metric("decoder", "frames_in", json!(3852));
+    mock.set_metric("decoder", "batches_out", json!(1287));
+    mock.set_metric("graw-writer", "ctrl_frames", json!(2));
+    mock.set_metric(
+        "graw-writer",
+        "asad",
+        json!([{"cobo": 0, "asad": 0, "bytes": 6528, "frames": 3850}]),
+    );
+    mock
+}
+
+/// 停止の後始末(上流から Stop → Reset。強制 EOS の receiver へは Stop を撃ち直さない)。
+fn forced_stop_commands() -> Vec<Call> {
+    vec![
+        Call::new("ecc", "stop"),
+        Call::new("receiver0", "Stop"),
+        Call::new("receiver0", "Reset"),
+        Call::new("decoder", "Stop"),
+        Call::new("decoder", "Reset"),
+        Call::new("graw-writer", "Stop"),
+        Call::new("graw-writer", "Reset"),
+    ]
+}
+
+/// **204 テスト 1(run 214 の形)**: decoder は decoder → root-sink の HWM ヒステリシスで凍って
+/// いる(`frames_in` / `batches_out` 不変、EOS も出せない)が、root-sink は積み残しを書き続けて
+/// いる(`events_built` が読みごとに +17)。`eos_timeout`(5 s)を何倍越えても Reset は撃たず、
+/// root-sink が run 214 を閉じた(`idle`)読みの**後**に Stop → Reset。
+///
+/// 手計算: root-sink は読み 0–78 が `running`、読み 79 = `read_at(79)` = 600 + 75 × 200 =
+/// **15 600 ms** で `idle`。decoder の EOS はその 1 周前の 15 400 ms に流れ切る(`eos_in` /
+/// `eos_out` が揃う)が、root-sink がまだ開いているので待つ(B-2)。closing の events_built =
+/// 10 000 + 17 × 79 = 11 343。旧実装は観測カウンタが 1 つも動かないので 600 + 5 000 = 5 600 ms
+/// で打ち切っていた(run 214 の `error:eos-timeout`)。
+#[test]
+fn a_decoder_frozen_by_a_full_pipe_does_not_end_the_stop_while_root_sink_keeps_writing() {
+    let params = params_with(&[0]);
+    let mut mock = still_chain(&params).with_root_sink_script(script(80, |k| {
+        let state = if k < 79 { "running" } else { "idle" };
+        root_sink(RUN, state, 10_000 + 17 * k as u64, 70_368_744, 9_000)
+    }));
+    mock.eos_after_slept = Some(Duration::from_millis(15_400));
+    let report = Sequencer::new(&params, &mut mock)
+        .with_run(RUN)
+        .stop_run(StopMode::Normal);
+
+    assert!(report.forced_eos);
+    assert!(
+        report.eos_closed,
+        "root-sink が書き続けているのに閉じ損ねた: {:?}",
+        report.notes
+    );
+    assert_eq!(report.reason, "normal");
+    assert!(report.ok);
+    assert_eq!(mock.slept, Duration::from_millis(15_600));
+    assert!(mock.slept > params.eos_timeout * 3);
+    assert_eq!(mock.root_sink_polled_at.len(), 80, "読み 79 で閉じる");
+    let closing_read = *mock.root_sink_polled_at.last().unwrap();
+    for (component, action) in [
+        ("receiver0", "Reset"),
+        ("decoder", "Stop"),
+        ("decoder", "Reset"),
+    ] {
+        assert!(
+            mock.index_of(component, action).unwrap() > closing_read,
+            "root-sink の close より前に {component} {action}: {:?}",
+            mock.calls
+        );
+    }
+    assert_eq!(mock.commands(), forced_stop_commands());
+}
+
+/// **204 テスト 2(B-2)**: decoder の `eos_out = 1` と graw-writer の `files_open = 0` は強制 EOS の
+/// 直後(600 ms)に揃うが、root-sink はまだ run 214 を書いている(`bytes_written` が読みごとに
+/// +4 096)→ 3 点が揃っても待つ。root-sink が `idle` を言った読みで完了し、decoder を畳むのは
+/// その後。
+///
+/// 手計算: `idle` は読み 54 = 600 + 50 × 200 = **10 600 ms**。旧実装は 3 点が揃った 600 ms で
+/// 閉じていた(root-sink が書き終える前に Idle へ戻る = 次の run の Data が古い EOS を追い越す)。
+#[test]
+fn the_stop_waits_for_root_sink_to_close_the_run_before_resetting_the_decoder() {
+    let params = params_with(&[0]);
+    let mut mock = still_chain(&params).with_root_sink_script(script(55, |k| {
+        let state = if k < 54 { "running" } else { "idle" };
+        root_sink(RUN, state, 9_000, 1_000_000 + 4096 * k as u64, 9_000)
+    }));
+    mock.set_metric("decoder", "eos_in", json!(1));
+    mock.set_metric("decoder", "eos_out", json!(1));
+    let report = Sequencer::new(&params, &mut mock)
+        .with_run(RUN)
+        .stop_run(StopMode::Normal);
+
+    assert!(report.eos_closed, "{:?}", report.notes);
+    assert_eq!(report.reason, "normal");
+    assert_eq!(mock.slept, Duration::from_millis(10_600));
+    assert_eq!(mock.commands(), forced_stop_commands());
+    let closing_read = *mock.root_sink_polled_at.last().unwrap();
+    assert!(
+        mock.index_of("decoder", "Stop").unwrap() > closing_read,
+        "root-sink が閉じる前に decoder を畳んでいる: {:?}",
+        mock.calls
+    );
+}
+
+/// **204 テスト 3**: root-sink の status が run 214 の `running` を一度も言わない ——
+/// 不在(status 無し)/ 0 事象の run(直前の run 213 を閉じたままの `idle`)/ 前の run 213 を
+/// まだ開いている(stale)—— なら root-sink の close は待たず、従来の 3 点で閉じる。
+/// 時間は `stop_forces_eos_as_soon_as_the_receivers_go_quiet` と同じ 600 ms。
+#[test]
+fn a_run_root_sink_never_opened_does_not_wait_for_its_close() {
+    let params = params_with(&[0]);
+    let cases: [(&str, Vec<Option<RootSinkStatus>>); 3] = [
+        ("absent", Vec::new()),
+        (
+            "idle on the previous run",
+            script(1, |_| root_sink(RUN - 1, "idle", 108, 6528, 108)),
+        ),
+        (
+            "still running the previous run",
+            script(1, |_| root_sink(RUN - 1, "running", 108, 6528, 108)),
+        ),
+    ];
+    for (case, root_sink_script) in cases {
+        let mut mock = MockTransport::new(&params).with_root_sink_script(root_sink_script);
+        mock.eos_after_polls = Some(4);
+        let report = Sequencer::new(&params, &mut mock)
+            .with_run(RUN)
+            .stop_run(StopMode::Normal);
+
+        assert!(report.eos_closed, "{case}: {:?}", report.notes);
+        assert_eq!(report.reason, "normal", "{case}");
+        assert_eq!(mock.slept, Duration::from_millis(600), "{case}");
+    }
+}
+
+/// **204 テスト 4(B-3)**: run 214 を開いているのを見た後で root-sink の status が来なくなり
+/// (読み 9 の 1 通が同じ `received_at` のまま残る)、decoder も凍っている → 観測集合が
+/// `eos_timeout` のあいだ 1 つも動かないので打ち切り、`error:eos-timeout`、Reset。
+///
+/// 手計算: events_built は読み 0–9 で +1 ずつ。最後に動いたサンプルは読み 9 = 1 600 ms、
+/// そこから不変が 5 000 ms 積もって **6 600 ms** で打ち切り(第二段の待ちは 6 000 ms)。
+#[test]
+fn a_root_sink_that_stops_publishing_counts_as_still_and_the_stop_times_out() {
+    let params = params_with(&[0]);
+    let mut mock = still_chain(&params).with_root_sink_script(script(10, |k| {
+        root_sink(RUN, "running", 500 + k as u64, 70_368_744, 9_000)
+    }));
+    let report = Sequencer::new(&params, &mut mock)
+        .with_run(RUN)
+        .stop_run(StopMode::Normal);
+
+    assert!(report.forced_eos);
+    assert!(!report.eos_closed);
+    assert_eq!(report.reason, "error:eos-timeout");
+    assert_eq!(mock.slept, Duration::from_millis(6_600));
+    assert!(
+        report.notes.iter().any(|n| n
+            == "EOS did not propagate within 5000 ms of no downstream progress after the \
+                forced EOS — waited 6000 ms; the observed counters last moved 5.0 s ago"),
+        "{:?}",
+        report.notes
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("root-sink did not close run 214")),
+        "root-sink が閉じなかった事実が note に無い: {:?}",
+        report.notes
+    );
+    // 打ち切りの後は畳む(Reset が撃たれる)。
+    assert_eq!(mock.commands(), forced_stop_commands());
+}
+
+/// **204 テスト 5(B-1)**: root-sink の `events_built` / `bytes_written` / `fragments` の 1 つ
+/// 1 つが、**単独で**動いても第二段を引き延ばす(`each_observed_counter_alone_…` の root-sink 版)。
+///
+/// 手計算: その値は読み 0–15 で +1 ずつ(読み 15 = 2 800 ms、読み 16 = 3 000 ms から不変 =
+/// 「3 000 ms まで動く」)→ 2 800 + 5 000 = **7 800 ms** で打ち切り(既存の 4 系統と同じ)。
+/// root-sink は run 214 を開いたまま閉じないので EOS は完了しない。
+#[test]
+fn root_sink_counters_alone_keep_the_second_stage_waiting() {
+    let params = params_with(&[0]);
+    for key in ["events_built", "bytes_written", "fragments"] {
+        // 動く 1 つだけ 1 000 + k、残り 2 つは定数(events_built 9 000 / bytes 70 368 744 /
+        // fragments 9 000)。
+        let mut mock = still_chain(&params).with_root_sink_script(script(16, |k| {
+            let moving = 1_000 + k as u64;
+            let (events_built, bytes_written, fragments) = match key {
+                "events_built" => (moving, 70_368_744, 9_000),
+                "bytes_written" => (9_000, moving, 9_000),
+                _ => (9_000, 70_368_744, moving),
+            };
+            root_sink(RUN, "running", events_built, bytes_written, fragments)
+        }));
+        let report = Sequencer::new(&params, &mut mock)
+            .with_run(RUN)
+            .stop_run(StopMode::Normal);
+
+        assert!(!report.eos_closed, "{key}");
+        assert_eq!(
+            mock.slept,
+            Duration::from_millis(7_800),
+            "root-sink の {key} が動いているのに第二段を引き延ばしていない"
+        );
+    }
+}
+
+/// **204 テスト 6(B-4、ロスレスの守り)**: 観測カウンタは全部静止・root-sink 不在・decoder 側の
+/// EOS は届いているが、graw-writer は到達可能なままファイルを 1 本開いている(ディスクの詰まり)。
+/// `eos_timeout` の 3 倍を越えても**打ち切らない**(Reset は receiver の graw リンクの送出待ちを
+/// 捨てる = graw の意図的ドロップ)。note は 1 行だけ。`files_open` が 0 になった読みで従来どおり
+/// 3 点が揃って閉じる。
+///
+/// 手計算: 第二段の静止は 600 ms のサンプルから積もり、5 600 / 10 600 / 15 600 ms で
+/// `eos_timeout` を越える(そのたびに warn、打ち切らない)。graw-writer は 16 000 ms から
+/// `files_open = 0` → その判定で完了。**16 000 ms**(> 3 × 5 000 + 600)。
+#[test]
+fn the_stop_never_resets_while_graw_writer_is_reachable_with_open_files() {
+    let params = params_with(&[0]);
+    let mut mock = still_chain(&params).graw_files_open_until(Duration::from_millis(16_000));
+    mock.set_metric("decoder", "eos_in", json!(1));
+    mock.set_metric("decoder", "eos_out", json!(1));
+    let report = Sequencer::new(&params, &mut mock)
+        .with_run(RUN)
+        .stop_run(StopMode::Normal);
+
+    assert_eq!(mock.slept, Duration::from_millis(16_000));
+    assert!(report.eos_closed, "{:?}", report.notes);
+    assert_eq!(report.reason, "normal");
+    assert_eq!(mock.commands(), forced_stop_commands());
+    let guard_notes: Vec<&String> = report
+        .notes
+        .iter()
+        .filter(|n| n.contains("the lossless link is never cut by a timer"))
+        .collect();
+    assert_eq!(
+        guard_notes,
+        vec!["graw-writer still has 1 files open — waiting; the lossless link is never cut by a timer"],
+        "{:?}",
+        report.notes
+    );
+}
+
+/// **204 テスト 7**: graw-writer に GetStatus が届かない(プロセスが居ない)なら守りは効かず、
+/// 今どおり `eos_timeout` で打ち切る: 第一段 600 ms + 静止 5 000 ms = **5 600 ms**。
+#[test]
+fn an_unreachable_graw_writer_lets_the_stop_time_out() {
+    let params = params_with(&[0]);
+    let mut mock = still_chain(&params).unreachable("graw-writer");
+    let report = Sequencer::new(&params, &mut mock)
+        .with_run(RUN)
+        .stop_run(StopMode::Normal);
+
+    assert_eq!(report.reason, "error:eos-timeout");
+    assert!(!report.eos_closed);
+    assert_eq!(mock.slept, Duration::from_millis(5_600));
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("graw-writer") && n.contains("GetStatus failed")),
+        "{:?}",
+        report.notes
+    );
+    // receiver / decoder は畳まれる(graw-writer は不達なので Stop / Reset も届かないが撃つ)。
+    assert_eq!(mock.actions("receiver0"), vec!["Stop", "Reset"]);
+    assert_eq!(mock.actions("decoder"), vec!["Stop", "Reset"]);
+}
+
+/// **204(主対話の裁定 1 = 案 β)**: 守りが外れる 2 つの形。graw-writer は到達可能でファイルを
+/// 開いたままだが、待っても自力で閉じる見込みが無い:
+/// - receiver が不達 —— その EOS は二度と graw-writer に届かない(捨てる送出待ちもプロセスごと無い)
+/// - graw-writer が Error —— PULL の消費を止めている
+///
+/// どちらも 5 600 ms(第一段 600 + 静止 5 000)で打ち切り、外した条件を note に 1 行残す。
+#[test]
+fn the_lossless_guard_is_lifted_when_a_receiver_is_gone_or_graw_writer_is_in_error() {
+    let params = params_with(&[0]);
+    let cases = [
+        (
+            "receiver gone",
+            still_chain(&params).unreachable("receiver0"),
+            "lossless guard lifted: receiver0 is unreachable",
+        ),
+        (
+            "graw-writer in Error",
+            still_chain(&params).component_in("graw-writer", ComponentState::Error),
+            "lossless guard lifted: graw-writer is in Error",
+        ),
+    ];
+    for (case, mock, expected) in cases {
+        let mut mock = mock.graw_files_open_until(Duration::from_secs(60));
+        let report = Sequencer::new(&params, &mut mock)
+            .with_run(RUN)
+            .stop_run(StopMode::Normal);
+
+        assert_eq!(report.reason, "error:eos-timeout", "{case}");
+        assert_eq!(mock.slept, Duration::from_millis(5_600), "{case}");
+        let lifted: Vec<&String> = report
+            .notes
+            .iter()
+            .filter(|n| n.starts_with("lossless guard lifted"))
+            .collect();
+        assert_eq!(lifted.len(), 1, "{case}: {:?}", report.notes);
+        assert!(lifted[0].starts_with(expected), "{case}: {lifted:?}");
+    }
+}
+
+/// **204 テスト 8a(C)**: run_stop の `events_built` / `events_incomplete` / `late_fragments` は
+/// root-sink が run 214 を**閉じたときの** status の値(走行中の値ではない)。
+///
+/// 手計算: `running` の間は events_built = 16 000 + k(読み 0–9)、読み 10 = 1 800 ms の `idle` が
+/// 17 000 / incomplete 41 / late 6(SPEC v1.50: この 3 つは run ごとの値)。
+#[test]
+fn run_stop_counters_carry_root_sink_events_from_its_closing_status() {
+    let params = params_with(&[0]);
+    let mut mock = MockTransport::new(&params).with_root_sink_script(script(11, |k| {
+        if k < 10 {
+            root_sink(
+                RUN,
+                "running",
+                16_000 + k as u64,
+                70_368_744,
+                16_000 + k as u64,
+            )
+        } else {
+            let mut closing = root_sink(RUN, "idle", 17_000, 70_368_744, 17_000);
+            closing.events_incomplete = 41;
+            closing.late_fragments = 6;
+            closing
+        }
+    }));
+    mock.set_metric("decoder", "eos_in", json!(1));
+    mock.set_metric("decoder", "eos_out", json!(1));
+    let report = Sequencer::new(&params, &mut mock)
+        .with_run(RUN)
+        .stop_run(StopMode::Normal);
+
+    assert!(report.eos_closed, "{:?}", report.notes);
+    assert_eq!(mock.slept, read_at(10));
+    assert_eq!(report.counters.events_built, Some(17_000));
+    assert_eq!(report.counters.events_incomplete, Some(41));
+    assert_eq!(report.counters.late_fragments, Some(6));
+    let json = serde_json::to_value(&report.counters).unwrap();
+    assert_eq!(json["events_built"], json!(17_000));
+}
+
+/// **204 テスト 8b(C)**: root-sink が run 214 を閉じたのを観測できなければ 3 つとも null ——
+/// 不在 / 別の run の status / 開いているのは見たが閉じる前に打ち切った(`error:eos-timeout`)。
+#[test]
+fn root_sink_counters_are_null_when_root_sink_was_not_observed() {
+    let params = params_with(&[0]);
+    let cases: [(&str, Vec<Option<RootSinkStatus>>, bool); 3] = [
+        ("absent", Vec::new(), true),
+        (
+            "another run",
+            script(1, |_| root_sink(RUN - 1, "idle", 108, 6528, 108)),
+            true,
+        ),
+        (
+            "opened but never closed",
+            script(1, |_| root_sink(RUN, "running", 108, 6528, 108)),
+            false,
+        ),
+    ];
+    for (case, root_sink_script, closes) in cases {
+        let mut mock = MockTransport::new(&params).with_root_sink_script(root_sink_script);
+        if closes {
+            mock = mock.with_eos_closed();
+        } else {
+            mock.set_metric("decoder", "eos_in", json!(1));
+            mock.set_metric("decoder", "eos_out", json!(1));
+        }
+        let report = Sequencer::new(&params, &mut mock)
+            .with_run(RUN)
+            .stop_run(StopMode::Normal);
+
+        assert_eq!(report.eos_closed, closes, "{case}: {:?}", report.notes);
+        assert_eq!(report.counters.events_built, None, "{case}");
+        assert_eq!(report.counters.events_incomplete, None, "{case}");
+        assert_eq!(report.counters.late_fragments, None, "{case}");
+    }
+}
+
+/// **204 追補 A**: receiver は到達できるのに強制 EOS の `Stop` を断った(Running でない・不許可
+/// 遷移など)—— その receiver は EOS を出さないので、graw-writer は全ソースの EOS まで閉じない
+/// (`files_open > 0` のまま)。待っても閉じる見込みが無いので守りを外して打ち切り、note に条件を
+/// 1 行残す。Error 中の receiver は Stop を実行する(184)ので対象外。
+///
+/// 手計算: 第一段 600 ms + 静止 5 000 ms = **5 600 ms**。守りを外さない実装なら graw-writer が
+/// 60 000 ms で閉じるまで待ってしまう(打ち切りはその後)。
+#[test]
+fn the_lossless_guard_is_lifted_when_a_reachable_receiver_rejects_the_stop() {
+    let params = params_with(&[0]);
+    let mut mock = still_chain(&params)
+        .fail_on("receiver0", "Stop")
+        .graw_files_open_until(Duration::from_secs(60));
+    let report = Sequencer::new(&params, &mut mock)
+        .with_run(RUN)
+        .stop_run(StopMode::Normal);
+
+    assert_eq!(report.reason, "error:eos-timeout");
+    assert_eq!(mock.slept, Duration::from_millis(5_600));
+    let lifted: Vec<&String> = report
+        .notes
+        .iter()
+        .filter(|n| n.starts_with("lossless guard lifted"))
+        .collect();
+    assert_eq!(lifted.len(), 1, "{:?}", report.notes);
+    assert!(
+        lifted[0].starts_with("lossless guard lifted: receiver0 rejected the Stop"),
+        "{lifted:?}"
+    );
+    // 断られた事実そのものも従来どおり note に残る。
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("receiver0: Stop refused")),
+        "{:?}",
+        report.notes
+    );
+}
+
+/// **204 追補 B**: EOS が自然に流れ切った(リプレイの EOF / 歩き戻しの breakup)= chain の 3 点が
+/// 第一段の 1 回目の判定で揃ったが、root-sink はまだ run 214 を書いている。第一段は chain の
+/// 3 点で完了とし、receiver へ強制 EOS(Stop)を**撃たずに**第二段で root-sink の close を待つ ——
+/// `forced_eos: false`(誤って「強制した」と記録しない)、閉じたら `ok` / `normal`。
+///
+/// 手計算: root-sink の読み 0 は第一段(0 ms、`running` を見る)、読み 1 から第二段で 200 ms 刻み
+/// (読み k = (k − 1) × 200 ms)。`idle` は読み 31 = **6 000 ms**(> eos_timeout —— その間
+/// `bytes_written` が読みごとに +4 096 なので静止ではない)。
+#[test]
+fn a_natural_eos_with_root_sink_still_writing_is_not_recorded_as_forced() {
+    let params = params_with(&[0]);
+    let mut mock = MockTransport::new(&params)
+        .with_eos_closed()
+        .with_root_sink_script(script(32, |k| {
+            let state = if k < 31 { "running" } else { "idle" };
+            root_sink(RUN, state, 9_000, 1_000_000 + 4096 * k as u64, 9_000)
+        }));
+    let report = Sequencer::new(&params, &mut mock)
+        .with_run(RUN)
+        .stop_run(StopMode::Normal);
+
+    assert!(!report.forced_eos, "自然 EOS なのに強制したと記録している");
+    assert!(report.eos_closed, "{:?}", report.notes);
+    assert_eq!(report.reason, "normal");
+    assert!(report.ok);
+    assert_eq!(mock.slept, Duration::from_millis(6_000));
+    // receiver の Stop は畳む段の 1 回だけ = root-sink が閉じた後。
+    assert_eq!(mock.actions("receiver0"), vec!["Stop", "Reset"]);
+    let closing_read = *mock.root_sink_polled_at.last().unwrap();
+    assert!(
+        mock.index_of("receiver0", "Stop").unwrap() > closing_read,
+        "root-sink が閉じる前に receiver を Stop している: {:?}",
+        mock.calls
+    );
+}

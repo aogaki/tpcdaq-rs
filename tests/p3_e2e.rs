@@ -389,6 +389,8 @@ impl Topology {
             // 124: power の経路は使わない(省略 = 503)。
             slow_cmd: None,
             slow_devices: Vec::new(),
+            // 204: 本番の `from_config` と同じ配線(`[monitor] sub_endpoint` = root-sink PUB)。
+            root_sink_pub: sink.pub_ep.clone(),
         };
         let (controller_shutdown, controller_rx) = broadcast::channel(1);
         let mut controller_proc = None;
@@ -595,6 +597,7 @@ build_timeout_ms = 1000
 
 [monitor]
 ws_listen = "127.0.0.1:{monitor_port}"
+sub_endpoint = "{root_sink_pub}"
 
 [controller]
 rest_listen = "127.0.0.1:{rest_port}"
@@ -615,6 +618,8 @@ router_ip = "127.0.0.1"
         // `[monitor] ws_listen` は controller が読まない(monitor は別プロセス)。
         // 設定検証を通すためだけに空きポートを 1 つ入れる。
         monitor_port = free_port(),
+        // 204: 別プロセス controller も root-sink の status を同じ実ポートで読む(固定 47004 にしない)。
+        root_sink_pub = params.root_sink_pub,
         rest_port = rest_port,
         passphrase = PASSPHRASE,
         // このハーネスは 3 相同値なので、TOML には文字列形(略記)を書く。
