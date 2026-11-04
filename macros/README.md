@@ -13,10 +13,10 @@ Step 2 in parallel (events are independent; N processes on entry ranges,
 merged with `hadd`, same output name as the serial run; TODO/169):
 
 ```
-./par_analyzeUVW.sh -p 91 -s 25 -d 1200 [-j N] [-o out_uvw.root] [--tracks] CoBo_xxx_raw.root
+./par_analyzeUVW.sh -p 91 -s 25 -d 1200 [-q stripQMin] [-j N] [-o out_uvw.root] [--tracks] CoBo_xxx_raw.root
 ```
 
-N defaults to the number of cores - 2; `--tracks` runs makeTracks.C on the
+`-q` = the strip-charge halo cut `stripQMin` (TODO/207; default 2000, see the table below); N defaults to the number of cores - 2; `--tracks` runs makeTracks.C on the
 merged file. run 175 (1.06 M events): 90 s with N = 12 vs ~14 min serial.
 `./test_par_analyzeUVW.sh <raw.root> <workdir>` checks serial == parallel
 (`compareUVW.C`, every entry / branch / bin).
@@ -39,7 +39,7 @@ Feed that file straight into analyzeUVW.C. graw2root.C stays the tool for
 | rateVsTime.C | .graw       | `*_rate.root/.png` | header-only scan (no waveforms): event rate vs time (bin width in s), inter-event Δt (linear + log10), DAQ restarts marked. CoBo timestamp = 10 ns ticks (checked against wall clock). Fast: 10k frames in seconds |
 | chargeVsTime.C | `*_uvw.root` + `*_raw.root` | `*_charge_vs_time.root/.png` | joins per-event charge (analyzeUVW) with the CoBo timestamp (graw2root): median charge / hits per time bin, early-vs-late charge spectra, rate. Tells a counting effect (decaying source) from a signal effect (attachment, gain) |
 | graw2root.C  | .graw       | `*_raw.root`    | tree `raw`: PURE lossless conversion - full waveforms `adc[4][68][512]`, eventId, 48-bit eventTime. No pedestal / threshold / geometry. Reads frameType 1 (2018, 4-byte items) and frameType 2 (rev 5 compact, 2-byte items — what tpcdaq-rs/zCoBo write today) |
-| analyzeUVW.C | `*_raw.root` | `*_uvw.root`   | ALL analysis: pedestal, ONE hit per strip (peak time -> z, integrated charge q, halo cut `STRIP_Q_MIN`), channel map, z scale; tree `uvw`: per-view charge, signal width, band-selected strip hits; histograms `hCharge` (strip-hit charge), `hWidth_U/V/W`; example UVW canvases |
+| analyzeUVW.C | `*_raw.root` | `*_uvw.root`   | ALL analysis: pedestal, ONE hit per strip (peak time -> z, integrated charge q, halo cut `stripQMin` argument, default `STRIP_Q_MIN` = 2000; written as TParameter `strip_q_min`), channel map, z scale; tree `uvw`: per-view charge, signal width, band-selected strip hits; histograms `hCharge` (strip-hit charge), `hWidth_U/V/W`; example UVW canvases |
 | drawUVW.C | `*_raw.root` | `*_uvw_events/` (PNG per event; `.pdf` out = one PDF) | `drawUVW(raw, pressureMbar, samplingMHz, driftHvVolt, out = "", first = 0, n = -1, drawMinAdc = -1, logz = false, zoom = true)`; run constants required (checked as analyzeUVW.C). Every event as one 1200 x 600 image `event<%07u eventId>.png` (default dir: `_raw.root` -> `_uvw_events/`; `out` = directory (made with parents), or ending `.pdf` = one PDF, 1 event = 1 page, bookmark `event <eventId>`). Top row U / V / W like the web UI (raw ADC summed per strip, minus the mean of the first 25 cells, `colz`) but with mm axes (x = z, y = strip position s from `channel_map.csv`, which must be a straight line s = slope * strip + offset within 1e-6 mm); `zoom` (default true) auto-zooms to the hit range (cells > max(35, 10 % of the plane max) in 8-neighbour components with >= 10 % of the largest component's charge, so stray cells / noise stripes do not count; +5 mm, at least 20 mm high) with the same mm per pixel in x and y and in all three planes, `zoom = false` draws the whole range (same equal-mm rule); bottom row XY / XZ / YZ of a model-free 3D point cloud (zoomed to the points the same way, only blobs of points <= 5 mm apart with >= 10 % of the largest blob's charge, one common mm per pixel; per cell: strips > 35 ADC grouped into clusters, U-V-W triples with a closing sum within 2 mm of the run constant c become points, charge-weighted; c = median over the first 300 events, printed). ~41-46 kB / event as PNG (all of run 209 ~ 370 MB); PDF ~570 kB / page (above 2 GiB ROOT writes a broken xref table - the macro warns; `mutool clean in.pdf out.pdf` fixes it); `drawMinAdc` / `logz` act on the top row only. Test: `root -l -b -q test_drawUVW.C` (exit code = failures) |
 | fitProngs.C | `*_raw.root` + `*_tracks.root` + `kernel.json` | `*_fit.root` (+ PNG per event) | `fitProngs(raw, tracks, pressureMbar, samplingMHz, driftHvVolt, kernelJson, out, entryList = "", pngDir = "", adcPerMeV = 0, fracErr = 0.10, commonMode = true, dchi2Threshold = 0, aBox = 0.15)`: forward-model fit of ONE alpha per event (3D segment + Bragg curve drawn on the U / V / W strip x cell images, chi2 against the raw ADC; Minuit2; both orientations, the smaller chi2 wins). v0.1: sensitive box x +-53 / y -58..48 mm, end points limited to initial +-10 mm (`atLimit`), A fixed per run by `adcPerMeV` (0 = free), common mode taken from the strips outside the ROI, pixel error sqrt(noise^2 + (0.10 data)^2); tree `fit` (chi2[2], ends, A, sigmaT/L, sigmaXY, length, energy, status, atLimit, cmSkipped, noise); PNG = data / model / residual in mm. v0.2 (TODO/198): H2 = the alpha + a uniform arm from its vertex (12 parameters with A fixed; arm seed from the H1 residual, 5 sigma components), H1 and H2 on the same ROI_event, `dchi2 = chi2H1 - chi2H2`, `hyp = 1` when dchi2 > `dchi2Threshold` (0 = calibration: hyp always 0); tree adds chi2H1/H2, dchi2, nBinsEvent, ndfH1/H2, hyp, vertex, arm end, armLen, armE, armQ, armDir, armSat, seedFallback, statusH2, atLimitH2, armResid; PNG of an H2 event shows the 2 segments. v0.3 (TODO/198 v2): H2 pays 100 x nBins x max(0, cos - 0.5)^2 for an arm along the alpha (`armCos`, `armPen`, `armAlong`; chi2H2 / dchi2 include it), A in A_ref x [1 -+ `aBox`] (default 0.15; 0 = fixed; `aRelH1` / `aRelH2`, atLimit bit 10), seed components within 2.5 mm of the alpha's projection left out (`seedAlong`; with none left the fallback Eeq is their charge, and an orientation whose alpha the seed lies along starts from the fallback: `orientFallback`), `h1Broken` (sigma at 5 mm -> hyp = -1 with a threshold), `h2Worse` (chi2H2 > chi2H1 -> dchi2 = 0). Test: `root -l -b -q test_fitProngs.C+` (exit code = failures) |
 | selectNeutron.C | `*_tracks.root` + `*_uvw.root` + `*_raw.root` | tree `sel` | interim neutron-event selection (TODO/194): reason code per event (blob / reject / contained / wall-alpha / vertex-in-exit-x/y/z), charge profile q_in / q_mid / q_wall, rate per hour from the CoBo timestamps. NOTE: in the one-end-inside class the source excess is not separable from the wall-alpha background by these observables (archive/194). Test: `root -l -b -q macros/test_selectNeutron.C` |
@@ -81,6 +81,20 @@ hits, else `ok == 0`.
 **Scale change**: `nhits` now counts strips (not time cells above threshold)
 and `qview` sums peak-window charges of halo-cut strips, so both are NOT
 comparable with `*_uvw.root` files written before TODO/094.
+
+**Halo cut `stripQMin`** (analyzeUVW.C last argument, `par_analyzeUVW.sh -q`;
+TODO/207). The strip charge q is the sum over peak +- 5 cells, so the right
+cut depends on the peaking time (pulse area): the valley between the halo
+(q < valley) and the track strips has to be re-measured when the electronics
+setting changes. Sampling 12.5 MHz, +-5-cell window:
+
+| peaking | stripQMin | valley (measured) |
+|---|---|---|
+| 502 ns | 2,000 (default) | run 215: 1,700-2,000 |
+| 232 ns | 1,100 | run 216: 950-1,150 |
+
+With 2,000 at 232 ns the faint side of a track is cut and fake contained
+tracks appear (run 216: 3.1 /h; 0 with 1,100).
 
 All tunable constants (thresholds, pedestal window, peak window, halo cut,
 drift velocity, band width) sit at the top of analyzeUVW.C -

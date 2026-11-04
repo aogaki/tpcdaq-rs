@@ -10,7 +10,8 @@
 //            t_peak +- PEAK_HALF_CELLS, converted to drift z [mm] with the
 //            nominal drift velocity
 //        q = sum of those cells (integrated charge, the dE/dx numerator)
-//      kept only if q >= STRIP_Q_MIN (halo cut, see the constant).
+//      kept only if q >= stripQMin (halo cut, default STRIP_Q_MIN, see the
+//      constant; the value per peaking time is the table in README.md).
 //      A (channel, time cell) hit list would stretch every strip by the
 //      pulse length (~4.6 us above threshold = ~20 mm of z) and bias the dip
 //      angle (TODO/093, 094). A strip crossed twice keeps only its largest
@@ -38,7 +39,10 @@
 //         sampling_MHz, drift_hv_V, drift_v_cm_us, mm_per_cell, z_window_mm)
 //         and copied on by makeTracks.C (TODO/178).
 //         Optional: first, n = entry range [first, first+n) (n < 0: to the
-//         end), outFile = output path (default: _raw.root -> _uvw.root).
+//         end), outFile = output path (default: _raw.root -> _uvw.root),
+//         stripQMin = halo cut on the strip charge q (default 2000 =
+//         peaking 502 ns; 232 ns -> 1100, TODO/207; table in README.md).
+//         Written as TParameter<double> strip_q_min.
 //         Events are independent, so par_analyzeUVW.sh runs N ranges in
 //         parallel and merges them with hadd (TODO/169).
 // =============================================================================
@@ -75,8 +79,10 @@ const int NDISPLAY = 5;  // events to draw as example hit maps
 // small 35-200 ADC pulse at the time of the track. The FPN channels do not
 // see it, so it is not AGET common mode (induction / crosstalk suspected).
 // Off-track halo strips have q < ~1500, track strips peak at ~5500; 2000 is
-// the valley. Without this cut the halo lines up with flat tracks, passes
+// the valley (for peaking 232 ns the valley is 950-1150: use 1100, TODO/207).
+// Without this cut the halo lines up with flat tracks, passes
 // the band and stretches their length (TODO/094 round 1).
+// STRIP_Q_MIN is the default of the stripQMin argument.
 const double STRIP_Q_MIN = 2000.0;
 // -----------------------------------------------------------------------------
 
@@ -100,7 +106,7 @@ double driftVelocityCmUs(double hvVolt, double lenCm, double pMbar)
 
 void analyzeUVW(const char *rawFile, double pressureMbar, double samplingMHz,
                 double driftHvVolt, Long64_t first = 0, Long64_t n = -1,
-                const char *outFile = "")
+                const char *outFile = "", double stripQMin = STRIP_Q_MIN)
 {
   // --- run constants: checked BEFORE anything is read or created --------------
   const double SAMPLING_OK[4] = {100.0, 50.0, 25.0, 12.5};  // GET sampling rates
@@ -118,6 +124,12 @@ void analyzeUVW(const char *rawFile, double pressureMbar, double samplingMHz,
               << " must be > 0; nothing written" << std::endl;
     return;
   }
+  if (!(stripQMin > 0)) {
+    std::cout << "ERROR: stripQMin = " << stripQMin
+              << " must be > 0; nothing written" << std::endl;
+    return;
+  }
+  std::cout << "strip charge cut stripQMin = " << stripQMin << std::endl;
   if (!(pressureMbar > 0)) {
     std::cout << "ERROR: pressureMbar = " << pressureMbar
               << " must be > 0; nothing written" << std::endl;
@@ -256,7 +268,7 @@ void analyzeUVW(const char *rawFile, double pressureMbar, double samplingMHz,
           q += val;
           qt += val * t;
         }
-        if (q < STRIP_Q_MIN) continue;  // halo strip
+        if (q < stripQMin) continue;  // halo strip
         vz[v].push_back(qt / q * mmPerCell);
         vs[v].push_back(chPos[a][c]);
         vq[v].push_back(q);
@@ -283,7 +295,7 @@ void analyzeUVW(const char *rawFile, double pressureMbar, double samplingMHz,
         mz += vq[v][k] * vz[v][k];
         ms += vq[v][k] * vs[v][k];
       }
-      mz /= sw;  // sw > 0: every hit has q >= STRIP_Q_MIN
+      mz /= sw;  // sw > 0: every hit has q >= stripQMin
       ms /= sw;
       double czz = 0, css = 0, czs = 0;
       for (size_t k = 0; k < n; ++k) {
@@ -358,6 +370,7 @@ void analyzeUVW(const char *rawFile, double pressureMbar, double samplingMHz,
   TParameter<double>("drift_v_cm_us", driftV, 'f').Write();
   TParameter<double>("mm_per_cell", mmPerCell, 'f').Write();
   TParameter<double>("z_window_mm", 512 * mmPerCell, 'f').Write();
+  TParameter<double>("strip_q_min", stripQMin, 'f').Write();
   utree.Write();
   hCharge.Write();
   for (int v = 0; v < 3; ++v) hWidth[v]->Write();
