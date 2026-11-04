@@ -13,6 +13,35 @@
     <span>{{ healthLabel() }}</span>
   </button>
 
+  @if (stoppingText(); as text) {
+    <span
+      class="item badge stopping"
+      matTooltip="Stop is waiting for the downstream to drain (graw is complete; ROOT is still being written)"
+      >{{ text }}</span
+    >
+  }
+  @if (overloaded().length > 0) {
+    <span
+      class="item badge overload"
+      [matTooltip]="'Error: ' + overloaded().join(', ') + ' (a receiver or graw-writer overflowed)'"
+      >OVERLOAD</span
+    >
+  }
+  @if (rootDropped(); as dropped) {
+    <span
+      class="item badge root-dropped bad"
+      matTooltip="graw is complete; rebuild ROOT from graw (SPEC §1.4-7)"
+      >ROOT DROPPED {{ dropped }}</span
+    >
+  }
+  @if (rootWritingRun(); as run) {
+    <span
+      class="item badge root-writing"
+      matTooltip="Controller is Idle but root_sink is still writing this run"
+      >ROOT writing · run {{ run }}</span
+    >
+  }
+
   <span class="item"><span class="key">state</span>{{ state() ?? '—' }}</span>
   <span class="item"><span class="key">run</span>{{ format(run()) }}</span>
   <span class="item"><span class="key">events</span>{{ format(eventsBuilt()) }}</span>
@@ -79,6 +108,12 @@
 
   <span class="item" [class.bad]="(slowAlarmCount() ?? 0) > 0" [matTooltip]="slowAlarmTooltip()">
     <span class="key">slow</span>{{ slowAlarmCount() === null ? '—' : slowAlarmCount() }}
+  </span>
+  <span
+    class="item"
+    matTooltip="controller GET /api/status, polled every 5 s ('—' = not reachable, so the chips above are unknown, not clear)"
+  >
+    <span class="key">ctl</span>{{ controller()?.phase ?? '—' }}
   </span>
   <span class="item" matTooltip="Parameters JSON (SPEC §3.3 / TODO/078), polled every 15 s">
     <span class="key">params</span>{{ paramsId() ?? '—' }} · exceptions

@@ -18,7 +18,7 @@
 import { Component, type OnDestroy, computed, inject, signal, viewChild } from '@angular/core';
 
 import { ControllerApiService } from '../api/controller-api';
-import { type StatusView, parseControllerStatus } from '../api/controller-status';
+import { type StatusView, drainingLabel, parseControllerStatus } from '../api/controller-status';
 import { type ActionResult, RunControlApiService } from '../api/run-control-api';
 import { describeError } from '../logbook/logbook-feed';
 import {
@@ -31,6 +31,9 @@ import {
 
 /** status のポーリング間隔(ログブックと同じ刻み)。 */
 export const STATUS_POLL_MS = 5000;
+
+/** Stop を追っている間(押してから Idle に戻るまで)の status の poll 間隔(TODO/187)。 */
+export const STOP_WATCH_MS = 1000;
 
 /** 直近 1 回の操作の結果(画面上端に出す)。 */
 export interface LastAction extends ActionResult {
@@ -72,6 +75,26 @@ export class RunView implements OnDestroy {
   readonly busy = signal<string | null>(null);
   readonly lastAction = signal<LastAction | null>(null);
 
+  /** TODO/187 ③: phase が Stopping の間の「STOPPING — draining · …」。 */
+  readonly stoppingText = computed(() => {
+    const view = this.status();
+    if (view?.phase !== 'Stopping') return null;
+    return drainingLabel(
+      view.stopping ?? { decoderBacklog: null, rootSinkBacklog: null, waitedS: null },
+    );
+  });
+
+  /**
+   * Stop を押してから Idle に戻るまで true。HTTP の応答(分単位になりうる)でなく phase を
+   * 信じて Stopping → Idle を追う。Idle に戻ったら最後の run_stop(ログブック)を `stopOutcome` に出す。
+   */
+  private awaitingStop = false;
+  private sawStopping = false;
+  /** Stop を押した時点で run が走っていたか(Stopping を見逃して Idle に戻っていた場合の判定用)。 */
+  private runWasActive = false;
+  private stopWatchTimer: ReturnType<typeof setInterval> | null = null;
+  readonly stopOutcome = signal<{ ok: boolean; text: string; at: string } | null>(null);
+
   readonly components = computed(() => this.status()?.components ?? []);
   readonly notes = computed(() => this.status()?.notes ?? []);
 
@@ -112,6 +135,7 @@ export class RunView implements OnDestroy {
   ngOnDestroy(): void {
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
+    this.endStopWatch();
   }
 
   disabled(action: RunAction): boolean {
@@ -153,8 +177,69 @@ export class RunView implements OnDestroy {
       this.status.set(view);
       this.statusError.set(null);
       this.lastOkAt.set(clockText());
+      await this.followStop(view);
     } catch (error) {
       this.statusError.set(describeError(error));
+    }
+  }
+
+  /** Stop を追っている間: Stopping を見たあと Idle に戻ったら、最後の run_stop を出す。 */
+  private async followStop(view: StatusView): Promise<void> {
+    if (!this.awaitingStop) return;
+    if (view.phase === 'Stopping') this.sawStopping = true;
+    else if (view.phase === 'Idle' && this.sawStopping) await this.finishStop();
+  }
+
+  private beginStopWatch(): void {
+    this.awaitingStop = true;
+    this.sawStopping = false;
+    this.runWasActive = this.status()?.run != null;
+    this.stopOutcome.set(null);
+    if (this.stopWatchTimer === null) {
+      this.stopWatchTimer = setInterval(() => void this.refresh(), STOP_WATCH_MS);
+    }
+  }
+
+  private endStopWatch(): void {
+    this.awaitingStop = false;
+    if (this.stopWatchTimer !== null) clearInterval(this.stopWatchTimer);
+    this.stopWatchTimer = null;
+  }
+
+  /** Idle に戻った: ログブックの最後(seq 最大)の run_stop の ok / reason を出す。 */
+  private async finishStop(): Promise<void> {
+    this.endStopWatch();
+    const at = clockText();
+    try {
+      const raw = (await this.api.getLogbook(0)) as { records?: unknown };
+      const records = Array.isArray(raw?.records) ? (raw.records as Record<string, unknown>[]) : [];
+      const stops = records.filter((r) => r?.['type'] === 'run_stop');
+      const last = stops.reduce<Record<string, unknown> | null>(
+        (best, r) => (best === null || Number(r['seq']) > Number(best['seq']) ? r : best),
+        null,
+      );
+      if (last === null) {
+        this.stopOutcome.set({
+          ok: false,
+          at,
+          text: 'The controller is Idle again, but no run_stop record was found in the logbook',
+        });
+        return;
+      }
+      const ok = last['ok'] !== false;
+      const counters = last['counters'] as Record<string, unknown> | null | undefined;
+      const rootIncomplete = counters?.['root_complete'] === false ? ' · ROOT incomplete' : '';
+      this.stopOutcome.set({
+        ok,
+        at,
+        text: `run_stop: run ${String(last['run'])} ${ok ? 'ok' : 'FAILED'} · reason ${String(last['reason'] ?? '—')}${rootIncomplete}`,
+      });
+    } catch (error) {
+      this.stopOutcome.set({
+        ok: false,
+        at,
+        text: `The controller is Idle again, but the run_stop record could not be read: ${describeError(error)}`,
+      });
     }
   }
 
@@ -187,13 +272,33 @@ export class RunView implements OnDestroy {
     if (this.busy() !== null) return; // 二重送信防止(disabled の取りこぼし対策)
     this.busy.set(action.endpoint);
     this.lastAction.set(null);
+    const isStop = action.endpoint === '/api/run/stop';
     try {
-      const result = await this.control.execute(action, {
+      const pending = this.control.execute(action, {
         operator: this.operator(),
         passphrase: this.passphrase(),
         comment: this.comment(),
         nextRun: this.nextRun(),
       });
+      if (isStop) {
+        // TODO/187 ③: 応答は分単位になりうる。待たずに phase を見に行く。
+        this.beginStopWatch();
+        void this.refresh();
+      }
+      const result = await pending;
+      if (isStop) {
+        if (result.status === 0) {
+          // 応答が無い(プロキシ / ブラウザのタイムアウト等)。phase を見て、止まりつつあるなら
+          // エラーにしない。止まっていないなら今までどおり失敗として出す。
+          await this.refresh();
+          const phase = this.status()?.phase;
+          const stillStopping = phase === 'Stopping';
+          const doneUnseen = phase === 'Idle' && this.runWasActive && !this.sawStopping;
+          if (doneUnseen) await this.finishStop();
+          if (stillStopping || doneUnseen) return;
+        }
+        this.endStopWatch();
+      }
       this.lastAction.set({
         ...result,
         label: action.label,
