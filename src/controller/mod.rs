@@ -755,10 +755,14 @@ pub async fn run_controller(
     info!(%local, "controller REST listening");
 
     // 204(SPEC §5.3 v1.54): root-sink の status を読む SUB スレッド(停止の第二段の材料)。
+    // 188: 停止フラグは他と分ける —— 終了の最中に走っている watchdog の停止が root-sink の close を
+    // 見られるよう、**watchdog の join の後**に立てる(先に止めると凍った status を読み続け、静止で
+    // 打ち切って「root-sink did not close」を偽に記録する)。
+    let root_sink_stop = Arc::new(AtomicBool::new(false));
     let root_sink_thread = match spawn_root_sink_status_thread(
         controller.params.root_sink_pub.clone(),
         controller.transport.root_sink_latest(),
-        Arc::clone(&stop_flag),
+        Arc::clone(&root_sink_stop),
     ) {
         Ok(handle) => handle,
         Err(e) => {
@@ -778,6 +782,7 @@ pub async fn run_controller(
             Err(e) => {
                 // 先に起こしたスレッドを残さない。
                 stop_flag.store(true, Ordering::Relaxed);
+                root_sink_stop.store(true, Ordering::Relaxed);
                 if log_thread.join().is_err() {
                     error!("log post thread panicked");
                 }
@@ -806,10 +811,12 @@ pub async fn run_controller(
     if log_thread.join().is_err() {
         error!("log post thread panicked");
     }
-    // 188: 走っている自動停止があれば、watchdog はそれを待ってから終わる。
+    // 188: 走っている自動停止があれば、watchdog はそれを待ってから終わる。root-sink の SUB は
+    // その停止が root-sink の close を見終えてから止める(順序が要る — 上の `root_sink_stop`)。
     if watchdog_thread.join().is_err() {
         error!("watchdog thread panicked");
     }
+    root_sink_stop.store(true, Ordering::Relaxed);
     if root_sink_thread.join().is_err() {
         error!("root-sink status thread panicked");
     }

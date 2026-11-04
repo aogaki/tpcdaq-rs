@@ -171,7 +171,7 @@ fn tick(controller: &Arc<Controller>, stopping: &mut Option<std::thread::JoinHan
     };
     {
         let mut latest = lock(&controller.watchdog);
-        log_changes(latest.as_ref(), &statuses);
+        log_changes(phase, latest.as_ref(), &statuses);
         *latest = Some(WatchdogSnapshot {
             polled_at: Instant::now(),
             statuses,
@@ -254,7 +254,11 @@ fn join_stop(handle: std::thread::JoinHandle<()>) {
 
 /// 前回の問い合わせから到達性か Error が変わったコンポーネントを 1 行ずつ出す(silent にしない ——
 /// 引き金にしない変化 = 不達・decoder の Error もここで見える)。前回が無ければ「健全」から比べる。
-fn log_changes(previous: Option<&WatchdogSnapshot>, statuses: &[ComponentStatus]) {
+///
+/// **Stopping 中の不達は info**(Running 中は warn): 停止は decoder の Reset の join(≤ 2.1 s、
+/// SPEC §1.3 v1.40)で REP が答えず、`status_timeout` では 1 回不達に見えるのが常態 —— 停止の
+/// たびに warn を出すと雑音になる(188 レビュー指摘 3)。
+fn log_changes(phase: Phase, previous: Option<&WatchdogSnapshot>, statuses: &[ComponentStatus]) {
     let health = |s: &ComponentStatus| (s.reachable, s.state == Some(ComponentState::Error));
     for status in statuses {
         let before = previous
@@ -265,6 +269,12 @@ fn log_changes(previous: Option<&WatchdogSnapshot>, statuses: &[ComponentStatus]
             continue;
         }
         match now {
+            (false, _) if phase == Phase::Stopping => info!(
+                component = %status.name,
+                error = ?status.error,
+                "watchdog: unreachable while stopping (expected during a Reset join — not a \
+                 trigger, SPEC §1.3)"
+            ),
             (false, _) => warn!(
                 component = %status.name,
                 error = ?status.error,

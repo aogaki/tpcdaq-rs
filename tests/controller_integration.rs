@@ -4663,3 +4663,157 @@ async fn the_watchdog_sets_stopping_since_so_the_status_shows_waited_s() {
 
     harness.shutdown();
 }
+
+/// 188: `logbook.jsonl` をファイルから直接読む(controller の終了後は REST が無いので)。
+/// 1 行 = フラットな 1 レコード(`{"ts", "seq", "type", ...}`)。無ければ空。
+fn read_logbook_file(path: &Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// **188 レビュー指摘 1**: watchdog の停止の最中に controller の終了(SIGTERM / Ctrl-C)を
+/// 要求しても、停止は root-sink の status を読み続け、root-sink の close を見て `eos_closed:true`
+/// で閉じる。root-sink の SUB スレッドが watchdog より先に止まると、停止は凍った最後の status を
+/// 読み続け、静止(`eos_timeout` 400 ms)で打ち切って `eos_closed:false` と note「root-sink did not
+/// close run N」を**偽に**記録していた(REST の停止は axum の graceful shutdown が待つので起きない)。
+///
+/// フェイクのコンポーネントは controller とは別の broadcast で止める(controller だけを終わらせる)。
+/// 終了の要求の後も root-sink は 1.5 s(`eos_timeout` の 3 倍超)書き続け、その間 run_stop は
+/// まだ書かれない。閉じたら run_stop が `eos_closed:true` / `abort:overload:receiver0` で書かれる。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutting_down_during_a_watchdog_stop_keeps_reading_the_root_sink_status() {
+    let (components_shutdown, _) = broadcast::channel(1);
+    let (controller_shutdown, _) = broadcast::channel(1);
+    let output_root = temp_root("watchdog-shutdown");
+    let root_sink = FakeRootSinkPub::spawn();
+
+    let (graw_endpoint, _, _) = spawn_fake(
+        json!({"files_open": 0, "files": []}),
+        components_shutdown.subscribe(),
+    )
+    .await;
+    let (decoder_endpoint, _, _) = spawn_fake(
+        json!({"eos_in": 1, "eos_out": 1, "malformed": 0,
+               "frames_in": 3900, "fragments_out": 3852}),
+        components_shutdown.subscribe(),
+    )
+    .await;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (receiver_endpoint, receiver, _) = spawn_fake(
+        json!({
+            "cobo_id": 0,
+            "bind_address": address.to_string(),
+            "router_port": address.port(),
+            "frames": 3852,
+            "overflow_frames": 0,
+            "bytes": 30_108_684u64,
+        }),
+        components_shutdown.subscribe(),
+    )
+    .await;
+    let components = vec![
+        ComponentEndpoint {
+            name: "graw-writer".to_string(),
+            endpoint: graw_endpoint,
+            kind: ComponentKind::GrawWriter,
+        },
+        ComponentEndpoint {
+            name: "decoder".to_string(),
+            endpoint: decoder_endpoint,
+            kind: ComponentKind::Decoder,
+        },
+        ComponentEndpoint {
+            name: "receiver0".to_string(),
+            endpoint: receiver_endpoint,
+            kind: ComponentKind::Receiver { cobo_id: 0 },
+        },
+    ];
+    let cobos = vec![CoboSpec {
+        id: 0,
+        listen: "0.0.0.0:46005".to_string(),
+        data_sender_id: "CoBo[0]".to_string(),
+    }];
+    let (BoundEndpoints { rest, .. }, _ecc, _) = spawn_controller(
+        &controller_shutdown,
+        &output_root,
+        cobos,
+        components,
+        None,
+        ConfigIds::same("integration"),
+        None,
+        None,
+        &root_sink.endpoint,
+    )
+    .await;
+
+    let (status, body) = post(
+        rest,
+        "/api/control/acquire",
+        json!({"operator": "aogaki", "passphrase": "change-me"}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let token = body["token"].as_str().unwrap().to_string();
+    let (status, body) = post(
+        rest,
+        "/api/run/start",
+        json!({"token": token, "comment": ""}),
+    );
+    assert_eq!(status, 200, "{body}");
+    let run = body["run"].as_u64().unwrap();
+    root_sink.set(|s| {
+        s.run = run as u32;
+        s.state = "running";
+        s.moving = true;
+    });
+    std::thread::sleep(Duration::from_millis(300)); // status が SUB に届くまで
+
+    receiver.overload();
+    wait_for("the watchdog stop", Duration::from_secs(8), || {
+        phase_of(rest) == "Stopping"
+    });
+
+    // controller の終了を要求する(フェイクは別の broadcast なので生きている)。
+    let _ = controller_shutdown.send(());
+    let logbook = output_root.join("logbook.jsonl");
+    std::thread::sleep(Duration::from_millis(1_500));
+    let early: Vec<Value> = run_stops_of(&read_logbook_file(&logbook), run);
+    assert!(
+        early.is_empty(),
+        "root-sink が書いている間に停止が打ち切られた(終了で root-sink の status を見失った): \
+         {early:?}"
+    );
+
+    release_root_sink(&root_sink);
+    wait_for("the run_stop record", Duration::from_secs(5), || {
+        !run_stops_of(&read_logbook_file(&logbook), run).is_empty()
+    });
+    let records = read_logbook_file(&logbook);
+    let stops = run_stops_of(&records, run);
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(stops[0]["eos_closed"], json!(true), "{}", stops[0]);
+    assert_eq!(
+        stops[0]["reason"],
+        json!("abort:overload:receiver0"),
+        "{}",
+        stops[0]
+    );
+    let audits = watchdog_audits_of(&records, run);
+    assert_eq!(audits.len(), 1, "{audits:?}");
+    assert!(
+        !audits[0]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("did not close"),
+        "root-sink は閉じたのに「閉じなかった」と記録した: {}",
+        audits[0]
+    );
+
+    let _ = components_shutdown.send(());
+    let _ = std::fs::remove_dir_all(&output_root);
+    drop(listener);
+}
