@@ -66,7 +66,7 @@
 | 停電・UPS 放電 | §1 の順序でやり直す。logbook の最終行破損は許容(§9.1)— リーダが警告する |
 | HV TRIP | DAQ は止めない(既定)。HV 側(CAEN GUI)で原因を見てから復帰。logbook に `slow` ALARM(STATUS の trip ビット)が自動記録 |
 | Slow control が `—` / IDENT が出ない | `slowctl` プロセスと TOML の `port`(`/dev/serial/by-id/`)を確認。`identity_mismatch` が増えるなら別の機器を読んでいる(ケーブル差し替え後は by-id を見直す) |
-| 停止が終わらない(phase `Stopping` が分単位で続く、v1.54 — TODO/204) | **ふつうは待つ**: UI の「STOPPING — draining · ROOT backlog N」の N が減っていれば root_sink が積み残しを書いている(PEventTPC on の高レートで ≈ 10 分)。**N が減らない・graw-writer のファイルが開いたまま**(ディスクの詰まり)のときだけ: graw-writer を落とす(受け取り済みの graw は Stop / Reset で閉じる)か、root_sink を SIGTERM(status が止まる → `eos_timeout` で `error:eos-timeout`、run は inprogress のまま)。高レートの run は `pevent = false` で取る(PEventTPC は後で graw から) |
+| 停止が終わらない(phase `Stopping` が分単位で続く、v1.54 — TODO/204) | **ふつうは待つ**: UI の「STOPPING — draining · ROOT backlog N」の N が減っていれば root_sink が積み残しを書いている(PEventTPC on の高レートで ≈ 10 分)。**N が減らない・graw-writer のファイルが開いたまま**(ディスクの詰まり)のときだけ: graw-writer を落とす(受け取り済みの graw は Stop / Reset で閉じる)か、root_sink を SIGTERM(status が止まる → `eos_timeout` で `error:eos-timeout`、run は inprogress のまま)。高レートの run は `pevent = false` で取る(PEventTPC は後で graw から)。**注意(TODO/209)**: graw-writer がディスクで止まっている間は状態の問い合わせにも答えない(不達に見える)ので、この守りは効かず停止は 5 s の静止で切れる — receiver の graw リンクの送り待ちは `messages_abandoned` に数えて捨てられる。run_stop の `lost_receiver_to_graw`・`messages_abandoned` を見る |
 | Parameters の Save が 503 | controller の TOML に `ecc_config_dir` が無い。409 = Running 中、400 = 値の範囲外(文言どおり直す) |
 
 ## 6. ログブック規約
@@ -90,6 +90,7 @@
 - [ ] UI: `ui/dist/ui/browser` の**中身**を `/opt/tpcdaq/ui` へ(旧版は `ui.prevNNN` に退避)。dist/ui ごと置くと `/` が 404
 - [ ] daq.toml `[root_sink] pevent`(既定 true)。`false` なら PEventTPC(TPCReco 形式)を書かない(raw ツリー + graw + monitor.root だけ、`raw_tree = true` 必須。TODO/183)。PEventTPC が要るときは grawToEventTPC で graw から作る
 - [ ] 停止・起動は **`~/tpcdaq-rs/tools/deploy/daq_{down,up}.sh`**(古い写しを使わない。slowctl も扱う版)
+- [ ] **`daq_down.sh` は phase が Idle になってから**(SPEC v1.54 — 停止は root_sink の書き切りまで `Stopping` が続く。Stopping の途中で daq_down すると controller は SIGINT から 10 s で SIGKILL され、run_stop が書かれず、次の起動の歩き戻し(113–115)で前の run を閉じることになる)
 - [ ] 反映後: `/api/status` が 200 **と** `/` が 200(`curl -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/`)、`/srv/tpcdaq/logs/*.log` に WARN / ERROR なし、`pgrep -a -f target/release` に 8 プロセス + root_sink
 - [ ] 試験で run を壊したら(stop せずに落とす等)、ログブックに comment を書き、`run_inprogress_*.root` の扱い(残す / 消す)を決める
 
@@ -97,7 +98,7 @@
 - v0.1(2026-09-17、Fable): 骨子。`[TODO]` は現地で埋める。069 0-3 のリハーサル記録を追記予定。
 - v0.2(2026-09-23、Fable): §3.1 Parameters タブ(078)、§4 Slow control タブ(079 / 089)、§5 に slowctl / Parameters の症状、§6 の自動記録を反映。
 - v0.4(2026-10-14、Fable): §7.1 反映チェックリスト。
-- v0.5(2026-11-04、Opus): §5 に「停止が終わらない」(SPEC v1.54、TODO/204)。
+- v0.5(2026-11-04、Opus): §5 に「停止が終わらない」(SPEC v1.54、TODO/204)、§7.1 に「daq_down は Idle になってから」、209 の注意(188 の Fable レビュー)。
 - v0.3(2026-10-12、Opus): §4 に slowctl の記録先(InfluxDB)・機器 × ch の表・ch0 UNV・「機器を繋いだらトリガレートを A/B」(118–122)。
 
 ## HV の値を変えるとき(CAEN GECO2020、2026-10-15、archive/145)

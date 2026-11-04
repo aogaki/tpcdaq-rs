@@ -132,7 +132,7 @@
 | [207](207_strip_q_min_per_peaking.md) | analyzeUVW の `STRIP_Q_MIN = 2000` が peaking 232 ns で高すぎ、淡い側が切れて偽の contained(run 216 で 3.1 /h)— 1,200 で消える、502 ns は 900 で halo を拾う → peaking ごとの切り | TODO | 232 ns の物理 run の解析の前 |
 | [208](208_controller_root_sink_status_followups.md) | 204 の残り 2 件(run 番号の再利用で前回の close を取り違える、hist_snapshot の全復号)| TODO(Sonnet、11/9 の後)| — |
 | [209](209_graw_writer_status_during_disk_stall.md) | ディスクが詰まった graw-writer は GetStatus にも答えず(blocking の lock)、204 の守りが Off → 停止で graw の送出待ちを捨てる(ユーザー裁定 B-4 が実際には効かない)| TODO(ユーザー判断: 11/9 前か)| — |
-| [188](188_controller_watchdog_auto_abort.md) | controller の run 中監視(2 s)+ 保存系 Error の自動異常停止(SPEC §1.4-3、未実装だった)| **実装済み `6319dea`**(cargo 1,155 passed)、**Fable レビュー = マージ可**、小直し 1・3 を同じブランチで実施中 | 11/9 前に要る(Fable)|
+| [188](188_controller_watchdog_auto_abort.md) | controller の run 中監視(2 s)+ 保存系 Error の自動異常停止(SPEC §1.4-3、未実装だった)| **main にマージ `efef4b6`**(`6319dea` + 小直し `6b95948`、cargo 1,156 passed)、ELITPC 反映・受け入れ中 | 11/9 前に要る(Fable)|
 | [187](187_ui_v153_overload_and_draining.md) | UI: STOPPING — draining・ROOT DROPPED・ログブックの root_complete・OVERLOAD | **main にマージ `654f2fd`**(413 PASS)、ELITPC 反映待ち | ③ と ① は 11/9 前 |
 | [205](205_n1068ge_settings_at_run_start.md) | トリガ(N1068GE)の設定を run 開始時に読んでログブックの `run_start` に残す(読むだけ、ポーリングなし、`CH:16` の MUX は送らない)| TODO(Fable キュー: 経路) | 11/9 の後 |
 | ~~184~~ | receiver の decoder リンク(数えて落とす)| 済 → [archive/184](archive/184_receiver_decoder_link_counted_drop.md)(2026-11-03 コミット `e553bb2`) | 実機の受け入れ(ELITPC 反映後) |
