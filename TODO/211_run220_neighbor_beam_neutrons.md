@@ -75,6 +75,16 @@
   | ≥ 40 | 30 | 4.84 | 4.37 | 13.27 | 67.6 |
   - ノイズの時間帯(11/12 14:00 – 11/13 11:00 EET)= ビームパルスは来ている(≈ 4.6–5 MHz)が液シンが 10–20 kHz と低い = ビームの強さ / 条件が違った。
 
+## 事象の絵(2026-11-17 — ユーザー「1(小さな raw を作って drawUVW)でそれぞれ作る」)
+- `macros/data/run0220_ana/extract220.C`: ノイズ以外(`run0220_noise.root` の isNoise = 0)から理由コードで選んで raw を写す + 一覧(CSV: new_entry・orig_entry・eventId・code・amax・time_eet)。
+  | 組 | 事象 | raw | 絵(`drawUVW.C`、198 / 12.5 / 1600) |
+  |---|---|---|---|
+  | contained | 228 | `run0220_contained_raw.root`(29 MB) | `run0220_contained_uvw_events/`(228 枚、6.7 MB、12 s) |
+  | blob | 887 | `run0220_blob_raw.root`(112 MB) | `run0220_blob_uvw_events/`(887 枚、22 MB、28 s) |
+  | ノイズ以外すべて | 17,065 | `run0220_signal_raw.root`(2.2 GB) | `run0220_signal_uvw_events/`(17,065 枚、572 MB) |
+  - 一覧 = `run0220_{contained,blob,signal}_index.csv`。絵の題名の event = 元の eventId(= 元の entry)、entry = 写した raw の通し番号。
+- 最初の目視(主対話、液シンが高い 11/14 11–12 時の contained 3 本): 171444 = 長さ ≈ 12 mm、片端が明るい(ブラッグ)、171570 = ≈ 6–8 mm の塊、171460 = ≈ 6–8 mm — 198 mbar の CO2 での C / O の (n,α)・反跳らしい大きさ。
+
 ## 次
 - ~~ユーザー: 隣のビームラインの運転記録~~ → 隣の DAQ の液シンで規格化済み(上)。
 - 1 時間ごとの contained / blob とビームの記録の相関、contained の事象の目視(drawUVW)、ビームの方向との関係(トラックの向き)。
