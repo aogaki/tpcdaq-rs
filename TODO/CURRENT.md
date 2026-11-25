@@ -133,7 +133,7 @@
 | [210](210_online_reco_strip_q_min.md) | オンラインの再構成 `src/reco` の `STRIP_Q_MIN = 2000` を peaking ごとに(表示だけ)| TODO(Fable キュー: SPEC §3.1・§5.5)| 11/9 の後 |
 | [211](211_run220_neighbor_beam_neutrons.md) | run 220(隣のビームの中性子): 100 Hz ノイズの弁別 = **amax < 270 ADC**(時間で検証: ノイズ側 0.99 が 10 ms に揃う・本物側はでたらめ)、ノイズを除くと **contained と blob が時期で一緒に増減**(3–5 /h ↔ 0.3–1 /h)、**隣の DAQ(InfluxDB)のレートと相関 + 0.74(contained)/ 対照は無相関 = 隣のビームの中性子を見ている**| IN PROGRESS | — |
 | [212](212_run_meta_text_file.md) | run ごとの meta ファイル(テキスト): params・HV / LV・**ガス(種類と混合比・圧力・流量、Unknown 可)**— 研究者の要望。開始時に前回の値 + 確認必須、160 の後は圧力・流量を自動に | TODO(Fable キュー: SPEC)| — |
-| [213](213_good_n_event_list.md) | 中性子の反応らしい良いイベントのリスト(run 209 / 220)と graw の位置 — α 1 本は外す | TODO | — |
+| [213](213_good_n_event_list.md) | 中性子の反応らしい良いイベントのリスト(run 209 / 220)と graw の位置 — α 1 本は外す | WAITING(ELITPC で graw を読んで作る — ユーザー方針)| — |
 | [208](208_controller_root_sink_status_followups.md) | 204 の残り 2 件(run 番号の再利用で前回の close を取り違える、hist_snapshot の全復号)| TODO(Sonnet、11/9 の後)| — |
 | [209](209_graw_writer_status_during_disk_stall.md) | ディスクが詰まった graw-writer は GetStatus にも答えず(blocking の lock)、204 の守りが Off → 停止で graw の送出待ちを捨てる(ユーザー裁定 B-4 が実際には効かない)| TODO(**ユーザー: 後で** — 2026-11-04)| 11/9 の後 |
 | ~~188~~ | controller の run 中監視(2 s)+ 保存系 Error の自動異常停止 | 済 → [archive/188](archive/188_controller_watchdog_auto_abort.md)(main `efef4b6`、**実機 run 218: graw_writer SIGSTOP → 溢れてすぐ `abort:overload:receiver0`(operator watchdog)、SIGCONT で eos_closed:true、overflow 400 は数えて恒等式どおり**。対照 run 219 は停止 4.4 s で ok / normal)| — |
