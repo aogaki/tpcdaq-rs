@@ -132,6 +132,8 @@
 | ~~207~~ | analyzeUVW の strip 電荷の切りが 232 ns で高すぎて偽の contained(run 216 で 3.1 /h)| 済 → [archive/207](archive/207_strip_q_min_per_peaking.md)(macros: `stripQMin` 引数・`par_analyzeUVW.sh -q`、**232 ns = 1,100**(谷 950–1,150)、run 216 で contained 0・wall-alpha 4.7 /h、215 は既定でビット一致)| 232 ns の run は `-q 1100` |
 | [210](210_online_reco_strip_q_min.md) | オンラインの再構成 `src/reco` の `STRIP_Q_MIN = 2000` を peaking ごとに(表示だけ)| TODO(Fable キュー: SPEC §3.1・§5.5)| 11/9 の後 |
 | [211](211_run220_neighbor_beam_neutrons.md) | run 220(隣のビームの中性子): 100 Hz ノイズの弁別 = **amax < 270 ADC**(時間で検証: ノイズ側 0.99 が 10 ms に揃う・本物側はでたらめ)、ノイズを除くと **contained と blob が時期で一緒に増減**(3–5 /h ↔ 0.3–1 /h)、**隣の DAQ(InfluxDB)のレートと相関 + 0.74(contained)/ 対照は無相関 = 隣のビームの中性子を見ている**| IN PROGRESS | — |
+| [212](212_run_meta_text_file.md) | run ごとの meta ファイル(テキスト): params・HV / LV・**ガス(種類と混合比・圧力・流量、Unknown 可)**— 研究者の要望。開始時に前回の値 + 確認必須、160 の後は圧力・流量を自動に | TODO(Fable キュー: SPEC)| — |
+| [213](213_good_n_event_list.md) | 中性子の反応らしい良いイベントのリスト(run 209 / 220)と graw の位置 — α 1 本は外す | TODO | — |
 | [208](208_controller_root_sink_status_followups.md) | 204 の残り 2 件(run 番号の再利用で前回の close を取り違える、hist_snapshot の全復号)| TODO(Sonnet、11/9 の後)| — |
 | [209](209_graw_writer_status_during_disk_stall.md) | ディスクが詰まった graw-writer は GetStatus にも答えず(blocking の lock)、204 の守りが Off → 停止で graw の送出待ちを捨てる(ユーザー裁定 B-4 が実際には効かない)| TODO(**ユーザー: 後で** — 2026-11-04)| 11/9 の後 |
 | ~~188~~ | controller の run 中監視(2 s)+ 保存系 Error の自動異常停止 | 済 → [archive/188](archive/188_controller_watchdog_auto_abort.md)(main `efef4b6`、**実機 run 218: graw_writer SIGSTOP → 溢れてすぐ `abort:overload:receiver0`(operator watchdog)、SIGCONT で eos_closed:true、overflow 400 は数えて恒等式どおり**。対照 run 219 は停止 4.4 s で ok / normal)| — |
@@ -191,6 +193,7 @@ Opus 主対話中に出た設計判断・SPEC 疑義・レビュー依頼をこ�
 - **198 の後の次の票(2026-11-04 積み)**: 分類器として使えるか(片端組で 209 − 208 = 0.010 ± 0.024)、cos ≈ −1 の縮退(208 の偽陽性 9 / 10 = α の真後ろへ伸びる腕、2 体運動学の許す領域なので罰則で止められない)、A の箱の幅(端に 21 %)、{α, α}・H0・N = 3、電荷の勾配、203、232 ns の較正 — どれを次に切るか(archive/198 の結果 v2)。
 - ~~198 A–D + 203 の順序~~ **裁定済み(2026-11-04 スポット Fable)**: 腕が α に重なるのは模型の縮退(H2 ⊃ H1 + 振幅の自由度)→ 向きの罰則 + A を ± 15 % の箱で自由に + 種の除外 + 印(h1Broken / h2Worse)、T の対照は run 208 の片端組 200 本、③・④ は測定に、203 は 198 の後、232 ns は別票。v2 を implementer(Opus)に発注。元の記述: 198 の実装は green(268 PASS)、受け入れは ② entry 27 合格・③ 0 / 10・④ 健全 62 本の 37 が hyp 1 — 腕が α に重なって H1 の系統的な残差(203)を吸う。分岐 A–D は 198 の結果節。
 - **210 = 207 のオンライン側(2026-11-04 積み)**: `src/reco` の `STRIP_Q_MIN = 2000` を peaking ごとに — `[monitor] reco_strip_q_min` を TOML に足す(SPEC §3.1・§5.5)か、params の peakingTime から引くか。表示だけの影響。
+- **212(2026-11-25 積み)**: run の meta ファイル(テキスト)とガスの入力 — run/start に `gas` を足すか、無いときに拒むか持ち越すか、meta.txt の形式と書き方、SPEC §6.5 / §8.1 / §9.2 / §11。
 - **205(2026-11-04 積み)**: N1068GE の設定の記録の経路 — slowctl に「run 開始の合図で 1 回読む」口を作るか(Opus 推し)、controller が直接読むか、params 側で照合するか。11/9 の後でよい。
 - ~~204~~ **裁定済み(2026-11-04 スポット Fable + ユーザー裁定)**: (a) を厳密化 = controller が root_sink の status を購読して close まで待つ、graw-writer が開いている間は打ち切らない、歩き戻しの第二段も同じ関数に(= 185 の申し送りの裁定も「統一」)。188・187 を起票。SPEC v1.54 案は 204 §5(マージ時に反映)。
 - **203(2026-11-03 積み)**: 偶数 / 奇数 strip の応答差(U 0.058・W 0.042・V 0.022)の原因と直し方、198 の前か後か。
