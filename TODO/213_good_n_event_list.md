@@ -33,3 +33,6 @@
   - run 220: **A 4**(1154・2181・171854・174579)、**B 7**、contained-alpha 10、short 125。
 - **成果物**(`macros/data/sheets/`、gitignore — 研究者に渡す): **`good_events_run0209.tsv`・`good_events_run0220.tsv`**(テキスト、`#` の行に説明。列 = run・**graw_file**・**eventIdx**・time_local・label・note・png)、ラベルの元 `labels_firstpass.txt`、A・B・C だけの一覧 `good_run0209_NN.png`(3 枚)・`good_run0220_01.png`。
 - 未: ユーザー / 研究者が一覧で確認して A / B / C を確定。研究者への渡し方(ELITPC の置き場)。run 220 の blob(中性子の強い時間帯)を入れるか。
+
+## run 220 の A・B をまとめたフォルダ(2026-11-27 — ユーザー「good list のイベントのファイルだけを持ってきて、リストと一緒にまとめたい。UVW の図も」)
+- `macros/data/run0220_good/`(gitignore、5.0 GB): `good_events_run0220_AB.tsv`(A 4 + B 7 = 11 事象、列 = run・graw_file・eventIdx・time_local・label・note・image)、**`graw/` = その 11 事象を含む graw 5 本だけ**(_0000・_0024・_0043・_0044・_0045、各 1,073,875,968 B、ELITPC で `sha256sum` → scp → 手元で `shasum -a 256` → **5 本とも一致**、`sha256_elitpc.txt`・`sha256_local.txt`)、`images/event%07u.png` 11 枚(drawUVW の図: 上 = U / V / W、下 = XY / XZ / YZ)、`overview_AB.png`(11 事象の一覧)、`README.txt`(英語: run の条件・列とラベルの意味・図の見方・ノイズの注意)。
